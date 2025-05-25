@@ -3,7 +3,7 @@ cmake_minimum_required(VERSION 3.21)
 project(llama_cpp)
 
 option(LLAMA_BUILD "Build llama.cpp shared library and install alongside python package" ON)
-option(LLAVA_BUILD "Build llava shared library and install alongside python package" ON)
+option(MTMD_BUILD "Build mtmd shared library and install alongside python package" ON)
 
 function(llama_cpp_python_install_target target)
     if(NOT TARGET ${target})
@@ -61,6 +61,9 @@ if (LLAMA_BUILD)
 
     # Enable building of the common library
     set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build llama.cpp common library" FORCE)
+
+    # Disable building curl support
+    set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: enable curl" FORCE)
 
     # Architecture detection and settings for Apple platforms
     if (APPLE)
@@ -133,7 +136,7 @@ if (LLAMA_BUILD)
         )
     endif()
 
-    if (LLAVA_BUILD)
+    if (MTMD_BUILD)
         if (LLAMA_CUBLAS OR LLAMA_CUDA)
             add_compile_definitions(GGML_USE_CUBLAS)
             add_compile_definitions(GGML_USE_CUDA)

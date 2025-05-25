@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.3.9]
 
 - feat: Update llama.cpp to ggerganov/llama.cpp@8733e0cf6eefc7c7752297cc22d0836706f4222c
+- Make building llava optional by setting `CMAKE_ARGS="-DMTMD_BUILD=OFF"` and using `MTMD_CPP_LIB` to specify alternative path to shared library
 
 ## [0.3.8]
 
