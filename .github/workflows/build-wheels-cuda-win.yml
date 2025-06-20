@@ -53,7 +53,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: microsoft/setup-msbuild@main
         with:
-          vs-version: '[17.12,17.14)'
+          vs-version: '[17.10.16, 17.14.6)'
           msbuild-architecture: x64
 
       - uses: actions/checkout@v4
