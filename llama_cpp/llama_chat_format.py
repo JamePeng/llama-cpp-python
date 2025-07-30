@@ -2835,15 +2835,12 @@ class Llava15ChatHandler:
 
         with suppress_stdout_stderr(disable=self.verbose):
             # Create bitmap from buffer using helper function
-            bitmap = self._mtmd_cpp.mtmd_helper_bitmap_init_from_buf(
-                self.mtmd_ctx,
-                (ctypes.c_uint8 * len(image_bytes)).from_buffer(bytearray(image_bytes)),
-                len(image_bytes)
-            )
+            n = len(image_bytes)
+            buf = (ctypes.c_ubyte * n).from_buffer_copy(image_bytes)  # makes a copy
 
-            if bitmap is None:
+            bitmap = self._mtmd_cpp.mtmd_helper_bitmap_init_from_buf(self.mtmd_ctx, buf, n)
+            if not bitmap:
                 raise ValueError("Failed to create bitmap from image bytes")
-
             return bitmap
 
     def __call__(
@@ -2965,7 +2962,6 @@ class Llava15ChatHandler:
 
                 # Reset llama context
                 llama.reset()
-                llama._ctx.kv_cache_clear()
 
                 # Process each chunk
                 n_past = llama_cpp.llama_pos(0)
@@ -2978,7 +2974,7 @@ class Llava15ChatHandler:
 
                     chunk_type = self._mtmd_cpp.mtmd_input_chunk_get_type(chunk)
 
-                    if chunk_type == self._mtmd_cpp.MTMD_INPUT_CHUNK_TYPE_TEXT:
+                    if chunk_type == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_TEXT:
                         # Handle text chunk
                         n_tokens_out = ctypes.c_size_t()
                         tokens_ptr = self._mtmd_cpp.mtmd_input_chunk_get_tokens_text(
@@ -2995,7 +2991,7 @@ class Llava15ChatHandler:
                                 )
                             llama.eval(tokens)
 
-                    elif chunk_type in [self._mtmd_cpp.MTMD_INPUT_CHUNK_TYPE_IMAGE, self._mtmd_cpp.MTMD_INPUT_CHUNK_TYPE_AUDIO]:
+                    elif chunk_type in [self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_IMAGE, self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO]:
                         # Handle image/audio chunk using helper
                         chunk_n_tokens = self._mtmd_cpp.mtmd_input_chunk_get_n_tokens(chunk)
 

@@ -11,6 +11,8 @@ from ctypes import (
     c_uint32,
     c_float,
     c_void_p,
+    c_size_t,
+    c_ubyte,
     POINTER,
     _Pointer,  # type: ignore
     Structure,
@@ -136,14 +138,13 @@ mtmd_context_params_p_ctypes = POINTER(mtmd_context_params)
 def mtmd_default_marker() -> c_char_p:
     ...
 
-
 # MTMD_API struct mtmd_context_params mtmd_context_params_default(void);
 @ctypes_function_mtmd(
     "mtmd_context_params_default",
     [],
-    mtmd_context_params_p_ctypes,
+    mtmd_context_params,
 )
-def mtmd_context_params_default() -> mtmd_context_params_p:
+def mtmd_context_params_default() -> mtmd_context_params:
     ...
 
 
@@ -370,13 +371,13 @@ def mtmd_input_chunk_get_type(chunk: mtmd_input_chunk_p) -> c_int32:
 @ctypes_function_mtmd(
     "mtmd_input_chunk_get_tokens_text", [
         mtmd_input_chunk_p_ctypes,
-        POINTER(c_uint),
-    ], c_int32)
+        POINTER(c_size_t),
+    ], POINTER(c_int32))
 def mtmd_input_chunk_get_tokens_text(
     chunk: mtmd_input_chunk_p,
-    n_tokens_output: c_uint,
+    n_tokens_output: c_size_t,
     /,
-) -> c_int32:
+) -> POINTER(c_int32):
     ...
 
 # MTMD_API const mtmd_image_tokens *  mtmd_input_chunk_get_tokens_image(const mtmd_input_chunk * chunk);
@@ -609,13 +610,11 @@ def mtmd_helper_bitmap_init_from_file(ctx: mtmd_context_p, fname: c_char_p) -> m
 # // this function is thread-safe
 # MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len);
 @ctypes_function_mtmd(
-    "mtmd_helper_bitmap_init_from_buf", [mtmd_context_p_ctypes, c_char_p, c_uint], mtmd_bitmap_p_ctypes)
-def mtmd_helper_bitmap_init_from_buf(
-    ctx: mtmd_context_p,
-    buf: c_char_p,
-    len: c_uint,
-    /,
-) -> mtmd_bitmap_p:
+    "mtmd_helper_bitmap_init_from_buf",
+    [mtmd_context_p_ctypes, POINTER(c_ubyte), c_size_t],
+    mtmd_bitmap_p_ctypes
+)
+def mtmd_helper_bitmap_init_from_buf(ctx, buf, length):
     """
     helper function to construct a mtmd_bitmap from a buffer containing a file
     supported formats:
