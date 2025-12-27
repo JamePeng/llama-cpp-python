@@ -746,8 +746,8 @@ print(res["choices"][0]["message"]["content"])
 
 |  Model             |  Type     |  Link                                                  |  Status      |
 |--------------------|-----------|--------------------------------------------------------|--------------|
-|      `bge-m3`      | Embedding |https://huggingface.co/gpustack/bge-m3-GGUF             |  Useful ✅  |
-|`bge-reranker-v2-m3`|   Rerank  |https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF |  Useful ✅  |
+|      `bge-m3`      | Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF)             |  Useful ✅  |
+|`bge-reranker-v2-m3`|   Rerank  |[bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |  Useful ✅  |
 
 ### TODO(JamePeng): Needs more extensive testing with various embedding and rerank models. :)
 
