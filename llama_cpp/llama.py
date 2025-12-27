@@ -1031,6 +1031,11 @@ class Llama:
         Returns:
             An embedding object.
         """
+        warnings.warn(
+            "The `create_embedding` method in `Llama` class is deprecated. "
+            "Please migrate to `LlamaEmbedding.create_embedding` for better efficiency.",
+            DeprecationWarning,
+        )
         model_name: str = model if model is not None else self.model_path
 
         input = input if isinstance(input, list) else [input]
@@ -1075,6 +1080,12 @@ class Llama:
         Returns:
             A list of embeddings
         """
+        warnings.warn(
+            "The `embed` method in `Llama` class is deprecated and will be removed in future versions. "
+            "Please use the `LlamaEmbedding` class from `llama_embedding` module for optimized performance and reranking support.",
+            DeprecationWarning,
+        )
+
         n_embd = self.n_embd()
         n_batch = self.n_batch
 
