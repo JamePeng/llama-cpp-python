@@ -39,7 +39,7 @@ class LlamaEmbedding(Llama):
     def __init__(
             self,
             model_path: str,
-            n_ctx: int = 1024,
+            n_ctx: int = 0,
             n_batch: int = 512,
             n_ubatch: int = 512,
             pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED,
@@ -130,11 +130,12 @@ class LlamaEmbedding(Llama):
 
         # Determine if it is in Rerank mode
         try:
-            current_pooling = self.pooling_type()
+            pooling_type = self.pooling_type()
         except AttributeError:
-            current_pooling = LLAMA_POOLING_TYPE_UNSPECIFIED
-        is_rank = (current_pooling == LLAMA_POOLING_TYPE_RANK)
-        logits_all = current_pooling == llama_cpp.LLAMA_POOLING_TYPE_NONE
+            pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED
+        is_rank = (pooling_type == LLAMA_POOLING_TYPE_RANK)
+        is_none = (pooling_type == LLAMA_POOLING_TYPE_NONE) # Token-level embedding
+        logits_all = True if is_none else False
 
         # Determine the output dimension
         if is_rank:
@@ -143,8 +144,8 @@ class LlamaEmbedding(Llama):
             out_dim = self.n_embd()
 
         if self.verbose:
-            mode_str = "RANK (Score)" if is_rank else "EMBED (Vector)"
-            print(f"LlamaEmbedding Debug: Mode={mode_str} | Output Dimension={out_dim}")
+            type_str = "TOKEN (None)" if is_none else ("RANK (Score)" if is_rank else "SEQ (Vector)")
+            print(f"LlamaEmbedding Debug: Mode={type_str} | Pooling={pooling_type} | Dim={out_dim}")
 
         # Preprocess Input
         inputs: List[Union[str, List[int]]] = []
@@ -179,17 +180,38 @@ class LlamaEmbedding(Llama):
 
             self._ctx.decode(self._batch)
 
-            for i in range(len(batch_seq_lens)):
-                ptr = llama_cpp.llama_get_embeddings_seq(ctx, i)
-                data = ptr[:out_dim]
+            # Extract Embeddings
+            # Branch A: LLAMA_POOLING_TYPE_NONE (Token Level)
+            if is_none:
+                curr_token_idx = 0
+                for seq_len in batch_seq_lens:
+                    doc_tokens_embd = []
+                    for _ in range(seq_len):
+                        # Get the vector of the i-th token
+                        ptr = llama_cpp.llama_get_embeddings_ith(ctx, curr_token_idx)
+                        data = ptr[:out_dim]
 
-                if not is_rank:
-                    data = self._normalize_vector(data, normalize)
+                        # Normalization
+                        data = self._normalize_vector(data, normalize)
 
-                if is_rank and len(data) == 1:
-                    results.append(data[0])
-                else:
-                    results.append(data)
+                        doc_tokens_embd.append(data)
+                        curr_token_idx += 1
+                    results.append(doc_tokens_embd)
+
+            # Branth B: Sequence Level (Mean, Cls, Rank, Unspecified)
+            else:
+                for i in range(len(batch_seq_lens)):
+                    # Obtain the vector of the i-th sequence.
+                    ptr = llama_cpp.llama_get_embeddings_seq(ctx, i)
+                    data = ptr[:out_dim]
+
+                    if not is_rank:
+                        data = self._normalize_vector(data, normalize)
+
+                    if is_rank and len(data) == 1:
+                        results.append(data[0])
+                    else:
+                        results.append(data)
 
             self._batch.reset()
             llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), True)
