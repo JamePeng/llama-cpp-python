@@ -19,6 +19,7 @@ NORM_MODE_NONE = -1
 NORM_MODE_MAX_INT16 = 0
 NORM_MODE_TAXICAB = 1
 NORM_MODE_EUCLIDEAN = 2
+NORM_MODE_PNORM = 6
 
 # TODO(JamePeng): Needs more extensive testing with various embedding and reranking models.
 class LlamaEmbedding(Llama):

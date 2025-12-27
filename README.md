@@ -730,6 +730,130 @@ print(res["choices"][0]["message"]["content"])
 
 ```
 
+---
+
+## Embeddings & Reranking (GGUF)
+
+`llama-cpp-python` provides a high-performance, memory-efficient specialized class `LlamaEmbedding` for generating text embeddings and calculating reranking scores.
+
+**Key Features:**
+* **Streaming Batch Processing:** Process massive datasets (e.g., Hundreds of documents) without running out of memory (OOM).
+* **Native Reranking:** Built-in support for Cross-Encoder models (outputting relevance scores instead of vectors).
+* **Optimized Performance:** Utilizes Unified KV Cache for parallel encoding of multiple documents.
+
+### TODO(JamePeng): Needs more extensive testing with various embedding and rerank models. :)
+
+#### 1. Text Embeddings (Vector Search)
+
+To generate embeddings, use the `LlamaEmbedding` class. It automatically configures the model for vector generation.
+
+```python
+from llama_cpp.llama_embedding import LlamaEmbedding
+
+# Initialize the model (automatically sets embedding=True)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf")
+
+# 1. Simple usage (OpenAI-compatible format)
+response = llm.create_embedding("Hello, world!")
+print(response['data'][0]['embedding'])
+
+# 2. Batch processing (High Performance)
+# You can pass a large list of strings; the streaming batcher handles memory automatically.
+documents = ["Hello, world!", "Goodbye, world!", "Llama is cute."] * 100
+embeddings = llm.embed(documents) # Returns a list of lists (vectors)
+
+print(f"Generated {len(embeddings)} vectors.")
+```
+
+**Advanced Output Formats:**
+You can request raw arrays or cosine similarity matrices directly:
+
+```python
+# Returns raw List[float] instead of a dictionary wrapper
+vector = llm.create_embedding("Text", output_format="array")
+
+# Returns a similarity matrix (A @ A.T) in the response
+# Note: Requires numpy installed
+response = llm.create_embedding(
+    ["apple", "fruit", "car"],
+    output_format="json+"
+)
+print(response["cosineSimilarity"])
+```
+
+#### 2. Reranking (Cross-Encoder Scoring)
+
+Reranking models (like `bge-reranker`) take a **Query** and a list of **Documents** as input and output a relevance score (scalar) for each document.
+
+> **Important:** You must explicitly set `pooling_type` to `LLAMA_POOLING_TYPE_RANK` (4) when initializing the model.
+
+```python
+import llama_cpp
+from llama_cpp.llama_embedding import LlamaEmbedding
+
+# Initialize a Reranking model
+ranker = LlamaEmbedding(
+    model_path="path/to/bge-reranker-v2-m3.gguf",
+    pooling_type=llama_cpp.LLAMA_POOLING_TYPE_RANK  # Crucial for Rerankers!
+)
+
+query = "What causes rain?"
+docs = [
+    "Clouds are made of water droplets...", # Relevant
+    "To bake a cake you need flour...",     # Irrelevant
+    "Rain is liquid water in the form of droplets..." # Highly Relevant
+]
+
+# Calculate relevance scores
+# Logic: Constructs inputs like "[BOS] query [SEP] doc [EOS]" automatically
+scores = ranker.rank(query, docs)
+
+# Result: List of floats (higher means more relevant)
+print(scores)
+# e.g., [-0.15, -8.23, 5.67] -> The 3rd doc is the best match
+```
+
+#### 3. Normalization
+
+The `embed` method supports various mathematical normalization strategies via the `normalize` parameter.
+
+| Normalization modes | $Integer$ | Description         | Formula |
+|---------------------|-----------|---------------------|---------|
+| NORM_MODE_NONE | $-1$      | none                |
+| NORM_MODE_MAX_INT16 | $0$       | max absolute int16  | $\Large{{32760 * x_i} \over\max \lvert x_i\rvert}$
+| NORM_MODE_TAXICAB | $1$       | taxicab             | $\Large{x_i \over\sum \lvert x_i\rvert}$
+| NORM_MODE_EUCLIDEAN | $2$       | euclidean (default) | $\Large{x_i \over\sqrt{\sum x_i^2}}$
+| NORM_MODE_PNORM | $>2$      | p-norm              | $\Large{x_i \over\sqrt[p]{\sum \lvert x_i\rvert^p}}$
+
+This is useful for optimizing storage or preparing vectors for cosine similarity search (which requires L2 normalization).
+
+```python
+from llama_cpp.llama_embedding import NORM_MODE_MAX_INT16, NORM_MODE_TAXICAB, NORM_MODE_EUCLIDEAN
+
+# Taxicab (L1)
+vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB)
+
+# Default is Euclidean (L2) - Standard for vector databases
+vec_l2 = llm.embed("text", normalize=NORM_MODE_EUCLIDEAN)
+
+# Max Absolute Int16 - Useful for quantization/compression
+vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
+
+# Raw Output (No Normalization) - Get the raw floating point values from the model
+embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE)
+```
+
+#### Legacy Usage (Deprecated)
+
+The standard `Llama` class still supports basic embedding generation, but it lacks the memory optimizations and reranking capabilities of `LlamaEmbedding`.
+
+```python
+# Old method - Not recommended for large batches or reranking
+llm = llama_cpp.Llama(model_path="...", embedding=True)
+emb = llm.create_embedding("text")
+```
+
+---
 
 ### Speculative Decoding
 
@@ -748,28 +872,6 @@ llama = Llama(
     draft_model=LlamaPromptLookupDecoding(num_pred_tokens=10) # num_pred_tokens is the number of tokens to predict 10 is the default and generally good for gpu, 2 performs better for cpu-only machines.
 )
 ```
-
-### Embeddings
-
-To generate text embeddings use [`create_embedding`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_embedding) or [`embed`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.embed). Note that you must pass `embedding=True` to the constructor upon model creation for these to work properly.
-
-```python
-import llama_cpp
-
-llm = llama_cpp.Llama(model_path="path/to/model.gguf", embedding=True)
-
-embeddings = llm.create_embedding("Hello, world!")
-
-# or create multiple embeddings at once
-
-embeddings = llm.create_embedding(["Hello, world!", "Goodbye, world!"])
-```
-
-There are two primary notions of embeddings in a Transformer-style model: *token level* and *sequence level*. Sequence level embeddings are produced by "pooling" token level embeddings together, usually by averaging them or using the first token.
-
-Models that are explicitly geared towards embeddings will usually return sequence level embeddings by default, one for each input string. Non-embedding models such as those designed for text generation will typically return only token level embeddings, one for each token in each sequence. Thus the dimensionality of the return type will be one higher for token level embeddings.
-
-It is possible to control pooling behavior in some cases using the `pooling_type` flag on model creation. You can ensure token level embeddings from any model using `LLAMA_POOLING_TYPE_NONE`. The reverse, getting a generation oriented model to yield sequence level embeddings is currently not possible, but you can always do the pooling manually.
 
 ### Adjusting the Context Window
 
