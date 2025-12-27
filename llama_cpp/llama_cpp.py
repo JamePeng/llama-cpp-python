@@ -1529,15 +1529,15 @@ def llama_model_n_head(model: llama_model_p, /) -> int:
     ...
 
 
- # LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
-@ctypes_function("llama_model_n_swa", [llama_model_p_ctypes], ctypes.c_int32)
-def llama_model_n_swa(model: llama_model_p, /) -> int:
-    ...
-
-
 # LLAMA_API int32_t llama_model_n_head_kv  (const struct llama_model * model);
 @ctypes_function("llama_model_n_head_kv", [llama_model_p_ctypes], ctypes.c_int32)
 def llama_model_n_head_kv(model: llama_model_p, /) -> int:
+    ...
+
+
+ # LLAMA_API int32_t llama_model_n_swa      (const struct llama_model * model);
+@ctypes_function("llama_model_n_swa", [llama_model_p_ctypes], ctypes.c_int32)
+def llama_model_n_swa(model: llama_model_p, /) -> int:
     ...
 
 
@@ -1545,6 +1545,31 @@ def llama_model_n_head_kv(model: llama_model_p, /) -> int:
 # LLAMA_API float llama_model_rope_freq_scale_train(const struct llama_model * model);
 @ctypes_function("llama_model_rope_freq_scale_train", [llama_model_p_ctypes], ctypes.c_float)
 def llama_model_rope_freq_scale_train(model: llama_model_p, /) -> float:
+    """
+    Get the model's RoPE frequency scaling factor
+    """
+    ...
+
+
+# // Returns the number of classifier outputs (only valid for classifier models)
+# // Undefined behavior for non-classifier models
+# LLAMA_API uint32_t llama_model_n_cls_out(const struct llama_model * model);
+@ctypes_function("llama_model_n_cls_out", [llama_model_p_ctypes], ctypes.c_uint32)
+def llama_model_n_cls_out(model: llama_model_p, /) -> int:
+    """
+    Returns the number of classifier outputs (only valid for classifier models)
+    Undefined behavior for non-classifier models
+    """
+    ...
+
+
+# // Returns label of classifier output by index (<n_cls_out). Returns nullptr if no label provided
+# LLAMA_API const char * llama_model_cls_label(const struct llama_model * model, uint32_t i);
+@ctypes_function("llama_model_cls_label", [llama_model_p_ctypes, ctypes.c_uint32], ctypes.c_char_p)
+def llama_model_cls_label(model: llama_model_p, i: ctypes.c_uint32, /) -> ctypes.c_char_p:
+    """
+    Returns label of classifier output by index (<n_cls_out). Returns nullptr if no label provided
+    """
     ...
 
 
