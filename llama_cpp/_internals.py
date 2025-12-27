@@ -84,13 +84,22 @@ class LlamaModel:
         return llama_cpp.llama_n_vocab(self.vocab)
 
     def n_ctx_train(self) -> int:
-        return llama_cpp.llama_n_ctx_train(self.model)
+        return llama_cpp.llama_model_n_ctx_train(self.model)
+
+    def n_cls_out(self) -> int:
+        return llama_cpp.llama_model_n_cls_out(self.model)
 
     def n_embd(self) -> int:
-        return llama_cpp.llama_n_embd(self.model)
+        return llama_cpp.llama_model_n_embd(self.model)
+
+    def n_head(self) -> int:
+        return llama_cpp.llama_model_n_head(self.model)
 
     def n_head_kv(self) -> int:
         return llama_cpp.llama_model_n_head_kv(self.model)
+
+    def n_swa(self) -> int:
+        return llama_cpp.llama_model_n_swa(self.model)
 
     def n_params(self) -> int:
         return llama_cpp.llama_model_n_params(self.model)
