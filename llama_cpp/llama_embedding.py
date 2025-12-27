@@ -36,12 +36,23 @@ class LlamaEmbedding(Llama):
        using NumPy for optimal performance and compatibility with various vector databases.
     """
 
-    def __init__(self, model_path: str, pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED, n_gpu_layers: int = 0, **kwargs):
+    def __init__(
+            self,
+            model_path: str,
+            n_ctx: int = 1024,
+            n_batch: int = 512,
+            n_ubatch: int = 512,
+            pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED,
+            n_gpu_layers: int = 0,
+            **kwargs):
         """
         Initialize the embedding model with enforced configuration.
 
         Args:
             model_path: Path to the GGUF model file.
+            n_ctx: Text context, 0 = from model
+            n_batch: Prompt processing maximum batch size
+            n_ubatch: Physical batch size
             pooling_type: The pooling strategy used by the model.
                           - Use `LLAMA_POOLING_TYPE_RANK` (4) for Reranker models.
                           - Use `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) to let the model metadata decide (for standard embeddings).
@@ -51,14 +62,15 @@ class LlamaEmbedding(Llama):
             **kwargs: Additional arguments passed to the Llama base class (e.g., n_batch, n_ctx, verbose).
         """
         kwargs["embedding"] = True
+        kwargs["n_gpu_layers"] = n_gpu_layers
+        kwargs["n_ctx"] = n_ctx
+        kwargs["n_batch"] = n_batch
+        kwargs["n_ubatch"] = n_ubatch
 
         # Enable Unified KV Cache (Crucial for Batching)
         # This allows us to assign arbitrary seq_ids in a batch, enabling the parallel /
         #     encoding of multiple unrelated documents without "invalid seq_id" errors.
         kwargs["kv_unified"] = True
-
-        # Number of model layers to offload to GPU.
-        kwargs["n_gpu_layers"] = n_gpu_layers
 
         # Set pooling type
         kwargs["pooling_type"] = pooling_type
