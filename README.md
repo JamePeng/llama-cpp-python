@@ -736,14 +736,22 @@ print(res["choices"][0]["message"]["content"])
 
 `llama-cpp-python` provides a high-performance, memory-efficient specialized class `LlamaEmbedding` for generating text embeddings and calculating reranking scores.
 
-**Key Features:**
+### Key Features:
 * **Streaming Batch Processing:** Process massive datasets (e.g., Hundreds of documents) without running out of memory (OOM).
 * **Native Reranking:** Built-in support for Cross-Encoder models (outputting relevance scores instead of vectors).
 * **Optimized Performance:** Utilizes Unified KV Cache for parallel encoding of multiple documents.
 
+### Support Embeddings & Rerank Model:
+
+
+|  Model             |  Type     |  Link                                                  |  Status      |
+|--------------------|-----------|--------------------------------------------------------|--------------|
+|      `bge-m3`      | Embedding |https://huggingface.co/gpustack/bge-m3-GGUF             |  Useful ✅  |
+|`bge-reranker-v2-m3`|   Rerank  |https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF |  Useful ✅  |
+
 ### TODO(JamePeng): Needs more extensive testing with various embedding and rerank models. :)
 
-#### 1. Text Embeddings (Vector Search)
+### 1. Text Embeddings (Vector Search)
 
 To generate embeddings, use the `LlamaEmbedding` class. It automatically configures the model for vector generation.
 
@@ -781,7 +789,7 @@ response = llm.create_embedding(
 print(response["cosineSimilarity"])
 ```
 
-#### 2. Reranking (Cross-Encoder Scoring)
+### 2. Reranking (Cross-Encoder Scoring)
 
 Reranking models (like `bge-reranker`) take a **Query** and a list of **Documents** as input and output a relevance score (scalar) for each document.
 
@@ -814,7 +822,7 @@ print(scores)
 # e.g., [-0.15, -8.23, 5.67] -> The 3rd doc is the best match
 ```
 
-#### 3. Normalization
+### 3. Normalization
 
 The `embed` method supports various mathematical normalization strategies via the `normalize` parameter.
 
@@ -844,7 +852,7 @@ vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16, n_gpu_layers=-1)
 embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE, n_gpu_layers=-1)
 ```
 
-#### Legacy Usage (Deprecated)
+### Legacy Usage (Deprecated)
 
 The standard `Llama` class still supports basic embedding generation, but it lacks the memory optimizations and reranking capabilities of `LlamaEmbedding`.
 
