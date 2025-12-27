@@ -44,6 +44,7 @@ class LlamaEmbedding(Llama):
             n_ubatch: int = 512,
             pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED,
             n_gpu_layers: int = 0,
+            verbose: bool = True,
             **kwargs):
         """
         Initialize the embedding model with enforced configuration.
@@ -66,6 +67,7 @@ class LlamaEmbedding(Llama):
         kwargs["n_ctx"] = n_ctx
         kwargs["n_batch"] = n_batch
         kwargs["n_ubatch"] = n_ubatch
+        kwargs["verbose"] = verbose
 
         # Enable Unified KV Cache (Crucial for Batching)
         # This allows us to assign arbitrary seq_ids in a batch, enabling the parallel /
@@ -189,16 +191,19 @@ class LlamaEmbedding(Llama):
                     for _ in range(seq_len):
                         # Get the vector of the i-th token
                         ptr = llama_cpp.llama_get_embeddings_ith(ctx, curr_token_idx)
-                        data = ptr[:out_dim]
+                        if ptr is None:
+                            # Fallback: append zero vector or skip (here we zero-pad to keep shape)
+                            doc_tokens_embd.append([0.0] * out_dim)
+                        else:
+                            data = ptr[:out_dim]
+                            # Normalization
+                            data = self._normalize_vector(data, normalize)
+                            doc_tokens_embd.append(data)
 
-                        # Normalization
-                        data = self._normalize_vector(data, normalize)
-
-                        doc_tokens_embd.append(data)
                         curr_token_idx += 1
                     results.append(doc_tokens_embd)
 
-            # Branth B: Sequence Level (Mean, Cls, Rank, Unspecified)
+            # Branch B: Sequence Level (Mean, Cls, Rank, Unspecified)
             else:
                 for i in range(len(batch_seq_lens)):
                     # Obtain the vector of the i-th sequence.
