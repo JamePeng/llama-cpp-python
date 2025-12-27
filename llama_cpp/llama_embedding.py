@@ -36,7 +36,7 @@ class LlamaEmbedding(Llama):
        using NumPy for optimal performance and compatibility with various vector databases.
     """
 
-    def __init__(self, model_path: str, pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED, **kwargs):
+    def __init__(self, model_path: str, pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED, n_gpu_layers: int = 0, **kwargs):
         """
         Initialize the embedding model with enforced configuration.
 
@@ -45,7 +45,10 @@ class LlamaEmbedding(Llama):
             pooling_type: The pooling strategy used by the model.
                           - Use `LLAMA_POOLING_TYPE_RANK` (4) for Reranker models.
                           - Use `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) to let the model metadata decide (for standard embeddings).
-            **kwargs: Additional arguments passed to the Llama base class (e.g., n_gpu_layers, n_batch, n_ctx).
+            n_gpu_layers: Number of model layers to offload to GPU.
+                          - Set to 0 for CPU only.
+                          - Set to -1 for all layers (recommended for best performance).
+            **kwargs: Additional arguments passed to the Llama base class (e.g., n_batch, n_ctx, verbose).
         """
         kwargs["embedding"] = True
 
@@ -53,6 +56,9 @@ class LlamaEmbedding(Llama):
         # This allows us to assign arbitrary seq_ids in a batch, enabling the parallel /
         #     encoding of multiple unrelated documents without "invalid seq_id" errors.
         kwargs["kv_unified"] = True
+
+        # Number of model layers to offload to GPU.
+        kwargs["n_gpu_layers"] = n_gpu_layers
 
         # Set pooling type
         kwargs["pooling_type"] = pooling_type

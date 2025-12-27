@@ -751,7 +751,7 @@ To generate embeddings, use the `LlamaEmbedding` class. It automatically configu
 from llama_cpp.llama_embedding import LlamaEmbedding
 
 # Initialize the model (automatically sets embedding=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf")
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1)
 
 # 1. Simple usage (OpenAI-compatible format)
 response = llm.create_embedding("Hello, world!")
@@ -770,7 +770,7 @@ You can request raw arrays or cosine similarity matrices directly:
 
 ```python
 # Returns raw List[float] instead of a dictionary wrapper
-vector = llm.create_embedding("Text", output_format="array")
+vector = llm.create_embedding("Text", output_format="array", n_gpu_layers=-1)
 
 # Returns a similarity matrix (A @ A.T) in the response
 # Note: Requires numpy installed
@@ -794,7 +794,8 @@ from llama_cpp.llama_embedding import LlamaEmbedding
 # Initialize a Reranking model
 ranker = LlamaEmbedding(
     model_path="path/to/bge-reranker-v2-m3.gguf",
-    pooling_type=llama_cpp.LLAMA_POOLING_TYPE_RANK  # Crucial for Rerankers!
+    pooling_type=llama_cpp.LLAMA_POOLING_TYPE_RANK,  # Crucial for Rerankers!
+    n_gpu_layers=-1,
 )
 
 query = "What causes rain?"
@@ -831,16 +832,16 @@ This is useful for optimizing storage or preparing vectors for cosine similarity
 from llama_cpp.llama_embedding import NORM_MODE_MAX_INT16, NORM_MODE_TAXICAB, NORM_MODE_EUCLIDEAN
 
 # Taxicab (L1)
-vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB)
+vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB, n_gpu_layers=-1)
 
 # Default is Euclidean (L2) - Standard for vector databases
-vec_l2 = llm.embed("text", normalize=NORM_MODE_EUCLIDEAN)
+vec_l2 = llm.embed("text", normalize=NORM_MODE_EUCLIDEAN, n_gpu_layers=-1)
 
 # Max Absolute Int16 - Useful for quantization/compression
-vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
+vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16, n_gpu_layers=-1)
 
 # Raw Output (No Normalization) - Get the raw floating point values from the model
-embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE)
+embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE, n_gpu_layers=-1)
 ```
 
 #### Legacy Usage (Deprecated)
