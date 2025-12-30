@@ -636,18 +636,31 @@ class LlamaContext:
 
 class LlamaBatch:
     def __init__(
-        self, *, n_tokens: int, embd: int, n_seq_max: int, verbose: bool = True
+        self,
+        *,
+        n_tokens: int,
+        embd: int,
+        n_seq_max: int,
+        verbose: bool = True
     ):
-        self._n_tokens = n_tokens
+        # logical validity of parameters
+        if n_tokens <= 0:
+            raise ValueError(f"n_tokens must be positive, got {n_tokens}")
+        if n_seq_max <= 0:
+            raise ValueError(f"n_seq_max must be positive, got {n_seq_max}")
+
+        self.n_tokens_capacity = n_tokens
         self.embd = embd
         self.n_seq_max = n_seq_max
         self.verbose = verbose
         self._exit_stack = ExitStack()
 
-        batch = llama_cpp.llama_batch_init(self._n_tokens, self.embd, self.n_seq_max)
+        batch = llama_cpp.llama_batch_init(self.n_tokens_capacity, self.embd, self.n_seq_max)
 
         if batch is None:
-            raise ValueError("Failed to create llama_batch")
+            raise MemoryError(
+                f"Failed to allocate memory for llama_batch via llama_batch_init({n_tokens},{embd},{n_seq_max})"
+            )
 
         self.batch = batch
 
@@ -660,18 +673,51 @@ class LlamaBatch:
         self._exit_stack.callback(free_batch)
 
     def close(self):
+        """Manually free resources."""
         self._exit_stack.close()
 
     def __del__(self):
         self.close()
 
     def n_tokens(self) -> int:
+        """
+        Current number of tokens stored in the batch.
+        """
+        if self.batch is None: return 0
         return self.batch.n_tokens
 
+    def capacity(self) -> int:
+        """
+        Total capacity of the batch.
+        """
+        return self.n_tokens_capacity
+
+    def space_left(self) -> int:
+        """
+        Returns the number of empty slots remaining in the batch.
+        Throws a RuntimeError if internal state implies an overflow.
+        """
+        if self.batch is None: return 0
+        elif self.n_tokens_capacity >= self.batch.n_tokens:
+            return self.n_tokens_capacity - self.batch.n_tokens
+        else:
+            raise RuntimeError(
+                f"LlamaBatch Critical Error: n_tokens ({self.batch.n_tokens}) exceeds capacity ({self.n_tokens_capacity}). "
+                "This implies a buffer overflow or corrupted internal state."
+            )
+
     def reset(self):
-        self.batch.n_tokens = 0
+        """
+        Resets the batch counter to 0. Does not free memory, just resets the index.
+        Call this before starting a new decoding step.
+        """
+        if self.batch is not None:
+            self.batch.n_tokens = 0
 
     def set_batch(self, batch: Sequence[int], n_past: llama_cpp.llama_pos, logits_all: bool):
+        if len(batch) > self.n_tokens_capacity:
+             raise IndexError(f"Input batch size {len(batch)} exceeds capacity {self.n_tokens_capacity}")
+
         n_tokens = len(batch)
         self.batch.n_tokens = n_tokens
         for i in range(n_tokens):
@@ -684,16 +730,21 @@ class LlamaBatch:
 
     def add_sequence(self, batch: Sequence[int], seq_id: int, logits_all: bool):
         n_tokens = len(batch)
-        n_tokens0 = self.batch.n_tokens
+        current_count = self.batch.n_tokens
+        if current_count + n_tokens > self.n_tokens_capacity:
+            raise IndexError(
+                f"LlamaBatch overflow: Cannot add {n_tokens} tokens. "
+                f"Space left: {self.n_tokens_capacity - current_count}"
+            )
         self.batch.n_tokens += n_tokens
         for i in range(n_tokens):
-            j = n_tokens0 + i
+            j = current_count + i
             self.batch.token[j] = batch[i]
             self.batch.pos[j] = i
             self.batch.seq_id[j][0] = seq_id
             self.batch.n_seq_id[j] = 1
             self.batch.logits[j] = logits_all
-        self.batch.logits[n_tokens - 1] = True
+        self.batch.logits[current_count + n_tokens - 1] = True
 
 
 class LlamaTokenDataArray:
