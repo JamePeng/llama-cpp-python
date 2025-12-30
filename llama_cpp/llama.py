@@ -435,7 +435,7 @@ class Llama:
                 internals.LlamaBatch(
                     n_tokens=self.n_batch,
                     embd=0,
-                    n_seq_max=self.context_params.n_ctx,
+                    n_seq_max=self.context_params.n_seq_max,
                     verbose=self.verbose,
                 )
             )
