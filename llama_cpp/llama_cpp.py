@@ -681,7 +681,7 @@ class llama_model_tensor_buft_override(ctypes.Structure):
 #     // NULL-terminated list of buffer types to use for tensors that match a pattern
 #     const struct llama_model_tensor_buft_override * tensor_buft_overrides;
 #
-#     int32_t n_gpu_layers; // number of layers to store in VRAM
+#     int32_t n_gpu_layers; // number of layers to store in VRAM, a negative value means all layers
 #     enum llama_split_mode split_mode; // how to split the model across multiple GPUs
 
 #     // main_gpu interpretation depends on split_mode:
@@ -720,7 +720,7 @@ class llama_model_params(ctypes.Structure):
     Attributes:
         devices (ctypes.Array[ggml_backend_dev_t]): NULL-terminated list of devices to use for offloading (if NULL, all available devices are used)
         tensor_buft_overrides(llama_model_tensor_buft_override): NULL-terminated list of buffer types to use for tensors that match a pattern
-        n_gpu_layers (int): number of layers to store in VRAM
+        n_gpu_layers (int): number of layers to store in VRAM, a negative value means all layers
         split_mode (int): how to split the model across multiple GPUs
         main_gpu (int): the GPU that is used for the entire model. main_gpu interpretation depends on split_mode: LLAMA_SPLIT_NONE: the GPU that is used for the entire model LLAMA_SPLIT_ROW: the GPU that is used for small tensors and intermediate results LLAMA_SPLIT_LAYER: ignored
         tensor_split (ctypes.Array[ctypes.ctypes.c_float]): proportion of the model (layers or rows) to offload to each GPU, size: llama_max_devices()
@@ -1312,10 +1312,22 @@ def llama_free(ctx: llama_context_p, /):
     ...
 
 
+# enum llama_params_fit_status {
+#     LLAMA_PARAMS_FIT_STATUS_SUCCESS = 0, // found allocations that are projected to fit
+#     LLAMA_PARAMS_FIT_STATUS_FAILURE = 1, // could not find allocations that are projected to fit
+#     LLAMA_PARAMS_FIT_STATUS_ERROR   = 2, // a hard error occured, e.g. because no model could be found at the specified path
+# };
+class llama_params_fit_status(enum.IntEnum):
+    LLAMA_PARAMS_FIT_STATUS_SUCCESS = 0
+    LLAMA_PARAMS_FIT_STATUS_FAILURE = 1
+    LLAMA_PARAMS_FIT_STATUS_ERROR   = 2
+
+
 # // fits mparams and cparams to free device memory (assumes system memory is unlimited)
-# // returns true if the parameters could be successfully modified to fit device memory
-# // this function is NOT thread safe because it modifies the global llama logger state
-# LLAMA_API bool llama_params_fit(
+# //   - returns true if the parameters could be successfully modified to fit device memory
+# //   - this function is NOT thread safe because it modifies the global llama logger state
+# //   - only parameters that have the same value as in llama_default_model_params are modified
+# LLAMA_API enum llama_params_fit_status llama_params_fit(
 #                                 const char   * path_model,
 #                 struct llama_model_params   * mparams,
 #                 struct llama_context_params * cparams,
@@ -1336,7 +1348,7 @@ def llama_free(ctx: llama_context_p, /):
         ctypes.c_uint32,
         ctypes.c_int,
     ],
-    ctypes.c_bool,
+    ctypes.c_int,
 )
 def llama_params_fit(
     path_model: ctypes.c_char_p,
@@ -1348,7 +1360,7 @@ def llama_params_fit(
     n_ctx_min: ctypes.c_uint32,
     log_level: int,
     /,
-) -> bool:
+) -> int:
     """
     fits mparams and cparams to free device memory (assumes system memory is unlimited)
     returns true if the parameters could be successfully modified to fit device memory
