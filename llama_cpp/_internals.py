@@ -340,7 +340,7 @@ class LlamaContext:
         llama_cpp.llama_memory_clear(self.get_memory(), data)
 
     def memory_seq_rm(self, seq_id: int, p0: int, p1: int) -> bool:
-        if self.ctx is not None and seq_id >= 0:
+        if self.ctx is not None:
             return llama_cpp.llama_memory_seq_rm(self.get_memory(), seq_id, p0, p1)
         else:
             return False
