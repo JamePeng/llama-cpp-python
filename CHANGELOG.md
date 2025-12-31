@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.19]
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/9b8329de7a7200385aaac16ab4a2ab79ae14d829](https://github.com/ggml-org/llama.cpp/commit/9b8329de7a7200385aaac16ab4a2ab79ae14d829)
+- feat: Sync llama.cpp llama/mtmd API Binding 20251230
+- **refactor: Extract embedding logic to `LlamaEmbedding` class, `Rerank` support and fix parallel batching**
+    - Decoupled embedding and rerank logic into `llama_embedding.py`.
+    - Implemented streaming batching for constant memory usage.
+    - Fixed parallel batching errors by enabling `kv_unified`. such as `"multiple embeddings in a single call"`
+    - Added native `rank()` support for `Reranker models`.
+    - Added advanced normalization support (`Euclidean`, `Taxicab`, `MaxInt16`).
+    - Added `array`,`json+` output format for raw vector access.
+    - The legacy embedding implementation in `llama.py` is now superseded by this optimized approach.
+- update README.md here: https://github.com/JamePeng/llama-cpp-python?tab=readme-ov-file#embeddings--reranking-gguf
+- refactor(LlamaBatch): enhance safety checks and fix indexing logic
+- refactor(Llama): enhance error handling and cleanup in eval method
+- Fixed a small bug in the Qwen3-VL chat template (by @alcoftTAO)
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/2efaa346bc0aa0d6648938a0dcdf8d12240a8bed...aa653ea5c6a90505a7491e855cc16988293cedd5
+
 ## [0.3.18]
 - feat: Update llama.cpp to [ggml-org/llama.cpp/commit/ce734a8a2f9fb6eb4f0383ab1370a1b0014ab787](https://github.com/ggml-org/llama.cpp/commit/ce734a8a2f9fb6eb4f0383ab1370a1b0014ab787)
 - feat: Sync llama.cpp llama/mtmd API Binding 20251215
