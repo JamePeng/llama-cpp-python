@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - refactor(LlamaBatch): enhance safety checks and fix indexing logic
 - refactor(Llama): enhance error handling and cleanup in eval method
 - Fixed a small bug in the Qwen3-VL chat template (by @alcoftTAO)
+- fix(Llama): implement fallback to full cache clear in eval
+    - If `memory_seq_rm` fails to clear from `current_pos`, fallback to clearing the entire sequence to prevent invalid input batch errors.
 
 More information see: https://github.com/JamePeng/llama-cpp-python/compare/2efaa346bc0aa0d6648938a0dcdf8d12240a8bed...aa653ea5c6a90505a7491e855cc16988293cedd5
 
