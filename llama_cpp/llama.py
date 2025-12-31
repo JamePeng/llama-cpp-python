@@ -673,7 +673,13 @@ class Llama:
         current_pos = self.n_tokens
 
         if self._ctx:
+            # Standard cleanup by current_pos
             is_success = self._ctx.memory_seq_rm(0, current_pos, -1)
+            # Fallback: Broad cleanup
+            if not is_success:
+                if self.verbose:
+                    print(f"WARN: memory_seq_rm(0, {current_pos}, -1) failed. Executing fallback: memory_seq_rm(0, 0, -1)")
+                is_success = self._ctx.memory_seq_rm(0, 0, -1)
 
         for i in range(0, n_eval, self.n_batch):
             batch = tokens[i : min(n_eval, i + self.n_batch)]
