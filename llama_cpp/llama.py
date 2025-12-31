@@ -667,36 +667,44 @@ class Llama:
         Args:
             tokens: The list of tokens to evaluate.
         """
-        self._ctx.memory_seq_rm(0, self.n_tokens, -1)
-        for i in range(0, len(tokens), self.n_batch):
-            batch = tokens[i : min(len(tokens), i + self.n_batch)]
+        if len(tokens) == 0:
+            return
+        n_eval = len(tokens)
+        current_pos = self.n_tokens
+
+        if self._ctx:
+            is_success = self._ctx.memory_seq_rm(0, current_pos, -1)
+
+        for i in range(0, n_eval, self.n_batch):
+            batch = tokens[i : min(n_eval, i + self.n_batch)]
             n_past = self.n_tokens
-            n_tokens = len(batch)
+            n_batch_tokens = len(batch)
             self._batch.set_batch(
                 batch=batch, n_past=n_past, logits_all=self._logits_all
             )
-            self._ctx.decode(self._batch)
+            try:
+                self._ctx.decode(self._batch)
+            except Exception as e:
+                raise RuntimeError(
+                    f"Decode Failed at Pos {current_pos}. "
+                    f"Batch size: {n_batch_tokens}. "
+                    f"Result of memory_seq_rm: {is_success}. "
+                    f"Error: {str(e)}."
+                ) from e
             # Save tokens
-            self.input_ids[n_past : n_past + n_tokens] = batch
+            self.input_ids[n_past : n_past + n_batch_tokens] = batch
             # Save logits
             if self._logits_all:
-                rows = n_tokens
+                rows = n_batch_tokens
                 cols = self._n_vocab
                 logits = np.ctypeslib.as_array(
                     self._ctx.get_logits(), shape=(rows * cols,)
                 )
-                self.scores[n_past : n_past + n_tokens, :].reshape(-1)[::] = logits
-            else:
-                # rows = 1
-                # cols = self._n_vocab
-                # logits = np.ctypeslib.as_array(
-                #     self._ctx.get_logits(), shape=(rows * cols,)
-                # )
-                # self.scores[n_past + n_tokens - 1, :].reshape(-1)[::] = logits
-                # NOTE: Now that sampling is done inside the sampler, logits are only needed for logprobs which requires logits_all
-                pass
+                self.scores[n_past : n_past + n_batch_tokens, :].reshape(-1)[::] = logits
+
             # Update n_tokens
-            self.n_tokens += n_tokens
+            current_pos += n_batch_tokens
+            self.n_tokens = current_pos
 
     def _init_sampler(
         self,
