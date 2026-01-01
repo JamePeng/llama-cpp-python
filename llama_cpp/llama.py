@@ -79,6 +79,7 @@ class Llama:
         n_ctx: int = 512,
         n_batch: int = 512,
         n_ubatch: int = 512,
+        n_seq_max: int = 1,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
         rope_scaling_type: Optional[
@@ -95,13 +96,13 @@ class Llama:
         yarn_beta_slow: float = 1.0,
         yarn_orig_ctx: int = 0,
         logits_all: bool = False,
-        embedding: bool = False,
+        embeddings: bool = False,
         offload_kqv: bool = True,
+        no_perf: bool = False,
         op_offload: Optional[bool] = None,
         swa_full: Optional[bool] = None,
         kv_unified: Optional[bool] = None,
         # Sampling Params
-        no_perf: bool = False,
         last_n_tokens_size: int = 64,
         # LoRA Params
         lora_base: Optional[str] = None,
@@ -168,6 +169,7 @@ class Llama:
             n_ctx: Text context, 0 = from model
             n_batch: Prompt processing maximum batch size
             n_ubatch: Physical batch size
+            n_seq_max: max number of sequences (i.e. distinct states for recurrent models)
             n_threads: Number of threads to use for generation
             n_threads_batch: Number of threads to use for batch processing
             rope_scaling_type: RoPE scaling type, from `enum llama_rope_scaling_type`. ref: https://github.com/ggml-org/llama.cpp/pull/2054
@@ -182,12 +184,12 @@ class Llama:
             yarn_beta_slow: YaRN high correction dim
             yarn_orig_ctx: YaRN original context size
             logits_all: Return logits for all tokens, not just the last token. Must be True for completion to return logprobs.
-            embedding: Embedding mode only.
+            embeddings: Embedding mode only. if true, extract embeddings (together with logits)
             offload_kqv: Offload K, Q, V to GPU.
+            no_perf: Measure performance timings.
             op_offload: whether to offload host tensor operations to device
             swa_full: whether to use full-size SWA cache
             kv_unified: use single unified KV buffer for the KV cache of all sequences
-            no_perf: Measure performance timings.
             last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
             lora_base: Optional path to base model, useful if using a quantized base model and you want to apply LoRA to an f16 model.
             lora_path: Path to a LoRA file to apply to the model.
@@ -314,6 +316,7 @@ class Llama:
             self.model_params.kv_overrides = self._kv_overrides_array
 
         self.n_batch = min(n_ctx, n_batch)  # ???
+        self.n_seq_max = n_seq_max
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
@@ -325,6 +328,7 @@ class Llama:
         self.context_params.n_ctx = n_ctx
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
+        self.context_params.n_seq_max = self.n_seq_max
         self.context_params.n_threads = self.n_threads
         self.context_params.n_threads_batch = self.n_threads_batch
         self.context_params.rope_scaling_type = (
@@ -366,9 +370,14 @@ class Llama:
             yarn_beta_slow if yarn_beta_slow != 0.0 else 0
         )
         self.context_params.yarn_orig_ctx = yarn_orig_ctx if yarn_orig_ctx != 0 else 0
+
         self._logits_all = logits_all if draft_model is None else True
-        self.context_params.embeddings = embedding  # TODO: Rename to embeddings
+
+        self.context_params.embeddings = embeddings
         self.context_params.offload_kqv = offload_kqv
+
+        if no_perf is not None:
+            self.context_params.no_perf = no_perf
 
         if op_offload is not None:
             self.context_params.op_offload = op_offload

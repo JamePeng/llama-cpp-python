@@ -62,7 +62,7 @@ class LlamaEmbedding(Llama):
                           - Set to -1 for all layers (recommended for best performance).
             **kwargs: Additional arguments passed to the Llama base class (e.g., n_batch, n_ctx, verbose).
         """
-        kwargs["embedding"] = True
+        kwargs["embeddings"] = True
         kwargs["n_gpu_layers"] = n_gpu_layers
         kwargs["n_ctx"] = n_ctx
         kwargs["n_batch"] = n_batch

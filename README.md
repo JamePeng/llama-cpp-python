@@ -858,7 +858,7 @@ The standard `Llama` class still supports basic embedding generation, but it lac
 
 ```python
 # Old method - Not recommended for large batches or reranking
-llm = llama_cpp.Llama(model_path="...", embedding=True)
+llm = llama_cpp.Llama(model_path="...", embeddings=True)
 emb = llm.create_embedding("text")
 ```
 

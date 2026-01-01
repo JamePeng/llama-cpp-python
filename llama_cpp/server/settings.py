@@ -73,6 +73,9 @@ class ModelSettings(BaseSettings):
     n_ubatch: int = Field(
         default=512, ge=1, description="The physical batch size used by llama.cpp"
     )
+    n_seq_max: int = Field(
+        default=1, ge=1, description="max number of sequences (i.e. distinct states for recurrent models)"
+    )
     n_threads: int = Field(
         default=max(multiprocessing.cpu_count() // 2, 1),
         ge=1,
@@ -112,9 +115,12 @@ class ModelSettings(BaseSettings):
         default=True, description="if true, use experimental mul_mat_q kernels"
     )
     logits_all: bool = Field(default=True, description="Whether to return logits.")
-    embedding: bool = Field(default=False, description="Whether to use embeddings.")
+    embeddings: bool = Field(default=False, description="Whether to use embeddings.")
     offload_kqv: bool = Field(
         default=True, description="Whether to offload kqv to the GPU."
+    )
+    no_perf: bool = Field(
+        default=False, description="measure performance timings"
     )
     op_offload: bool = Field(
         default=True, description="Whether to offload host tensor operations to device"
