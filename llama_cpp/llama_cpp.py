@@ -139,6 +139,7 @@ LLAMA_VOCAB_TYPE_PLAMO2 = 6
 
 
 # NOTE: Deprecated and will be removed in the future. (already gone in llama.cpp)
+# https://github.com/ggml-org/llama.cpp/blob/master/src/llama-vocab.h#L10
 # // pre-tokenization types
 # enum llama_vocab_pre_type {
 #     LLAMA_VOCAB_PRE_TYPE_DEFAULT         = 0,
@@ -184,6 +185,8 @@ LLAMA_VOCAB_TYPE_PLAMO2 = 6
 #     LLAMA_VOCAB_PRE_TYPE_GRANITE_DOCLING = 40,
 #     LLAMA_VOCAB_PRE_TYPE_MINIMAX_M2      = 41,
 #     LLAMA_VOCAB_PRE_TYPE_AFMOE           = 42,
+#     LLAMA_VOCAB_PRE_TYPE_SOLAR_OPEN      = 43,
+#     LLAMA_VOCAB_PRE_TYPE_YOUTU           = 44,
 # };
 LLAMA_VOCAB_PRE_TYPE_DEFAULT = 0
 LLAMA_VOCAB_PRE_TYPE_LLAMA3 = 1
@@ -228,6 +231,8 @@ LLAMA_VOCAB_PRE_TYPE_GROK_2 = 39
 LLAMA_VOCAB_PRE_TYPE_GRANITE_DOCLING = 40
 LLAMA_VOCAB_PRE_TYPE_MINIMAX_M2 = 41
 LLAMA_VOCAB_PRE_TYPE_AFMOE = 42
+LLAMA_VOCAB_PRE_TYPE_SOLAR_OPEN = 43,
+LLAMA_VOCAB_PRE_TYPE_YOUTU = 44,
 
 
 # // note: these values should be synchronized with ggml_rope
