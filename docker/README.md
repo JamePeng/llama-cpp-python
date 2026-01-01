@@ -15,18 +15,28 @@ docker run --cap-add SYS_RESOURCE -e USE_MLOCK=0 -e MODEL=/var/model/<model-path
 ```
 where `<model-root-path>/<model-path>` is the full path to the model file on the Docker host system.
 
+--------------------------------------------------------------------------
+
 ### cuda_simple
+
 > [!WARNING]  
-> Nvidia GPU CuBLAS support requires an Nvidia GPU with sufficient VRAM (approximately as much as the size in the table below) and Docker Nvidia support (see [container-toolkit/install-guide](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)) <br>
+> **NVIDIA Container Toolkit**: You must have the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) installed on the host. The `12.8.1-cudnn-devel-ubuntu22.04` images currently in use generally include the necessary NVCC compilation environment.<br>
+> **VRAM**: Ensure your GPU has enough VRAM to load the model.
 
-A simple Dockerfile for CUDA-accelerated CuBLAS, where the model is located outside the Docker image:
+A Dockerfile that builds `llama-cpp-python` from source (with CUDA 12.8 support) and runs an OpenAI-compatible API server.
 
-```
+#### 1. Build
+Note: The build process will compile the llama.cpp C++ backend, which may take several tens of minutes.
+```bash
 cd ./cuda_simple
 docker build -t cuda_simple .
-docker run --gpus=all --cap-add SYS_RESOURCE -e USE_MLOCK=0 -e MODEL=/var/model/<model-path> -v <model-root-path>:/var/model -t cuda_simple
 ```
-where `<model-root-path>/<model-path>` is the full path to the model file on the Docker host system.
+#### 2. Run
+```bash
+docker run --gpus=all --cap-add SYS_RESOURCE -e USE_MLOCK=0 -e MODEL=/app/models/<model-path> -v /path/to/your/models:/app/models -t cuda_simple
+```
+`--gpus=all`: Enables GPU access.<br>
+`-e MODEL=...`: Specifies the path to the model inside the container.
 
 --------------------------------------------------------------------------
 
