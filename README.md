@@ -758,7 +758,7 @@ To generate embeddings, use the `LlamaEmbedding` class. It automatically configu
 ```python
 from llama_cpp.llama_embedding import LlamaEmbedding
 
-# Initialize the model (automatically sets embedding=True)
+# Initialize the model (automatically sets embeddings=True)
 llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1)
 
 # 1. Simple usage (OpenAI-compatible format)

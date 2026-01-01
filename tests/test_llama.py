@@ -232,9 +232,9 @@ def test_real_llama_embeddings(llama_cpp_model_path):
         n_threads=multiprocessing.cpu_count(),
         n_threads_batch=multiprocessing.cpu_count(),
         logits_all=False,
-        swa_full=True,
+        embeddings=True,
         kv_unified=True,
-        embedding=True
+        swa_full=True,
     )
     # Smoke test for now
     model.embed("Hello World")

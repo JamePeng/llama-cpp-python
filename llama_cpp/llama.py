@@ -1118,7 +1118,7 @@ class Llama:
 
         if self.context_params.embeddings is False:
             raise RuntimeError(
-                "Llama model must be created with embedding=True to call this method"
+                "Llama model must be created with embeddings=True to call this method"
             )
 
         if self.verbose:

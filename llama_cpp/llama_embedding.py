@@ -28,7 +28,7 @@ class LlamaEmbedding(Llama):
     Inherits from the base Llama class but is optimized for vector operations.
 
     Key Features:
-    1. Auto-configuration: Automatically sets embedding=True.
+    1. Auto-configuration: Automatically sets embeddings=True.
     2. Streaming Batch: Handles massive datasets without OOM (Out Of Memory).
     3. Native Reranking Support: Specifically handles `LLAMA_POOLING_TYPE_RANK` models (like BGE-Reranker). /
        It correctly identifies classification heads to output scalar relevance scores instead of high-dimensional vectors.
