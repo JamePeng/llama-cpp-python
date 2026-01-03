@@ -2972,7 +2972,7 @@ class Llava15ChatHandler:
             # Create input text structure
             input_text = self._mtmd_cpp.mtmd_input_text()
             input_text.text = text.encode('utf-8')
-            input_text.add_special = True
+            input_text.add_special = (llama.n_tokens == 0)
             input_text.parse_special = True
 
             # Create input chunks
@@ -3058,7 +3058,7 @@ class Llava15ChatHandler:
                     llama._ctx.memory_seq_rm(0, n_past - 1, -1)
                     if llama._ctx.memory_seq_pos_min(0) == llama._ctx.memory_seq_pos_max(0):
                         n_past += 1
-                    llama.n_tokens = n_past
+                        llama.n_tokens = n_past
                 # Get prompt tokens to avoid a cache miss
                 prompt = llama.input_ids[: llama.n_tokens].tolist()
 
