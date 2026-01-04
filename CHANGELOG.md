@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.20]
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/cef1d23c5a33156c44a206c1f4bc146f4db729f9](https://github.com/ggml-org/llama.cpp/commit/cef1d23c5a33156c44a206c1f4bc146f4db729f9)
+- feat: Update llama_context_params and fixed some embeddings typo
+- [docker(cuda_simple): upgrade to CUDA 12.8.1 and switch to source install](https://github.com/JamePeng/llama-cpp-python/commit/3f347005f2040610a5b4e9f2ccb8a7d23af22282)
+- update docker/README.md for cuda simple
+- [Small fix for Llava15ChatHandler class](https://github.com/JamePeng/llama-cpp-python/commit/c7721b4b99b5edc098c0b2e9773d64a8dd21e297)
+
 ## [0.3.19]
 - feat: Update llama.cpp to [ggml-org/llama.cpp/commit/9b8329de7a7200385aaac16ab4a2ab79ae14d829](https://github.com/ggml-org/llama.cpp/commit/9b8329de7a7200385aaac16ab4a2ab79ae14d829)
 - feat: Sync llama.cpp llama/mtmd API Binding 20251230
