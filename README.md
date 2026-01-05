@@ -772,7 +772,7 @@ print(res["choices"][0]["message"]["content"])
 To generate embeddings, use the `LlamaEmbedding` class. It automatically configures the model for vector generation.
 
 ```python
-from llama_cpp.llama_embedding import LlamaEmbedding
+from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 
 # Initialize the model (automatically sets embeddings=True)
 llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
@@ -793,8 +793,13 @@ print(f"Generated {len(embeddings)} vectors.")
 You can request raw arrays or cosine similarity matrices directly:
 
 ```python
+from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
+
+# Initialize the model (automatically sets embeddings=True)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
+
 # Returns raw List[float] instead of a dictionary wrapper
-vector = llm.create_embedding("Text", output_format="array", n_gpu_layers=-1)
+vector = llm.create_embedding("Text", output_format="array")
 
 # Returns a similarity matrix (A @ A.T) in the response
 # Note: Requires numpy installed
@@ -813,12 +818,12 @@ Reranking models (like `bge-reranker`) take a **Query** and a list of **Document
 
 ```python
 import llama_cpp
-from llama_cpp.llama_embedding import LlamaEmbedding
+from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_RANK
 
 # Initialize a Reranking model
 ranker = LlamaEmbedding(
     model_path="path/to/bge-reranker-v2-m3.gguf",
-    pooling_type=llama_cpp.LLAMA_POOLING_TYPE_RANK,  # Crucial for Rerankers!
+    pooling_type=LLAMA_POOLING_TYPE_RANK,  # Crucial for Rerankers!
     n_gpu_layers=-1,
 )
 
@@ -853,22 +858,27 @@ The `embed` method supports various mathematical normalization strategies via th
 This is useful for optimizing storage or preparing vectors for cosine similarity search (which requires L2 normalization).
 
 ```python
-from llama_cpp.llama_embedding import NORM_MODE_MAX_INT16, NORM_MODE_TAXICAB, NORM_MODE_EUCLIDEAN
+from llama_cpp.llama_embedding import (
+  LLAMA_POOLING_TYPE_NONE,
+  NORM_MODE_MAX_INT16,
+  NORM_MODE_TAXICAB,
+  NORM_MODE_EUCLIDEAN
+)
 
 # Initialize the model (automatically sets embeddings=True)
 llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
 
 # Taxicab (L1)
-vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB, n_gpu_layers=-1)
+vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB)
 
 # Default is Euclidean (L2) - Standard for vector databases
-vec_l2 = llm.embed("text", normalize=NORM_MODE_EUCLIDEAN, n_gpu_layers=-1)
+vec_l2 = llm.embed("text", normalize=NORM_MODE_EUCLIDEAN)
 
 # Max Absolute Int16 - Useful for quantization/compression
-vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16, n_gpu_layers=-1)
+vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
 
 # Raw Output (No Normalization) - Get the raw floating point values from the model
-embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE, n_gpu_layers=-1)
+embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE)
 ```
 
 ### Legacy Usage (Deprecated)
