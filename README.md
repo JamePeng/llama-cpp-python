@@ -775,7 +775,7 @@ To generate embeddings, use the `LlamaEmbedding` class. It automatically configu
 from llama_cpp.llama_embedding import LlamaEmbedding
 
 # Initialize the model (automatically sets embeddings=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
 
 # 1. Simple usage (OpenAI-compatible format)
 response = llm.create_embedding("Hello, world!")
@@ -854,6 +854,9 @@ This is useful for optimizing storage or preparing vectors for cosine similarity
 
 ```python
 from llama_cpp.llama_embedding import NORM_MODE_MAX_INT16, NORM_MODE_TAXICAB, NORM_MODE_EUCLIDEAN
+
+# Initialize the model (automatically sets embeddings=True)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
 
 # Taxicab (L1)
 vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB, n_gpu_layers=-1)
