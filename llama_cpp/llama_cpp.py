@@ -779,6 +779,23 @@ class llama_model_params(ctypes.Structure):
 
 llama_model_params_p = ctypes.POINTER(llama_model_params)
 
+
+# struct llama_sampler_seq_config {
+#     llama_seq_id           seq_id;
+#     struct llama_sampler * sampler;
+# };
+class llama_sampler_seq_config(ctypes.Structure):
+    if TYPE_CHECKING:
+        seq_id: llama_seq_id
+        sampler: ctypes.c_void_p
+    _fields_ = [
+        ("seq_id", llama_seq_id),
+        ("sampler", ctypes.c_void_p),
+    ]
+
+llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
+
+
 # // NOTE: changing the default values of parameters marked as [EXPERIMENTAL] may cause crashes or incorrect results in certain configurations
 # //       https://github.com/ggml-org/llama.cpp/pull/7544
 # struct llama_context_params {
@@ -826,6 +843,11 @@ llama_model_params_p = ctypes.POINTER(llama_model_params)
 #     bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
 #                       // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
 #                       // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+#     // [EXPERIMENTAL]
+#     // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
+#     // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
+#     struct llama_sampler_seq_config * samplers;
+#     size_t                            n_samplers;
 # };
 class llama_context_params(ctypes.Structure):
     """Parameters for llama_context
@@ -861,6 +883,8 @@ class llama_context_params(ctypes.Structure):
         op_offload(bool): whether to offload host tensor operations to device
         swa_full(bool): whether to use full-size SWA cache
         kv_unified(bool): use a unified buffer across the input sequences when computing the attention
+        samplers(llama_sampler_seq_config *): the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
+        n_samplers(size_t): numbers of sampler chains
     """
 
     if TYPE_CHECKING:
@@ -894,6 +918,8 @@ class llama_context_params(ctypes.Structure):
         op_offload:bool
         swa_full:bool
         kv_unified:bool
+        samplers: ctypes.c_void_p
+        n_samplers: int
 
     _fields_ = [
         ("n_ctx", ctypes.c_uint32),
@@ -926,6 +952,8 @@ class llama_context_params(ctypes.Structure):
         ("op_offload", ctypes.c_bool),
         ("swa_full", ctypes.c_bool),
         ("kv_unified", ctypes.c_bool),
+        ("samplers", llama_sampler_seq_config_p),
+        ("n_samplers", ctypes.c_int),
     ]
 
 llama_context_params_p = ctypes.POINTER(llama_context_params)
@@ -1757,9 +1785,9 @@ def llama_model_has_decoder(model: llama_model_p, /) -> bool:
 # // to the decoder to start generating output sequence. For other models, it returns -1.
 # LLAMA_API llama_token llama_model_decoder_start_token(const struct llama_model * model);
 @ctypes_function(
-    "llama_model_decoder_start_token", [llama_model_p_ctypes], ctypes.c_int32
+    "llama_model_decoder_start_token", [llama_model_p_ctypes], llama_token
 )
-def llama_model_decoder_start_token(model: llama_model_p, /) -> int:
+def llama_model_decoder_start_token(model: llama_model_p, /) -> ctypes.c_int32:
     """For encoder-decoder models, this function returns id of the token that must be provided
     to the decoder to start generating output sequence. For other models, it returns -1.
     """
@@ -3028,6 +3056,132 @@ def llama_get_embeddings_seq(
 
 
 # //
+# // backend sampling API [EXPERIMENTAL]
+# // note: use only if the llama_context was created with at least one llama_sampler_seq_config
+# //
+
+# // Get the backend sampled token for the ith token.
+# // Returns LLAMA_TOKEN_NULL if no token was sampled.
+# LLAMA_API llama_token llama_get_sampled_token_ith(struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_token_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    llama_token,
+)
+def llama_get_sampled_token_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> ctypes.c_int32:
+    """
+    Get the backend sampled token for the ith token.
+    Returns LLAMA_TOKEN_NULL if no token was sampled.
+    """
+    ...
+
+
+# // Get the backend sampled probabilites for the ith token
+# // The index matches llama_get_sampled_token_ith().
+# // Returns NULL if no probabilites were generated.
+# LLAMA_API float *  llama_get_sampled_probs_ith      (struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_probs_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.POINTER(ctypes.c_float),
+)
+def llama_get_sampled_probs_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> CtypesArray[ctypes.c_float]:
+    """
+    Get the backend sampled probabilites for the ith token
+    The index matches llama_get_sampled_token_ith().
+    Returns NULL if no probabilites were generated.
+    """
+    ...
+
+
+# LLAMA_API uint32_t llama_get_sampled_probs_count_ith(struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_probs_count_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.c_uint32,
+)
+def llama_get_sampled_probs_count_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> ctypes.c_uint32:
+    """
+    Get the backend sampled probabilites count for the ith token
+    """
+    ...
+
+
+# // Get the backend sampled logits for the ith token
+# // Returns NULL if no logits were sampled.
+# LLAMA_API float *  llama_get_sampled_logits_ith      (struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_logits_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.POINTER(ctypes.c_float),
+)
+def llama_get_sampled_logits_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> CtypesArray[ctypes.c_float]:
+    """
+    Get the backend sampled logits for the ith token
+    Returns NULL if no logits were sampled.
+    """
+    ...
+
+
+# LLAMA_API uint32_t llama_get_sampled_logits_count_ith(struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_logits_count_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.c_uint32,
+)
+def llama_get_sampled_logits_count_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> ctypes.c_uint32:
+    """
+    Get the backend sampled logits count for the ith token
+    """
+    ...
+
+
+# // Get the backend sampled candidates (token ids) for the ith token
+# // These are needed to map probability/logit indices to vocab token ids.
+# // Returns NULL if no candidates were sampled.
+# LLAMA_API llama_token * llama_get_sampled_candidates_ith      (struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_candidates_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.POINTER(llama_token),
+)
+def llama_get_sampled_candidates_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> CtypesArray[llama_token]:
+    """
+    Get the backend sampled candidates (token ids) for the ith token
+    These are needed to map probability/logit indices to vocab token ids.
+    Returns NULL if no candidates were sampled.
+    """
+    ...
+
+
+# LLAMA_API uint32_t      llama_get_sampled_candidates_count_ith(struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_sampled_candidates_count_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.c_uint32,
+)
+def llama_get_sampled_candidates_count_ith(
+    ctx: llama_context_p, i: ctypes.c_int32, /
+) -> ctypes.c_uint32:
+    """
+    Get the backend sampled candidates (token ids) count for the ith token
+    """
+    ...
+
+
+# //
 # // Vocab
 # //
 
@@ -3734,11 +3888,30 @@ def llama_chat_builtin_templates(
 # //
 # //    llama_sampler_free(smpl);
 # //
-# // TODO: In the future, llama_sampler will be utilized to offload the sampling to the backends (e.g. GPU).
-# //
 
 # typedef void * llama_sampler_context_t;
 llama_sampler_context_t = ctypes.c_void_p
+
+
+# struct llama_sampler_data {
+#     struct ggml_tensor * logits;
+#     struct ggml_tensor * probs;
+#     struct ggml_tensor * sampled;
+#     struct ggml_tensor * candidates;
+# };
+class llama_sampler_data(ctypes.Structure):
+    if TYPE_CHECKING:
+        logits: ctypes.c_void_p
+        probs: ctypes.c_void_p
+        sampled: ctypes.c_void_p
+        candidates: ctypes.c_void_p
+
+    _fields_ = [
+        ("logits", ctypes.c_void_p),
+        ("probs", ctypes.c_void_p),
+        ("sampled", ctypes.c_void_p),
+        ("candidates", ctypes.c_void_p),
+    ]
 
 
 # // user code can implement the interface below in order to create custom llama_sampler
@@ -3749,17 +3922,38 @@ llama_sampler_context_t = ctypes.c_void_p
 #     void                   (*reset) (      struct llama_sampler * smpl);                                 // can be NULL
 #     struct llama_sampler * (*clone) (const struct llama_sampler * smpl);                                 // can be NULL if ctx is NULL
 #     void                   (*free)  (      struct llama_sampler * smpl);                                 // can be NULL if ctx is NULL
-#
-#     // TODO: API for internal libllama usage for appending the sampling to an existing ggml_cgraph
-#     //void (*apply_ggml) (struct llama_sampler * smpl, ...);
+
+#     // [EXPERIMENTAL]
+#     // backend sampling interface:
+
+#     // return true if the backend supports all ops needed by the sampler
+#     // note: call once per sampler
+#     bool (*backend_init)(struct llama_sampler * smpl, ggml_backend_buffer_type_t buft);
+
+#     // call after .backend_apply()
+#     void (*backend_accept)(
+#             struct llama_sampler * smpl,
+#             struct ggml_context  * ctx,
+#             struct ggml_cgraph   * gf,
+#             struct ggml_tensor   * selected_token);
+
+#     // call after .backend_init()
+#     void (*backend_apply)(
+#             struct llama_sampler      * smpl,
+#             struct ggml_context       * ctx,
+#             struct ggml_cgraph        * gf,
+#             struct llama_sampler_data * data);
+
+#     // called before graph execution to set inputs for the current ubatch
+#     void (*backend_set_input)(struct llama_sampler * smpl);
 # };
 class llama_sampler_i(ctypes.Structure):
     ...
 
 
 # struct llama_sampler {
-#     const struct llama_sampler_i  * iface;
-#     llama_sampler_context_t         ctx;
+#     struct llama_sampler_i * iface;
+#     llama_sampler_context_t  ctx;
 # };
 class llama_sampler(ctypes.Structure):
     _fields_ = [
@@ -3776,11 +3970,18 @@ llama_sampler_p_ctypes = ctypes.POINTER(llama_sampler)
 llama_sampler_i_name = ctypes.CFUNCTYPE(ctypes.c_char_p, llama_sampler_p_ctypes)
 llama_sampler_i_accept = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes, llama_token)
 llama_sampler_i_apply = ctypes.CFUNCTYPE(
-    None, llama_sampler_p_ctypes, llama_token_data_array_p
-)
+    None, llama_sampler_p_ctypes, llama_token_data_array_p)
 llama_sampler_i_reset = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes)
 llama_sampler_i_clone = ctypes.CFUNCTYPE(llama_sampler_p_ctypes, llama_sampler_p_ctypes)
 llama_sampler_i_free = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes)
+
+llama_sampler_i_backend_init = ctypes.CFUNCTYPE(
+    ctypes.c_bool, llama_sampler_p_ctypes, ctypes.c_void_p)
+llama_sampler_i_backend_accept = ctypes.CFUNCTYPE(
+    None, llama_sampler_p_ctypes, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+llama_sampler_i_backend_apply = ctypes.CFUNCTYPE(
+    None, llama_sampler_p_ctypes, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
+llama_sampler_i_backend_set_input = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes)
 
 llama_sampler_i._fields_ = [
     ("name", llama_sampler_i_name),
@@ -3789,18 +3990,43 @@ llama_sampler_i._fields_ = [
     ("reset", llama_sampler_i_reset),
     ("clone", llama_sampler_i_clone),
     ("free", llama_sampler_i_free),
+    ("backend_init", llama_sampler_i_backend_init),
+    ("backend_accept", llama_sampler_i_backend_accept),
+    ("backend_apply", llama_sampler_i_backend_apply),
+    ("backend_set_input", llama_sampler_i_backend_set_input),
 ]
 
 
+# // [EXPERIMENTAL]
+# // attach a sampler to the context
+# // note: prefer initializing the context with llama_context_params.samplers when possible
+# // note: changing the samplers of a context can cause graph reallocations and degraded performance
+# LLAMA_API bool llama_set_sampler(struct llama_context * ctx, llama_seq_id seq_id, struct llama_sampler * smpl);
+@ctypes_function(
+    "llama_set_sampler",
+    [llama_context_p_ctypes, llama_seq_id, llama_sampler_p_ctypes],
+    ctypes.c_bool,
+)
+def llama_set_sampler(
+    ctx: llama_context_p, seq_id: llama_seq_id, smpl: llama_sampler_p, /
+) -> ctypes.c_bool:
+    """
+    attach a sampler to the context
+    note: prefer initializing the context with llama_context_params.samplers when possible
+    note: changing the samplers of a context can cause graph reallocations and degraded performance
+    """
+    ...
+
+
 # // mirror of llama_sampler_i:
-# LLAMA_API struct llama_sampler * llama_sampler_init  (const struct llama_sampler_i * iface, llama_sampler_context_t ctx);
+# LLAMA_API struct llama_sampler * llama_sampler_init  (     struct llama_sampler_i * iface, llama_sampler_context_t ctx);
 @ctypes_function(
     "llama_sampler_init",
     [ctypes.POINTER(llama_sampler_i), llama_sampler_context_t],
     llama_sampler_p_ctypes,
 )
 def llama_sampler_init(
-    iface: ctypes.POINTER(llama_sampler_i), ctx: llama_sampler_context_t, /
+    iface: ctypes.pointer(llama_sampler_i), ctx: llama_sampler_context_t, /
 ) -> llama_sampler_p:
     ...
 
@@ -3892,7 +4118,12 @@ def llama_sampler_chain_add(chain: llama_sampler_p, smpl: llama_sampler_p, /):
     ...
 
 
-# LLAMA_API struct llama_sampler * llama_sampler_chain_get(const struct llama_sampler * chain, int32_t i);
+# // return NULL if:
+# //   - the sampler is NULL
+# //   - the sampler is not a llama_sampler_chain
+# //   - the index is out of bounds, unless i == -1
+# //   - if i == -1, returns the chain itself (can be used to check if the sampler is a chain)
+# LLAMA_API struct llama_sampler * llama_sampler_chain_get(      struct llama_sampler * chain, int32_t i);
 @ctypes_function(
     "llama_sampler_chain_get",
     [llama_sampler_p_ctypes, ctypes.c_int32],
@@ -3901,6 +4132,13 @@ def llama_sampler_chain_add(chain: llama_sampler_p, smpl: llama_sampler_p, /):
 def llama_sampler_chain_get(
     chain: llama_sampler_p, i: Union[ctypes.c_int32, int], /
 ) -> llama_sampler_p:
+    """
+    return NULL if:
+      - the sampler is NULL
+      - the sampler is not a llama_sampler_chain
+      - the index is out of bounds, unless i == -1
+      - if i == -1, returns the chain itself (can be used to check if the sampler is a chain)
+    """
     ...
 
 
