@@ -626,7 +626,9 @@ llm = Llama(
 )
 
 # Comprehensive MIME type mapping (updated as of 2025)
+# Based on Pillow 10.x+ "Fully Supported" (Read & Write) formats
 # Reference: IANA official media types + common real-world usage
+# See: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
 _IMAGE_MIME_TYPES = {
     # Most common formats
     '.png':  'image/png',
@@ -634,25 +636,39 @@ _IMAGE_MIME_TYPES = {
     '.jpeg': 'image/jpeg',
     '.gif':  'image/gif',
     '.webp': 'image/webp',
-    '.svg':  'image/svg+xml',
-    '.svgz': 'image/svg+xml',
 
     # Next-generation formats
     '.avif': 'image/avif',
-    '.heic': 'image/heic',
-    '.heif': 'image/heif',
-    '.heics': 'image/heic-sequence',
-    '.heifs': 'image/heif-sequence',
+    '.jp2':  'image/jp2',
+    '.j2k':  'image/jp2',
+    '.jpx':  'image/jp2',
 
     # Legacy / Windows formats
     '.bmp':  'image/bmp',
-    '.dib':  'image/bmp',
     '.ico':  'image/x-icon',
-    '.cur':  'image/x-icon',
+    '.pcx':  'image/x-pcx',
+    '.tga':  'image/x-tga',
+    '.icns': 'image/icns',
 
-    # Professional imaging
+    # Professional / Scientific imaging
     '.tif':  'image/tiff',
     '.tiff': 'image/tiff',
+    '.eps':  'application/postscript',
+    '.dds':  'image/vnd-ms.dds',
+    '.dib':  'image/dib',
+    '.sgi':  'image/sgi',
+
+    # Portable Map formats (PPM/PGM/PBM)
+    '.pbm':  'image/x-portable-bitmap',
+    '.pgm':  'image/x-portable-graymap',
+    '.ppm':  'image/x-portable-pixmap',
+
+    # Miscellaneous / Older formats
+    '.xbm':  'image/x-xbitmap',
+    '.mpo':  'image/mpo',
+    '.msp':  'image/msp',
+    '.im':   'image/x-pillow-im',
+    '.qoi':  'image/qoi',
 }
 
 def image_to_base64_data_uri(
@@ -663,7 +679,7 @@ def image_to_base64_data_uri(
     """
     Convert a local image file to a base64-encoded data URI with the correct MIME type.
 
-    Supports 20+ image formats (PNG, JPEG, WebP, AVIF, HEIC, SVG, BMP, ICO, TIFF, etc.).
+    Supports 20+ image formats (PNG, JPEG, WebP, AVIF, BMP, ICO, TIFF, etc.).
 
     Args:
         file_path: Path to the image file on disk.

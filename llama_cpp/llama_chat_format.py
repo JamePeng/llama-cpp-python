@@ -3169,7 +3169,7 @@ class Llava15ChatHandler:
         - Remote images via HTTP/HTTPS (with proper User-Agent)
         - Data URIs (base64-encoded, e.g., data:image/png;base64,...)
         - Images with alpha channel (PNG, WebP, etc.) → automatically composites on white/black background
-        - Any format that Pillow can open
+        - Any format that Pillow can open. See: https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html
 
         Returns:
             JPEG-encoded bytes (quality=95) in RGB mode, suitable for most vision models.
