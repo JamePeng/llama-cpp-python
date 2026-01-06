@@ -2351,13 +2351,41 @@ class Llama:
         """Return the context window size."""
         return self._ctx.n_ctx()
 
+    def n_ctx_train(self) -> int:
+        """Return the training context window size."""
+        return self._model.n_ctx_train()
+
     def n_embd(self) -> int:
         """Return the embedding size."""
         return self._model.n_embd()
 
+    def n_embd_inp(self) -> int:
+        """Return the input embedding size."""
+        return self._model.n_embd_inp()
+
+    def n_embd_out(self) -> int:
+        """Return the output embedding size."""
+        return self._model.n_embd_out()
+
+    def n_layer(self) -> int:
+        """Return the n_layer value."""
+        return self._model.n_layer()
+
+    def n_head(self) -> int:
+        """Return the head size."""
+        return self._model.n_head()
+
     def n_head_kv(self) -> int:
         """Return the head_kv size."""
         return self._model.n_head_kv()
+
+    def n_swa(self) -> int:
+        """Return the swa size."""
+        return self._model.n_swa()
+
+    def n_params(self) -> int:
+        """Returns the total number of parameters in the model"""
+        return self._model.n_params()
 
     def n_vocab(self) -> int:
         """Return the vocabulary size."""

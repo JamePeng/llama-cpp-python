@@ -1562,6 +1562,12 @@ def llama_model_n_embd_inp(model: llama_model_p, /) -> int:
     ...
 
 
+# LLAMA_API int32_t llama_model_n_embd_out (const struct llama_model * model);
+@ctypes_function("llama_model_n_embd_out", [llama_model_p_ctypes], ctypes.c_int32)
+def llama_model_n_embd_out(model: llama_model_p, /) -> int:
+    ...
+
+
 # LLAMA_API int32_t llama_model_n_layer    (const struct llama_model * model);
 @ctypes_function("llama_model_n_layer", [llama_model_p_ctypes], ctypes.c_int32)
 def llama_model_n_layer(model: llama_model_p, /) -> int:

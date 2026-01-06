@@ -92,6 +92,15 @@ class LlamaModel:
     def n_embd(self) -> int:
         return llama_cpp.llama_model_n_embd(self.model)
 
+    def n_embd_inp(self) -> int:
+        return llama_cpp.llama_model_n_embd_inp(self.model)
+
+    def n_embd_out(self) -> int:
+        return llama_cpp.llama_model_n_embd_out(self.model)
+
+    def n_layer(self) -> int:
+        return llama_cpp.llama_model_n_layer(self.model)
+
     def n_head(self) -> int:
         return llama_cpp.llama_model_n_head(self.model)
 
