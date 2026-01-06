@@ -3901,6 +3901,93 @@ class GLM46VChatHandler(Llava15ChatHandler):
         return super().__call__(**kwargs)
 
 
+class GraniteDoclingChatHandler(Llava15ChatHandler):
+    """
+    Handler for Granite-Docling models.
+
+    Format(512x512): <loc_xmin><loc_ymin><loc_xmax><loc_ymax>Content
+
+    Note(JamePeng): The GGUF files for Model and MMPROJ should be BF16 version !!!
+                    Since the model does not have special tokens for the start and end of an image,
+                    it is recommended to process only one image at a time.
+                    You can iterate through the images individually for recognition.
+
+    """
+    GRANITE_BOS_TOKEN = "<|start_of_role|>"
+    GRANITE_EOS_TOKEN = "<|end_of_text|>"
+    GRANITE_PAD_TOKEN = "<|end_of_text|>"
+    GRANITE_IMAGE_TOKEN = "<image>"
+
+    CHAT_FORMAT = (
+        "{%- for message in messages -%}"
+            "{{- '<|start_of_role|>' + message['role'] + '<|end_of_role|>' -}}"
+            "{%- if message['content'] is string -%}"
+                "{{- message['content'] -}}"
+            "{%- else -%}"
+                "{%- for part in message['content'] -%}"
+                    "{%- if part['type'] == 'text' -%}"
+                        "{{- part['text'] -}}"
+                    "{%- elif part['type'] == 'image_url' -%}"
+                        "{%- if part.image_url is string -%}"
+                            "{{- part.image_url -}}"
+                        "{%- else -%}"
+                            "{{- part.image_url.url -}}"
+                        "{%- endif -%}"
+                    "{%- endif -%}"
+                "{%- endfor -%}"
+            "{%- endif -%}"
+            "{{- '<|end_of_text|>\n' -}}"
+        "{%- endfor -%}"
+        "{%- if add_generation_prompt -%}"
+            "{{- '<|start_of_role|>assistant' -}}"
+            # Support the 'controls' parameter if present in generation arguments
+            "{%- if controls -%}{{- ' ' + controls | tojson() -}}{%- endif -%}"
+            "{{- '<|end_of_role|>' -}}"
+        "{%- endif -%}"
+    )
+
+    def __init__(self, controls: dict = None, **kwargs):
+        """
+        Granite-Docling Handler
+        Args:
+            controls (dict, optional): Operational parameters passed to the assistant role.
+
+            The 'controls' parameter is used to guide the model's behavior or output format.
+            Common examples for 'controls' include:
+             - Document Parsing: {"mode": "document_parsing", "format": "json"}
+        """
+        self.controls = controls
+        super().__init__(**kwargs)
+
+    def __call__(self, **kwargs):
+        # Inject controls into the template environment
+        self.extra_template_arguments["controls"] = self.controls
+        self.DEFAULT_SYSTEM_MESSAGE = None
+        kwargs['stop'] = [self.GRANITE_EOS_TOKEN]
+
+        llama = kwargs['llama']
+        llama.reset()
+        llama._ctx.memory_clear(True)
+        llama.n_tokens = 0
+
+        if hasattr(llama, 'input_ids'):
+            llama.input_ids.fill(0)
+
+        if hasattr(self, '_last_image_embed'):
+            self._last_image_embed = None
+            self._last_image_hash = None
+
+        if self.verbose:
+            messages = kwargs.get('messages', [])
+            try:
+                image_count = len(self.get_image_urls(messages))
+                print(f"GraniteDoclingChatHandler - Cleared state, processing {image_count} images", file=sys.stderr)
+            except Exception:
+                print(f"GraniteDoclingChatHandler - Cleared state", file=sys.stderr)
+
+        return super().__call__(**kwargs)
+
+
 class LFM2VLChatHandler(Llava15ChatHandler):
     LFM2VL_BOS_TOKEN = "<|startoftext|>"
     LFM2VL_EOS_TOKEN = "<|im_end|>"
