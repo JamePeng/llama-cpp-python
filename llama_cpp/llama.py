@@ -69,6 +69,7 @@ class Llama:
         tensor_split: Optional[List[float]] = None,
         vocab_only: bool = False,
         use_mmap: bool = True,
+        use_direct_io: bool = True,
         use_mlock: bool = False,
         check_tensors: bool = False,
         use_extra_bufts: bool = False,
@@ -256,6 +257,7 @@ class Llama:
             self.model_params.tensor_split = self._c_tensor_split
         self.model_params.vocab_only = vocab_only
         self.model_params.use_mmap = use_mmap if lora_path is None else False
+        self.model_params.use_direct_io = use_direct_io
         self.model_params.use_mlock = use_mlock
         self.model_params.check_tensors = check_tensors
         self.model_params.use_extra_bufts = use_extra_bufts
@@ -2248,6 +2250,7 @@ class Llama:
             tensor_split=self.tensor_split,
             vocab_only=self.model_params.vocab_only,
             use_mmap=self.model_params.use_mmap,
+            use_direct_io=self.model_params.use_direct_io,
             use_mlock=self.model_params.use_mlock,
             check_tensors=self.model_params.check_tensors,
             use_extra_bufts=self.model_params.use_extra_bufts,

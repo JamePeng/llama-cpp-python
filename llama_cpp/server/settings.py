@@ -47,12 +47,28 @@ class ModelSettings(BaseSettings):
         default=False, description="Whether to only return the vocabulary."
     )
     use_mmap: bool = Field(
-        default=llama_cpp.llama_supports_mmap(),
-        description="Use mmap.",
+        default=True,
+        description="Enable mmap to use filesystem cache.",
+    )
+    use_direct_io: bool = Field(
+        default=True,
+        description="Use direct io, takes precedence over use_mmap.",
     )
     use_mlock: bool = Field(
-        default=llama_cpp.llama_supports_mlock(),
-        description="Use mlock.",
+        default=False,
+        description="Use mlock for force system to keep model in RAM",
+    )
+    check_tensors: bool = Field(
+        default=False,
+        description="Validate model tensor data.",
+    )
+    use_extra_bufts: bool = Field(
+        default=True,
+        description="Use extra buffer types (used for weight repacking).",
+    )
+    no_host: bool = Field(
+        default=False,
+        description="Bypass host buffer allowing extra buffers to be used.",
     )
     kv_overrides: Optional[List[str]] = Field(
         default=None,

@@ -75,6 +75,7 @@ def test_real_model(llama_cpp_model_path):
 
     params = llama_cpp.llama_model_default_params()
     params.use_mmap = llama_cpp.llama_supports_mmap()
+    params.use_direct_io = True
     params.use_mlock = llama_cpp.llama_supports_mlock()
     params.check_tensors = False
 

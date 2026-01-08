@@ -270,7 +270,11 @@ class LlamaProxy:
             tensor_split=settings.tensor_split,
             vocab_only=settings.vocab_only,
             use_mmap=settings.use_mmap,
+            use_direct_io=settings.use_direct_io,
             use_mlock=settings.use_mlock,
+            check_tensors=settings.check_tensors,
+            use_extra_bufts=settings.use_extra_bufts,
+            no_host=settings.no_host,
             kv_overrides=kv_overrides,
             rpc_servers=settings.rpc_servers,
             # Context Params

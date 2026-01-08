@@ -78,6 +78,7 @@ specified) expect poor results""",
         self.lparams.memory_f16 = self.params.memory_f16
         self.lparams.use_mlock = self.params.use_mlock
         self.lparams.use_mmap = self.params.use_mmap
+        self.lparams.use_direct_io = self.params.use_direct_io
 
         self.model = llama_cpp.llama_load_model_from_file(
             self.params.model.encode("utf8"), self.lparams
