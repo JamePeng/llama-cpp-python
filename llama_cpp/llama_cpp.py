@@ -4183,6 +4183,7 @@ def llama_sampler_init_greedy() -> llama_sampler_p:
     ...
 
 
+# /// seed == LLAMA_DEFAULT_SEED to use a random seed.
 # LLAMA_API struct llama_sampler * llama_sampler_init_dist  (uint32_t seed);
 @ctypes_function("llama_sampler_init_dist", [ctypes.c_uint32], llama_sampler_p_ctypes)
 def llama_sampler_init_dist(seed: int) -> llama_sampler_p:
