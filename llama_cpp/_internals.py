@@ -200,45 +200,84 @@ class LlamaModel:
     # Tokenization
 
     def tokenize(self, text: bytes, add_bos: bool, special: bool):
-        n_ctx = self.n_ctx_train()
-        tokens = (llama_cpp.llama_token * n_ctx)()
+        """
+        Tokenize a string.
+        Optimized to use dynamic buffer allocation.
+        """
+        n_tokens_alloc = len(text) + 2
+        tokens = (llama_cpp.llama_token * n_tokens_alloc)()
+
         n_tokens = llama_cpp.llama_tokenize(
-            self.vocab, text, len(text), tokens, n_ctx, add_bos, special
+            self.vocab, text, len(text), tokens, n_tokens_alloc, add_bos, special
         )
+
+        # If the buffer is insufficient (returns a negative number), reallocate the buffer.
         if n_tokens < 0:
-            n_tokens = abs(n_tokens)
-            tokens = (llama_cpp.llama_token * n_tokens)()
+            n_tokens_alloc = -n_tokens
+            tokens = (llama_cpp.llama_token * n_tokens_alloc)()
             n_tokens = llama_cpp.llama_tokenize(
-                self.vocab, text, len(text), tokens, n_tokens, add_bos, special
+                self.vocab, text, len(text), tokens, n_tokens_alloc, add_bos, special
             )
             if n_tokens < 0:
                 raise RuntimeError(
                     f'Failed to tokenize: text="{text}" n_tokens={n_tokens}'
                 )
+
+        # return a buffer of n_tokens size.
         return list(tokens[:n_tokens])
 
     def token_to_piece(self, token: int, special: bool = False) -> bytes:
-        buf = ctypes.create_string_buffer(32)
-        llama_cpp.llama_token_to_piece(self.vocab, token, buf, 32, 0, special)
-        return bytes(buf)
+        """
+        Convert a single token to bytes.
+        Optimized to handle dynamic resizing for ultra-long tokens.
+        """
+        size = 32
+        buf = (ctypes.c_char * size)()
+        n = llama_cpp.llama_token_to_piece(self.vocab, token, buf, size, 0, special)
+
+        # If the token is very long (returns a negative number), redistribute it according to the returned size.
+        if n < 0:
+            size = -n
+            buf = (ctypes.c_char * size)()
+            n = llama_cpp.llama_token_to_piece(self.vocab, token, buf, size, 0, special)
+            if n < 0:
+                raise RuntimeError(f"Failed to get piece for token {token}")
+
+        # return a buffer of n size.
+        return bytes(buf[:n])
 
     def detokenize(self, tokens: List[int], special: bool = False) -> bytes:
-        output = b""
-        size = 32
-        buffer = (ctypes.c_char * size)()
-        for token in tokens:
-            n = llama_cpp.llama_token_to_piece(
-                self.vocab, llama_cpp.llama_token(token), buffer, size, 0, special
-            )
-            assert n <= size
-            output += bytes(buffer[:n])
-        # NOTE: Llama1 models automatically added a space at the start of the prompt
-        # this line removes a leading space if the first token is a beginning of sentence token
-        return (
-            output[1:]
-            if len(tokens) > 0 and tokens[0] == self.token_bos() and output[0:1] == b" "
-            else output
+        """
+        Convert a list of tokens to bytes.
+        Optimized to handle dynamic resizing for ultra-long tokens.
+        """
+        if not tokens:
+            return b""
+
+        n_tokens = len(tokens)
+        # Convert a Python list to a C int array
+        tokens_array = (llama_cpp.llama_token * n_tokens)(*tokens)
+
+        # Initial buffer size estimation
+        buffer_size = max(n_tokens, 64)
+        buffer = (ctypes.c_char * buffer_size)()
+
+        n_chars = llama_cpp.llama_detokenize(
+            self.vocab, tokens_array, n_tokens, buffer, buffer_size, False, special
         )
+
+        # If the buffer is insufficient, expand it and retry.
+        if n_chars < 0:
+            buffer_size = -n_chars
+            buffer = (ctypes.c_char * buffer_size)()
+            n_chars = llama_cpp.llama_detokenize(
+                self.vocab, tokens_array, n_tokens, buffer, buffer_size, False, special
+            )
+            if n_chars < 0:
+                raise RuntimeError("Failed to detokenize")
+
+        return bytes(buffer[:n_chars])
+
 
     # Extra
     def metadata(self) -> Dict[str, str]:
