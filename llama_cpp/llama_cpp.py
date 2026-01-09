@@ -3710,23 +3710,6 @@ def llama_token_to_piece(
     ...
 
 
-# # // check if token0 is contained as a prefix in token1
-# # LLAMA_API bool llama_token_is_prefix(
-# #           const struct llama_model * model,
-# #                        llama_token   token0,
-# #                        llama_token   token1);
-# @ctypes_function(
-#     "llama_token_is_prefix",
-#     [llama_model_p_ctypes, llama_token, llama_token],
-#     ctypes.c_bool,
-# )
-# def llama_token_is_prefix(
-#     model: llama_model_p, token0: Union[llama_token, int], token1: Union[llama_token, int], /
-# ) -> bool:
-#     """Check if token0 is contained as a prefix in token1"""
-#     ...
-
-
 # /// @details Convert the provided tokens into text (inverse of llama_tokenize()).
 # /// @param text The char pointer must be large enough to hold the resulting text.
 # /// @return Returns the number of chars/bytes on success, no more than text_len_max.
@@ -3734,17 +3717,17 @@ def llama_token_to_piece(
 # /// @param remove_special Allow to remove BOS and EOS tokens if model is configured to do so.
 # /// @param unparse_special If true, special tokens are rendered in the output.
 # LLAMA_API int32_t llama_detokenize(
-#     const struct llama_model * model,
-#            const llama_token * tokens,
-#                      int32_t   n_tokens,
+#     const struct llama_vocab * vocab,
+#             const llama_token * tokens,
+#                         int32_t   n_tokens,
 #                         char * text,
-#                      int32_t   text_len_max,
+#                         int32_t   text_len_max,
 #                         bool   remove_special,
 #                         bool   unparse_special);
 @ctypes_function(
     "llama_detokenize",
     [
-        llama_model_p_ctypes,
+        llama_vocab_p_ctypes,
         llama_token_p,
         ctypes.c_int32,
         ctypes.c_char_p,
@@ -3755,7 +3738,7 @@ def llama_token_to_piece(
     ctypes.c_int32,
 )
 def llama_detokenize(
-    model: llama_model_p,
+    vocab: llama_vocab_p,
     tokens: CtypesArray[llama_token],
     n_tokens: Union[ctypes.c_int, int],
     text: bytes,
@@ -3767,13 +3750,14 @@ def llama_detokenize(
     """Convert the provided tokens into text (inverse of llama_tokenize()).
 
     Args:
-        model: The model to use for tokenization.
+        vocab: The model vocab to use for tokenization.
         tokens: The tokens to convert.
         n_tokens: The number of tokens.
         text: The buffer to write the text to.
         text_len_max: The length of the buffer.
         remove_special: Allow to remove BOS and EOS tokens if model is configured to do so.
-        unparse_special: If true, special tokens are rendered in the output."""
+        unparse_special: If true, special tokens are rendered in the output.
+    """
     ...
 
 
