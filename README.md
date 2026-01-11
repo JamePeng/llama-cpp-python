@@ -6,7 +6,7 @@
 
 [![Documentation Status](https://readthedocs.org/projects/llama-cpp-python/badge/?version=latest)](https://llama-cpp-python.readthedocs.io/en/latest/?badge=latest)
 [![Tests](https://github.com/abetlen/llama-cpp-python/actions/workflows/test.yaml/badge.svg?branch=main)](https://github.com/abetlen/llama-cpp-python/actions/workflows/test.yaml)
-[![PyPI](https://img.shields.io/pypi/v/llama-cpp-python)](https://pypi.org/project/llama-cpp-python/)
+![GitHub Tag](https://img.shields.io/github/v/tag/JamePeng/llama-cpp-python)
 [![PyPI - Python Version](https://img.shields.io/pypi/pyversions/llama-cpp-python)](https://pypi.org/project/llama-cpp-python/)
 [![PyPI - License](https://img.shields.io/pypi/l/llama-cpp-python)](https://pypi.org/project/llama-cpp-python/)
 [![PyPI - Downloads](https://static.pepy.tech/badge/llama-cpp-python/month)](https://pepy.tech/projects/llama-cpp-python)
@@ -35,31 +35,31 @@ Requirements:
   - Python 3.9+
   - C compiler
       - Linux: gcc or clang
-      - Windows: Visual Studio or MinGW
+      - Windows: [`Visual Studio 2022 Build Tools`](https://download.visualstudio.microsoft.com/download/pr/6efb3484-905b-485c-8b5f-9d3a5f39e731/07908cd6d91e75b8ea4339d8f2cfa6e8d8bb4fd706af7b918ae391cd6fc2a066/vs_BuildTools.exe) or `MinGW`
       - MacOS: Xcode
+  - CMake 3.21+
+  - Git
 
 To install the package, run:
-
-```bash
-pip install llama-cpp-python
-```
+- Method 1:
+    ```bash
+    pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+    ```
+- Method 2:
+    ```bash
+    git clone https://github.com/JamePeng/llama-cpp-python --recursive
+    cd llama-cpp-python
+    python -m pip install -U pip
+    pip install .
+    ```
 
 This will also build `llama.cpp` from source and install it alongside this python package.
 
 If this fails, add `--verbose` to the `pip install` see the full cmake build log.
 
-**Pre-built Wheel (New)**
-
-It is also possible to install a pre-built wheel with basic CPU support.
-
-```bash
-pip install llama-cpp-python \
-  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
-```
-
 ### Installation Configuration
 
-`llama.cpp` supports a number of hardware acceleration backends to speed up inference as well as backend specific options. See the [llama.cpp README](https://github.com/ggerganov/llama.cpp#build) for a full list.
+`llama.cpp` supports a number of hardware acceleration backends to speed up inference as well as backend specific options. See the [llama.cpp build docs](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md) for a full list.
 
 All `llama.cpp` cmake build options can be set via the `CMAKE_ARGS` environment variable or via the `--config-settings / -C` cli flag during installation.
 
@@ -69,13 +69,13 @@ All `llama.cpp` cmake build options can be set via the `CMAKE_ARGS` environment 
 ```bash
 # Linux and Mac
 CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
-  pip install llama-cpp-python
+  pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 ```powershell
 # Windows
 $env:CMAKE_ARGS = "-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
-pip install llama-cpp-python
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 </details>
 
@@ -86,7 +86,7 @@ They can also be set via `pip install -C / --config-settings` command and saved 
 
 ```bash
 pip install --upgrade pip # ensure pip is up to date
-pip install llama-cpp-python \
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git" \
   -C cmake.args="-DGGML_BLAS=ON;-DGGML_BLAS_VENDOR=OpenBLAS"
 ```
 
@@ -103,22 +103,25 @@ llama-cpp-python -C cmake.args="-DGGML_BLAS=ON;-DGGML_BLAS_VENDOR=OpenBLAS"
 Below are some common backends, their build commands and any additional environment variables required.
 
 <details open>
-<summary>OpenBLAS (CPU)</summary>
-
-To install with OpenBLAS, set the `GGML_BLAS` and `GGML_BLAS_VENDOR` environment variables before installing:
-
-```bash
-CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" pip install llama-cpp-python
-```
-</details>
-
-<details>
 <summary>CUDA</summary>
 
-To install with CUDA support, set the `GGML_CUDA=on` environment variable before installing:
+Installing a CUDA-supported version requires the `CUDA Toolkit` environment to be installed first.
+
+**Note: Please select and install according to your system environment and local graphics card model to ensure that the compilation is based on the optimal local environment.**
+
+See here: https://developer.nvidia.com/cuda-toolkit-archive
+
+Then, set the `GGML_CUDA=on` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_CUDA=on" pip install llama-cpp-python
+# Linux
+CMAKE_ARGS="-DGGML_CUDA=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
+
+```powershell
+# Windows
+$env:CMAKE_ARGS = "-DGGML_CUDA=on"
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 **Pre-built Wheel (New)**
@@ -136,12 +139,22 @@ https://github.com/JamePeng/llama-cpp-python/releases
 </details>
 
 <details>
+<summary>OpenBLAS (CPU)</summary>
+
+To install with OpenBLAS, set the `GGML_BLAS` and `GGML_BLAS_VENDOR` environment variables before installing:
+
+```bash
+CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
+</details>
+
+<details>
 <summary>Metal</summary>
 
 To install with Metal (MPS), set the `GGML_METAL=on` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_METAL=on" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_METAL=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 **Pre-built Wheel (New)**
@@ -164,7 +177,7 @@ pip install llama-cpp-python \
 To install with hipBLAS / ROCm support for AMD cards, set the `GGML_HIPBLAS=on` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_HIPBLAS=on" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_HIPBLAS=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 </details>
@@ -179,7 +192,7 @@ CMAKE_ARGS="-DGGML_HIPBLAS=on" pip install llama-cpp-python
 Then install with Vulkan support by set the `GGML_VULKAN=on` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_VULKAN=on" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_VULKAN=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 </details>
@@ -191,7 +204,7 @@ To install with SYCL support, set the `GGML_SYCL=on` environment variable before
 
 ```bash
 source /opt/intel/oneapi/setvars.sh   
-CMAKE_ARGS="-DGGML_SYCL=on -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_SYCL=on -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 </details>
 
@@ -202,7 +215,7 @@ To install with RPC support, set the `GGML_RPC=on` environment variable before i
 
 ```bash
 source /opt/intel/oneapi/setvars.sh   
-CMAKE_ARGS="-DGGML_RPC=on" pip install llama-cpp-python
+CMAKE_ARGS="-DGGML_RPC=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 </details>
 
@@ -245,7 +258,7 @@ Otherwise, while installing it will build the llama.cpp x86 version which will b
 Try installing with
 
 ```bash
-CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DGGML_METAL=on" pip install --upgrade --verbose --force-reinstall --no-cache-dir llama-cpp-python
+CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DGGML_METAL=on" pip install --upgrade --verbose --force-reinstall --no-cache-dir "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 </details>
 
