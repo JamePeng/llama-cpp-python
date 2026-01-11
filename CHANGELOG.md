@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.21]
+- perf: optimize tokenization and detokenization logic
+    - Refactor `tokenize`, `token_to_piece`, and `detokenize` methods in `_internals.py` to significantly reduce Python loop overhead and improve the batch-processing performance and stability of `load`/`prompt-eval`.
+
+    - Key changes:
+        - Replace `token_to_piece` O(N) Python loops in `detokenize` with `llama.cpp` native batch C-API (`llama_detokenize`).
+        - Implement dynamic buffer allocation to safely handle arbitrary token lengths (removing the hardcoded 32-byte limit).
+        - Add automatic buffer resizing for `tokenize` to prevent overflow errors.
+
+    - Performance observations (based on simple benchmarks):
+        - Small Batch Processing (127 tokens):
+          Latency reduced from ~117ms to ~37ms (approx. 3.1x speedup in processing loop).
+        - Large Batch Processing (2420 tokens):
+          Throughput improved from ~6905 t/s to ~8258 t/s.
+        - General Latency:
+          Total execution time for standard chat scenarios reduced by ~1.1s (from 8.4s to 7.3s).
+        - The comparative test results are here: https://github.com/JamePeng/llama-cpp-python/issues/47#issuecomment-3731055087
+
+- feat: Add `Granite-Docling` multimodel support with `GraniteDoclingChatHandler`
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/b1377188784f9aea26b8abde56d4aee8c733eec7](https://github.com/ggml-org/llama.cpp/commit/b1377188784f9aea26b8abde56d4aee8c733eec7)
+- feat: Sync llama.cpp llama/mtmd API Binding 20260110
+
 ## [0.3.20]
 - feat: Update llama.cpp to [ggml-org/llama.cpp/commit/cef1d23c5a33156c44a206c1f4bc146f4db729f9](https://github.com/ggml-org/llama.cpp/commit/cef1d23c5a33156c44a206c1f4bc146f4db729f9)
 - feat: Update llama_context_params and fixed some embeddings typo
@@ -37,9 +59,9 @@ More information see: https://github.com/JamePeng/llama-cpp-python/compare/2efaa
 ## [0.3.18]
 - feat: Update llama.cpp to [ggml-org/llama.cpp/commit/ce734a8a2f9fb6eb4f0383ab1370a1b0014ab787](https://github.com/ggml-org/llama.cpp/commit/ce734a8a2f9fb6eb4f0383ab1370a1b0014ab787)
 - feat: Sync llama.cpp llama/mtmd API Binding 20251215
-- feat: **implement `GLM46VChatHandler` for GLM-4.6V Series Model**
-- feat: **implement `LFM2VLChatHandler` for LFM2-VL series models**
-- feat: **implement `GLM41VChatHandler` for GLM-4.1V-9B-Thinking Model**
+- feat: **implement `GLM46VChatHandler` for GLM-4.6V Series Multimodel**
+- feat: **implement `LFM2VLChatHandler` for LFM2-VL series Multimodel**
+- feat: **implement `GLM41VChatHandler` for GLM-4.1V-9B-Thinking Multimodel**
 - workflow: Added workflows for compiling with CUDA 13.0.2 on Windows and Linux.
 - feat: Added the scan path for CUDA 13.0+ dynamic link libraries under Windows system ($env:CUDA_PATH\bin\x64)
 - Optimization: Improved batch token processing logic in Llava15ChatHandler.
