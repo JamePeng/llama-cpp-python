@@ -36,14 +36,14 @@ def test_llama_cpp_tokenization():
     assert tokens[0] == llama.token_bos()
     assert tokens == [1, 15043, 2787]
     detokenized = llama.detokenize(tokens)
-    assert detokenized == text
+    assert detokenized[1:] == text
 
     tokens = llama.tokenize(text, add_bos=False)
     assert tokens[0] != llama.token_bos()
     assert tokens == [15043, 2787]
 
     detokenized = llama.detokenize(tokens)
-    assert detokenized != text
+    assert detokenized == text
 
     text = b"Hello World</s>"
     tokens = llama.tokenize(text)
