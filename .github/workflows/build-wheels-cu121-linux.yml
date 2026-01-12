@@ -1,0 +1,104 @@
+name: Build Wheels(CU121) for Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_wheels:
+    name: Build Wheel ${{ matrix.os }} ${{ matrix.pyver }} ${{ matrix.cuda }} ${{ matrix.releasetag == 'wheels' && 'AVX2' || matrix.releasetag }}
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:12.1.1-cudnn8-devel-ubuntu22.04
+    strategy:
+      matrix:
+        os: ["ubuntu-22.04"]
+        pyver: ["3.10", "3.11", "3.12", "3.13"]
+        cuda: ["12.1.1"]
+        releasetag: ["AVX2"]
+        cudaarch: ["all"]
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CUDAVER: ${{ matrix.cuda }}
+      AVXVER: ${{ matrix.releasetag }}
+      CUDAARCHVER: ${{ matrix.cudaarch }}
+
+    steps:
+      - name: Install dependencies
+        run: |
+            apt update
+            apt install -y build-essential ccache cmake curl git libgomp1 libjpeg-dev libssl-dev
+
+      - uses: actions/checkout@v4
+        with:
+          submodules: "recursive"
+
+      - name: Install the latest version of uv and set the python version
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
+
+      - run: nvcc -V
+
+      - name: Build Wheel With Cmake
+        env:
+          LD_LIBRARY_PATH: "/usr/local/cuda/lib64:/usr/local/cuda/compat:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+          VERBOSE: 1
+          CUDA_HOME: "/usr/local/cuda/"
+          CUDA_PATH: "${PATH}"
+          CUDA_TOOLKIT_ROOT_DIR: "/usr/local/cuda/"
+        run: |
+          echo "VERBOSE=1" >> $GITHUB_ENV
+          find /usr/ -name 'libcuda.so.*'
+          echo $LD_LIBRARY_PATH
+
+          # CUDA 12.1 supports up to compute capability 90 (Hopper)
+          CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES='70-real;75-real;80-real;86-real;87-real;89-real;90-real'"
+          CMAKE_ARGS="-DGGML_CUDA_FORCE_MMQ=on ${CMAKE_ARGS}"
+          CMAKE_ARGS="${CMAKE_ARGS} -DLLAMA_CURL=off -DLLAMA_OPENSSL=on -DLLAMA_HTTPLIB=on"
+
+          if [ "${AVXVER}" = "AVX" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=off -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off"
+          fi
+          if [ "${AVXVER}" = "AVX2" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX512=off"
+          fi
+          if [ "${AVXVER}" = "AVXVNNI" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX_VNNI=on"
+          fi
+          if [ "${AVXVER}" = "Basic" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off"
+          fi
+
+          echo ${CMAKE_ARGS}
+          echo "CMAKE_ARGS=${CMAKE_ARGS}" >> $GITHUB_ENV
+
+          uv pip install build setuptools wheel packaging
+          CMAKE_ARGS=${CMAKE_ARGS} uv build --wheel
+
+          wheel_file=$(ls dist/*.whl | head -n 1)
+          tag_ver=$(basename "$wheel_file" | cut -d'-' -f 2)
+          echo "TAG_VERSION=$tag_ver" >> $GITHUB_ENV
+
+          cuda_ver_short=$(echo "${CUDAVER}" | cut -d'.' -f 1,2 | sed 's/\.//g')
+          echo "CUDA_VERSION=$cuda_ver_short" >> $GITHUB_ENV
+
+      - name: Get Current Date
+        id: get-date
+        run: |
+          currentDate=$(date +%Y%m%d)
+          echo "BUILD_DATE=$currentDate" >> $GITHUB_ENV
+
+      - uses: softprops/action-gh-release@v2.2.2
+        with:
+          files: dist/*
+          tag_name: v${{ env.TAG_VERSION }}-cu${{ env.CUDA_VERSION }}-${{ env.AVXVER }}-linux-${{ env.BUILD_DATE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
