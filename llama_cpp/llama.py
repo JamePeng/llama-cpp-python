@@ -420,6 +420,25 @@ class Llama:
             )
         )
 
+        # Check for Encoder-Decoder architecture
+        self._has_encoder = self._model.has_encoder()
+        self._has_decoder = self._model.has_decoder()
+        self._decoder_start_token_id = -1
+
+        if self._has_encoder:
+            try:
+                self._decoder_start_token_id = self._model.decoder_start_token()
+            except AttributeError:
+                 # LLAMA_TOKEN_NULL = -1
+                 self._decoder_start_token_id = -1
+
+            if self._decoder_start_token_id == -1:
+                # Fallback to BOS if specific start token is not defined
+                self._decoder_start_token_id = self.token_bos()
+
+            if self.verbose:
+                print(f"Model is Encoder-Decoder. Decoder start token: {self._decoder_start_token_id}", file=sys.stderr)
+
         # Override tokenizer
         self.tokenizer_ = tokenizer or LlamaTokenizer(self)
 
