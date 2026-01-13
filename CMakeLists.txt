@@ -66,10 +66,16 @@ if (LLAMA_BUILD)
     set(CMAKE_SKIP_RPATH FALSE)
 
     # Enable building of the common library
-    set(LLAMA_BUILD_COMMON ON CACHE BOOL "Build llama.cpp common library" FORCE)
+    set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama.cpp: build common utils library" FORCE)
+
+    # Disable building of examples
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "llama.cpp: build examples" FORCE)
+
+    # Disable building of tests
+    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "llama.cpp: build tests" FORCE)
 
     # Disable building curl support
-    set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: enable curl" FORCE)
+    set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: use libcurl to download model from an URL" FORCE)
 
     # Enable build and link OpenSSL
     set(LLAMA_OPENSSL ON CACHE BOOL "llama.cpp: build and link OpenSSL" FORCE)
