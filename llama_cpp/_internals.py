@@ -113,6 +113,24 @@ class LlamaModel:
     def n_params(self) -> int:
         return llama_cpp.llama_model_n_params(self.model)
 
+    def has_encoder(self) -> bool:
+        return llama_cpp.llama_model_has_encoder(self.model)
+
+    def has_decoder(self) -> bool:
+        return llama_cpp.llama_model_has_decoder(self.model)
+
+    def decoder_start_token(self) -> int:
+        return llama_cpp.llama_model_decoder_start_token(self.model)
+
+    def is_recurrent(self) -> bool:
+        return llama_cpp.llama_model_is_recurrent(self.model)
+
+    def is_hybrid(self) -> bool:
+        return llama_cpp.llama_model_is_hybrid(self.model)
+
+    def is_diffusion(self) -> bool:
+        return llama_cpp.llama_model_is_diffusion(self.model)
+
     def rope_freq_scale_train(self) -> float:
         return llama_cpp.llama_model_rope_freq_scale_train(self.model)
 
