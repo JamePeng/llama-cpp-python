@@ -33,7 +33,8 @@ from llama_cpp._ctypes_extensions import (
 )
 
 from llama_cpp._ggml import (
-    ggml_log_callback
+    ggml_backend_sched_eval_callback,
+    ggml_log_callback,
 )
 
 if TYPE_CHECKING:
@@ -146,10 +147,14 @@ class clip_context_params(Structure):
 #     const char * media_marker;
 #     enum llama_flash_attn_type flash_attn_type;
 #     bool warmup; // whether to run a warmup encode pass after initialization
-
+#
 #     // limit number of image tokens, only for vision models with dynamic resolution
 #     int image_min_tokens; // minimum number of tokens for image input (default: read from metadata)
 #     int image_max_tokens; // maximum number of tokens for image input (default: read from metadata)
+#
+#     // callback function passed over to mtmd proper
+#     ggml_backend_sched_eval_callback cb_eval;
+#     void * cb_eval_user_data;
 # };
 class mtmd_context_params(Structure):
     _fields_ = [
@@ -162,9 +167,10 @@ class mtmd_context_params(Structure):
         ("warmup", c_bool),
         ("image_min_tokens", c_int),
         ("image_max_tokens", c_int),
+        ("cb_eval", ggml_backend_sched_eval_callback),
+        ("cb_eval_user_data", c_void_p),
     ]
 
-mtmd_context_params_p = NewType("mtmd_context_params_p", int)
 mtmd_context_params_p_ctypes = POINTER(mtmd_context_params)
 
 # MTMD_API const char * mtmd_default_marker(void);
