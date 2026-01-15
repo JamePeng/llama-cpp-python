@@ -764,6 +764,10 @@ class Llama:
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         penalize_nl: bool = True,
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
@@ -772,18 +776,6 @@ class Llama:
 
         if logit_bias is not None:
             sampler.add_logit_bias(self.n_vocab(), logit_bias)
-
-        sampler.add_penalties(
-            n_vocab=self._n_vocab,
-            special_eos_id=self._token_eos,
-            linefeed_id=self._token_nl,
-            penalty_last_n=self.last_n_tokens_size,
-            penalty_repeat=repeat_penalty,
-            penalty_freq=frequency_penalty,
-            penalty_present=presence_penalty,
-            penalize_nl=penalize_nl,
-            ignore_eos=False,
-        )
 
         if grammar is not None:
             sampler.add_grammar(self._model, grammar)
@@ -794,6 +786,7 @@ class Llama:
             sampler.add_greedy()
         else:
             if mirostat_mode == 1:
+                sampler.add_temp(temp)
                 mirostat_m = 100
                 sampler.add_mirostat(
                     self._n_vocab,
@@ -803,6 +796,7 @@ class Llama:
                     mirostat_m,
                 )
             elif mirostat_mode == 2:
+                sampler.add_temp(temp)
                 sampler.add_mirostat_v2(
                     self._seed,
                     mirostat_tau,
@@ -811,15 +805,33 @@ class Llama:
             else:
                 n_probs = 0
                 min_keep = max(1, n_probs)
-                sampler.add_top_k(top_k)
-                sampler.add_typical(typical_p, min_keep)
-                sampler.add_top_n_sigma(top_n_sigma)
-                sampler.add_top_p(top_p, min_keep)
-                sampler.add_min_p(min_p, min_keep)
-                sampler.add_temp(temp)
-                sampler.add_dist(self._seed)
-                sampler.add_xtc(xtc_probability, xtc_threshold, min_keep, self._seed)
                 sampler.add_dry(self._model, dry_multiplier, dry_base, dry_allowed_length, dry_penalty_last_n, dry_seq_breakers)
+                sampler.add_top_k(top_k)
+                sampler.add_top_p(top_p, min_keep)
+                sampler.add_top_n_sigma(top_n_sigma)
+                sampler.add_min_p(min_p, min_keep)
+                sampler.add_xtc(xtc_probability, xtc_threshold, min_keep, self._seed)
+                sampler.add_typical(typical_p, min_keep)
+                sampler.add_temp(temp)
+                if use_infill:
+                    sampler.add_infill(self._model)
+                sampler.add_penalties(
+                    n_vocab=self._n_vocab,
+                    special_eos_id=self._token_eos,
+                    linefeed_id=self._token_nl,
+                    penalty_last_n=self.last_n_tokens_size,
+                    penalty_repeat=repeat_penalty,
+                    penalty_freq=frequency_penalty,
+                    penalty_present=presence_penalty,
+                    penalize_nl=penalize_nl,
+                    ignore_eos=False,
+                )
+                if use_adaptive_p:
+                    # only if user explicitly included adaptive-p sampler
+                    sampler.add_adaptive_p(adaptive_target,adaptive_decay, self._seed)
+                else:
+                    # default: sample from distribution
+                    sampler.add_dist(self._seed)
         return sampler
 
     def sample(
@@ -844,6 +856,10 @@ class Llama:
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         penalize_nl: bool = True,
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
@@ -887,6 +903,10 @@ class Llama:
                 dry_penalty_last_n=dry_penalty_last_n,
                 dry_seq_breakers=dry_seq_breakers,
                 penalize_nl=penalize_nl,
+                adaptive_target=adaptive_target,
+                adaptive_decay=adaptive_decay,
+                use_adaptive_p=use_adaptive_p,
+                use_infill=use_infill,
                 logit_bias=logit_bias,
                 logits_processor=logits_processor,
                 grammar=grammar,
@@ -924,6 +944,10 @@ class Llama:
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         penalize_nl: bool = True,
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
@@ -971,6 +995,10 @@ class Llama:
             dry_penalty_last_n=dry_penalty_last_n,
             dry_seq_breakers=dry_seq_breakers,
             penalize_nl=penalize_nl,
+            adaptive_target=adaptive_target,
+            adaptive_decay=adaptive_decay,
+            use_adaptive_p=use_adaptive_p,
+            use_infill=use_infill,
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
@@ -1034,6 +1062,10 @@ class Llama:
                     logits_processor=logits_processor,
                     grammar=grammar,
                     penalize_nl=penalize_nl,
+                    adaptive_target=adaptive_target,
+                    adaptive_decay=adaptive_decay,
+                    use_adaptive_p=use_adaptive_p,
+                    use_infill=use_infill,
                     idx=sample_idx,
                 )
 
@@ -1265,6 +1297,10 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         model: Optional[str] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         logit_bias: Optional[Dict[int, float]] = None,
@@ -1464,6 +1500,10 @@ class Llama:
             presence_penalty=presence_penalty,
             repeat_penalty=repeat_penalty,
             stopping_criteria=stopping_criteria,
+            adaptive_target=adaptive_target,
+            adaptive_decay=adaptive_decay,
+            use_adaptive_p=use_adaptive_p,
+            use_infill=use_infill,
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
@@ -1900,6 +1940,10 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         model: Optional[str] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         logit_bias: Optional[Dict[int, float]] = None,
@@ -1936,6 +1980,10 @@ class Llama:
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
             dry_penalty_last_n: How many tokens to scan for repetitions. Default: `0`, where `0` is disabled and `-1` is context size.
             dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
+            adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
+            adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
+            use_adaptive_p: The adaptive_p sampler is only checked when use_adaptive_p is true; the default is to use dist.
+            use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
             model: The name to use for the model in the completion object.
             stopping_criteria: A list of stopping criteria to use.
             logit_bias: A logit bias to use.
@@ -1977,6 +2025,10 @@ class Llama:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_seq_breakers=dry_seq_breakers,
+            adaptive_target=adaptive_target,
+            adaptive_decay=adaptive_decay,
+            use_adaptive_p=use_adaptive_p,
+            use_infill=use_infill,
             model=model,
             stopping_criteria=stopping_criteria,
             logit_bias=logit_bias,
@@ -2018,6 +2070,10 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         model: Optional[str] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         logit_bias: Optional[Dict[int, float]] = None,
@@ -2054,6 +2110,10 @@ class Llama:
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
             dry_penalty_last_n: How many tokens to scan for repetitions. Default: `0`, where `0` is disabled and `-1` is context size.
             dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
+            adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
+            adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
+            use_adaptive_p: The adaptive_p sampler is only checked when use_adaptive_p is true; the default is to use dist.
+            use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
             model: The name to use for the model in the completion object.
             stopping_criteria: A list of stopping criteria to use.
             logit_bias: A logit bias to use.
@@ -2095,6 +2155,10 @@ class Llama:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_seq_breakers=dry_seq_breakers,
+            adaptive_target=adaptive_target,
+            adaptive_decay=adaptive_decay,
+            use_adaptive_p=use_adaptive_p,
+            use_infill=use_infill,
             model=model,
             stopping_criteria=stopping_criteria,
             logit_bias=logit_bias,
@@ -2133,6 +2197,10 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_adaptive_p: bool = False,
+        use_infill: bool = False,
         model: Optional[str] = None,
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
@@ -2174,6 +2242,10 @@ class Llama:
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
             dry_penalty_last_n: How many tokens to scan for repetitions. Default: `0`, where `0` is disabled and `-1` is context size.
             dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
+            adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
+            adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
+            use_adaptive_p: The adaptive_p sampler is only checked when use_adaptive_p is true; the default is to use dist.
+            use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
             model: The name to use for the model in the completion object.
             logit_bias: A logit bias to use.
             logits_processor: A list of logits processors to use.
@@ -2220,6 +2292,10 @@ class Llama:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_seq_breakers=dry_seq_breakers,
+            adaptive_target=adaptive_target,
+            adaptive_decay=adaptive_decay,
+            use_adaptive_p=use_adaptive_p,
+            use_infill=use_infill,
             model=model,
             logit_bias=logit_bias,
             logits_processor=logits_processor,

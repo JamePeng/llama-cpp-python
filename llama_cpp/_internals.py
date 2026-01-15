@@ -1208,6 +1208,19 @@ class LlamaSampler:
         )
         self._add_sampler(sampler)
 
+    def add_adaptive_p(
+        self,
+        target: float,
+        decay: float,
+        seed: int,
+    ):
+        sampler = llama_cpp.llama_sampler_init_adaptive_p(
+            target,
+            decay,
+            seed
+        )
+        self._add_sampler(sampler)
+
     def add_logit_bias(
         self, n_vocab: int, logit_bias: Dict[int, float]
     ):
@@ -1219,6 +1232,10 @@ class LlamaSampler:
             logit_bias_array[i].bias = bias
 
         sampler = llama_cpp.llama_sampler_init_logit_bias(n_vocab, len(logit_bias), logit_bias_array)
+        self._add_sampler(sampler)
+
+    def add_infill(self, model: LlamaModel):
+        sampler = llama_cpp.llama_sampler_init_infill(model.vocab)
         self._add_sampler(sampler)
 
     def add_custom(
