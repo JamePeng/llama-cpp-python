@@ -2565,14 +2565,14 @@ class Llama:
         if not current_ids or not new_tokens:
             return 0
 
-        # Probe inspection: Use Python to quickly compare the first token
-        # If the tokens are different from the beginning, return immediately to avoid any NumPy overhead.
-        if current_ids[0] != new_tokens[0]:
-            return 0
-
         # Determine the comparison range (limited by the shorter sequence)
         min_len = min(len(current_ids), len(new_tokens))
         if min_len == 0:
+            return 0
+
+        # Probe inspection: Use Python to quickly compare the first token
+        # If the tokens are different from the beginning, return immediately to avoid any NumPy overhead.
+        if current_ids[0] != new_tokens[0]:
             return 0
 
         # Accelerating SIMD for Large Data Volumes
