@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.22]
+- perf (TFFT): Optimize longest_token_prefix with Numpy SIMD and fast-fail probe
+    - Vectorization: Replaced standard Python zip loop with Numpy SIMD comparison for high-performance context matching.
+
+    - Fast Exit: Added an O(1) probe check (a[0] != b[0]) to eliminate Numpy conversion overhead on mismatches. Making the "Time To First Token" virtually instantaneous for cached sessions.
+
+    - Memory Optimization: Only the intersection of the two sequences (`[:min_len]`) is converted to Numpy arrays, minimizing memory allocation.
+
+    - Result: Achieved ~5x speedup (129ms -> 25ms) in KV cache reuse scenarios and ~2.5x speedup (554.23ms -> 201.62ms) in load time while maintaining stability on long contexts.
+
+    - The comparative test results are here: https://github.com/JamePeng/llama-cpp-python/issues/47#issuecomment-3761094840
+
+    - This change significantly reduces latency in RAG and chat applications on long contexts.
+
+- feat: [Add support for adaptive_p and infill samplers and optimize the sampler logic.](https://github.com/JamePeng/llama-cpp-python/commit/99e7ece91a9765ae31922c2bc79f5be1e22bf61e)
+
+- feat: [Add initialization checks to the Encoder-Decoder architecture.](https://github.com/JamePeng/llama-cpp-python/commit/a43d904dbac45b87d4086b096779b139fb52a34e)
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/10c98cbdf623d982f7491e8de5711e916a913192](https://github.com/ggml-org/llama.cpp/commit/10c98cbdf623d982f7491e8de5711e916a913192)
+- feat: Sync llama.cpp llama/mtmd API Binding 20260116
+
 ## [0.3.21]
 - perf: optimize tokenization and detokenization logic
     - Refactor `tokenize`, `token_to_piece`, and `detokenize` methods in `_internals.py` to significantly reduce Python loop overhead and improve the batch-processing performance and stability of `load`/`prompt-eval`.
