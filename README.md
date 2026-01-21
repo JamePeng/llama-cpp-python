@@ -1076,14 +1076,54 @@ Using pre-built binaries would require disabling these optimizations or supporti
 That being said there are some pre-built binaries available through the Releases as well as some community provided wheels.
 
 In the future, I would like to provide pre-built binaries and wheels for common platforms and I'm happy to accept any useful contributions in this area.
-This is currently being tracked in [#741](https://github.com/abetlen/llama-cpp-python/issues/741)
 
 ### How does this compare to other Python bindings of `llama.cpp`?
 
 I originally wrote this package for my own use with two goals in mind:
 
-- Provide a simple process to install `llama.cpp` and access the full C API in `llama.h` from Python
+- Provide a simple process to install `llama.cpp` and access the full C API in `llama.h`and `mtmd.h` from Python
+
 - Provide a high-level Python API that can be used as a drop-in replacement for the OpenAI API so existing apps can be easily ported to use `llama.cpp`
+
+- Provide a high-throughput, relatively low-latency Python library by continuously optimizing (reducing unnecessary CPU processing or algorithm tuning) and accepting feedback (issues or pull requests), making loading and running GGUF files via Python simpler and more controllable.
+
+- Provides clearer code comments and error code analysis feedback in llama.cpp, based on common usage feedback and code execution flow, to help more users who are learning LLM through this project understand the project's operation and subsequent feedback optimization.
+
+### OSError: libcudart.so.XX/cudart64_XX.dll: cannot open shared object file: No such file or directory
+This error is primarily caused by the following reasons:
+
+- Missing Installation or Configuration: The CUDA Toolkit is either not installed, or the environment variables were not correctly configured after installation, preventing the system from locating the required dynamic link libraries. You can try running `nvidia-smi` or `nvcc` in your terminal to check if they output results correctly.
+
+- Version Mismatch: The CUDA Toolkit environment is installed and configured, but it does not match the CUDA version of the pre-compiled llama-cpp-python wheel you are using. For example, your local environment might be running CUDA 12.1, but you installed a version compiled for CUDA 12.6.
+
+- Recommendation (Build from Source): It is recommended to fully configure your local CUDA Toolkit environment (ensuring the PATH for dynamic libraries is set and the nvcc compiler is recognized). Then, clone the code and compile it locally. Remember to enable the -DGGML_CUDA=on CMake option during compilation. This ensures the installation achieves maximum compatibility with your local system.
+
+### FileNotFoundError: Could not find module (like ggml.dll, ggml-cpu.dll, ggml-cuda.dll)
+
+**Step 1:** Locate the `lib` folder of the `llama-cpp-python` library within your current Python runtime environment: `Python3XX\Lib\site-packages\llama_cpp\lib\`
+
+**Step 2:** Verify that the missing DLL mentioned in the error is correctly present in this directory. Developers often have multiple Python environments locally, or projects like ComfyUI may use embedded virtual environments. Please ensure that you are installing the library and running the code in the exact same environment.
+
+This error is primarily caused by the following reasons:
+
+1. **Environment Mismatch:** The Python environment used for installation is different from the one being used for execution.
+
+2. **Instruction Set Incompatibility:** Regarding `ggml.dll` and `ggml-cpu.dll`, the instruction sets (such as AVX) supported by the pre-compiled version may be incompatible with your local processor. (This typically manifests as `OSError: [WinError -1073741795] Windows Error 0xc000001d` after execution).
+
+3. **CUDA Version Mismatch:** Regarding `ggml-cuda.dll`, the CUDA version of the pre-compiled library does not match your local CUDA Toolkit version (e.g., a mismatch between CUDA 12.X and CUDA 13.X). It is recommended to fully configure your local CUDA Toolkit environment (ensuring the PATH for dynamic libraries is set and the nvcc compiler is recognized). Then, clone the code and compile it locally.
+
+### Why are libraries compiled by other authors only around 100MB, while your pre-compiled versions range from 300MB to 900MB?
+
+My GitHub Actions script is configured to compile against **all supported CUDA compute architectures** for each specific CUDA version I maintain.
+
+For example:
+
+* **CUDA 13.0.2:** Currently supports architectures from SM75 (Turing) up to SM120a (Blackwell).
+* **CUDA 12.4.1 and 12.6.3:** Support older architectures as well, such as SM70.
+* *(Note: The Windows versions are built to support every architecture compatible with the respective CUDA version).*
+
+The reason libraries from other authors are smaller is that they often **only compile for a single architecture** (e.g., targeting only the RTX 30 series [SM86] or the RTX 40 series [SM89]). To maximize convenience, I provide an **integrated compilation** covering a wide range of hardware; you simply need to select the CUDA version that matches your environment to load and run it.
+
 
 Any contributions and changes to this package will be made with these goals in mind.
 
