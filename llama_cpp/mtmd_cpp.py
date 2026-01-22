@@ -598,7 +598,7 @@ def mtmd_encode_chunk(
 
 # // get output embeddings from the last encode pass
 # // the reading size (in bytes) is equal to:
-# // llama_model_n_embd(model) * mtmd_input_chunk_get_n_tokens(chunk) * sizeof(float)
+# // llama_model_n_embd_inp(model) * mtmd_input_chunk_get_n_tokens(chunk) * sizeof(float)
 # MTMD_API float * mtmd_get_output_embd(mtmd_context * ctx);
 @ctypes_function_mtmd(
     "mtmd_get_output_embd", [mtmd_context_p_ctypes], POINTER(c_float))
