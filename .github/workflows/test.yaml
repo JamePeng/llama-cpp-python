@@ -2,11 +2,9 @@ name: Tests
 
 on:
   pull_request:
-    branches:
-      - main
+    branches: ["main"]
   push:
-    branches:
-      - main
+    branches: ["main"]
 
 # Auto-cancel stale runs on the same PR/branch
 concurrency:
@@ -16,6 +14,7 @@ concurrency:
 env:
   REPO_ID: Qwen/Qwen2-0.5B-Instruct-GGUF
   MODEL_FILE: qwen2-0_5b-instruct-q8_0.gguf
+  HF_HOME: ${{ github.workspace }}/hf_cache
 
 jobs:
   # Combined job for Linux, Windows, and macOS (non-Metal)
@@ -25,93 +24,85 @@ jobs:
       # Don't cancel other jobs in the matrix if one fails
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-14]
-        python-version: ["3.9", "3.10", "3.11", "3.12", "3.13"]
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.9", "3.13", "3.14"]
+        include:
+          # macOS Non-Metal
+          - os: macos-14
+            python-version: "3.9"
+            cmake_args: "-DLLAMA_METAL=off"
+            metal_status: "(No Metal)"
+          - os: macos-14
+            python-version: "3.13"
+            cmake_args: "-DLLAMA_METAL=off"
+            metal_status: "(No Metal)"
+          - os: macos-14
+            python-version: "3.14"
+            cmake_args: "-DLLAMA_METAL=off"
+            metal_status: "(No Metal)"
+
+          # macOS Metal
+          - os: macos-14
+            python-version: "3.9"
+            cmake_args: "-DLLAMA_METAL=on -DGGML_METAL_USE_BF16=on -DGGML_METAL_EMBED_LIBRARY=on"
+            metal_status: "(Metal)"
+          - os: macos-14
+            python-version: "3.13"
+            cmake_args: "-DLLAMA_METAL=on -DGGML_METAL_USE_BF16=on -DGGML_METAL_EMBED_LIBRARY=on"
+            metal_status: "(Metal)"
+          - os: macos-14
+            python-version: "3.14"
+            cmake_args: "-DLLAMA_METAL=on -DGGML_METAL_USE_BF16=on -DGGML_METAL_EMBED_LIBRARY=on"
+            metal_status: "(Metal)"
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           submodules: "recursive"
 
+      - name: Install the latest version of uv and set the python version
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+
       - name: Set up Python ${{ matrix.python-version }}
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
-          cache: 'pip'
 
       - name: Cache HuggingFace model
         id: model-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
-          path: ~/.cache/huggingface/hub
+          path: ${{ env.HF_HOME }}
           key: ${{ runner.os }}-model-${{ env.REPO_ID }}-${{ env.MODEL_FILE }}
 
       - name: Download model if not cached
         # Only run this step if the cache was not found
         if: steps.model-cache.outputs.cache-hit != 'true'
         run: |
-          pip install huggingface-hub
+          uv pip install --system huggingface-hub
           hf download ${{ env.REPO_ID }} ${{ env.MODEL_FILE }}
         shell: bash
 
-      - name: Install dependencies
+      - name: Install dependencies and Build
         env:
-          CMAKE_ARGS: ${{ runner.os == 'macOS' && '-DLLAMA_METAL=off' || '' }}
+          CMAKE_ARGS: ${{ matrix.cmake_args }}
         run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          python -m uv pip install -e .[all] --verbose
+          echo "Building with CMAKE_ARGS: $CMAKE_ARGS"
+          uv pip install --system -e .[all] --verbose
         shell: bash
 
-      - name: Test with pytest
-        run: python -m pytest
-        shell: bash
-
-  # Dedicated job for macOS with Metal support
-  build-macos-metal:
-    runs-on: macos-14
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-        with:
-          submodules: "recursive"
-
-      - name: Set up Python 3.9
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-          cache: 'pip'
-
-      - name: System Info
+      - name: System Info and llama-cpp-python version
         run: |
-          uname -a
-          sysctl -n machdep.cpu.brand_string
-          python -c "import platform; print(platform.machine(), platform.architecture())"
+          python -c "import platform; print('Machine:', platform.machine(), 'Arch:', platform.architecture())"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+             sysctl -n machdep.cpu.brand_string
+          fi
+          python -c "import llama_cpp; print('llama_cpp_python:', llama_cpp.__version__)"
         shell: bash
 
-      - name: Cache HuggingFace model
-        id: model-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface/hub
-          key: ${{ runner.os }}-metal-model-${{ env.REPO_ID }}-${{ env.MODEL_FILE }}
-
-      - name: Download model if not cached
-        # Only run this step if the cache was not found
-        if: steps.model-cache.outputs.cache-hit != 'true'
-        run: |
-          pip install huggingface-hub
-          hf download ${{ env.REPO_ID }} ${{ env.MODEL_FILE }}
-        shell: bash
-
-      - name: Install dependencies (macOS Metal)
-        run: |
-          python -m pip install --upgrade pip
-          python -m pip install uv
-          CMAKE_ARGS="-DLLAMA_METAL=on -DGGML_METAL_USE_BF16=on -DGGML_METAL_EMBED_LIBRARY=on" python -m uv pip install -e .[all] --verbose
-        shell: bash
-
-      - name: Test with pytest
+      - name: Test with pytest by python ${{ matrix.python-version }}
         run: python -m pytest
         shell: bash
