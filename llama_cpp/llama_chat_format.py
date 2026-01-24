@@ -2790,7 +2790,8 @@ def functionary_v1_v2_chat_handler(
 
 class Llava15ChatHandler:
     DEFAULT_SYSTEM_MESSAGE: Optional[str] = (
-        "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions."
+"""You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels at deeply understanding and richly describing images, charts, diagrams, text in images, scenes, and any visual content,
+while also answering every question accurately, clearly, and step-by-step when appropriate — always responding in the same language as the user's question, remaining polite, professional, and maximally helpful."""
     )
 
     CHAT_FORMAT = (
@@ -3512,10 +3513,8 @@ class MoondreamChatHandler(Llava15ChatHandler):
 
 
 class Llava16ChatHandler(Llava15ChatHandler):
-    DEFAULT_SYSTEM_MESSAGE = "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. "
-
     # Example prompt
-    # "A chat between a curious human and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the human's questions. USER: <image>\nWhat is shown in this image? ASSISTANT:"
+    # "DEFAULT_SYSTEM_MESSAGE + USER: <image>\nWhat is shown in this image? ASSISTANT:"
 
     CHAT_FORMAT = (
         "{% for message in messages %}"
@@ -3618,7 +3617,6 @@ class Llama3VisionAlphaChatHandler(Llava15ChatHandler):
     # question = "<image>" + q
 
     # prompt = f"<|start_header_id|>user<|end_header_id|>\n\n{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
-    DEFAULT_SYSTEM_MESSAGE = None
 
     CHAT_FORMAT = (
         "{% for message in messages %}"
@@ -3668,7 +3666,6 @@ Llama3VisionAlpha = Llama3VisionAlphaChatHandler
 
 
 class MiniCPMv26ChatHandler(Llava15ChatHandler):
-    DEFAULT_SYSTEM_MESSAGE = "You are a helpful assistant."
 
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
@@ -3709,7 +3706,6 @@ class MiniCPMv26ChatHandler(Llava15ChatHandler):
 
 
 class Gemma3ChatHandler(Llava15ChatHandler):
-    DEFAULT_SYSTEM_MESSAGE = "You are a helpful assistant."
 
     GEMMA3_BOI_TOKEN  = "<start_of_image>"
     GEMMA3_EOI_TOKEN = "<end_of_image>"
@@ -4098,8 +4094,6 @@ class LFM2VLChatHandler(Llava15ChatHandler):
 
 
 class Qwen25VLChatHandler(Llava15ChatHandler):
-    DEFAULT_SYSTEM_MESSAGE = "You are a helpful assistant."
-
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
         "{% for message in messages %}"
