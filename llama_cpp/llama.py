@@ -78,7 +78,7 @@ class Llama:
         # Context Params
         seed: int = llama_cpp.LLAMA_DEFAULT_SEED,
         n_ctx: int = 512,
-        n_batch: int = 512,
+        n_batch: int = 2048,
         n_ubatch: int = 512,
         n_seq_max: int = 1,
         n_threads: Optional[int] = None,
