@@ -565,13 +565,25 @@ class Llama:
                 file=sys.stderr,
             )
 
+        # Iterate through all the chat templates found in the model's metadata
         for name, template in template_choices.items():
-            self._chat_handlers[name] = llama_chat_format.Jinja2ChatFormatter(
-                template=template,
-                eos_token=eos_token,
-                bos_token=bos_token,
-                stop_token_ids=[eos_token_id],
-            ).to_chat_handler()
+            try:
+                # Attempt to parse and register the template as a valid chat handler.
+                # We wrap this in a try-block because some models (like LLaVA) contain
+                # non-standard Jinja2 tags (e.g., {% generation %}) that cause the
+                # standard parser to crash.
+                self._chat_handlers[name] = llama_chat_format.Jinja2ChatFormatter(
+                    template=template,
+                    eos_token=eos_token,
+                    bos_token=bos_token,
+                    stop_token_ids=[eos_token_id],
+                ).to_chat_handler()
+            except Exception as e:
+                # If parsing fails (e.g., TemplateSyntaxError), log a warning but do not crash.
+                # This ensures the model still loads even if one metadata template is broken.
+                if self.verbose:
+                    print(f"Warning: Failed to parse chat template '{name}': {e}", file=sys.stderr)
+                pass
 
         if (
             self.chat_format is None
