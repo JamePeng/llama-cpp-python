@@ -1366,6 +1366,7 @@ class llama_params_fit_status(enum.IntEnum):
 # //   - returns true if the parameters could be successfully modified to fit device memory
 # //   - this function is NOT thread safe because it modifies the global llama logger state
 # //   - only parameters that have the same value as in llama_default_model_params are modified
+# //     with the exception of the context size which is modified if and only if equal to 0
 # LLAMA_API enum llama_params_fit_status llama_params_fit(
 #                                 const char   * path_model,
 #                 struct llama_model_params   * mparams,
@@ -4550,18 +4551,18 @@ def llama_sampler_sample(
 # /// @details Build a split GGUF final path for this chunk.
 # ///          llama_split_path(split_path, sizeof(split_path), "/models/ggml-model-q4_0", 2, 4) => split_path = "/models/ggml-model-q4_0-00002-of-00004.gguf"
 # //  Returns the split_path length.
-# LLAMA_API int llama_split_path(char * split_path, size_t maxlen, const char * path_prefix, int split_no, int split_count);
+# LLAMA_API int32_t  llama_split_path(char * split_path, size_t maxlen, const char * path_prefix, int32_t split_no, int32_t split_count);
 @ctypes_function(
     "llama_split_path",
-    [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_int, ctypes.c_int],
-    ctypes.c_int,
+    [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_int32, ctypes.c_int32],
+    ctypes.c_int32,
 )
 def llama_split_path(
     split_path: bytes,
     maxlen: Union[ctypes.c_size_t, int],
     path_prefix: bytes,
-    split_no: Union[ctypes.c_int, int],
-    split_count: Union[ctypes.c_int, int],
+    split_no: Union[ctypes.c_int32, int],
+    split_count: Union[ctypes.c_int32, int],
     /,
 ) -> int:
     """Build a split GGUF final path for this chunk."""
@@ -4571,18 +4572,18 @@ def llama_split_path(
 # /// @details Extract the path prefix from the split_path if and only if the split_no and split_count match.
 # ///          llama_split_prefix(split_prefix, 64, "/models/ggml-model-q4_0-00002-of-00004.gguf", 2, 4) => split_prefix = "/models/ggml-model-q4_0"
 # //  Returns the split_prefix length.
-# LLAMA_API int llama_split_prefix(char * split_prefix, size_t maxlen, const char * split_path, int split_no, int split_count);
+# LLAMA_API int32_t llama_split_prefix(char * split_prefix, size_t maxlen, const char * split_path, int32_t split_no, int32_t split_count);
 @ctypes_function(
     "llama_split_prefix",
-    [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_int, ctypes.c_int],
-    ctypes.c_int,
+    [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_char_p, ctypes.c_int32, ctypes.c_int32],
+    ctypes.c_int32,
 )
 def llama_split_prefix(
     split_prefix: bytes,
     maxlen: Union[ctypes.c_size_t, int],
     split_path: bytes,
-    split_no: Union[ctypes.c_int, int],
-    split_count: Union[ctypes.c_int, int],
+    split_no: Union[ctypes.c_int32, int],
+    split_count: Union[ctypes.c_int32, int],
     /,
 ) -> int:
     """Extract the path prefix from the split_path if and only if the split_no and split_count match."""
