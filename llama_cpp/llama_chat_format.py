@@ -3704,6 +3704,144 @@ class MiniCPMv26ChatHandler(Llava15ChatHandler):
     )
 
 
+class MiniCPMv45ChatHandler(Llava15ChatHandler):
+    """
+    Handler for MiniCPM-V 4.5 models.
+
+    Supports:
+    - Multi-step tool calls with <tool_call> and <tool_response> XML tags.
+    - Integrated reasoning (thinking) process with <think> tags.
+    - Specialized system prompt handling with tool definitions.
+    - Global image numbering for multi-image processing.
+    """
+
+    # Model specific control tokens
+    MINICPMV_BOS_TOKEN = "<|im_start|>"
+    MINICPMV_EOS_TOKEN = "<|im_end|>"
+    MINICPMV_PAD_TOKEN = "<|endoftext|>"
+
+    # Image placeholder tags
+    MINICPMV_IMAGE_START_TOKEN = "<image>"
+    MINICPMV_IMAGE_END_TOKEN = "</image>"
+    MINICPMV_IMAGE_ID_START_TOKEN = "<image_id>"
+    MINICPMV_IMAGE_ID_END_TOKEN = "</image_id>"
+
+    CHAT_FORMAT = (
+        # --- 1. First System Message & Tools Definitions ---
+        "{%- if tools %}"
+            "{{- '" + MINICPMV_BOS_TOKEN + "system\\n' }}"
+            "{%- if messages[0].role == 'system' %}{{- messages[0].content + '\\n\\n' }}{%- endif %}"
+            "{{- '# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\n' }}"
+            "{{- 'You are provided with function signatures within <tools></tools> XML tags:\\n<tools>' }}"
+            "{%- for tool in tools %}{{- '\\n' + (tool | tojson) }}{%- endfor %}"
+            "{{- '\\n</tools>\\n\\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\\n<tool_call>\\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\\n</tool_call>" + MINICPMV_EOS_TOKEN + "\\n' }}"
+        "{%- elif messages[0].role == 'system' %}"
+            "{{- '" + MINICPMV_BOS_TOKEN + "system\\n' + messages[0].content + '" + MINICPMV_EOS_TOKEN + "\\n' }}"
+        "{%- endif %}"
+
+        # --- 2. Message Stream Processing ---
+        "{% set image_count = namespace(value=0) %}"
+        "{%- for message in messages %}"
+            # --- Unified Role Handling (User, Assistant, and subsequent Systems) ---
+            "{%- if message.role in ['user', 'assistant'] or (message.role == 'system' and not loop.first) %}"
+                "{{- '" + MINICPMV_BOS_TOKEN + "' + message.role + '\\n' }}"
+
+                "{%- set content = message.content %}"
+                "{%- if content is not string %}"
+                    "{%- set ns = namespace(content_str='') %}"
+                    "{%- for item in content %}"
+                        # --- Explicit image_url type and value checking ---
+                        "{%- if item.type == 'image_url' %}"
+                            "{%- set image_url = item.image_url if item.image_url is string else item.image_url.url %}"
+                            "{%- set image_count.value = image_count.value + 1 %}"
+                            # Format: <image_id>N</image_id>: <image>IMAGE_URL</image>
+                            "{%- set ns.content_str = ns.content_str + '<image_id>' + (image_count.value | string) + '</image_id>: <image>' + image_url + '</image>' %}"
+                        "{%- elif item.type == 'text' %}"
+                            "{%- set ns.content_str = ns.content_str + item.text %}"
+                        "{%- endif %}"
+                    "{%- endfor %}"
+                    "{%- set content = ns.content_str %}"
+                "{%- endif %}"
+
+                "{{- content -}}"
+
+                # Append tool_calls to assistant messages if they exist
+                "{%- if message.role == 'assistant' and message.tool_calls %}"
+                    "{%- for tool_call in message.tool_calls %}"
+                        "{%- set tc = tool_call.function if tool_call.function else tool_call %}"
+                        "{{- '\\n<tool_call>\\n{\"name\": \"' + tc.name + '\", \"arguments\": ' }}"
+                        "{{- tc.arguments if tc.arguments is string else tc.arguments | tojson }}"
+                        "{{- '}\\n</tool_call>' }}"
+                    "{%- endfor %}"
+                "{%- endif %}"
+                "{{- '" + MINICPMV_EOS_TOKEN + "\\n' }}"
+
+            # --- Specialized Tool Response Handling ---
+            # Group consecutive tool responses under a single user-like block
+            "{%- elif message.role == 'tool' %}"
+                "{%- if loop.first or (messages[loop.index0 - 1].role != 'tool') %}"
+                    "{{- '" + MINICPMV_BOS_TOKEN + "user' }}"
+                "{%- endif %}"
+                "{{- '\\n<tool_response>\\n' + message.content + '\\n</tool_response>' }}"
+                "{%- if loop.last or (messages[loop.index0 + 1].role != 'tool') %}"
+                    "{{- '" + MINICPMV_EOS_TOKEN + "\\n' }}"
+                "{%- endif %}"
+            "{%- endif %}"
+        "{%- endfor %}"
+
+        # --- 3. Generation Prompt ---
+        "{%- if add_generation_prompt %}"
+            "{{- '" + MINICPMV_BOS_TOKEN + "assistant\\n' }}"
+            # Handle thinking/reasoning block visibility based on configuration
+            "{%- if enable_thinking is defined and enable_thinking is false %}"
+                "{{- '<think>\\n\\n</think>\\n\\n' }}"
+            "{%- elif enable_thinking is defined and enable_thinking is true %}"
+                "{{- '<think>\\n' }}"
+            "{%- endif %}"
+        "{%- endif %}"
+    )
+
+    def __init__(self, enable_thinking: bool = True, **kwargs):
+        """
+        Initializes the MiniCPM-V 4.5 Handler.
+
+        Args:
+            enable_thinking (bool): If True, model generates reasoning before the final answer.
+            **kwargs: Additional arguments for the base Llava15ChatHandler.
+        """
+        self.enable_thinking = enable_thinking
+        super().__init__(**kwargs)
+
+    def __call__(self, **kwargs):
+        # Inject thinking control flag into the template
+        self.extra_template_arguments["enable_thinking"] = self.enable_thinking
+
+        # Set stop token patch
+        kwargs['stop'] = [self.MINICPMV_EOS_TOKEN, self.MINICPMV_PAD_TOKEN]
+
+        llama = kwargs['llama']
+        llama.reset()
+        llama._ctx.memory_clear(True)
+        llama.n_tokens = 0
+
+        if hasattr(llama, 'input_ids'):
+            llama.input_ids.fill(0)
+
+        if hasattr(self, '_last_image_embed'):
+            self._last_image_embed = None
+            self._last_image_hash = None
+
+        if self.verbose:
+            messages = kwargs.get('messages', [])
+            try:
+                image_count = len(self.get_image_urls(messages))
+                print(f"MiniCPMV45ChatHandler(enable_thinking={self.enable_thinking}) - Processing {image_count} images", file=sys.stderr)
+            except Exception:
+                print(f"MiniCPMV45ChatHandler - Cleared state", file=sys.stderr)
+
+        return super().__call__(**kwargs)
+
+
 class Gemma3ChatHandler(Llava15ChatHandler):
 
     GEMMA3_BOI_TOKEN  = "<start_of_image>"
