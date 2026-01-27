@@ -95,12 +95,27 @@ jobs:
             exit 1
           }
 
+          $wheelFile = Get-Item '.\dist\*.whl' | Select-Object -First 1
+
+          # Split wheel filename: name-ver-py-abi-plat.whl
+          $parts = $wheelFile.Name.Split('-')
+          $distName = $parts[0]
+          $version  = $parts[1]
+          $pyTag    = $parts[2]
+          $abiTag   = $parts[3]
+          $platTag  = $parts[4]
+
+          $newVersion = "$version+cu$cudaVersion.$($env:AVXVER.ToLower())"
+
+          $newName = "$distName-$newVersion-$pyTag-$platTag"
+
+          # Rename wheel file
+          Rename-Item -Path $wheelFile.FullName -NewName $newName
+          Write-Output "Renamed wheel to: $newName"
+
           # write the build tag to the output
           Write-Output "CUDA_VERSION=$cudaVersion" >> $env:GITHUB_ENV
-
-          $wheel = (gi '.\dist\*.whl')[0]
-          $tagVer = $wheel.name.split('-')[1]
-          Write-Output "TAG_VERSION=$tagVer" >> $env:GITHUB_ENV
+          Write-Output "TAG_VERSION=$version" >> $env:GITHUB_ENV
 
       - name: Get Current Date
         id: get-date
@@ -113,7 +128,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: dist/*
-          # Set tag_name to <tag>-cu<cuda_version>-<date>-win
+          # Set tag_name to <tag>-cu<cuda_version>-<avxver>-win-<date>
           tag_name: v${{ env.TAG_VERSION }}-cu${{ env.CUDA_VERSION }}-${{ env.AVXVER }}-win-${{ env.BUILD_DATE }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

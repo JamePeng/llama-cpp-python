@@ -58,6 +58,7 @@ jobs:
         run: |
           echo "VERBOSE=1" >> $GITHUB_ENV # Enable verbose build output for troubleshooting
           find /usr/ -name 'libcuda.so.*'
+          find /usr/ -name 'libcudart.so.*'
           echo $LD_LIBRARY_PATH
 
           # Add project-specific and feature flags
@@ -88,25 +89,28 @@ jobs:
 
           # Run the Python build command to generate the wheel
           uv pip install build setuptools wheel packaging
-          # uv pip install -U torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
           CMAKE_ARGS=${CMAKE_ARGS} uv build --wheel
 
-          # --- Post-build steps to get info for release tag ---
+          # --- Post-build steps to get info for rename wheel file and release tag ---
 
-          # Find the generated wheel file in the 'dist' directory using bash
-          # Assumes only one wheel is generated per build configuration run
-          wheel_file=$(ls dist/*.whl | head -n 1)
-
-          # Extract the package version (e.g., 1.2.3) from the wheel filename
-          # Filename format is typically: package_name-version-tag-specificators.whl
-          # Using basename and cut to split by '-' and get the second field
-          tag_ver=$(basename "$wheel_file" | cut -d'-' -f 2)
-          echo "TAG_VERSION=$tag_ver" >> $GITHUB_ENV # Store version in env for release step
-
-          # Extract the short CUDA version (e.g., 124) from the full version (e.g., 12.4.1) from the matrix variable
           cuda_ver_short=$(echo "${CUDAVER}" | cut -d'.' -f 1,2 | sed 's/\.//g')
-          echo "CUDA_VERSION=$cuda_ver_short" >> $GITHUB_ENV # Store short CUDA version in env
+          avx_ver=$(echo "${AVXVER}" | tr '[:upper:]' '[:lower:]')
 
+          wheel_path=$(ls dist/*.whl | head -n 1)
+          filename=$(basename "$wheel_path")
+
+          # Split wheel filename
+          IFS='-' read -r dist_name version py_tag abi_tag plat_tag <<< "$filename"
+
+          new_version="${version}+cu${cuda_ver_short}.${avx_ver}"
+          new_filename="${dist_name}-${new_version}-${py_tag}-${plat_tag}"
+
+          # Rename wheel file
+          mv "$wheel_path" "dist/$new_filename"
+          echo "Renamed wheel to: $new_filename"
+
+          echo "CUDA_VERSION=$cuda_ver_short" >> $GITHUB_ENV # Store short CUDA version in env
+          echo "TAG_VERSION=$version" >> $GITHUB_ENV # Store version in env for release step
 
       - name: Get Current Date # Step to get current date for the release tag
         id: get-date
