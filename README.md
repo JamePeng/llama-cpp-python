@@ -129,8 +129,8 @@ pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python
 It is also possible to install a pre-built wheel with CUDA support. As long as your system meets some requirements:
 
 - CUDA Version is 12.4, 12.6, 12.8 or 13.0
-- Python Version is 3.10, 3.11, 3.12 or 3.13
-- Basic version: A version compiled without using AVX instructions (for compatibility with CPU platforms lacking AVX instructions or with AVX instruction compatibility issues).
+- Python Version is 3.10, 3.11, 3.12, 3.13 or 3.14
+- Basic version(Default): A version compiled without using AVX instructions (for compatibility with CPU platforms lacking AVX instructions or with AVX instruction compatibility issues).
 - AVX2 version: A version compiled using AVX2 instructions.
 
 Check the releases page:
@@ -172,13 +172,20 @@ pip install llama-cpp-python \
 </details>
 
 <details>
-<summary>hipBLAS (ROCm)</summary>
+<summary>HIP (ROCm)</summary>
 
-To install with hipBLAS / ROCm support for AMD cards, set the `GGML_HIPBLAS=on` environment variable before installing:
+This provides GPU acceleration on HIP-supported AMD GPUs. Make sure to have ROCm installed.
+
+You can download it from your Linux distro's package manager or from here: [ROCm Quick Start (Linux)](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tutorial/quick-start.html#rocm-install-quick).
+
+To install with HIP / ROCm support for AMD cards, set the `GGML_HIP=ON` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_HIPBLAS=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1030" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
+Note: `GPU_TARGETS` is optional, omitting it will build the code for all GPUs in the current system.
+
+More details see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#hip
 
 </details>
 
