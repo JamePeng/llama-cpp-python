@@ -13,9 +13,9 @@ jobs:
     strategy:
       matrix:
         os: ['windows-2022']
-        pyver: ["3.10", "3.11", "3.12", "3.13"]
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         cuda: ["12.8.1"]
-        releasetag: ["AVX2"]
+        releasetag: ["Basic"]
         cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;101-real;120-real"]
     defaults:
       run:

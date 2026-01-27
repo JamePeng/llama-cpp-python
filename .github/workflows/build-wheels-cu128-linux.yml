@@ -14,9 +14,9 @@ jobs:
     strategy:
       matrix: # Define the build matrix directly here
         os: ["ubuntu-22.04"]
-        pyver: ["3.10", "3.11", "3.12", "3.13"] # Python versions
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"] # Python versions
         cuda: ["12.8.1"]
-        releasetag: ["AVX2"] # Controls CMAKE_ARGS for CPU features (even in CUDA build)
+        releasetag: ["Basic"] # Controls CMAKE_ARGS for CPU features (even in CUDA build)
         cudaarch: ["all"] # Controls target CUDA architectures for nvcc
 
     defaults:
