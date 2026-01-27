@@ -13,7 +13,7 @@ authors = [
 ]
 dependencies = [
     "typing-extensions>=4.8.0",
-    "numpy>=1.21.6",
+    "numpy>=1.21.6,<=2.3.2",
     "diskcache>=5.6.2",
     "jinja2>=2.11.3",
     "Pillow>=9.5.0",
@@ -26,6 +26,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
 ]
 
 
@@ -73,10 +74,11 @@ provider = "scikit_build_core.metadata.regex"
 input = "llama_cpp/__init__.py"
 
 [project.urls]
-Homepage = "https://github.com/abetlen/llama-cpp-python"
-Issues = "https://github.com/abetlen/llama-cpp-python/issues"
+Homepage = "https://github.com/JamePeng/llama-cpp-python"
+Issues = "https://github.com/JamePeng/llama-cpp-python/issues"
 Documentation = "https://llama-cpp-python.readthedocs.io/en/latest/"
-Changelog = "https://llama-cpp-python.readthedocs.io/en/latest/changelog/"
+Changelog = "https://github.com/JamePeng/llama-cpp-python/blob/main/CHANGELOG.md"
+FAQ = "https://github.com/JamePeng/llama-cpp-python?tab=readme-ov-file#faq"
 
 [tool.pytest.ini_options]
 testpaths = "tests"
