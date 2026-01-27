@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.23]
+- feat: [Implement MiniCPMv45ChatHandler for MiniCPM-V 4.5 with multi-image tracking](https://github.com/JamePeng/llama-cpp-python/commit/83d5839b136a62a2ccac3feabe4eec1dbced961b)
+
+- feat: Add python 3.14 support and pin numpy version(1.21.4-2.3.2) for compatibility
+
+- feat: Increased the n_batch parameter in Llama model initialization from 512 to 2048. Slightly improves the speed of some multimodal image processing.
+
+- fix: catch TemplateSyntaxError when parsing metadata chat templates
+
+    - Some models (e.g., LLaVA 1.5) contain non-standard Jinja2 tags (like {% generation %}) in their metadata.
+
+    - This commit adds a try-except block to prevent initialization crashes, allowing the model to load even if the metadata template is invalid.
+
+- feat: enhance default system prompt with strong multimodal + same-language capabilities
+
+- feat: Better Llava1.5 Chat Format
+
+- ci: Customize wheel filename to improve version identification
+    - Parse generated wheel filenames in the build step.
+    - Append CUDA version (cuXXX) and AVX level (basic/avx2) to the version string.
+    - New format: package-ver+cuXXX.avxver-pyver-plat.whl (e.g., llama_cpp_python-0.3.23+cu130.basic-cp310-win_amd64.whl).
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/68ac3acb435450d5ba1e62748e17671815313dc3](https://github.com/ggml-org/llama.cpp/commit/68ac3acb435450d5ba1e62748e17671815313dc3)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260127
+
 ## [0.3.22]
 - perf (TFFT): Optimize longest_token_prefix with Numpy SIMD and fast-fail probe
     - Vectorization: Replaced standard Python zip loop with Numpy SIMD comparison for high-performance context matching.
