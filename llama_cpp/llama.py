@@ -69,7 +69,7 @@ class Llama:
         tensor_split: Optional[List[float]] = None,
         vocab_only: bool = False,
         use_mmap: bool = True,
-        use_direct_io: bool = True,
+        use_direct_io: bool = False,
         use_mlock: bool = False,
         check_tensors: bool = False,
         use_extra_bufts: bool = False,

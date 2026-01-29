@@ -715,7 +715,7 @@ class llama_model_tensor_buft_override(ctypes.Structure):
 #     // Keep the booleans together to avoid misalignment during copy-by-value.
 #     bool vocab_only;      // only load the vocabulary, no weights
 #     bool use_mmap;        // use mmap if possible
-#     bool use_direct_io;   // use direct io, takes precedence over use_mmap
+#     bool use_direct_io;   // use direct io, takes precedence over use_mmap when supported
 #     bool use_mlock;       // force system to keep model in RAM
 #     bool check_tensors;   // validate model tensor data
 #     bool use_extra_bufts; // use extra buffer types (used for weight repacking)
@@ -737,7 +737,7 @@ class llama_model_params(ctypes.Structure):
         kv_overrides (ctypes.Array[llama_model_kv_override]): override key-value pairs of the model meta data
         vocab_only (bool): only load the vocabulary, no weights
         use_mmap (bool): use mmap if possible
-        use_direct_io(bool): use direct io, takes precedence over use_mmap
+        use_direct_io(bool): use direct io, takes precedence over use_mmap when supported
         use_mlock (bool): force system to keep model in RAM
         check_tensors (bool): validate model tensor data
         use_extra_bufts (bool): use extra buffer types (used for weight repacking)

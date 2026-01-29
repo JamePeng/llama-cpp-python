@@ -51,7 +51,7 @@ class ModelSettings(BaseSettings):
         description="Enable mmap to use filesystem cache.",
     )
     use_direct_io: bool = Field(
-        default=True,
+        default=False,
         description="Use direct io, takes precedence over use_mmap.",
     )
     use_mlock: bool = Field(
