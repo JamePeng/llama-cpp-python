@@ -107,7 +107,7 @@ jobs:
 
           $newVersion = "$version+cu$cudaVersion.$($env:AVXVER.ToLower())"
 
-          $newName = "$distName-$newVersion-$pyTag-$platTag"
+          $newName = "$distName-$newVersion-$pyTag-$abiTag-$platTag"
 
           # Rename wheel file
           Rename-Item -Path $wheelFile.FullName -NewName $newName

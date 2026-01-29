@@ -103,7 +103,7 @@ jobs:
           IFS='-' read -r dist_name version py_tag abi_tag plat_tag <<< "$filename"
 
           new_version="${version}+cu${cuda_ver_short}.${avx_ver}"
-          new_filename="${dist_name}-${new_version}-${py_tag}-${plat_tag}"
+          new_filename="${dist_name}-${new_version}-${py_tag}-${abi_tag}-${plat_tag}"
 
           # Rename wheel file
           mv "$wheel_path" "dist/$new_filename"
