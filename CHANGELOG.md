@@ -27,11 +27,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - ci: Customize wheel filename to improve version identification
     - Parse generated wheel filenames in the build step.
     - Append CUDA version (cuXXX) and AVX level (basic/avx2) to the version string.
-    - New format: package-ver+cuXXX.avxver-pyver-plat.whl (e.g., llama_cpp_python-0.3.23+cu130.basic-cp310-win_amd64.whl).
+    - New format: package-ver+cuXXX.avxver-pyver-abiver-platform.whl (e.g., llama_cpp_python-0.3.23+cu130.basic-cp310-cp310-win_amd64.whl).
 
-- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/68ac3acb435450d5ba1e62748e17671815313dc3](https://github.com/ggml-org/llama.cpp/commit/68ac3acb435450d5ba1e62748e17671815313dc3)
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/b33df266d0a53f800c47513386920cff1019d70e](https://github.com/ggml-org/llama.cpp/commit/b33df266d0a53f800c47513386920cff1019d70e)
 
-- feat: Sync llama.cpp llama/mtmd API Binding 20260127
+- feat: Sync llama.cpp llama/mtmd API Binding 20260129
 
 ## [0.3.22]
 - perf (TFFT): Optimize longest_token_prefix with Numpy SIMD and fast-fail probe
