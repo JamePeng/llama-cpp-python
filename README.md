@@ -778,6 +778,7 @@ print(res["choices"][0]["message"]["content"])
 * **Streaming Batch Processing:** Process massive datasets (e.g., Hundreds of documents) without running out of memory (OOM).
 * **Native Reranking:** Built-in support for Cross-Encoder models (outputting relevance scores instead of vectors).
 * **Optimized Performance:** Utilizes Unified KV Cache for parallel encoding of multiple documents.
+* **Chat Template Support:** Support for rerank templates has been introduced (via `llama_model_chat_template(model, b"rerank")`), which can automatically populate the query and document into a specific format.
 
 ### Support Embeddings & Rerank Model:
 
@@ -786,8 +787,9 @@ print(res["choices"][0]["message"]["content"])
 |--------------------|-----------|--------------------------------------------------------|--------------|
 |      `bge-m3`      | Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF)             |  Useful ✅  |
 |`bge-reranker-v2-m3`|   Rerank  |[bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |  Useful ✅  |
+|`qwen3-reranker`|   Rerank  |[Qwen3-Reranker-GGUF](https://huggingface.co/JamePeng2023/Qwen3-Reranker-GGUF) |  Useful ✅  |
 
-### TODO(JamePeng): Needs more extensive testing with various embedding and rerank models. :)
+#### TODO(JamePeng): Needs more extensive testing with various embedding and rerank models. :)
 
 ### 1. Text Embeddings (Vector Search)
 
@@ -840,16 +842,17 @@ Reranking models (like `bge-reranker`) take a **Query** and a list of **Document
 
 ```python
 import llama_cpp
-from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_RANK
+from llama_cpp.llama_embedding import LlamaEmbedding
 
 # Initialize a Reranking model
 ranker = LlamaEmbedding(
-    model_path="path/to/bge-reranker-v2-m3.gguf",
-    pooling_type=LLAMA_POOLING_TYPE_RANK,  # Crucial for Rerankers!
+    model_path="path/to/qwen3-reranker-0.6b-q8_0.gguf",
+    pooling_type=llama_cpp.LLAMA_POOLING_TYPE_RANK,  # Crucial for Rerankers!
     n_gpu_layers=-1,
+    n_ctx=0
 )
 
-query = "What causes rain?"
+query = "What causes Rain?"
 docs = [
     "Clouds are made of water droplets...", # Relevant
     "To bake a cake you need flour...",     # Irrelevant
@@ -861,8 +864,8 @@ docs = [
 scores = ranker.rank(query, docs)
 
 # Result: List of floats (higher means more relevant)
-print(scores)
-# e.g., [-0.15, -8.23, 5.67] -> The 3rd doc is the best match
+print(scores) 
+# e.g., [0.0011407170677557588, 5.614783731289208e-05, 0.7173627614974976] -> The 3rd doc is the best match
 ```
 
 ### 3. Normalization
