@@ -30,7 +30,7 @@ class LlamaEmbedding(Llama):
     Key Features:
     1. Auto-configuration: Automatically sets embeddings=True.
     2. Streaming Batch: Handles massive datasets without OOM (Out Of Memory).
-    3. Native Reranking Support: Specifically handles `LLAMA_POOLING_TYPE_RANK` models (like BGE-Reranker). /
+    3. Native Reranking Support: Specifically handles `LLAMA_POOLING_TYPE_RANK` models (like BGE-Reranker, Qwen3-Reranker). /
        It correctly identifies classification heads to output scalar relevance scores instead of high-dimensional vectors.
     4. Advanced Normalization: Implements MaxInt16, Taxicab (L1), and Euclidean (L2) normalization strategies /
        using NumPy for optimal performance and compatibility with various vector databases.
@@ -273,8 +273,10 @@ class LlamaEmbedding(Llama):
         """
         Calculate relevance scores for a list of documents against a query using a Reranking model.
 
-        This method constructs a specific prompt structure ([BOS] Query [SEP] Doc [EOS])
-        typically used by Cross-Encoders to estimate similarity.
+        This method follows the implementation logic of the latest llama.cpp embedding example,
+        supporting both specialized chat templates and manual sequence construction.
+
+        Link: https://github.com/ggml-org/llama.cpp/blob/master/examples/embedding/embedding.cpp
 
         Args:
             query: The search query string.
@@ -283,33 +285,69 @@ class LlamaEmbedding(Llama):
         Returns:
             A list of float scores, where higher values indicate greater relevance.
         """
+        # Ensure the model is configured for Reranking (Cross-Encoding)
         if self.pooling_type() != LLAMA_POOLING_TYPE_RANK:
             raise ValueError(f"Model pooling_type is {self.pooling_type()}, but LLAMA_POOLING_TYPE_RANK is required.")
 
-        # Prepare Special Tokens
-        sep_id = self.token_sep()
-        if sep_id == -1: sep_id = self.token_eos()
-        eos_id = self.token_eos()
+        # 1. Attempt to retrieve the built-in 'rerank' chat template from model metadata.
+        # Modern GGUF models often include a template for formatting query/document pairs.
+        rerank_template = llama_cpp.llama_model_chat_template(self._model.model, b"rerank")
+        if rerank_template:
+            rerank_template = rerank_template.decode("utf-8")
 
-        # Pre-process Query
-        q_tokens = self.tokenize(query.encode("utf-8"), add_bos=True, special=True)
-        # Remove the automatically added EOS token from the query
-        # because we need to append the separator and document tokens after it.
-        if q_tokens and q_tokens[-1] == eos_id:
-            q_tokens.pop()
-
-        # Construct Batch Inputs
         batch_inputs: List[List[int]] = []
-        for doc in documents:
-            d_tokens = self.tokenize(doc.encode("utf-8"), add_bos=False, special=True)
-            full_seq = q_tokens + [sep_id] + d_tokens
-            # Ensure the sequence ends with an EOS token to mark the end of inference.
-            if not full_seq or full_seq[-1] != eos_id:
-                full_seq.append(eos_id)
-            batch_inputs.append(full_seq)
 
-        # We use NORM_MODE_NONE because rerankers output raw logits/scores, not vectors that need normalization.
-        return self.embed(batch_inputs, normalize=NORM_MODE_NONE)
+        # 2. Case A: Using Model-Specific Template
+        # If a template exists, we perform dynamic string replacement for {query} and {document}.
+        if rerank_template:
+            for doc in documents:
+                final_prompt = rerank_template.replace("{query}", query).replace("{document}", doc)
+                # Tokenize the full formatted prompt. Template usually dictates BOS/EOS placement.
+                tokens = self.tokenize(final_prompt.encode("utf-8"), add_bos=False, special=True)
+                batch_inputs.append(tokens)
+
+        # 3. Case B: Manual Sequence Construction (Fallback)
+        # If no template is found, construct the standard [BOS] Query [SEP] Doc [EOS] sequence.
+        else:
+            # Determine separator and end-of-sequence tokens
+            sep_id = self.token_sep() if self.token_sep() != -1 else self.token_eos()
+            eos_id = self.token_eos()
+
+            # Pre-tokenize the query with BOS (Beginning of Sequence)
+            q_tokens = self.tokenize(query.encode("utf-8"), add_bos=True, special=True)
+
+            # Remove the automatically added EOS token from the query to allow concatenation.
+            if q_tokens and q_tokens[-1] == eos_id:
+                q_tokens.pop()
+
+            for doc in documents:
+                # Tokenize document without an additional BOS token
+                d_tokens = self.tokenize(doc.encode("utf-8"), add_bos=False, special=True)
+
+                # Combine: [BOS] Query [SEP] Document
+                full_seq = q_tokens + [sep_id] + d_tokens
+
+                # Ensure the sequence is properly terminated with an EOS token for inference.
+                if not full_seq or full_seq[-1] != eos_id:
+                    full_seq.append(eos_id)
+
+                batch_inputs.append(full_seq)
+
+        # Execute embedding inference. Rerankers output raw logits/scores, so we skip normalization.
+        raw_results = self.embed(batch_inputs, normalize=NORM_MODE_NONE)
+        results_list = [raw_results] if (len(batch_inputs) == 1 and isinstance(raw_results[0], float)) else raw_results
+
+        # 5. Output Post-Processing
+        # For generative rerankers like Qwen3-Reranker, output dim is 2 ([yes_logit, no_logit]).
+        final_scores = []
+        # Ensure we iterate through results (embed returns List[Any] for batch inputs)
+        for res in results_list:
+            if isinstance(res, (list, np.ndarray)) and len(res) == 2:
+                final_scores.append(float(res[0])) # Standard scalar score in list form yes_logit
+            else:
+                final_scores.append(float(res))    # Raw scalar score
+
+        return final_scores
 
     def create_embedding(
         self,
