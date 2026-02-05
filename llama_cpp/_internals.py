@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import os
 import ctypes
+import enum
+import os
 
 from typing import (
     Dict,
     List,
+    Set,
     Tuple,
     Optional,
     Sequence,
@@ -850,36 +852,128 @@ def normalize_embedding(embedding):
 
 
 # Python wrappers over common/sampling structs
+# common/common.h common_params_sampling
 
+# enum common_sampler_type {
+#     COMMON_SAMPLER_TYPE_NONE        = 0,
+#     COMMON_SAMPLER_TYPE_DRY         = 1,
+#     COMMON_SAMPLER_TYPE_TOP_K       = 2,
+#     COMMON_SAMPLER_TYPE_TOP_P       = 3,
+#     COMMON_SAMPLER_TYPE_MIN_P       = 4,
+#   //COMMON_SAMPLER_TYPE_TFS_Z       = 5,
+#     COMMON_SAMPLER_TYPE_TYPICAL_P   = 6,
+#     COMMON_SAMPLER_TYPE_TEMPERATURE = 7,
+#     COMMON_SAMPLER_TYPE_XTC         = 8,
+#     COMMON_SAMPLER_TYPE_INFILL      = 9,
+#     COMMON_SAMPLER_TYPE_PENALTIES   = 10,
+#     COMMON_SAMPLER_TYPE_TOP_N_SIGMA = 11,
+#     COMMON_SAMPLER_TYPE_ADAPTIVE_P  = 12,
+# };
+
+class CommonSamplerType(enum.IntEnum):
+    NONE        = 0
+    DRY         = 1
+    TOP_K       = 2
+    TOP_P       = 3
+    MIN_P       = 4
+    TYPICAL_P   = 6
+    TEMPERATURE = 7
+    XTC         = 8
+    INFILL      = 9
+    PENALTIES   = 10
+    TOP_N_SIGMA = 11
+    ADAPTIVE_P  = 12
 
 @dataclass
 class LlamaSamplingParams:
-    n_prev: int = 64
-    n_probs: int = 0
-    top_k: int = 40
-    top_n_sigma: float = -1.00
-    top_p: float = 0.95
-    min_p: float = 0.05
-    typical_p: float = 1.00
-    temp: float = 0.80
-    penalty_last_n: int = 64
-    penalty_repeat: float = 1.0
-    penalty_freq: float = 0.00
-    penalty_present: float = 0.00
-    mirostat: int = 0
-    mirostat_tau: float = 5.00
-    mirostat_eta: float = 0.10
-    penalize_nl: bool = True
+    seed: int = llama_cpp.LLAMA_DEFAULT_SEED  # the seed used to initialize llama_sampler
 
-    xtc_threshold: float = 0.1
-    xtc_probability: float = 0.0
+    n_prev: int = 64                 # number of previous tokens to remember
+    n_probs: int = 0                 # if greater than 0, output the probabilities of top n_probs tokens.
+    min_keep: int = 0                # 0 = disabled, otherwise samplers should return at least min_keep tokens
+    top_k: int = 40                  # <= 0 to use vocab size
+    top_p: float = 0.95              # 1.0 = disabled
+    min_p: float = 0.05              # 0.0 = disabled
+    xtc_probability: float = 0.0     # 0.0 = disabled
+    xtc_threshold: float = 0.1       # > 0.5 disables XTC
+    typical_p: float = 1.00          # typical_p, 1.0 = disabled
+    temp: float = 0.80               # <= 0.0 to sample greedily, 0.0 to not output probabilities
+    dynatemp_range: float = 0.00     # 0.0 = disabled
+    dynatemp_exponent: float = 1.00  # controls how entropy maps to temperature in dynamic temperature sampler
+
+    penalty_last_n: int = 64         # last n tokens to penalize (0 = disable penalty, -1 = context size)
+    penalty_repeat: float = 1.0      # 1.0 = disabled
+    penalty_freq: float = 0.00       # 0.0 = disabled
+    penalty_present: float = 0.00    # 0.0 = disabled
+
+    dry_multiplier: float = 0.0      # 0.0 = disabled;      DRY repetition penalty for tokens extending repetition:
+    dry_base: float = 1.75           # 0.0 = disabled;      multiplier * base ^ (length of sequence before token - allowed length)
+    dry_allowed_length: int = 2      # tokens extending repetitions beyond this receive penalty
+    dry_penalty_last_n: int = -1     # how many tokens to scan for repetitions (0 = disable penalty, -1 = context size)
+
+    adaptive_target: float = -1.0    # select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
+    adaptive_decay: float = 0.90     # EMA decay for adaptation; history ≈ 1/(1-decay) tokens (0.0 - 0.99)
+    mirostat: int = 0                # 0 = disabled, 1 = mirostat, 2 = mirostat 2.0
+    top_n_sigma: float = -1.00       # -1.0 = disabled
+    mirostat_tau: float = 5.00       # target entropy
+    mirostat_eta: float = 0.10       # learning rate
+
+    ignore_eos: bool = False
+    no_perf: bool = False            # disable performance metrics
+    timing_per_token: bool = False
+    backend_sampling: bool = False
+    user_sampling_config: int = 0    # bitfield to track user-specified samplers
+
+    dry_sequence_breakers: List[str] = field(
+        default_factory=lambda: ["\n", ":", "\"", "*"]  # default sequence breakers for DRY
+    )
+
+    samplers: List[CommonSamplerType] = field(
+        default_factory=lambda: [
+            CommonSamplerType.PENALTIES,
+            CommonSamplerType.DRY,
+            CommonSamplerType.TOP_N_SIGMA,
+            CommonSamplerType.TOP_K,
+            CommonSamplerType.TYPICAL_P,
+            CommonSamplerType.TOP_P,
+            CommonSamplerType.MIN_P,
+            CommonSamplerType.XTC,
+            CommonSamplerType.TEMPERATURE,
+        ]
+    )
 
     grammar: str = ""
+    grammar_lazy: bool = False
+    grammar_triggers: List[Any] = field(default_factory=list)
+    preserved_tokens: Set[int] = field(default_factory=set)
 
-    cfg_negative_prompt: str = ""
-    cfg_scale: float = 1.00
+    logit_bias: List[llama_cpp.llama_logit_bias] = field(default_factory=list)
+    logit_bias_eog: List[llama_cpp.llama_logit_bias] = field(default_factory=list)
 
-    logit_bias: dict[int, float] = field(default_factory=dict)
+    @property
+    def has_logit_bias(self) -> bool:
+        return len(self.logit_bias) > 0
+
+    def print_params(self) -> str:
+        result = (
+            f"\trepeat_last_n = {self.penalty_last_n}, repeat_penalty = {self.penalty_repeat:.3f}, "
+            f"frequency_penalty = {self.penalty_freq:.3f}, presence_penalty = {self.penalty_present:.3f}\n"
+
+            f"\tdry_multiplier = {self.dry_multiplier:.3f}, dry_base = {self.dry_base:.3f}, "
+            f"dry_allowed_length = {self.dry_allowed_length}, dry_penalty_last_n = {self.dry_penalty_last_n}\n"
+
+            f"\ttop_k = {self.top_k}, top_p = {self.top_p:.3f}, min_p = {self.min_p:.3f}, "
+            f"xtc_probability = {self.xtc_probability:.3f}, xtc_threshold = {self.xtc_threshold:.3f}, "
+            f"typical_p = {self.typ_p:.3f}, top_n_sigma = {self.top_n_sigma:.3f}, temp = {self.temp:.3f}\n"
+
+            f"\tmirostat = {self.mirostat}, mirostat_lr = {self.mirostat_eta:.3f}, "
+            f"mirostat_ent = {self.mirostat_tau:.3f}, adaptive_target = {self.adaptive_target:.3f}, "
+            f"adaptive_decay = {self.adaptive_decay:.3f}"
+        )
+        return result
+
+    def __repr__(self) -> str:
+        return self.print_params()
 
 
 @dataclass
@@ -956,8 +1050,6 @@ class LlamaSamplingContext:
                     self.params.penalty_freq,
                     self.params.penalty_present,
                 )
-            if not self.params.penalize_nl:
-                token_data_array.candidates_data.logit[nl_token] = nl_logit
 
         if self.grammar is not None:
             ctx_main.sample_grammar(token_data_array, self.grammar)
