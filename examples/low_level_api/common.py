@@ -59,7 +59,6 @@ class GptParams:
     interactive_start: bool = False
 
     instruct: bool = False
-    penalize_nl: bool = True
     perplexity: bool = False
     use_mmap: bool = True
     use_direct_io: bool = False
@@ -361,12 +360,6 @@ def gpt_params_parse(argv=None):
         action="store_true",
         help="run in instruction mode (use with Alpaca or Vicuna models)",
         dest="instruct",
-    )
-    parser.add_argument(
-        "--no-penalize-nl",
-        action="store_false",
-        help="do not penalize newline token",
-        dest="penalize_nl",
     )
     parser.add_argument(
         "--perplexity",

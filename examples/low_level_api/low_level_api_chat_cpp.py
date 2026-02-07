@@ -479,9 +479,6 @@ n_keep = {self.params.n_keep}
                 # 	_arr,
                 # 	last_n_repeat, llama_cpp.c_float(self.params.frequency_penalty), llama_cpp.c_float(self.params.presence_penalty))
 
-                if not self.params.penalize_nl:
-                    logits[llama_cpp.llama_token_nl()] = nl_logit
-
                 if self.params.temp <= 0:
                     # Greedy sampling
                     id = llama_cpp.llama_sampler_init_greedy(self.ctx, candidates_p)

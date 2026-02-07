@@ -4457,7 +4457,7 @@ def llama_sampler_init_penalties(
         ctypes.c_float,
         ctypes.c_int32,
         ctypes.c_int32,
-        ctypes.POINTER(ctypes.POINTER(ctypes.c_char)),
+        ctypes.POINTER(ctypes.c_char_p),
         ctypes.c_size_t,
     ],
     llama_sampler_p_ctypes,
@@ -4469,7 +4469,7 @@ def llama_sampler_init_dry(
     dry_base: float,
     dry_allowed_length: int,
     dry_penalty_last_n: int,
-    seq_breakers: CtypesArray[bytes],
+    seq_breakers: CtypesArray[ctypes.c_char_p],
     num_breakers: int,
     /,
 ) -> llama_sampler_p:

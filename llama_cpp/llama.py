@@ -775,7 +775,6 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
-        penalize_nl: bool = True,
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
         use_adaptive_p: bool = False,
@@ -828,15 +827,10 @@ class Llama:
                 if use_infill:
                     sampler.add_infill(self._model)
                 sampler.add_penalties(
-                    n_vocab=self._n_vocab,
-                    special_eos_id=self._token_eos,
-                    linefeed_id=self._token_nl,
                     penalty_last_n=self.last_n_tokens_size,
                     penalty_repeat=repeat_penalty,
                     penalty_freq=frequency_penalty,
-                    penalty_present=presence_penalty,
-                    penalize_nl=penalize_nl,
-                    ignore_eos=False,
+                    penalty_present=presence_penalty
                 )
                 if use_adaptive_p:
                     # only if user explicitly included adaptive-p sampler
@@ -867,7 +861,6 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
-        penalize_nl: bool = True,
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
         use_adaptive_p: bool = False,
@@ -914,7 +907,6 @@ class Llama:
                 dry_allowed_length=dry_allowed_length,
                 dry_penalty_last_n=dry_penalty_last_n,
                 dry_seq_breakers=dry_seq_breakers,
-                penalize_nl=penalize_nl,
                 adaptive_target=adaptive_target,
                 adaptive_decay=adaptive_decay,
                 use_adaptive_p=use_adaptive_p,
@@ -955,7 +947,6 @@ class Llama:
         dry_allowed_length: int = 2,
         dry_penalty_last_n:int = 0,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
-        penalize_nl: bool = True,
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
         use_adaptive_p: bool = False,
@@ -1006,7 +997,6 @@ class Llama:
             dry_allowed_length=dry_allowed_length,
             dry_penalty_last_n=dry_penalty_last_n,
             dry_seq_breakers=dry_seq_breakers,
-            penalize_nl=penalize_nl,
             adaptive_target=adaptive_target,
             adaptive_decay=adaptive_decay,
             use_adaptive_p=use_adaptive_p,
@@ -1068,7 +1058,6 @@ class Llama:
                     logit_bias=logit_bias,
                     logits_processor=logits_processor,
                     grammar=grammar,
-                    penalize_nl=penalize_nl,
                     adaptive_target=adaptive_target,
                     adaptive_decay=adaptive_decay,
                     use_adaptive_p=use_adaptive_p,
