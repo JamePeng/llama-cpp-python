@@ -782,6 +782,7 @@ class Llama:
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy: bool = False
     ):
         sampler = internals.LlamaSampler()
 
@@ -789,7 +790,7 @@ class Llama:
             sampler.add_logit_bias(self.n_vocab(), logit_bias)
 
         if grammar is not None:
-            sampler.add_grammar(self._model, grammar)
+            sampler.add_grammar(self._model, grammar, grammar_lazy)
 
         if temp < 0.0:
             sampler.add_dist(self._seed)
@@ -868,6 +869,7 @@ class Llama:
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy: bool = False,
         idx: Optional[int] = None,
     ):
         """Sample a token from the model.
@@ -914,6 +916,7 @@ class Llama:
                 logit_bias=logit_bias,
                 logits_processor=logits_processor,
                 grammar=grammar,
+                grammar_lazy=grammar_lazy
             )
 
         ridx = idx - self.n_tokens if idx is not None else -1
@@ -955,6 +958,7 @@ class Llama:
         logits_processor: Optional[LogitsProcessorList] = None,
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy :bool = False,
     ) -> Generator[int, Optional[Sequence[int]], None]:
         """Create a generator of tokens from a prompt.
 
@@ -1004,6 +1008,7 @@ class Llama:
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
+            grammar_lazy=grammar_lazy
         )
 
         # Check for kv cache prefix match
@@ -1058,6 +1063,7 @@ class Llama:
                     logit_bias=logit_bias,
                     logits_processor=logits_processor,
                     grammar=grammar,
+                    grammar_lazy=grammar_lazy,
                     adaptive_target=adaptive_target,
                     adaptive_decay=adaptive_decay,
                     use_adaptive_p=use_adaptive_p,
@@ -1302,6 +1308,7 @@ class Llama:
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy: bool = False
     ) -> Union[
         Iterator[CreateCompletionResponse], Iterator[CreateCompletionStreamResponse]
     ]:
@@ -1503,6 +1510,7 @@ class Llama:
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
+            grammar_lazy=grammar_lazy,
         ):
             if llama_cpp.llama_token_is_eog(self._model.vocab, token):
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
@@ -1945,6 +1953,7 @@ class Llama:
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy: bool = False,
     ) -> Union[CreateCompletionResponse, Iterator[CreateCompletionStreamResponse]]:
         """Generate text from a prompt.
 
@@ -1985,6 +1994,7 @@ class Llama:
             logit_bias: A logit bias to use.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use for constrained sampling.
+            grammar_lazy: If True, enables lazy evaluation.
 
         Raises:
             ValueError: If the requested tokens exceed the context window.
@@ -2030,6 +2040,7 @@ class Llama:
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
+            grammar_lazy=grammar_lazy,
         )
         if stream:
             chunks: Iterator[CreateCompletionStreamResponse] = completion_or_chunks
@@ -2075,6 +2086,7 @@ class Llama:
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy: bool = False,
     ) -> Union[CreateCompletionResponse, Iterator[CreateCompletionStreamResponse]]:
         """Generate text from a prompt.
 
@@ -2115,6 +2127,7 @@ class Llama:
             logit_bias: A logit bias to use.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use for constrained sampling.
+            grammar_lazy: If True, enables lazy evaluation.
 
         Raises:
             ValueError: If the requested tokens exceed the context window.
@@ -2160,6 +2173,7 @@ class Llama:
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
+            grammar_lazy=grammar_lazy,
         )
 
     def create_chat_completion(
@@ -2201,6 +2215,7 @@ class Llama:
         logit_bias: Optional[Dict[int, float]] = None,
         logits_processor: Optional[LogitsProcessorList] = None,
         grammar: Optional[LlamaGrammar] = None,
+        grammar_lazy: bool = False,
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
     ) -> Union[
@@ -2246,6 +2261,7 @@ class Llama:
             logit_bias: A logit bias to use.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use.
+            grammar_lazy: If True, enables lazy evaluation.
 
         Returns:
             Generated chat completion or a stream of chat completion chunks.
@@ -2296,6 +2312,7 @@ class Llama:
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
+            grammar_lazy=grammar_lazy,
         )
 
     def create_chat_completion_openai_v1(
