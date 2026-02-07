@@ -746,7 +746,7 @@ class llama_model_params(ctypes.Structure):
 
     if TYPE_CHECKING:
         devices: CtypesArray[ctypes.c_void_p]  # NOTE: unused
-        tensor_buft_overrides: ctypes.POINTER(llama_model_tensor_buft_override)
+        tensor_buft_overrides: CtypesPointer[llama_model_tensor_buft_override]
         n_gpu_layers: int
         split_mode: int
         main_gpu: int
@@ -1392,10 +1392,10 @@ class llama_params_fit_status(enum.IntEnum):
 )
 def llama_params_fit(
     path_model: ctypes.c_char_p,
-    mparams: llama_model_params_p,
-    cparams: llama_context_params_p,
-    tensor_split: ctypes.pointer(ctypes.c_float),
-    tensor_buft_overrides: ctypes.pointer(llama_model_tensor_buft_override),
+    mparams: CtypesPointer[llama_model_params],
+    cparams: CtypesPointer[llama_context_params],
+    tensor_split: CtypesPointer[ctypes.c_float],
+    tensor_buft_overrides: CtypesPointer[llama_model_tensor_buft_override],
     margin: ctypes.c_size_t,
     n_ctx_min: ctypes.c_uint32,
     log_level: int,
@@ -1989,7 +1989,7 @@ def llama_adapter_get_alora_n_invocation_tokens(adapter: llama_adapter_lora_p, /
     [llama_adapter_lora_p_ctypes],
     ctypes.c_uint64,
 )
-def llama_adapter_get_alora_invocation_tokens(adapter: llama_adapter_lora_p, /) -> llama_token_p:
+def llama_adapter_get_alora_invocation_tokens(adapter: llama_adapter_lora_p, /) -> CtypesPointer[llama_token]:
     ...
 
 
@@ -2720,7 +2720,7 @@ def llama_state_seq_get_size_ext(
 )
 def llama_state_seq_get_data_ext(
     ctx: llama_context_p,
-    dst: ctypes.POINTER(ctypes.c_uint8),
+    dst: CtypesPointer[ctypes.c_uint8],
     size: Union[int, ctypes.c_size_t],
     seq_id: llama_seq_id,
     flags: llama_state_seq_flags,
@@ -2748,7 +2748,7 @@ def llama_state_seq_get_data_ext(
 )
 def llama_state_seq_set_data_ext(
     ctx: llama_context_p,
-    src: ctypes.POINTER(ctypes.c_uint8),
+    src: CtypesPointer[ctypes.c_uint8],
     size: Union[int, ctypes.c_size_t],
     dest_seq_id: llama_seq_id,
     flags: llama_state_seq_flags,
@@ -3008,7 +3008,7 @@ def llama_get_logits(ctx: llama_context_p, /) -> CtypesArray[ctypes.c_float]:
 )
 def llama_get_logits_ith(
     ctx: llama_context_p, i: ctypes.c_int32, /
-) -> ctypes.POINTER(ctypes.c_float):
+) -> CtypesPointer[ctypes.c_float]:
     """Logits for the ith token. Equivalent to:
     llama_get_logits(ctx) + ctx->output_ids[i]*n_vocab"""
     ...
@@ -3835,7 +3835,7 @@ def llama_chat_apply_template(
     ctypes.c_int32,
 )
 def llama_chat_builtin_templates(
-    output: CtypesArray[bytes],
+    output: CtypesArray[ctypes.c_char_p],
     len: Union[ctypes.c_size_t, int],
     /,
 ) -> int:
@@ -3945,8 +3945,93 @@ class llama_sampler_data(ctypes.Structure):
 #     // called before graph execution to set inputs for the current ubatch
 #     void (*backend_set_input)(struct llama_sampler * smpl);
 # };
+
+# const char * (*name)(const struct llama_sampler * smpl);
+llama_sampler_name_fn = ctypes.CFUNCTYPE(
+    ctypes.c_char_p,    # return type
+    ctypes.c_void_p     # smpl
+)
+
+# void (*accept)(struct llama_sampler * smpl, llama_token token);
+llama_sampler_accept_fn = ctypes.CFUNCTYPE(
+    None,                      # return void
+    ctypes.c_void_p,           # smpl
+    llama_token                # token
+)
+
+# void (*apply)(struct llama_sampler * smpl, llama_token_data_array * cur_p);
+llama_sampler_apply_fn = ctypes.CFUNCTYPE(
+    None,                                  # return void
+    ctypes.c_void_p,                       # smpl
+    ctypes.POINTER(llama_token_data_array) # cur_p
+)
+
+# void (*reset)(struct llama_sampler * smpl);
+llama_sampler_reset_fn = ctypes.CFUNCTYPE(
+    None,               # return void
+    ctypes.c_void_p     # smpl
+)
+
+# struct llama_sampler * (*clone)(const struct llama_sampler * smpl);
+llama_sampler_clone_fn = ctypes.CFUNCTYPE(
+    ctypes.c_void_p,    # return struct llama_sampler *
+    ctypes.c_void_p     # smpl (const ignored in ctypes)
+)
+
+# void (*free)(struct llama_sampler * smpl);
+llama_sampler_free_fn = ctypes.CFUNCTYPE(
+    None,               # return void
+    ctypes.c_void_p     # smpl
+)
+
+# --- EXPERIMENTAL Backend Sampling Interface ---
+
+# bool (*backend_init)(struct llama_sampler * smpl, ggml_backend_buffer_type_t buft);
+llama_sampler_backend_init_fn = ctypes.CFUNCTYPE(
+    ctypes.c_bool,        # return bool
+    ctypes.c_void_p,      # smpl
+    ctypes.c_void_p       # buft
+)
+
+# void (*backend_accept)(struct llama_sampler * smpl, struct ggml_context * ctx, struct ggml_cgraph * gf, struct ggml_tensor * selected_token);
+llama_sampler_backend_accept_fn = ctypes.CFUNCTYPE(
+    None,                  # return void
+    ctypes.c_void_p,       # smpl
+    ctypes.c_void_p,       # ctx
+    ctypes.c_void_p,       # gf
+    ctypes.c_void_p        # selected_token
+)
+
+# void (*backend_apply)(struct llama_sampler * smpl, struct ggml_context * ctx, struct ggml_cgraph * gf, struct llama_sampler_data * data);
+llama_sampler_backend_apply_fn = ctypes.CFUNCTYPE(
+    None,                              # return void
+    ctypes.c_void_p,                   # smpl
+    ctypes.c_void_p,                   # ctx
+    ctypes.c_void_p,                   # gf
+    ctypes.POINTER(llama_sampler_data) # data
+)
+
+# void (*backend_set_input)(struct llama_sampler * smpl);
+llama_sampler_backend_set_input_fn = ctypes.CFUNCTYPE(
+    None,              # return void
+    ctypes.c_void_p    # smpl
+)
+
 class llama_sampler_i(ctypes.Structure):
-    ...
+    _fields_ = [
+        ("name",           llama_sampler_name_fn),
+        ("accept",         llama_sampler_accept_fn),
+        ("apply",          llama_sampler_apply_fn),
+        ("reset",          llama_sampler_reset_fn),
+        ("clone",          llama_sampler_clone_fn),
+        ("free",           llama_sampler_free_fn),
+
+        # [EXPERIMENTAL] Backend sampling interface
+        ("backend_init",      llama_sampler_backend_init_fn),
+        ("backend_accept",    llama_sampler_backend_accept_fn),
+        ("backend_apply",     llama_sampler_backend_apply_fn),
+        ("backend_set_input", llama_sampler_backend_set_input_fn),
+    ]
 
 
 # struct llama_sampler {
@@ -3964,35 +4049,6 @@ if TYPE_CHECKING:
     llama_sampler_p = CtypesPointer[llama_sampler]
 
 llama_sampler_p_ctypes = ctypes.POINTER(llama_sampler)
-
-llama_sampler_i_name = ctypes.CFUNCTYPE(ctypes.c_char_p, llama_sampler_p_ctypes)
-llama_sampler_i_accept = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes, llama_token)
-llama_sampler_i_apply = ctypes.CFUNCTYPE(
-    None, llama_sampler_p_ctypes, llama_token_data_array_p)
-llama_sampler_i_reset = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes)
-llama_sampler_i_clone = ctypes.CFUNCTYPE(llama_sampler_p_ctypes, llama_sampler_p_ctypes)
-llama_sampler_i_free = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes)
-
-llama_sampler_i_backend_init = ctypes.CFUNCTYPE(
-    ctypes.c_bool, llama_sampler_p_ctypes, ctypes.c_void_p)
-llama_sampler_i_backend_accept = ctypes.CFUNCTYPE(
-    None, llama_sampler_p_ctypes, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-llama_sampler_i_backend_apply = ctypes.CFUNCTYPE(
-    None, llama_sampler_p_ctypes, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p)
-llama_sampler_i_backend_set_input = ctypes.CFUNCTYPE(None, llama_sampler_p_ctypes)
-
-llama_sampler_i._fields_ = [
-    ("name", llama_sampler_i_name),
-    ("accept", llama_sampler_i_accept),
-    ("apply", llama_sampler_i_apply),
-    ("reset", llama_sampler_i_reset),
-    ("clone", llama_sampler_i_clone),
-    ("free", llama_sampler_i_free),
-    ("backend_init", llama_sampler_i_backend_init),
-    ("backend_accept", llama_sampler_i_backend_accept),
-    ("backend_apply", llama_sampler_i_backend_apply),
-    ("backend_set_input", llama_sampler_i_backend_set_input),
-]
 
 
 # // [EXPERIMENTAL]
@@ -4024,7 +4080,7 @@ def llama_set_sampler(
     llama_sampler_p_ctypes,
 )
 def llama_sampler_init(
-    iface: ctypes.pointer(llama_sampler_i), ctx: llama_sampler_context_t, /
+    iface: CtypesPointer[llama_sampler_i], ctx: llama_sampler_context_t, /
 ) -> llama_sampler_p:
     ...
 
