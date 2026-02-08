@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.24]
+- feat: [Refactor sampling infrastructure to use llama.cpp sampler chain API](https://github.com/JamePeng/llama-cpp-python/commit/1df39b422890db55cb9f6de43cb792a26921752e)
+    - LlamaContext: Remove obsolete manual sampling methods.
+
+    - LlamaSampler: Wrap C++ sampler chain; add support for DRY, XTC, Adaptive-P, and lazy grammar.`add_grammar` merged the processing branches for regular grammar and lazy grammar.
+
+    - LlamaSamplingContext: Update to build and manage sampler chains instead of manual logic.
+
+    - CustomSampler: Rewrite for proper C-struct lifecycle management and ABI compatibility.
+
+    - Optimizations: Simplified redundant handling and variable usage.
+
+- feat: Optimize the method definition of class llama_sampler_i and CtypesPointer definition
+
+- feat: [refactor LlamaSamplingParams class](https://github.com/JamePeng/llama-cpp-python/commit/2ebd4808c132c6c4ab561c60b25145bee7453999)
+    - base on llama.cpp/common/common.h
+    - support more sampler params
+
+- feat: [implement generative reranking with chat template support](https://github.com/JamePeng/llama-cpp-python/commit/79500ec2f5ec6ba4c83de21d61cb5a420271b8e2)
+    - Chat Template Support: Support for rerank templates has been introduced (via `llama_model_chat_template(model, b"rerank")`), which can automatically populate the query and document into a specific format.
+    - Now support Qwen3-Reranker series model(Non-Vision)
+    - Update README.md for Qwen3-Reranker
+
+- feat: Update README.md for python 3.14 and HIP (ROCm) guide
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/b83111815e9a79949257e9d4b087206b320a3063](https://github.com/ggml-org/llama.cpp/commit/b83111815e9a79949257e9d4b087206b320a3063)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260208
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/9b985b75105ea9f5e7f2f5e7988a1149f233af2f...acb7efa09293cffa5912242c372b715555e2a884
+
 ## [0.3.23]
 - feat: [Implement MiniCPMv45ChatHandler for MiniCPM-V 4.5 with multi-image tracking](https://github.com/JamePeng/llama-cpp-python/commit/83d5839b136a62a2ccac3feabe4eec1dbced961b)
 
