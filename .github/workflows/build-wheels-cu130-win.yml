@@ -78,14 +78,14 @@ jobs:
             $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX512=off'
           }
           if ($env:AVXVER -eq 'AVXVNNI') {
-           $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX_VNNI=on'
+            $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX_VNNI=on'
           }
           # if ($env:AVXVER -eq 'AVX512') {
           #  $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX512=on'
           # }
           # Basic options for compiling without AVX instructions
-          if ($env:AVXVER -eq 'Basic') {
-           $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off'
+          if ($env:AVXVER -eq 'Basic') {'
+            $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_NATIVE=off -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX_VNNI=off -DGGML_AVX512=off -DGGML_AVX512_VBMI=off -DGGML_AVX512_VNNI=off -DGGML_AVX512_BF16=off -DGGML_FMA=off -DGGML_F16C=off'
           }
           python -m build --wheel
 

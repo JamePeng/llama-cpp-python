@@ -80,7 +80,7 @@ jobs:
           # fi
           # Basic options for compiling without AVX instructions
           if [ "${AVXVER}" = "Basic" ]; then
-            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off"
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_NATIVE=off -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX_VNNI=off -DGGML_AVX512=off -DGGML_AVX512_VBMI=off -DGGML_AVX512_VNNI=off -DGGML_AVX512_BF16=off -DGGML_FMA=off -DGGML_F16C=off"
           fi
 
           # Export CMAKE_ARGS environment variable so the python -m build command can use it
