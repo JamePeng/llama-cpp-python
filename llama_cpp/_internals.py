@@ -826,7 +826,7 @@ class LlamaSamplingParams:
             CommonSamplerType.PENALTIES,
             CommonSamplerType.DRY,
             CommonSamplerType.TOP_N_SIGMA,
-            CommonSamplerType.CUSTOM,
+            # CommonSamplerType.CUSTOM,  # When logits_processor is used, CommonSamplerType.CUSTOM is automatically injected into the samplers.
             CommonSamplerType.TOP_K,
             CommonSamplerType.TYPICAL_P,
             CommonSamplerType.TOP_P,
@@ -851,7 +851,7 @@ class LlamaSamplingParams:
     def print_params(self) -> str:
         result = (
             f"\trepeat_last_n = {self.penalty_last_n}, repeat_penalty = {self.penalty_repeat:.3f}, "
-            f"frequency_penalty = {self.penalty_freq:.3f}, presence_penalty = {self.penalty_present:.3f}\n"
+            f"frequency_penalty = {self.penalty_freq:.3f}, present_penalty = {self.penalty_present:.3f}\n"
 
             f"\tdry_multiplier = {self.dry_multiplier:.3f}, dry_base = {self.dry_base:.3f}, "
             f"dry_allowed_length = {self.dry_allowed_length}, dry_penalty_last_n = {self.dry_penalty_last_n}\n"
@@ -917,12 +917,9 @@ class LlamaSamplingContext:
 
         # --- 3. Grammar / Syntax Constraints ---
         if p.grammar and m:
-            # Use "root" as default rule name if not specified
-            root_rule = "root"
             s.add_grammar(
                 model=m,
                 grammar_str=p.grammar,
-                root=root_rule,
                 lazy=p.grammar_lazy,
                 triggers=p.grammar_triggers
             )
@@ -1220,7 +1217,7 @@ class LlamaSampler:
     def add_grammar(
         self,
         model: LlamaModel,
-        grammar: LlamaGrammar,
+        grammar_str: str,
         lazy: bool = False,
         triggers: List[Union[str, int]] = None
     ):
@@ -1232,8 +1229,8 @@ class LlamaSampler:
             lazy: If True, enables lazy evaluation.
             triggers: List of trigger words (str) or tokens (int) for lazy evaluation.
         """
-        c_grammar_str = grammar._grammar.encode('utf-8')
-        c_root = grammar._root.encode('utf-8')
+        c_grammar_str = grammar_str.encode('utf-8')
+        c_root = "root".encode('utf-8')
 
         if not lazy:
             self._add_sampler(llama_cpp.llama_sampler_init_grammar(

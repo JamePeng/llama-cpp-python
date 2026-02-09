@@ -273,7 +273,7 @@ number of tokens in prompt = {len(self.embd_inp)}""",
         print(
             f"""sampling: repeat_last_n = {self.params.repeat_last_n},\
 repeat_penalty = {self.params.repeat_penalty},\
-presence_penalty = {self.params.presence_penalty},\
+present_penalty = {self.params.present_penalty},\
 frequency_penalty = {self.params.frequency_penalty},\
 top_k = {self.params.top_k},\
 top_n_sigma  = {self.params.top_n_sigma},\
@@ -471,13 +471,13 @@ n_keep = {self.params.n_keep}
                     penalty_last_n=last_n_repeat,
                     penalty_repeat=llama_cpp.c_float(self.params.repeat_penalty),
                     penalty_freq=llama_cpp.c_float(self.params.frequency_penalty),
-                    penalty_present=llama_cpp.c_float(self.params.presence_penalty),
+                    penalty_present=llama_cpp.c_float(self.params.present_penalty),
                 )
 
                 # NOT PRESENT IN CURRENT VERSION ?
-                # llama_cpp.llama_sample_frequency_and_presence_penalti(self.ctx, candidates_p,
+                # llama_cpp.llama_sample_frequency_and_present_penalty(self.ctx, candidates_p,
                 # 	_arr,
-                # 	last_n_repeat, llama_cpp.c_float(self.params.frequency_penalty), llama_cpp.c_float(self.params.presence_penalty))
+                # 	last_n_repeat, llama_cpp.c_float(self.params.frequency_penalty), llama_cpp.c_float(self.params.present_penalty))
 
                 if self.params.temp <= 0:
                     # Greedy sampling

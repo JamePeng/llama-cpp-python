@@ -1,15 +1,14 @@
 import ctypes
 import multiprocessing
-
+import os
+import pytest
 import numpy as np
 from scipy.special import log_softmax
-
 from huggingface_hub import hf_hub_download
-
-import pytest
 
 import llama_cpp
 import llama_cpp._internals as internals
+from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 
 from typing import (
     List,
@@ -25,6 +24,10 @@ def test_llama_cpp_version():
 
 
 def test_llama_cpp_tokenization():
+    """
+    Test the tokenizer API (Llama.tokenize and Llama.detokenize).
+    Verifies handling of BOS (Begin of Sentence), EOS (End of Sentence), and special tokens.
+    """
     llama = llama_cpp.Llama(model_path=MODEL, vocab_only=True, verbose=False)
 
     assert llama
@@ -63,6 +66,7 @@ def test_llama_cpp_tokenization():
 
 @pytest.fixture
 def llama_cpp_model_path():
+    """Fixture to download a real GGUF model for integration tests."""
     repo_id = "Qwen/Qwen2-0.5B-Instruct-GGUF"
     filename = "qwen2-0_5b-instruct-q8_0.gguf"
     model_path = hf_hub_download(repo_id, filename)
@@ -70,17 +74,23 @@ def llama_cpp_model_path():
 
 
 def test_real_model(llama_cpp_model_path):
-    import os
+    """
+    Test the Low-Level API (internals.*).
+    This manually constructs the Model, Context, Batch, and Sampler Chain.
+    """
     assert os.path.exists(llama_cpp_model_path)
 
+    # 1. Setup Model Parameters
     params = llama_cpp.llama_model_default_params()
     params.use_mmap = llama_cpp.llama_supports_mmap()
     params.use_direct_io = False
     params.use_mlock = llama_cpp.llama_supports_mlock()
     params.check_tensors = False
 
+    # 2. Load the Model
     model = internals.LlamaModel(path_model=llama_cpp_model_path, params=params)
 
+    # 3. Setup Context Parameters
     cparams = llama_cpp.llama_context_default_params()
     cparams.n_ctx = 16
     cparams.n_batch = 16
@@ -90,11 +100,13 @@ def test_real_model(llama_cpp_model_path):
     cparams.swa_full = True
     cparams.kv_unified = True
 
+    # 4. Create the Context
     context = internals.LlamaContext(model=model, params=cparams)
     tokens = model.tokenize(b"Hello, world!", add_bos=True, special=True)
 
     assert tokens == [9707, 11, 1879, 0]
 
+    # New prompt for generation test
     tokens = model.tokenize(b"The quick brown fox jumps", add_bos=True, special=True)
 
     batch = internals.LlamaBatch(n_tokens=len(tokens), embd=0, n_seq_max=1)
@@ -106,18 +118,31 @@ def test_real_model(llama_cpp_model_path):
     sampler.add_temp(0.8)
     sampler.add_dist(seed)
 
-    result = tokens
+    result = list(tokens)
     n_eval = 0
-    for _ in range(4):
-        batch.set_batch(tokens, n_past=n_eval, logits_all=False)
-        context.decode(batch)
-        n_eval += len(tokens)
-        token_id = sampler.sample(context, -1)
-        tokens = [token_id]
-        result += tokens
+    curr_tokens = tokens
 
-    output = result[5:]
+    for _ in range(4):
+        # Prepare batch with current tokens
+        batch.set_batch(curr_tokens, n_past=n_eval, logits_all=False)
+
+        # Decode (run inference)
+        context.decode(batch)
+        n_eval += len(curr_tokens)
+
+        # Sample the next token (index -1 means the last token in the batch)
+        token_id = sampler.sample(context, -1)
+
+        # Accept the token to update internal sampler state
+        sampler.accept(token_id)
+
+        # Update loop variables
+        curr_tokens = [token_id]
+        result.append(token_id)
+
+    output = result[len(tokens):]
     output_text = model.detokenize(output, special=True)
+    print(output_text)
     assert output_text == b" over the lazy dog"
 
 def test_real_llama(llama_cpp_model_path):
@@ -225,17 +250,13 @@ root ::= "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10"
 
 
 def test_real_llama_embeddings(llama_cpp_model_path):
-    model = llama_cpp.Llama(
-        llama_cpp_model_path,
-        n_ctx=32,
-        n_batch=32,
-        n_ubatch=32,
-        n_threads=multiprocessing.cpu_count(),
-        n_threads_batch=multiprocessing.cpu_count(),
-        logits_all=False,
-        embeddings=True,
-        kv_unified=True,
-        swa_full=True,
-    )
+    model = LlamaEmbedding(
+         model_path=llama_cpp_model_path,
+         n_ctx=32,
+         n_batch=32,
+         n_ubatch=32,
+         pooling_type=LLAMA_POOLING_TYPE_NONE)
     # Smoke test for now
-    model.embed("Hello World")
+    embeddings = model.embed("Hello, world!")
+    assert isinstance(embeddings, list)
+    assert len(embeddings) > 0

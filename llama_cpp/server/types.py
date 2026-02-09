@@ -68,7 +68,7 @@ repeat_penalty_field = Field(
     + "Repeat penalty is a hyperparameter used to penalize the repetition of token sequences during text generation. It helps prevent the model from generating repetitive or monotonous text. A higher value (e.g., 1.5) will penalize repetitions more strongly, while a lower value (e.g., 0.9) will be more lenient.",
 )
 
-presence_penalty_field = Field(
+present_penalty_field = Field(
     default=0.0,
     ge=-2.0,
     le=2.0,
@@ -132,7 +132,7 @@ class CreateCompletionRequest(BaseModel):
         ge=0,
         description="The number of logprobs to generate. If None, no logprobs are generated.",
     )
-    presence_penalty: Optional[float] = presence_penalty_field
+    present_penalty: Optional[float] = present_penalty_field
     frequency_penalty: Optional[float] = frequency_penalty_field
     logit_bias: Optional[Dict[str, float]] = Field(None)
     seed: Optional[int] = Field(None)
@@ -228,7 +228,7 @@ class CreateChatCompletionRequest(BaseModel):
     min_p: float = min_p_field
     stop: Optional[Union[str, List[str]]] = stop_field
     stream: bool = stream_field
-    presence_penalty: Optional[float] = presence_penalty_field
+    present_penalty: Optional[float] = present_penalty_field
     frequency_penalty: Optional[float] = frequency_penalty_field
     logit_bias: Optional[Dict[str, float]] = Field(None)
     seed: Optional[int] = Field(None)

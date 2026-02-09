@@ -55,7 +55,7 @@ n_batch = 24
 last_n_repeat = 64
 repeat_penalty = 1
 frequency_penalty = 0.0
-presence_penalty = 0.0
+present_penalty = 0.0
 
 while remaining_tokens > 0:
     if len(embd) > 0:
@@ -90,7 +90,7 @@ while remaining_tokens > 0:
             penalty_last_n=last_n_repeat,
             penalty_repeat=repeat_penalty,
             penalty_freq=frequency_penalty,
-            penalty_present=presence_penalty,
+            penalty_present=present_penalty,
         )
 
         llama_cpp.llama_sample_top_k(ctx, candidates_p, k=40, min_keep=1)
