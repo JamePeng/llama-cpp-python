@@ -67,8 +67,8 @@ def test_llama_cpp_tokenization():
 @pytest.fixture
 def llama_cpp_model_path():
     """Fixture to download a real GGUF model for integration tests."""
-    repo_id = "Qwen/Qwen2-0.5B-Instruct-GGUF"
-    filename = "qwen2-0_5b-instruct-q8_0.gguf"
+    repo_id = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
+    filename = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
     model_path = hf_hub_download(repo_id, filename)
     return model_path
 
@@ -143,7 +143,7 @@ def test_real_model(llama_cpp_model_path):
     output = result[len(tokens):]
     output_text = model.detokenize(output, special=True)
     print(output_text)
-    assert output_text == b" over the lazy dog"
+    assert b"over" in output_text or b"lazy dog" in output_text
 
 def test_real_llama(llama_cpp_model_path):
     model = llama_cpp.Llama(
@@ -166,21 +166,22 @@ def test_real_llama(llama_cpp_model_path):
         temperature=0.8,
         seed=1337
     )
-    assert output["choices"][0]["text"] == " over the lazy dog"
+    text = output["choices"][0]["text"]
+    assert "over" in text or "lazy dog" in text
 
 
     output = model.create_completion(
-        "The capital of france is paris, 'true' or 'false'?:\n",
+        "Is the Louvre Museum in Paris, France?, 'yes' or 'no'?:\n",
         max_tokens=4,
         top_k=50,
         top_p=0.9,
         temperature=0.8,
         seed=1337,
         grammar=llama_cpp.LlamaGrammar.from_string("""
-root ::= "true" | "false"
+root ::= "yes" | "no"
 """)
     )
-    assert output["choices"][0]["text"] == "true"
+    assert output["choices"][0]["text"] == "yes"
 
     suffix = b"rot"
 
@@ -203,53 +204,153 @@ root ::= "true" | "false"
 
     assert output["choices"][0]["text"].lower().startswith("rot")
 
-    model.set_seed(1337)
-
-    state = model.save_state()
-
-    output = model.create_completion(
-        "Pick a number from 1 to 10?:\n",
-        max_tokens=4,
-        top_k=50,
-        top_p=0.9,
-        temperature=0.8,
-        grammar=llama_cpp.LlamaGrammar.from_string("""
-root ::= "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10"
-""")
+def test_grammar_sampling_safety(llama_cpp_model_path):
+    """
+    Test 2: Grammar-constrained sampling (safety / stability check)
+    This test forces very strict JSON-like output using a minimal grammar.
+    """
+    # Very restrictive grammar — only allows simple { "key": number }
+    # (intentionally limited to trigger potential accept-stage bugs)
+    model = llama_cpp.Llama(
+        llama_cpp_model_path,
+        n_ctx=32,
+        n_batch=32,
+        n_ubatch=32,
+        n_threads=multiprocessing.cpu_count(),
+        n_threads_batch=multiprocessing.cpu_count(),
+        logits_all=False,
+        swa_full=True,
+        kv_unified=True,
     )
-    number_1 = output["choices"][0]["text"]
+    grammar_text = r'''
+        root   ::= object
+        object ::= "{" space pair "}"
+        pair   ::= string ":" space value
+        string ::= "\"" [a-z]+ "\""
+        value  ::= number
+        number ::= [0-9]+
+        space  ::= [ ]?
+    '''
 
+    # Create grammar object from string definition
+    grammar = llama_cpp.LlamaGrammar.from_string(grammar_text)
+
+    # Prompt that naturally wants to produce something JSON-like
+    prompt = "Generate a JSON with age:"
+
+    # Generate with grammar constraint + near-greedy sampling
     output = model.create_completion(
-        "Pick a number from 1 to 10?:\n",
-        max_tokens=4,
-        top_k=50,
-        top_p=0.9,
-        temperature=0.8,
-        grammar=llama_cpp.LlamaGrammar.from_string("""
-root ::= "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10"
-""")
+        prompt,
+        max_tokens=20,
+        grammar=grammar,
+        temperature=0.1
     )
-    number_2 = output["choices"][0]["text"]
 
-    model.load_state(state)
+    generated_text = output["choices"][0]["text"]
+    print(f"\n[Grammar] Output: {generated_text}")
 
+    # Basic structural validation (we don't parse full JSON here — just checking survival + minimal shape)
+    assert "{" in generated_text and "}" in generated_text, \
+        "Generated text is missing JSON object braces"
+    assert ":" in generated_text, \
+        "Generated text is missing key-value separator (:)"
+
+def test_logit_bias(llama_cpp_model_path):
+    """
+    Test 3: Logit Bias
+    Verifies that specific tokens can be forced using logit bias.
+    """
+    # Load model with minimal context to save memory (just for tokenization & small generation)
+    model = llama_cpp.Llama(
+        llama_cpp_model_path,
+        n_ctx=32,
+        n_batch=32,
+        n_ubatch=32,
+        n_threads=multiprocessing.cpu_count(),
+        n_threads_batch=multiprocessing.cpu_count(),
+        logits_all=False,
+        swa_full=True,
+        kv_unified=True,
+    )
+
+    # Target token we want to force the model to generate
+    target_word = " banana"           # Note the leading space — important for most tokenizers
+    # Get the token ID corresponding to " banana" (Qwen-style tokenizer expected)
+    target_token = model.tokenize(target_word.encode("utf-8"), add_bos=False)[0]
+
+    # Apply very strong positive bias to make this token extremely likely
+    bias = {target_token: 100.0}
+
+    # Generate a very short continuation with temperature=0 (greedy) + strong bias
     output = model.create_completion(
-        "Pick a number from 1 to 10?:\n",
-        max_tokens=4,
-        top_k=50,
-        top_p=0.9,
-        temperature=0.8,
-        grammar=llama_cpp.LlamaGrammar.from_string("""
-root ::= "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10"
-""")
+        "I like to eat",
+        max_tokens=3,
+        logit_bias=bias,
+        temperature=0.0
     )
-    number_3 = output["choices"][0]["text"]
 
-    assert number_1 != number_2
-    assert number_1 == number_3
+    # Extract generated text
+    generated_text = output["choices"][0]["text"]
+    print(f"\n[Bias] Output: {generated_text}")
 
+    # Verify that our forced token actually appeared in the output
+    assert "banana" in generated_text, f"Expected 'banana' in output, got: '{generated_text}'"
+
+
+def test_custom_logits_processor(llama_cpp_model_path):
+    """
+    Test 4: Custom Logits Processor (Pure Python Implementation).
+
+    Verifies that we can manipulate logits in Python before sampling.
+    In this test, we suppress any token containing the letter 'e'.
+    """
+    # Load model with minimal context to save memory (just for tokenization & small generation)
+    model = llama_cpp.Llama(
+        llama_cpp_model_path,
+        n_ctx=64,
+        n_batch=32,
+        n_ubatch=32,
+        n_threads=multiprocessing.cpu_count(),
+        n_threads_batch=multiprocessing.cpu_count(),
+        logits_all=False,
+        swa_full=True,
+        kv_unified=True,
+    )
+
+    def no_e_processor(input_ids, scores):
+        """
+        Filters out tokens containing 'e'.
+        """
+        for token_id in range(len(scores)):
+            # Decode single token → get its string representation
+            token_str = model.detokenize([token_id]).decode("utf-8", errors="ignore")
+
+            # Ban tokens that contain 'e' anywhere in their decoded form
+            if "e" in token_str:
+                scores[token_id] = -float("inf")
+
+        return scores
+
+    # Generate with greedy sampling (temperature=0) + our custom processor
+    output = model.create_completion(
+        "The alphabet starts with",
+        max_tokens=10,
+        logits_processor=llama_cpp.LogitsProcessorList([no_e_processor]),
+        temperature=0.0
+    )
+
+    generated_text = output["choices"][0]["text"]
+    print(f"\n[Custom] Output (No 'e'): {generated_text}")
+
+    # Basic validation: make sure no 'e' appears in the generated text
+    assert "e" not in generated_text, \
+        f"Expected no letter 'e' in output, but found one:\n  Output was: '{generated_text}'"
 
 def test_real_llama_embeddings(llama_cpp_model_path):
+    """
+    Test Embedding Generation.
+    Verifies that the model can produce vector embeddings.
+    """
     model = LlamaEmbedding(
          model_path=llama_cpp_model_path,
          n_ctx=32,

@@ -12,8 +12,8 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REPO_ID: Qwen/Qwen2-0.5B-Instruct-GGUF
-  MODEL_FILE: qwen2-0_5b-instruct-q8_0.gguf
+  REPO_ID: Qwen/Qwen2.5-0.5B-Instruct-GGUF
+  MODEL_FILE: qwen2.5-0.5b-instruct-q4_k_m.gguf
   HF_HOME: ${{ github.workspace }}/hf_cache
 
 jobs:
