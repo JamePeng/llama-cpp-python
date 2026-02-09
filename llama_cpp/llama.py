@@ -1047,7 +1047,7 @@ class Llama:
             self.eval(tokens)
             while sample_idx < self.n_tokens:
                 token = self._sampling_ctx.sample(self._ctx, idx=-1)
-                self._sampling_ctx.accept(token)
+                self._sampling_ctx.accept(token, False if grammar is None else True)
 
                 sample_idx += 1
                 if stopping_criteria is not None and stopping_criteria(

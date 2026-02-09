@@ -4112,7 +4112,7 @@ def llama_sampler_accept(smpl: llama_sampler_p, token: Union[llama_token, int], 
     None,
 )
 def llama_sampler_apply(
-    smpl: llama_sampler_p, cur_p: CtypesArray[llama_token_data_array], /
+    smpl: llama_sampler_p, cur_p: CtypesPointer[llama_token_data_array], /
 ):
     ...
 
