@@ -11,20 +11,21 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-14, macos-15]
+        os: [macos-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v6
         with:
           submodules: "recursive"
 
-      # Used to host cibuildwheel
-      - uses: actions/setup-python@v5
+      - name: Setup Python
+        uses: actions/setup-python@v6
         with:
-          python-version: "3.12"
+          python-version: "3.13"
           cache: 'pip'
           
-      - name: Install dependencies (Linux/MacOS)
+      - name: Install dependencies (MacOS)
         run: |
           python -m pip install --upgrade pip
           python -m pip install uv
@@ -32,21 +33,36 @@ jobs:
         shell: bash
 
       - name: Build wheels
-        uses: pypa/cibuildwheel@v2.22.0
+        uses: pypa/cibuildwheel@v3.3.1
         env:
-          # disable repair
           CIBW_REPAIR_WHEEL_COMMAND: ""
           CIBW_ARCHS: "arm64"
-          CIBW_ENVIRONMENT: CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DGGML_METAL=on -DCMAKE_CROSSCOMPILING=ON"
-          CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-*"
+          CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          CIBW_ENVIRONMENT: >
+            CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64
+            -DCMAKE_APPLE_SILICON_PROCESSOR=arm64
+            -DCMAKE_CROSSCOMPILING=on
+            -DGGML_METAL=on
+            -DGGML_METAL_USE_BF16=on
+            -DGGML_METAL_EMBED_LIBRARY=off
+            -DGGML_METAL_SHADER_DEBUG=on
+            -DLLAMA_HTTPLIB=on"
         with:
           package-dir: .
           output-dir: wheelhouse2
 
-      - uses: actions/upload-artifact@v4
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
-          name: wheels-mac_${{ matrix.os }}
+          name: wheels-metal_${{ matrix.os }}
           path: ./wheelhouse2/*.whl
+
+      - name: Get Wheel Filename
+        run: |
+          WHEEL_FILE=$(ls wheelhouse2/*.whl | head -n 1)
+          FILENAME=$(basename "$WHEEL_FILE")
+          echo VERSION=$(echo "$FILENAME" | cut -d'-' -f2 | tr -d '[:space:]') >> $GITHUB_ENV
+
 
   release:
     name: Release
@@ -54,15 +70,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/download-artifact@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
         with:
           merge-multiple: true
           path: dist2
-          
-      - uses: softprops/action-gh-release@v2
+
+      - name: Get Current Date # Step to get current date for the release tag
+        id: get-date
+        run: |
+          # Get date in YYYYMMDD format using bash date command
+          currentDate=$(date +%Y%m%d)
+          # Store the date in environment variable for the release step
+          echo "BUILD_DATE=$currentDate" >> $GITHUB_ENV
+
+      - name: Publish Release
+        uses: softprops/action-gh-release@v2.2.2
         with:
           files: dist2/*
-          # set release name to <tag>-metal
-          tag_name: ${{ github.ref_name }}-metal
+          # set release name to v${VERSION}-metal-macos-${BUILD_DATE}
+          tag_name: v${{env.VERSION}}-metal-macos-${{env.BUILD_DATE}}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
