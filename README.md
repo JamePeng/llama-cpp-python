@@ -154,7 +154,7 @@ CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" pip install "llama-cpp-p
 To install with Metal (MPS), set the `GGML_METAL=on` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_METAL=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+CMAKE_ARGS="-DGGML_METAL=on -DGGML_METAL_USE_BF16=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 **Pre-built Wheel (New)**
@@ -162,12 +162,10 @@ CMAKE_ARGS="-DGGML_METAL=on" pip install "llama-cpp-python @ git+https://github.
 It is also possible to install a pre-built wheel with Metal support. As long as your system meets some requirements:
 
 - MacOS Version is 11.0 or later
-- Python Version is 3.10, 3.11 or 3.12
+- Python Version is 3.10, 3.11, 3.12, 3.13 or 3.14
 
-```bash
-pip install llama-cpp-python \
-  --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/metal
-```
+Check the releases page:
+https://github.com/JamePeng/llama-cpp-python/releases
 
 </details>
 
