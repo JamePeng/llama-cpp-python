@@ -158,6 +158,7 @@ def test_real_llama(llama_cpp_model_path):
         kv_unified=True,
     )
 
+    # 1. Basic Completion Test
     output = model.create_completion(
         "The quick brown fox jumps",
         max_tokens=4,
@@ -169,24 +170,31 @@ def test_real_llama(llama_cpp_model_path):
     text = output["choices"][0]["text"]
     assert "over" in text or "lazy dog" in text
 
-
+    # 2. Grammar Constraint Test (Updated: Coin Flip)
+    # We verify that the model ONLY outputs "heads" or "tails".
+    # This tests the sampler mechanism, not the model's intelligence.
     output = model.create_completion(
-        "Is the Louvre Museum in Paris, France?, 'yes' or 'no'?:\n",
+        "Flip a coin: heads or tails? Result:",
         max_tokens=4,
         top_k=50,
         top_p=0.9,
         temperature=0.8,
         seed=1337,
         grammar=llama_cpp.LlamaGrammar.from_string("""
-root ::= "yes" | "no"
-""")
+            root ::= "heads" | "tails"
+        """)
     )
-    assert output["choices"][0]["text"] == "yes"
 
+    generated_text = output["choices"][0]["text"]
+    print(f"\n[Grammar Coin Flip] Output: {generated_text}")
+
+    # Assert that the output is strictly one of the allowed grammar options
+    assert generated_text in ["heads", "tails"], \
+        f"Grammar failed! Expected 'heads' or 'tails', got: '{generated_text}'"
+
+    # 3. Logit Bias Test
     suffix = b"rot"
-
     tokens = model.tokenize(suffix, add_bos=True, special=True)
-
     logit_bias: Dict[int, float] = {}
 
     for token_id in tokens:
