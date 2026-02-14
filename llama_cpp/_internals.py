@@ -17,6 +17,7 @@ from typing import (
 )
 
 from dataclasses import dataclass, field
+from collections import deque
 from contextlib import ExitStack
 
 import numpy as np
@@ -871,14 +872,23 @@ class GrammarSampler:
 
     def __init__(self, model, grammar_str, lazy=False, triggers=None):
 
+        if model is None:
+            raise ValueError("model must not be None")
+
         self.model = model
         self.vocab = model.vocab
 
+        if not grammar_str:
+            raise ValueError("grammar_str must not be empty")
+
         self.grammar = llama_cpp.llama_sampler_init_grammar(
             self.vocab,
-            grammar_str.encode(),
+            grammar_str.encode("utf-8"),
             b"root"
         )
+
+        if not self.grammar:
+            raise RuntimeError("Failed to initialize grammar sampler")
 
     def apply(self, token_data):
         llama_cpp.llama_sampler_apply(self.grammar, token_data)
@@ -889,8 +899,22 @@ class GrammarSampler:
     def reset(self):
         llama_cpp.llama_sampler_reset(self.grammar)
 
-    def free(self):
-        llama_cpp.llama_sampler_free(self.grammar)
+    def close(self):
+        if self.grammar:
+            try:
+                llama_cpp.llama_sampler_free(self.grammar)
+            except Exception:
+                pass
+
+        self.model = None
+        self.vocab = None
+        self.grammar = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
 
 @dataclass
 class LlamaSamplingContext:
@@ -904,34 +928,49 @@ class LlamaSamplingContext:
         model: Optional[LlamaModel] = None,
         _existing_sampler: Optional[LlamaSampler] = None, # Internal use for cloning
     ):
-        self.params = params
+        if model is None:
+            raise RuntimeError("model must not be None")
         self.model = model
+
+        self.params = params
         self.vocab = llama_cpp.llama_model_get_vocab(model.model)
         self.n_vocab = model.n_vocab()
 
         lparams = llama_cpp.llama_sampler_chain_default_params()
         lparams.no_perf = params.no_perf
 
-        # Keep track of generated tokens for Python-side debugging/decoding
-        self.prev: List[int] = []
+        # history (bounded)
+        # params.sampling.n_prev = std::max(params.sampling.n_prev, params.sampling.penalty_last_n);
+        self.prev = deque(maxlen=max(params.n_prev, params.penalty_last_n))
+        # reusable token data array
         self._cur_p = LlamaTokenDataArray(n_vocab=self.n_vocab)
+        # reusable numpy logits view
+        self._logits_view = None
 
+        self._single_token = llama_cpp.llama_token_data()
+        self._single_array = llama_cpp.llama_token_data_array(
+            data=ctypes.pointer(self._single_token),
+            size=1,
+            selected=-1,
+            sorted=False,
+        )
+
+        # sampler chain
         if _existing_sampler:
-            # Use the provided sampler (already configured/cloned)
             self.sampler_chain = _existing_sampler
         else:
-            # Build a new chain from scratch
-            self.grammar_sampler = None
             self.sampler_chain = LlamaSampler()
-
-            if params.grammar is not None:
-                self.grammar_sampler = GrammarSampler(
-                    model,
-                    params.grammar,
-                    params.grammar_lazy,
-                    params.grammar_triggers
-                )
             self._build_sampler_chain()
+
+        # grammar sampler
+        self.grammar_sampler = None
+        if params.grammar:
+            self.grammar_sampler = GrammarSampler(
+                model,
+                params.grammar,
+                params.grammar_lazy,
+                params.grammar_triggers,
+            )
 
     def _build_sampler_chain(self):
         """
@@ -1029,9 +1068,13 @@ class LlamaSamplingContext:
         """
         Resets the internal state of all samplers in the chain.
         """
-        self.grammar_sampler.reset()
-        self.sampler_chain.reset()
-        self.prev = []
+        self.prev.clear()
+
+        if self.grammar_sampler:
+            self.grammar_sampler.reset()
+
+        if self.sampler_chain:
+            self.sampler_chain.reset()
 
     def cp(self) -> 'LlamaSamplingContext':
         """
@@ -1084,14 +1127,17 @@ class LlamaSamplingContext:
             return int(sampled)
 
         # 3. build cur_p
-        logits = llama_cpp.llama_get_logits_ith(ctx.ctx, idx)
+        logits_ptr = llama_cpp.llama_get_logits_ith(ctx.ctx, idx)
 
-        logits_array = np.ctypeslib.as_array(
-            logits,
-            shape=(self.n_vocab,)
-        )
+        if self._logits_view is None:
+            self._logits_view = np.ctypeslib.as_array(
+                logits_ptr,
+                shape=(self.n_vocab,),
+            )
 
+        logits_array = self._logits_view
         cur_p = self._cur_p
+
         cur_p.copy_logits(logits_array)
 
         # logit bias
@@ -1107,6 +1153,15 @@ class LlamaSamplingContext:
                 ctypes.byref(cur_p.candidates)
             )
 
+            llama_cpp.llama_sampler_apply(
+                self.sampler_chain.sampler,
+                ctypes.byref(cur_p.candidates)
+            )
+            # grammar-first return directly
+            selected = cur_p.candidates.selected
+            return int(cur_p.candidates_data.id[selected])
+
+
         # 5. sampling chain
         llama_cpp.llama_sampler_apply(
             self.sampler_chain.sampler,
@@ -1116,45 +1171,24 @@ class LlamaSamplingContext:
         selected = cur_p.candidates.selected
         token = int(cur_p.candidates_data.id[selected])
 
-        # 6. grammar-first return directly
-        if self.grammar_sampler and grammar_first:
-            return token
-
-        # 7. grammar rejection sampling
+        # 6. grammar rejection sampling
         if self.grammar_sampler:
 
-            single = llama_cpp.llama_token_data(
-                id=token,
-                logit=1.0,
-                p=0.0
-            )
-
-            single_arr = llama_cpp.llama_token_data_array(
-                data=ctypes.pointer(single),
-                size=1,
-                selected=-1,
-                sorted=False
-            )
+            self._single_token.id = token
+            self._single_token.logit = 1.0
+            self._single_token.p = 0.0
+            self._single_array.selected = -1
+            self._single_array.sorted = False
 
             llama_cpp.llama_sampler_apply(
                 self.grammar_sampler.grammar,
-                ctypes.byref(single_arr)
+                ctypes.byref(self._single_array)
             )
 
-            valid = not np.isneginf(single.logit)
-
-            if valid:
+            if not np.isneginf(self._single_token.logit):
                 return token
 
-
-            # 8. resample
-            logits = llama_cpp.llama_get_logits_ith(ctx.ctx, idx)
-
-            logits_array = np.ctypeslib.as_array(
-                logits,
-                shape=(self.n_vocab,)
-            )
-
+            # 7. resample
             cur_p.copy_logits(logits_array)
 
             llama_cpp.llama_sampler_apply(
@@ -1172,14 +1206,29 @@ class LlamaSamplingContext:
 
         return token
 
+    def close(self):
+        """
+        Clear samplers cache
+        """
+        if self.grammar_sampler:
+            self.grammar_sampler.close()
+            self.grammar_sampler = None
+
+        if self.sampler_chain:
+            self.sampler_chain.close()
+            self.sampler_chain = None
+
+    def __del__(self):
+        try:
+            self.close()
+        except Exception:
+            pass
+
     # --- Utilities ---
 
     def last(self) -> Optional[int]:
         """Returns the last sampled token."""
-        if len(self.prev) > 0:
-            return self.prev[-1]
-        else:
-            return None
+        return self.prev[-1] if self.prev else None
 
     def prev_str(self, ctx_main: LlamaContext, n: int) -> str:
         """
@@ -1189,9 +1238,9 @@ class LlamaSamplingContext:
         if not self.prev:
             return ""
         # Get the last n tokens
-        last_tokens = self.prev[-n:]
+        last_n_tokens = self.prev[-n:]
         # Use the model linked to the context to detokenize
-        return ctx_main.model.detokenize(last_tokens).decode("utf-8", errors="replace")
+        return ctx_main.model.detokenize(last_n_tokens).decode("utf-8", errors="replace")
 
 
 class CustomSampler:
