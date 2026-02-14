@@ -1996,52 +1996,22 @@ def llama_adapter_get_alora_invocation_tokens(adapter: llama_adapter_lora_p, /) 
 # // The following functions operate on a llama_context, hence the naming: llama_verb_...
 
 
-# // Add a loaded LoRA adapter to given context
-# // This will not modify model's weight
-# LLAMA_API int32_t llama_set_adapter_lora(
+# // Set LoRa adapters on the context. Will only modify if the adapters currently in context are different.
+# LLAMA_API int32_t llama_set_adapters_lora(
 #         struct llama_context * ctx,
-#         struct llama_adapter_lora * adapter,
-#         float scale);
+#         struct llama_adapter_lora ** adapters,
+#         size_t n_adapters,
+#         float * scales);
 @ctypes_function(
-    "llama_set_adapter_lora",
-    [llama_context_p_ctypes, llama_adapter_lora_p_ctypes, ctypes.c_float],
+    "llama_set_adapters_lora",
+    [llama_context_p_ctypes, ctypes.POINTER(llama_adapter_lora_p_ctypes), ctypes.c_size_t, ctypes.c_float],
     ctypes.c_int32,
 )
-def llama_set_adapter_lora(
-    ctx: llama_context_p, adapter: llama_adapter_lora_p, scale: float, /
+def llama_set_adapters_lora(
+    ctx: llama_context_p, adapters: CtypesArray[llama_adapter_lora_p], n_adapters: ctypes.c_size_t, scale: float, /
 ) -> int:
-    """Add a loaded LoRA adapter to given context
-    This will not modify model's weight"""
-    ...
-
-
-# // Remove a specific LoRA adapter from given context
-# // Return -1 if the adapter is not present in the context
-# LLAMA_API int32_t llama_rm_adapter_lora(
-#         struct llama_context * ctx,
-#         struct llama_adapter_lora * adapter);
-@ctypes_function(
-    "llama_rm_adapter_lora",
-    [llama_context_p_ctypes, llama_adapter_lora_p_ctypes],
-    ctypes.c_int32,
-)
-def llama_rm_adapter_lora(
-    ctx: llama_context_p, adapter: llama_adapter_lora_p, /
-) -> int:
-    """Remove a specific LoRA adapter from given context
-    Return -1 if the adapter is not present in the context"""
-    ...
-
-
-# // Remove all LoRA adapters from given context
-# LLAMA_API void llama_clear_adapter_lora(struct llama_context * ctx);
-@ctypes_function(
-    "llama_clear_adapter_lora",
-    [llama_context_p_ctypes],
-    None,
-)
-def llama_clear_adapter_lora(ctx: llama_context_p, /):
-    """Remove all LoRA adapters from given context"""
+    """Set LoRa adapters on the context.
+    Will only modify if the adapters currently in context are different."""
     ...
 
 
@@ -2051,15 +2021,15 @@ def llama_clear_adapter_lora(ctx: llama_context_p, /):
 # // to an n_embd x n_layers buffer starting from layer 1.
 # // il_start and il_end are the layer range the vector should apply to (both inclusive)
 # // See llama_control_vector_load in common to load a control vector.
-# LLAMA_API int32_t llama_apply_adapter_cvec(
+# LLAMA_API int32_t llama_set_adapter_cvec(
 #         struct llama_context * ctx,
-#                  const float * data,
-#                       size_t   len,
-#                      int32_t   n_embd,
-#                      int32_t   il_start,
-#                      int32_t   il_end);
+#                     const float * data,
+#                         size_t   len,
+#                         int32_t   n_embd,
+#                         int32_t   il_start,
+#                         int32_t   il_end);
 @ctypes_function(
-    "llama_apply_adapter_cvec",
+    "llama_set_adapter_cvec",
     [
         llama_context_p_ctypes,
         ctypes.POINTER(ctypes.c_float),
@@ -2070,7 +2040,7 @@ def llama_clear_adapter_lora(ctx: llama_context_p, /):
     ],
     ctypes.c_int32,
 )
-def llama_apply_adapter_cvec(
+def llama_set_adapter_cvec(
     ctx: llama_context_p,
     data: CtypesPointerOrRef[ctypes.c_float],
     len: int,
@@ -2079,12 +2049,14 @@ def llama_apply_adapter_cvec(
     il_end: int,
     /,
 ) -> int:
-    """Apply a loaded control vector to a llama_context, or if data is NULL, clear
+    """
+    Apply a loaded control vector to a llama_context, or if data is NULL, clear
     the currently loaded vector.
     n_embd should be the size of a single layer's control, and data should point
     to an n_embd x n_layers buffer starting from layer 1.
     il_start and il_end are the layer range the vector should apply to (both inclusive)
-    See llama_control_vector_load in common to load a control vector."""
+    See llama_control_vector_load in common to load a control vector.
+    """
     ...
 
 
