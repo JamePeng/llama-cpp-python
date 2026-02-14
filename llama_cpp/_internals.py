@@ -940,10 +940,22 @@ class LlamaSamplingContext:
         lparams.no_perf = params.no_perf
 
         # history (bounded)
+        # last n tokens to consider for penalize (default: %d, 0 = disabled, -1 = ctx_size)
+        if self.params.penalty_last_n == -1:
+            # full context
+            self.params.penalty_last_n = self.model.n_ctx_train()
+
         # params.sampling.n_prev = std::max(params.sampling.n_prev, params.sampling.penalty_last_n);
-        self.prev = deque(maxlen=max(params.n_prev, params.penalty_last_n))
+        if self.params.penalty_last_n > 0:
+            self.params.n_prev = max(
+                self.params.n_prev,
+                self.params.penalty_last_n
+            )
+        self.prev = deque(maxlen=max(self.params.n_prev, 32))
+
         # reusable token data array
         self._cur_p = LlamaTokenDataArray(n_vocab=self.n_vocab)
+
         # reusable numpy logits view
         self._logits_view = None
 
