@@ -638,6 +638,10 @@ class Llama:
 
     @property
     def _scores(self) -> npt.NDArray[np.single]:
+        if not self._logits_all:
+            raise RuntimeError(
+                "Llama model must be created with logits_all=True to call this method"
+            )
         return self.scores[: self.n_tokens, :]
 
     @property
@@ -646,6 +650,10 @@ class Llama:
 
     @property
     def eval_logits(self) -> Deque[List[float]]:
+        if not self._logits_all:
+            raise RuntimeError(
+                "Llama model must be created with logits_all=True to call this method"
+            )
         return deque(
             self.scores[: self.n_tokens, :].tolist(),
             maxlen=self._n_ctx if self._logits_all else 1,
@@ -2434,10 +2442,11 @@ prompt: The prompt to generate text from.
         )
 
     def load_state(self, state: LlamaState) -> None:
-        # Only filling in up to `n_tokens` and then zero-ing out the rest
-        self.scores[: state.n_tokens, :] = state.scores.copy()
-        rest = self.scores[state.n_tokens :, :]
-        rest[rest > 0] = 0.0
+        if self._logits_all:
+            # Only filling in up to `n_tokens` and then zero-ing out the rest
+            self.scores[: state.n_tokens, :] = state.scores.copy()
+            rest = self.scores[state.n_tokens :, :]
+            rest[rest > 0] = 0.0
         self.input_ids = state.input_ids.copy()
         self.n_tokens = state.n_tokens
         self._seed = state.seed
