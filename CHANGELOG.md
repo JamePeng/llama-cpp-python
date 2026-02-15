@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.25]
+- feat: [Refactor Llama class to use new LlamaSampler chain API from _internals](https://github.com/JamePeng/llama-cpp-python/commit/1e6094a327f0fb9dc35d52f84d8ebabc1faa1e95)
+This commit refactors the high-level Llama class to fully utilize the new C++ `llama_sampler` chain architecture via `LlamaSamplingContext`.
+    - Replaced manual sampling logic and obsolete `_init_sampler` with `LlamaSamplingContext`.
+    - Updated `sample()` and `generate()` to support the full suite of modern sampling strategies (DRY, XTC, Adaptive-P, Infill, etc.).
+    - Added new sampling parameters to all generation methods (`create_completion`, `create_chat_completion`, `__call__`):
+    - `dynatemp_range`, `dynatemp_exponent` (Dynamic Temperature)
+    - `min_keep`
+    - Refactored `logits_processor` handling to use `CustomSampler` adapter for better performance and C++ interop.
+    - Improved sampling state management (e.g., repetition penalties) by persisting `_sampling_ctx` during generation.
+    - Removed manual `logit_bias` processing in Python; now delegated to the underlying sampler chain.
+
+- feat: Separate the grammar sampler, improve the code stability of Sampler Chain processing, and fix some bugs.
+
+- [Improve sampling and grammar lifecycle management, fix memory growth issues](https://github.com/JamePeng/llama-cpp-python/commit/5ef874cf7e5b08533c7782286eda777e44be9744)
+    - Validate grammar sampler initialization and inputs
+    - Replace unbounded prev token list with bounded deque by LlamaSamplingParams n_prev param
+    - Reuse logits NumPy view to avoid repeated allocations
+    - Reuse single-token buffers for grammar rejection sampling
+    - Minor cleanups and consistency improvements in sampling flow
+
+- feat: [Fix sampling history alignment with llama.cpp](https://github.com/JamePeng/llama-cpp-python/commit/9f79b78cb89cef44397f8727adc55e288c74946c)
+
+- test: update integration tests for new sampler architecture
+
+- test: replace unstable grammar test with deterministic mechanism check
+
+- fix: Optimize .gitignore and add macOS system files
+
+- feat: Refactor the build-wheels-metal.yaml
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/079feab9e3efee1d6d4ca370eac50f156e2dc6e8](https://github.com/ggml-org/llama.cpp/commit/079feab9e3efee1d6d4ca370eac50f156e2dc6e8)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260214
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/4ab182382b87bbbba4fb05ff184b557414740103...dc5f7e5564dd68af9d62f7d450cda45313f80b5d
+
 ## [0.3.24]
 - feat: [Refactor sampling infrastructure to use llama.cpp sampler chain API](https://github.com/JamePeng/llama-cpp-python/commit/1df39b422890db55cb9f6de43cb792a26921752e)
     - LlamaContext: Remove obsolete manual sampling methods.
