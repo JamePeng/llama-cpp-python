@@ -526,8 +526,8 @@ class Llama:
         self.n_tokens = 0
         self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
         self.scores: npt.NDArray[np.single] = np.ndarray(
-            (n_ctx if logits_all == True else n_batch, self._n_vocab), dtype=np.single
-        )
+            (n_ctx, self._n_vocab), dtype=np.single
+        ) if self._logits_all else None
 
         self._mirostat_mu = ctypes.c_float(
             2.0 * 5.0
