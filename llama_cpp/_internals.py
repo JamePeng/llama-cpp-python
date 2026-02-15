@@ -672,7 +672,12 @@ class LlamaBatch:
         if self.batch is not None:
             self.batch.n_tokens = 0
 
-    def set_batch(self, batch: Sequence[int], n_past: llama_cpp.llama_pos, logits_all: bool):
+    def set_batch(self,
+        batch: Sequence[int],
+        n_past: llama_cpp.llama_pos,
+        logits_all: bool,
+        logits_last: bool = True
+    ):
         if len(batch) > self.n_tokens_capacity:
              raise IndexError(f"Input batch size {len(batch)} exceeds capacity {self.n_tokens_capacity}")
 
@@ -684,7 +689,7 @@ class LlamaBatch:
             self.batch.seq_id[i][0] = 0
             self.batch.n_seq_id[i] = 1
             self.batch.logits[i] = logits_all
-        self.batch.logits[n_tokens - 1] = True
+        self.batch.logits[n_tokens - 1] = logits_last
 
     def add_sequence(self, batch: Sequence[int], seq_id: int, logits_all: bool):
         n_tokens = len(batch)
