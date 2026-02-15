@@ -699,25 +699,24 @@ class LlamaBatch:
         if self.batch is not None:
             self.batch.n_tokens = 0
 
-    def add_token(self, token: int, pos: int, seq_ids: Sequence[int], logits: bool):
-        """
-        Adds a single token to the batch.
-        This is a high-performance method for appending a single token during the generation loop,
-        avoiding the overhead of creating temporary lists required by add_sequence.
+    def set_batch(self,
+        batch: Sequence[int],
+        n_past: llama_cpp.llama_pos,
+        logits_all: bool,
+        logits_last: bool = True
+    ):
+        if len(batch) > self.n_tokens_capacity:
+             raise IndexError(f"Input batch size {len(batch)} exceeds capacity {self.n_tokens_capacity}")
 
-        Args:
-            token: The integer ID of the token to add.
-            pos: The logical sequence position (n_past) of this token.
-            seq_ids: A sequence of sequence IDs this token belongs to (e.g., [0] for a standard single chat).
-                     A single token can be part of multiple sequences simultaneously.
-            logits: A boolean flag indicating whether the backend should compute logits for this token.
-        """
-        idx = self.batch.n_tokens
-        if idx >= self.n_tokens_capacity:
-            raise IndexError(f"LlamaBatch overflow[add_token]: Cannot add token. Capacity {self.n_tokens_capacity} reached.")
-
-        self.batch.token[idx] = token
-        self.batch.pos[idx] = pos
+        n_tokens = len(batch)
+        self.batch.n_tokens = n_tokens
+        for i in range(n_tokens):
+            self.batch.token[i] = batch[i]
+            self.batch.pos[i] = n_past + i
+            self.batch.seq_id[i][0] = 0
+            self.batch.n_seq_id[i] = 1
+            self.batch.logits[i] = logits_all
+        self.batch.logits[n_tokens - 1] = logits_last
 
         n_seq_id = len(seq_ids)
         if n_seq_id > self.n_seq_max:

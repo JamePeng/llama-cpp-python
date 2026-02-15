@@ -12,6 +12,8 @@ from .llama_cpp import (
     LLAMA_POOLING_TYPE_LAST,
     LLAMA_POOLING_TYPE_RANK, # Specifically for Reranking models
 )
+from .mtmd import MediaChunk, mtmd_tokenize, mtmd_prefill
+from ._utils import suppress_stdout_stderr
 
 # Normalization modes for embedding vectors
 # See: https://github.com/ggml-org/llama.cpp/tree/master/examples/embedding#--embd-normalize-integer
@@ -168,7 +170,7 @@ class LlamaEmbedding(Llama):
         if self.verbose:
             llama_cpp.llama_perf_context_reset(ctx)
         self._batch.reset()
-        llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), True)
+        llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), False)
 
         # Initialize State Variables
         results: List[Any] = []
@@ -219,7 +221,7 @@ class LlamaEmbedding(Llama):
                         results.append(data)
 
             self._batch.reset()
-            llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), True)
+            llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), False)
             batch_seq_lens = []
 
         # Main Streaming Loop
@@ -439,3 +441,68 @@ class LlamaEmbedding(Llama):
                     print(f"Warning: Failed to calculate similarity matrix: {e}")
 
         return response
+
+
+    def embed_multimodal(
+        self,
+        prompt: str,
+        files: List[bytes | str] = [],
+
+        normalize: int = NORM_MODE_EUCLIDEAN,
+        return_count: bool = False,
+    ) -> Union[List[float], List[List[float]], Tuple[Any, int]]:
+
+        ctx = self._ctx.ctx
+        mctx = self.mtmd_context.ctx
+
+        # Determine if it is in Rerank mode
+        try:
+            pooling_type = self.pooling_type()
+        except AttributeError:
+            pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED
+        is_rank = (pooling_type == LLAMA_POOLING_TYPE_RANK)
+        is_none = (pooling_type == LLAMA_POOLING_TYPE_NONE) # Token-level embedding
+
+        out_dim = self.n_embd()
+
+        if self.verbose:
+            type_str = "TOKEN (None)" if is_none else ("RANK (Score)" if is_rank else "SEQ (Vector)")
+            print(f"LlamaEmbedding Debug: Mode={type_str} | Pooling={pooling_type} | Dim={out_dim}")
+
+        # Reset Context and Batch
+        if self.verbose:
+            llama_cpp.llama_perf_context_reset(ctx)
+        self._batch.reset()
+        llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), False)
+
+        # Initialize State Variables
+        result: Any = None
+
+
+        with suppress_stdout_stderr(disable=self.verbose):
+            tokens: MultimodalTokenList = mtmd_tokenize(mctx, prompt, files)
+
+        n_tokens = len(tokens)
+
+        if n_tokens == 0:
+            result = []
+        else:
+            n_past = mtmd_prefill(self._ctx, mctx, self._batch, tokens)
+
+            # Extract Embeddings
+            ptr = llama_cpp.llama_get_embeddings_ith(ctx, self._batch.n_tokens() - 1)
+            data = ptr[:out_dim]
+            data = self._normalize_vector(data, normalize)
+
+            result = data
+
+            self._batch.reset()
+            llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), False)
+
+        if self.verbose:
+            llama_cpp.llama_perf_context_print(ctx)
+
+        if return_count:
+            return result, n_tokens
+
+        return result
