@@ -101,6 +101,7 @@ if (LLAMA_BUILD)
 
         # Metal settings (enable for both architectures)
         set(GGML_METAL "ON" CACHE BOOL "ggml: enable Metal" FORCE)
+        set(GGML_METAL_USE_BF16 "ON" CACHE BOOL "ggml: use bfloat if available" FORCE)
         set(GGML_METAL_EMBED_LIBRARY "ON" CACHE BOOL "ggml: embed metal library" FORCE)
     endif()
 
