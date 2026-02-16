@@ -55,7 +55,6 @@ jobs:
             -DGGML_METAL_USE_BF16=on
             -DGGML_METAL_EMBED_LIBRARY=off
             -DGGML_METAL_SHADER_DEBUG=on
-            -DLLAMA_HTTPLIB=on"
         with:
           package-dir: .
           output-dir: wheelhouse2

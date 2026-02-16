@@ -69,7 +69,7 @@ jobs:
           $env:VERBOSE = '1'
           $env:CMAKE_ARGS = '-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES=' + $env:CUDAARCHVER + ' -DCMAKE_BUILD_PARALLEL_LEVEL=' + $env:MAX_JOBS
           $env:CMAKE_ARGS = "-DGGML_CUDA_FORCE_MMQ=on -DCUDA_SEPARABLE_COMPILATION=on $env:CMAKE_ARGS"
-          $env:CMAKE_ARGS = "-DENABLE_CCACHE=on -DLLAMA_CURL=off -DLLAMA_HTTPLIB=on $env:CMAKE_ARGS"
+          $env:CMAKE_ARGS = "-DENABLE_CCACHE=on -DLLAMA_CURL=off $env:CMAKE_ARGS"
 
           if ($env:AVXVER -eq 'AVX') {
             $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=off -DGGML_FMA=off -DGGML_F16C=off'
