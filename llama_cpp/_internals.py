@@ -714,29 +714,63 @@ def normalize_embedding(embedding):
 
 
 class LlamaTokenDataArray:
+    """
+    Performance-optimized wrapper for llama_token_data_array.
+    This class minimizes Python overhead by caching memory views and avoiding
+    redundant memory allocations during the inference loop.
+    """
     def __init__(self, *, n_vocab: int):
         self.n_vocab = n_vocab
-        self.candidates_data = np.recarray(
-            (self.n_vocab,),
+
+        # Define the structure of llama_token_data to match the C++ memory layout.
+        # id: token identifier (int32)
+        # logit: raw prediction score (float32)
+        # p: probability score (float32)
+        self.candidates_data = np.empty(
+            self.n_vocab,
             dtype=np.dtype(
-                [("id", np.intc), ("logit", np.single), ("p", np.single)], align=True
+                [("id", np.intc), ("logit", np.single), ("p", np.single)],
+                align=True
             ),
         )
+
+        # Optimization: Cache field views to bypass NumPy's expensive field lookup overhead.
+        # Using these cached views allows for direct memory access in the inference loop.
+        self._id_view = self.candidates_data["id"]
+        self._logit_view = self.candidates_data["logit"]
+        self._p_view = self.candidates_data["p"]
+
+        # Initialization: Pre-generate a standard token ID sequence (0 to n_vocab - 1).
+        # This acts as the 'golden' reference to reset the buffer after sorting operations.
+        self._default_ids = np.arange(self.n_vocab, dtype=np.intc)
+        self._id_view[:] = self._default_ids
+
+        # Construct the llama_cpp C structure.
+        # 'data' is assigned a direct pointer to the underlying NumPy memory buffer.
         self.candidates = llama_cpp.llama_token_data_array(
             data=self.candidates_data.ctypes.data_as(llama_cpp.llama_token_data_p),
             size=self.n_vocab,
             selected=-1,
             sorted=False,
         )
-        self.default_candidates_data_id = np.arange(self.n_vocab, dtype=np.intc)  # type: ignore
-        self.default_candidates_data_p = np.zeros(self.n_vocab, dtype=np.single)
 
     def copy_logits(self, logits: npt.NDArray[np.single]):
-        self.candidates_data.id[:] = self.default_candidates_data_id
-        self.candidates_data.logit[:] = logits
-        self.candidates_data.p[:] = self.default_candidates_data_p
-        self.candidates.sorted = False
+        """
+        Synchronizes the memory buffer with new logit data from the model.
+        """
+        # Step 1: Transfer new logits from the model output to our working buffer.
+        self._logit_view[:] = logits
+
+        # Step 2: Critical Reset.
+        # Samplers (like top-k or top-p) reorder elements in memory during processing.
+        # We must reset token IDs every step to ensure logical consistency for the next run.
+        self._id_view[:] = self._default_ids
+
+        # Step 3: Metadata update.
+        # Inform the llama.cpp backend that the buffer is full and currently unsorted.
         self.candidates.size = self.n_vocab
+        self.candidates.sorted = False
+        self.candidates.selected = -1
 
 
 # Python wrappers over common/sampling structs
@@ -1155,7 +1189,7 @@ class LlamaSamplingContext:
         # logit bias
         if self.params.logit_bias:
             for item in self.params.logit_bias:
-                cur_p.candidates_data.logit[item.token] += item.bias
+                cur_p._logit_view[item.token] += item.bias
 
 
         # 4. grammar first
@@ -1171,7 +1205,7 @@ class LlamaSamplingContext:
             )
             # grammar-first return directly
             selected = cur_p.candidates.selected
-            return int(cur_p.candidates_data.id[selected])
+            return int(cur_p._id_view[selected])
 
 
         # 5. sampling chain
@@ -1181,7 +1215,7 @@ class LlamaSamplingContext:
         )
 
         selected = cur_p.candidates.selected
-        token = int(cur_p.candidates_data.id[selected])
+        token = int(cur_p._id_view[selected])
 
         # 6. grammar rejection sampling
         if self.grammar_sampler:
@@ -1214,7 +1248,7 @@ class LlamaSamplingContext:
             )
 
             selected = cur_p.candidates.selected
-            token = int(cur_p.candidates_data.id[selected])
+            token = int(cur_p._id_view[selected])
 
         return token
 
