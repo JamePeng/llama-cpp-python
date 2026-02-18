@@ -772,6 +772,31 @@ class LlamaTokenDataArray:
         self.candidates.sorted = False
         self.candidates.selected = -1
 
+    def close(self):
+        """
+        Release internal NumPy buffers and C-structure references.
+        """
+        # Main structured NumPy buffer holding token data (id, logit, prob)
+        self.candidates_data = None
+
+        # Cached NumPy field views (avoid dangling references)
+        self._id_view = None
+        self._logit_view = None
+        self._p_view = None
+
+        # Precomputed default token id array
+        self._default_ids = None
+
+        # Setting to None ensures no stale pointer references remain.
+        self.candidates = None
+
+    def __del__(self):
+        # Ensures memory cleanup in case close() was not called explicitly.
+        try:
+            self.close()
+        except Exception:
+            pass
+
 
 # Python wrappers over common/sampling structs
 # common/common.h common_params_sampling
@@ -1254,15 +1279,44 @@ class LlamaSamplingContext:
 
     def close(self):
         """
-        Clear samplers cache
+        Release all sampling-related resources and break references
+        to large buffers to allow Python GC to reclaim memory.
+
+        This method must be called when the sampling context is no longer needed,
+        especially in long-running services, to prevent memory retention.
         """
+
+        # Free grammar sampler if it was initialized.
+        # This releases underlying llama.cpp sampler memory.
         if self.grammar_sampler:
             self.grammar_sampler.close()
             self.grammar_sampler = None
 
+        # Free the sampler chain and all attached C samplers.
         if self.sampler_chain:
             self.sampler_chain.close()
             self.sampler_chain = None
+
+        # Release large token data buffer used during sampling.
+        # Important for high-vocab models to avoid memory retention.
+        if hasattr(self, "_cur_p"):
+            try:
+                self._cur_p.close()
+            except Exception:
+                pass
+            self._cur_p = None
+
+        # Clear token history deque to drop references.
+        if hasattr(self, "prev"):
+            self.prev.clear()
+            self.prev = None
+
+        # Remove NumPy view pointing to llama logits buffer.
+        self._logits_view = None
+
+        # Break references to small C structs used in grammar rejection sampling.
+        self._single_token = None
+        self._single_array = None
 
     def __del__(self):
         try:
