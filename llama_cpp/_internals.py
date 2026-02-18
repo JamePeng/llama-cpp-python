@@ -1488,7 +1488,16 @@ class LlamaSampler:
         if not new_sampler_p:
             raise RuntimeError("llama_sampler_clone failed")
 
-        return LlamaSampler(existing_sampler_p=new_sampler_p)
+        new_sampler = LlamaSampler(existing_sampler_p=new_sampler_p)
+
+        # copy _keep_alive and custom_samplers list to new sampler
+        if self._keep_alive:
+            new_sampler._keep_alive = self._keep_alive.copy()
+
+        if self.custom_samplers:
+            new_sampler.custom_samplers = self.custom_samplers.copy()
+
+        return new_sampler
 
     def sample(self, ctx: LlamaContext, idx: int = -1) -> int:
         """
