@@ -525,9 +525,8 @@ class Llama:
 
         self.n_tokens = 0
         self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
-        self.scores: npt.NDArray[np.single] = np.ndarray(
-            (n_ctx if logits_all == True else n_batch, self._n_vocab), dtype=np.single
-        )
+        self.scores: npt.NDArray[np.single] = np.ndarray((n_ctx if self._logits_all else 1, self._n_vocab), dtype=np.single)
+
 
         self._mirostat_mu = ctypes.c_float(
             2.0 * 5.0
@@ -638,7 +637,10 @@ class Llama:
 
     @property
     def _scores(self) -> npt.NDArray[np.single]:
-        return self.scores[: self.n_tokens, :]
+        if self._logits_all:
+            return self.scores[: self.n_tokens, :]
+        else:
+            return self.scores
 
     @property
     def eval_tokens(self) -> Deque[int]:
@@ -747,14 +749,17 @@ class Llama:
                 ) from e
             # Save tokens
             self.input_ids[n_past : n_past + n_batch_tokens] = batch
+
             # Save logits
+            logits_ptr = self._ctx.get_logits()
             if self._logits_all:
                 rows = n_batch_tokens
                 cols = self._n_vocab
-                logits = np.ctypeslib.as_array(
-                    self._ctx.get_logits(), shape=(rows * cols,)
-                )
-                self.scores[n_past : n_past + n_batch_tokens, :].reshape(-1)[::] = logits
+                logits_view = np.ctypeslib.as_array(logits_ptr, shape=(rows * cols,))
+                self.scores[n_past : n_past + n_batch_tokens, :].reshape(-1)[:] = logits_view
+            else:
+                logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
+                self.scores[0, :] = logits_view
 
             # Update n_tokens
             current_pos += n_batch_tokens
@@ -875,7 +880,10 @@ class Llama:
             # LogitsProcessor Adapter
             if logits_processor:
                 def adapter(token_data_array: llama_cpp.llama_token_data_array):
-                    current_scores = self._scores[self.n_tokens - 1, :]
+                    if self._logits_all:
+                        current_scores = self._scores[self.n_tokens - 1, :]
+                    else:
+                        current_scores = self._scores[0, :]
                     new_scores = logits_processor(self._input_ids, current_scores)
                     size = token_data_array.size
                     data_ptr = token_data_array.data
@@ -1003,7 +1011,10 @@ class Llama:
 
         if logits_processor:
             def adapter(token_data_array: llama_cpp.llama_token_data_array):
-                current_scores = self._scores[self.n_tokens - 1, :]
+                if self._logits_all:
+                    current_scores = self._scores[self.n_tokens - 1, :]
+                else:
+                    current_scores = self._scores[0, :]
                 new_scores = logits_processor(self._input_ids, current_scores)
 
                 size = token_data_array.size
@@ -1050,10 +1061,22 @@ class Llama:
                 self._sampling_ctx.accept(token, False if grammar is None else True)
 
                 sample_idx += 1
-                if stopping_criteria is not None and stopping_criteria(
-                    self._input_ids[: sample_idx], self._scores[sample_idx - self.n_tokens, :]
-                ):
-                    return
+                if stopping_criteria is not None:
+                    if self._logits_all:
+                        logits_idx = sample_idx - self.n_tokens
+                        check_stopping = True
+                    else:
+                        if sample_idx == self.n_tokens:
+                            logits_idx = 0
+                            check_stopping = True
+                        else:
+                            check_stopping = False
+
+                    if check_stopping and stopping_criteria(
+                        self._input_ids[: sample_idx],
+                        self._scores[logits_idx, :]
+                    ):
+                        return
                 tokens_or_none = yield token
                 tokens.clear()
                 tokens.append(token)
@@ -1556,7 +1579,10 @@ class Llama:
                             ).decode("utf-8", errors="ignore")
                         )
                         token_offset = len(prompt_tokens) + returned_tokens
-                        logits = self._scores[token_offset - 1, :]
+                        if self._logits_all:
+                            logits = self._scores[token_offset - 1, :]
+                        else:
+                            logits = self._scores[0, :]
                         current_logprobs = Llama.logits_to_logprobs(logits).tolist()
                         sorted_logprobs = list(
                             sorted(
@@ -1695,7 +1721,10 @@ class Llama:
                         )
                     )
                     token_offset = len(prompt_tokens) + returned_tokens - 1
-                    logits = self._scores[token_offset, :]
+                    if self._logits_all:
+                        logits = self._scores[token_offset, :]
+                    else:
+                        logits = self._scores[0, :]
                     current_logprobs = Llama.logits_to_logprobs(logits).tolist()
                     sorted_logprobs = list(
                         sorted(
@@ -2406,46 +2435,72 @@ prompt: The prompt to generate text from.
     def save_state(self) -> LlamaState:
         if self.verbose:
             print("Llama.save_state: saving llama state", file=sys.stderr)
-        state_size = llama_cpp.llama_get_state_size(self._ctx.ctx)
+
+        # Query the backend for the required buffer size to store the current state.
+        state_size = llama_cpp.llama_state_get_size(self._ctx.ctx)
         if self.verbose:
             print(f"Llama.save_state: got state size: {state_size}", file=sys.stderr)
+
+        # Allocate a ctypes uint8 array (buffer) of the required size.
         llama_state = (ctypes.c_uint8 * int(state_size))()
         if self.verbose:
             print("Llama.save_state: allocated state", file=sys.stderr)
-        n_bytes = llama_cpp.llama_copy_state_data(self._ctx.ctx, llama_state)
+
+        # Copy the raw state data from the internal C context into our Python-managed buffer.
+        # Returns the actual number of bytes written (n_bytes).
+        n_bytes = llama_cpp.llama_state_get_data(self._ctx.ctx, llama_state, state_size)
         if self.verbose:
             print(f"Llama.save_state: copied llama state: {n_bytes}", file=sys.stderr)
+
+        # Safety check to prevent buffer overflow issues.
         if int(n_bytes) > int(state_size):
             raise RuntimeError("Failed to copy llama state data")
-        llama_state_compact = (ctypes.c_uint8 * int(n_bytes))()
-        llama_cpp.ctypes.memmove(llama_state_compact, llama_state, int(n_bytes))
+
+        # Directly read 'n_bytes' from the buffer's memory address to create the Python bytes object.
+        # Significantly reducing memory overhead by avoiding an intermediate array allocation.
+        llama_state_bytes = ctypes.string_at(ctypes.addressof(llama_state), int(n_bytes))
         if self.verbose:
             print(
                 f"Llama.save_state: saving {n_bytes} bytes of llama state",
                 file=sys.stderr,
             )
+
+        # Create and return the snapshot object.
         return LlamaState(
             scores=self._scores.copy(),
             input_ids=self.input_ids.copy(),
             n_tokens=self.n_tokens,
-            llama_state=bytes(llama_state_compact),
+            llama_state=llama_state_bytes,
             llama_state_size=n_bytes,
             seed=self._seed,
         )
 
     def load_state(self, state: LlamaState) -> None:
-        # Only filling in up to `n_tokens` and then zero-ing out the rest
-        self.scores[: state.n_tokens, :] = state.scores.copy()
-        rest = self.scores[state.n_tokens :, :]
-        rest[rest > 0] = 0.0
+        # Restore metadata: input tokens, token count, and RNG seed.
         self.input_ids = state.input_ids.copy()
         self.n_tokens = state.n_tokens
         self._seed = state.seed
+        # Restore Logits (Scores) handling different memory configurations.
+        if self._logits_all:
+            # Case A: Full history mode. Restore as many rows as possible.
+            available_rows = state.scores.shape[0]
+            # Prevent index out of bounds by taking the minimum valid length.
+            limit = min(self.n_tokens, available_rows)
+            # Restore valid history and clear any remaining "future" slots.
+            self.scores[:limit, :] = state.scores[:limit, :]
+            self.scores[limit:, :] = 0.0
+        else:
+            # Case B: Optimized mode (1-row buffer).
+            # Only restore the last token's logits if available.
+            if state.scores.shape[0] > 0:
+                self.scores[0, :] = state.scores[-1, :]
+
         state_size = state.llama_state_size
         LLamaStateArrayType = ctypes.c_uint8 * state_size
+        # Copy the raw bytes from the Python object into a C-compatible buffer.
         llama_state = LLamaStateArrayType.from_buffer_copy(state.llama_state)
 
-        if llama_cpp.llama_set_state_data(self._ctx.ctx, llama_state) != state_size:
+        if llama_cpp.llama_state_set_data(self._ctx.ctx, llama_state, state_size) != state_size:
             raise RuntimeError("Failed to set llama state data")
 
     def n_ctx(self) -> int:
