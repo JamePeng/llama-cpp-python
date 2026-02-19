@@ -17,23 +17,31 @@ function(llama_cpp_python_install_target target)
         return()
     endif()
 
-    install(
-        TARGETS ${target}
-        LIBRARY DESTINATION llama_cpp/lib
-        RUNTIME DESTINATION llama_cpp/lib
-        ARCHIVE DESTINATION llama_cpp/lib
-        FRAMEWORK DESTINATION llama_cpp/lib
-        RESOURCE DESTINATION llama_cpp/lib
+    # Define install destinations to avoid code duplication
+    set(INSTALL_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
+        "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
     )
 
-    # Windows DLL dependencies
-    if (WIN32)
+    foreach(DIR ${INSTALL_DIRS})
         install(
-            FILES $<TARGET_RUNTIME_DLLS:${target}>
-            DESTINATION llama_cpp/lib
-            OPTIONAL
+            TARGETS ${target}
+            LIBRARY DESTINATION ${DIR}
+            RUNTIME DESTINATION ${DIR}
+            ARCHIVE DESTINATION ${DIR}
+            FRAMEWORK DESTINATION ${DIR}
+            RESOURCE DESTINATION ${DIR}
         )
-    endif()
+
+        # Automatically handle Windows DLL installation for each target
+        if (WIN32)
+            install(
+                FILES $<TARGET_RUNTIME_DLLS:${target}>
+                DESTINATION ${DIR}
+                OPTIONAL # Prevent errors if the target has no DLLs
+            )
+        endif()
+    endforeach()
 
     # Proper RPATH handling
     if(UNIX)

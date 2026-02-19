@@ -20,25 +20,23 @@ from typing_extensions import TypeAlias
 
 
 # Load the library
-def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
-    """Platform independent shared library loader"""
-    # Searching for the library in the current directory under the name "libllama" (default name
-    # for llamacpp) and "llama" (default name for this repo)
-    lib_paths: List[pathlib.Path] = []
-    # Determine the file extension based on the platform
+def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list[pathlib.Path]]):
+    if isinstance(base_paths, pathlib.Path):
+        base_paths = [base_paths]
+
+    lib_names = []
+
     if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
-        lib_paths += [
-            base_path / f"lib{lib_base_name}.so",
-        ]
+        lib_names = [f"lib{lib_base_name}.so"]
     elif sys.platform == "darwin":
-        lib_paths += [
-            base_path / f"lib{lib_base_name}.so",
-            base_path / f"lib{lib_base_name}.dylib",
+        lib_names = [
+            f"lib{lib_base_name}.dylib",
+            f"lib{lib_base_name}.so",
         ]
     elif sys.platform == "win32":
-        lib_paths += [
-            base_path / f"{lib_base_name}.dll",
-            base_path / f"lib{lib_base_name}.dll",
+        lib_names = [
+            f"{lib_base_name}.dll",
+            f"lib{lib_base_name}.dll",
         ]
     else:
         raise RuntimeError("Unsupported platform")
@@ -47,11 +45,13 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
 
     # Add the library directory to the DLL search path on Windows (if needed)
     if sys.platform == "win32":
-        os.add_dll_directory(str(base_path))
+        for base_path in base_paths:
+            os.add_dll_directory(str(base_path))
         os.environ["PATH"] = str(base_path) + os.pathsep + os.environ["PATH"]
 
-    if sys.platform == "win32" and sys.version_info >= (3, 8):
-        os.add_dll_directory(str(base_path))
+    if sys.platform == "win32" and sys.version_info >= (3, 9):
+        for base_path in base_paths:
+            os.add_dll_directory(str(base_path))
         if "CUDA_PATH" in os.environ:
             cuda_path = os.environ["CUDA_PATH"]
             sub_dirs_to_add = [
@@ -75,16 +75,21 @@ def load_shared_library(lib_base_name: str, base_path: pathlib.Path):
 
         cdll_args["winmode"] = ctypes.RTLD_GLOBAL
 
-    # Try to load the shared library, handling potential errors
-    for lib_path in lib_paths:
-        if lib_path.exists():
-            try:
-                return ctypes.CDLL(str(lib_path), **cdll_args)  # type: ignore
-            except Exception as e:
-                raise RuntimeError(f"Failed to load shared library '{lib_path}': {e}")
+    errors = []
 
-    raise FileNotFoundError(
-        f"Shared library with base name '{lib_base_name}' not found"
+    # Try to load the shared library, handling potential errors
+    for base_path in base_paths:
+        for lib_name in lib_names:
+            lib_path = base_path / lib_name
+            if lib_path.exists():
+                try:
+                    return ctypes.CDLL(str(lib_path), **cdll_args)
+                except Exception as e:
+                    errors.append(f"{lib_path}: {e}")
+
+    raise RuntimeError(
+        f"Failed to load '{lib_base_name}' from {base_paths}\n"
+        + "\n".join(errors)
     )
 
 

@@ -7,7 +7,11 @@ import os
 import pathlib
 import ctypes
 
-import llama_cpp._ctypes_extensions as ctypes_ext
+from llama_cpp._ctypes_extensions import (
+    load_shared_library,
+    byref,
+    ctypes_function_for_shared_library,
+)
 
 from typing import (
     Callable,
@@ -17,8 +21,15 @@ from typing import (
     TYPE_CHECKING,
 )
 
-libggml_base_path = pathlib.Path(os.path.abspath(os.path.dirname(__file__))) / "lib"
-libggml = ctypes_ext.load_shared_library("ggml", libggml_base_path)
+libggml_base_path = pathlib.Path(os.path.abspath(os.path.dirname(__file__)))
+libggml_base_paths = [
+    libggml_base_path / "lib",
+    libggml_base_path / "bin",
+]
+
+libggml = load_shared_library("ggml", libggml_base_paths)
+
+ggml_function = ctypes_function_for_shared_library(libggml)
 
 # // ====== ggml.h ======
 
@@ -361,3 +372,20 @@ ggml_opt_get_optimizer_params = ctypes.CFUNCTYPE(
 ggml_backend_sched_eval_callback = ctypes.CFUNCTYPE(
     ctypes.c_bool, ctypes.c_void_p, ctypes.c_bool, ctypes.c_void_p
 )
+
+# //
+# // Backend registry
+# //
+
+# // Load all known backends from dynamic libraries
+# GGML_API void               ggml_backend_load_all(void);
+@ggml_function("ggml_backend_load_all", [], None)
+def ggml_backend_load_all():
+    """Load all known backends from dynamic libraries"""
+    ...
+
+# GGML_API void               ggml_backend_load_all_from_path(const char * dir_path);
+@ggml_function("ggml_backend_load_all_from_path", [ctypes.c_char_p], None)
+def ggml_backend_load_all_from_path(dir_path: ctypes.c_char_p):
+    """Load all known backends from path"""
+    ...
