@@ -28,11 +28,25 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
 
     if sys.platform.startswith("linux") or sys.platform.startswith("freebsd"):
         lib_names = [f"lib{lib_base_name}.so"]
+
+        base_paths.extend([
+            "/usr/local/lib",
+            "/usr/lib",
+            "/usr/lib64",
+        ])
+
     elif sys.platform == "darwin":
         lib_names = [
             f"lib{lib_base_name}.dylib",
             f"lib{lib_base_name}.so",
         ]
+
+        base_paths.extend([
+            "/usr/local/lib",
+            "/opt/homebrew/lib",
+            "/usr/lib",
+        ])
+
     elif sys.platform == "win32":
         lib_names = [
             f"{lib_base_name}.dll",

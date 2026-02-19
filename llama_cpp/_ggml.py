@@ -2,10 +2,10 @@
 
 This module provides a minimal interface for working with ggml tensors from llama-cpp-python
 """
+import ctypes
 import enum
 import os
 import pathlib
-import ctypes
 
 from llama_cpp._ctypes_extensions import (
     load_shared_library,
