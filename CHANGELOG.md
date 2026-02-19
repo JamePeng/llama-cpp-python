@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.26]
+- perf(llama-cpp): optimize LlamaTokenDataArray memory operations
+    - Cache NumPy field views for 'id', 'logit', and 'p' to bypass expensive property lookups.
+    - Refactor copy_logits to use pre-generated ID sequences and cached views.
+    - Ensure logical consistency by resetting token IDs every sampling step to counter C++ reordering.
+    - Minimize redundant memory allocations during the inference loop.
+
+- feat: Add explicit memory cleanup for sampling contexts
+    - Implements `close()` and `__del__` for LlamaTokenDataArray and expands LlamaSamplingContext cleanup.
+    - Ensures NumPy views and internal C-references are properly released to allow Python GC to reclaim memory.
+
+- optimize(memory): reduce scores buffer size and optimize state saving
+    - Update save_state and load_state API use.
+    - Refactored self.scores to allocate only a single row (1, n_vocab) when logits_all=False, significantly reducing memory usage for large vocabulary models.
+    - Optimized save_state to eliminate redundant memory allocations and copies by using ctypes.string_at.
+    - Updated load_state, eval, and sampler adapters to correctly handle the dynamic shape of self.scores.
+
+- Fix CMake install layout to avoid top-level bin directory in site-packages
+
+- ggml: Load ggml library from candidate path list
+    - Auto-select lib/ or bin/ directories
+    - Add backend loading functions
+
+- feat(loader): extend default library search paths on Linux and macOS
+    - `load_shared_library` to include a path list feature (allowing you to add custom paths in addition to the default ones). You can later add your own paths to the `libggml_base_paths` candidate list in `_ggml.py`, such as those not commonly used Python paths.
+    - fix: Enhance the handling logic for non-existent file paths.
+    - Improves reliability of shared library discovery for system-wide installations.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/abb9f3c42b5e6acee9e8e37836ef691d1a41bdb8](https://github.com/ggml-org/llama.cpp/commit/abb9f3c42b5e6acee9e8e37836ef691d1a41bdb8)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260219
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/b03224b2dde3c8cbdd8bf529794e3a41ac7f5751...6b38182a17effd0cedbf8736bee2464dd6c7b4da
+
 ## [0.3.25]
 - feat: [Refactor Llama class to use new LlamaSampler chain API from _internals](https://github.com/JamePeng/llama-cpp-python/commit/1e6094a327f0fb9dc35d52f84d8ebabc1faa1e95)
 This commit refactors the high-level Llama class to fully utilize the new C++ `llama_sampler` chain architecture via `LlamaSamplingContext`.
