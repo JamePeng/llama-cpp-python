@@ -5,39 +5,37 @@ project(llama_cpp)
 option(LLAMA_BUILD "Build llama.cpp shared library and install alongside python package" ON)
 option(MTMD_BUILD "Build mtmd shared library and install alongside python package" ON)
 
+
+set(CMAKE_INSTALL_BINDIR llama_cpp/bin CACHE PATH "" FORCE)
+set(CMAKE_INSTALL_LIBDIR llama_cpp/lib CACHE PATH "" FORCE)
+set(CMAKE_INSTALL_INCLUDEDIR llama_cpp/include CACHE PATH "" FORCE)
+
+
 # Helper function to install targets to Python package directories
 function(llama_cpp_python_install_target target)
     if(NOT TARGET ${target})
         return()
     endif()
 
-    # Define install destinations to avoid code duplication
-    set(INSTALL_DIRS
-        "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
-        "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
+    install(
+        TARGETS ${target}
+        LIBRARY DESTINATION llama_cpp/lib
+        RUNTIME DESTINATION llama_cpp/lib
+        ARCHIVE DESTINATION llama_cpp/lib
+        FRAMEWORK DESTINATION llama_cpp/lib
+        RESOURCE DESTINATION llama_cpp/lib
     )
 
-    foreach(DIR ${INSTALL_DIRS})
+    # Windows DLL dependencies
+    if (WIN32)
         install(
-            TARGETS ${target}
-            LIBRARY DESTINATION ${DIR}
-            RUNTIME DESTINATION ${DIR}
-            ARCHIVE DESTINATION ${DIR}
-            FRAMEWORK DESTINATION ${DIR}
-            RESOURCE DESTINATION ${DIR}
+            FILES $<TARGET_RUNTIME_DLLS:${target}>
+            DESTINATION llama_cpp/lib
+            OPTIONAL
         )
+    endif()
 
-        # Automatically handle Windows DLL installation for each target
-        if (WIN32)
-            install(
-                FILES $<TARGET_RUNTIME_DLLS:${target}>
-                DESTINATION ${DIR}
-                OPTIONAL # Prevent errors if the target has no DLLs
-            )
-        endif()
-    endforeach()
-
-    # Configure RPATH
+    # Proper RPATH handling
     if(UNIX)
         set(INSTALL_RPATH_VAL "$ORIGIN")
         if(APPLE)
@@ -68,6 +66,9 @@ if (LLAMA_BUILD)
     # Enable building of the common library
     set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama.cpp: build common utils library" FORCE)
 
+    # Enable build and link OpenSSL
+    set(LLAMA_OPENSSL ON CACHE BOOL "llama.cpp: build and link OpenSSL" FORCE)
+
     # Disable building of examples
     set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "llama.cpp: build examples" FORCE)
 
@@ -76,9 +77,6 @@ if (LLAMA_BUILD)
 
     # Disable building curl support
     set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: use libcurl to download model from an URL" FORCE)
-
-    # Enable build and link OpenSSL
-    set(LLAMA_OPENSSL ON CACHE BOOL "llama.cpp: build and link OpenSSL" FORCE)
 
     # Architecture detection and settings for Apple platforms
     if (APPLE)
@@ -107,10 +105,8 @@ if (LLAMA_BUILD)
 
     add_subdirectory(vendor/llama.cpp)
 
-    if (WIN32)
-        if (TARGET llama)
-            set_target_properties(llama PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-        endif()
+    if (WIN32 AND TARGET llama)
+        set_target_properties(llama PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     endif()
 
     # Define list of GGML targets to install
