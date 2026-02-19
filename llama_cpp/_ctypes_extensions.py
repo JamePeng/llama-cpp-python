@@ -46,12 +46,16 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
     # Add the library directory to the DLL search path on Windows (if needed)
     if sys.platform == "win32":
         for base_path in base_paths:
-            os.add_dll_directory(str(base_path))
-        os.environ["PATH"] = str(base_path) + os.pathsep + os.environ["PATH"]
+            p = pathlib.Path(base_path)
+            if p.exists() and p.is_dir():
+                os.add_dll_directory(str(p))
+                os.environ["PATH"] = str(p) + os.pathsep + os.environ["PATH"]
 
     if sys.platform == "win32" and sys.version_info >= (3, 9):
         for base_path in base_paths:
-            os.add_dll_directory(str(base_path))
+            p = pathlib.Path(base_path)
+            if p.exists() and p.is_dir():
+                os.add_dll_directory(str(p))
         if "CUDA_PATH" in os.environ:
             cuda_path = os.environ["CUDA_PATH"]
             sub_dirs_to_add = [
