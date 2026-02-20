@@ -828,8 +828,10 @@ class Llama:
         assert self.n_tokens > 0
 
         s_ctx = self._sampling_ctx
+        is_temp_ctx = False
 
         if s_ctx is None:
+            is_temp_ctx = True
             params = LlamaSamplingParams(
                 # Core
                 top_k=top_k,
@@ -902,7 +904,12 @@ class Llama:
         ridx = idx - self.n_tokens if idx is not None else -1
         assert s_ctx is not None
 
-        token = s_ctx.sample(self._ctx, ridx)
+        try:
+            token = s_ctx.sample(self._ctx, ridx)
+        finally:
+            if is_temp_ctx:
+                s_ctx.close()
+
         return token
 
     def generate(
@@ -1029,6 +1036,10 @@ class Llama:
 
             if CommonSamplerType.CUSTOM not in params.samplers:
                 params.samplers.insert(3, CommonSamplerType.CUSTOM)
+
+        if getattr(self, "_sampling_ctx", None) is not None:
+            self._sampling_ctx.close()
+            self._sampling_ctx = None
 
         self._sampling_ctx = LlamaSamplingContext(params, self._model)
 
@@ -2585,6 +2596,9 @@ prompt: The prompt to generate text from.
 
     def close(self) -> None:
         """Explicitly free the model from memory."""
+        if getattr(self, "_sampling_ctx", None) is not None:
+            self._sampling_ctx.close()
+            self._sampling_ctx = None
         self._stack.close()
 
     def __del__(self) -> None:
