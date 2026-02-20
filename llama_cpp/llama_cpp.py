@@ -990,19 +990,20 @@ It might not exist for progress report where '.' is output repeatedly."""
 
 # // model quantization parameters
 # typedef struct llama_model_quantize_params {
-#     int32_t nthread;                     // number of threads to use for quantizing, if <=0 will use std::thread::hardware_concurrency()
-#     enum llama_ftype ftype;              // quantize to this llama_ftype
-#     enum ggml_type output_tensor_type;   // output tensor type
-#     enum ggml_type token_embedding_type; // token embeddings tensor type
-#     bool allow_requantize;               // allow quantizing non-f32/f16 tensors
-#     bool quantize_output_tensor;         // quantize output.weight
-#     bool only_copy;                      // only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
-#     bool pure;                           // quantize all tensors to the default type
-#     bool keep_split;                     // quantize to the same number of shards
-#     void * imatrix;                      // pointer to importance matrix data
-#     void * kv_overrides;                 // pointer to vector containing overrides
-#     void * tensor_types;                 // pointer to vector containing tensor types
-#     void * prune_layers;                 // pointer to vector containing layer indices to prune
+#     int32_t nthread;                      // number of threads to use for quantizing, if <=0 will use std::thread::hardware_concurrency()
+#     enum llama_ftype ftype;               // quantize to this llama_ftype
+#     enum ggml_type output_tensor_type;    // output tensor type
+#     enum ggml_type token_embedding_type;  // token embeddings tensor type
+#     bool allow_requantize;                // allow quantizing non-f32/f16 tensors
+#     bool quantize_output_tensor;          // quantize output.weight
+#     bool only_copy;                       // only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
+#     bool pure;                            // quantize all tensors to the default type
+#     bool keep_split;                      // quantize to the same number of shards
+#     bool dry_run;                         // calculate and show the final quantization size without performing quantization
+#     void * imatrix;                       // pointer to importance matrix data
+#     void * kv_overrides;                  // pointer to vector containing overrides
+#     void * tensor_types;                  // pointer to vector containing tensor types
+#     void * prune_layers;                  // pointer to vector containing layer indices to prune
 # } llama_model_quantize_params;
 class llama_model_quantize_params(ctypes.Structure):
     """Parameters for llama_model_quantize
@@ -1017,6 +1018,7 @@ class llama_model_quantize_params(ctypes.Structure):
         only_copy (bool): only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
         pure (bool): quantize all tensors to the default type
         keep_split (bool): quantize to the same number of shards
+        dry_run (bool): calculate and show the final quantization size without performing quantization
         imatrix (ctypes.c_void_p): pointer to importance matrix data
         kv_overrides (ctypes.c_void_p): pointer to vector containing overrides
         tensor_types (ctypes.c_void_p): pointer to vector containing tensor types
@@ -1033,6 +1035,7 @@ class llama_model_quantize_params(ctypes.Structure):
         only_copy: bool
         pure: bool
         keep_split: bool
+        dry_run: bool
         imatrix: ctypes.c_void_p
         kv_overrides: ctypes.c_void_p
         tensor_types: ctypes.c_void_p
@@ -1048,6 +1051,7 @@ class llama_model_quantize_params(ctypes.Structure):
         ("only_copy", ctypes.c_bool),
         ("pure", ctypes.c_bool),
         ("keep_split", ctypes.c_bool),
+        ("dry_run", ctypes.c_bool),
         ("imatrix", ctypes.c_void_p),
         ("kv_overrides", ctypes.c_void_p),
         ("tensor_types", ctypes.c_void_p),
