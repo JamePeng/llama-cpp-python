@@ -2599,6 +2599,14 @@ prompt: The prompt to generate text from.
         if getattr(self, "_sampling_ctx", None) is not None:
             self._sampling_ctx.close()
             self._sampling_ctx = None
+
+        if getattr(self, "_candidates", None) is not None:
+            self._candidates.close()
+            self._candidates = None
+
+        self.scores = None
+        self.input_ids = None
+
         self._stack.close()
 
     def __del__(self) -> None:
