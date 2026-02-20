@@ -1365,8 +1365,10 @@ class CustomSampler:
             raise TypeError("apply_func must be callable")
 
         self.apply_func = apply_func
+        # Convert the name to bytes for C compatibility
         self.name_bytes = name.encode("utf-8")
 
+        # Define internal Python callbacks
         def _cb_name(_):
             return self.name_bytes
 
@@ -1398,10 +1400,7 @@ class CustomSampler:
         self._cb_free_ref = llama_cpp.llama_sampler_free_fn(_cb_free)
         self._cb_clone_ref = llama_cpp.llama_sampler_clone_fn(_cb_clone)
 
-        # -----------------------------
         # Build llama_sampler_i
-        # -----------------------------
-
         self.llama_sampler_i = llama_cpp.llama_sampler_i()
 
         self.llama_sampler_i.name = self._cb_name_ref
@@ -1434,7 +1433,30 @@ class CustomSampler:
             raise RuntimeError("Failed to initialize custom sampler")
 
     def get_sampler(self) -> llama_cpp.llama_sampler_p:
+        """Returns the underlying C pointer to the initialized sampler."""
         return self.sampler_p
+
+    def close(self):
+        """Safely releases C memory and breaks Python reference cycles."""
+        if hasattr(self, 'sampler_p') and self.sampler_p:
+            try:
+                llama_cpp.llama_sampler_free(self.sampler_p)
+            except Exception:
+                pass
+            self.sampler_p = None
+
+        self.llama_sampler_i = None
+        self._cb_name_ref = None
+        self._cb_apply_ref = None
+        self._cb_accept_ref = None
+        self._cb_reset_ref = None
+        self._cb_free_ref = None
+        self._cb_clone_ref = None
+        self.apply_func = None
+
+    def __del__(self):
+        """Fallback cleanup if the object is GC before close() is called."""
+        self.close()
 
 
 class LlamaSampler:
@@ -1516,10 +1538,20 @@ class LlamaSampler:
 
     def close(self):
         if self.sampler:
-            for index, _ in reversed(self.custom_samplers):
+            # Iterate backwards to safely remove samplers without shifting indices
+            for index, custom_sampler in reversed(self.custom_samplers):
+                # Detach the custom sampler from the C-level chain
                 llama_cpp.llama_sampler_chain_remove(self.sampler, index)
+
+                # Explicitly free the custom sampler's C memory and Python callbacks
+                if custom_sampler:
+                    custom_sampler.close()
+
+            # Free the main official sampler chain
             llama_cpp.llama_sampler_free(self.sampler)
             self.sampler = None
+
+        # Clear cache lists
         self.samplers.clear()
         self.custom_samplers.clear()
         self._keep_alive.clear()
