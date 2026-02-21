@@ -5,7 +5,7 @@ import os
 import ctypes
 import functools
 import pathlib
-
+from ctypes.util import find_library
 from typing import (
     Any,
     Callable,
@@ -95,10 +95,19 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
 
     errors = []
 
-    # Try to load the shared library, handling potential errors
+    # First, try to find an available library through the system
+    lib_path = find_library(lib_base_name)
+    if lib_path:
+        try:
+            return ctypes.CDLL(lib_path, **cdll_args)
+        except Exception as e:
+            errors.append(f"{lib_path}: {e}")
+
+    # Then fallback to manually checking the list of paths.
     for base_path in base_paths:
         for lib_name in lib_names:
-            lib_path = base_path / lib_name
+            lib_path = pathlib.Path(base_path) / lib_name
+
             if lib_path.exists():
                 try:
                     return ctypes.CDLL(str(lib_path), **cdll_args)
