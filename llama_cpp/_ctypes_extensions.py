@@ -101,7 +101,7 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
         try:
             return ctypes.CDLL(lib_path, **cdll_args)
         except Exception as e:
-            pass
+            errors.append(f"{lib_path}: {e}")
 
     # Then fallback to manually checking the list of paths.
     for base_path in base_paths:
