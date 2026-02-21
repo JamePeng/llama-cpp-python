@@ -585,6 +585,9 @@ class LlamaContext:
     def print_timings(self):
         llama_cpp.llama_perf_context_print(self.ctx)
 
+    def print_memory_breakdown(self):
+        llama_cpp.llama_memory_breakdown_print(self.ctx)
+
     # Utility functions
     @staticmethod
     def default_params():
@@ -1535,6 +1538,20 @@ class LlamaSampler:
         """
         assert self.sampler is not None
         llama_cpp.llama_sampler_reset(self.sampler)
+
+    def reset_timings(self):
+        """
+        Reset the performance timings for the sampler chain.
+        """
+        assert self.sampler is not None
+        llama_cpp.llama_perf_sampler_reset(self.sampler)
+
+    def print_timings(self):
+        """
+        Print the performance timings for each sampler in the chain.
+        """
+        assert self.sampler is not None
+        llama_cpp.llama_perf_sampler_print(self.sampler)
 
     def close(self):
         if self.sampler:
