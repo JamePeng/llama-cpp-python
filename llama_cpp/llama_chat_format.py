@@ -4227,6 +4227,126 @@ class LFM2VLChatHandler(Llava15ChatHandler):
         return super().__call__(**kwargs)
 
 
+class PaddleOCRChatHandler(Llava15ChatHandler):
+    """
+    Handler for PaddleOCR 1.5 multimodal models.
+    """
+
+    PADDLEOCR_CLS_TOKEN = "<|begin_of_sentence|>"
+    PADDLEOCR_BOS_TOKEN = "<s>"
+    PADDLEOCR_EOS_TOKEN = "</s>"
+    PADDLEOCR_SEP_TOKEN = "<|end_of_sentence|>"
+    PADDLEOCR_IMAGE_BOS_TOKEN = "<|IMAGE_START|>"
+    PADDLEOCR_IMAGE_EOS_TOKEN = "<|IMAGE_END|>"
+
+    CHAT_FORMAT = (
+        "{%- if not add_generation_prompt is defined -%}{%- set add_generation_prompt = true -%}{%- endif -%}"
+        "{%- if not cls_token is defined -%}{%- set cls_token = '" + PADDLEOCR_CLS_TOKEN + "' -%}{%- endif -%}"
+        "{%- if not eos_token is defined -%}{%- set eos_token = '" + PADDLEOCR_EOS_TOKEN + "' -%}{%- endif -%}"
+
+        "{{- cls_token -}}"
+        "{%- for message in messages -%}"
+            "{%- if message['role'] == 'user' -%}"
+                "{{- 'User: ' -}}"
+
+                # Robust parsing: Check if content is string or list
+                "{%- if message['content'] is string -%}"
+                    "{{- message['content'] -}}"
+                "{%- else -%}"
+                    # Pass 1: Render all images first
+                    "{%- for content in message['content'] -%}"
+                        "{%- if content['type'] == 'image_url' and 'image_url' in content -%}"
+                            "{{- '<|IMAGE_START|>' -}}"
+                                "{%- if content.image_url is string -%}"
+                                    "{{- content.image_url -}}"
+                                "{%- else -%}"
+                                    "{{- content.image_url.url -}}"
+                                "{%- endif -%}"
+                            "{{- '<|IMAGE_END|>' -}}"
+                        "{%- endif -%}"
+                    "{%- endfor -%}"
+
+                    # Pass 2: Render all text second
+                    "{%- for content in message['content'] -%}"
+                        "{%- if content['type'] == 'text' -%}"
+                            "{{- content['text'] -}}"
+                        "{%- endif -%}"
+                    "{%- endfor -%}"
+                "{%- endif -%}"
+                "{{- '\\n' -}}"
+
+            "{%- elif message['role'] == 'assistant' -%}"
+                "{{- 'Assistant:\\n' -}}"
+                "{%- if message['content'] is string -%}"
+                    "{{- message['content'] -}}"
+                "{%- else -%}"
+                    "{%- for content in message['content'] -%}"
+                        "{%- if content['type'] == 'text' -%}"
+                            "{{- content['text'] -}}"
+                        "{%- endif -%}"
+                    "{%- endfor -%}"
+                "{%- endif -%}"
+                "{{- eos_token -}}"
+
+            "{%- elif message['role'] == 'system' -%}"
+                "{%- if message['content'] is string -%}"
+                    "{{- message['content'] + '\\n' -}}"
+                "{%- else -%}"
+                    "{%- for content in message['content'] -%}"
+                        "{%- if content['type'] == 'text' -%}"
+                            "{{- content['text'] + '\\n' -}}"
+                        "{%- endif -%}"
+                    "{%- endfor -%}"
+                "{%- endif -%}"
+            "{%- endif -%}"
+        "{%- endfor -%}"
+
+        "{%- if add_generation_prompt -%}"
+            "{{- 'Assistant:\\n' -}}"
+        "{%- endif -%}"
+    )
+
+    def __init__(
+        self,
+        image_min_tokens: int = -1,
+        image_max_tokens: int = -1,
+        **kwargs
+    ):
+        self.image_min_tokens = image_min_tokens
+        self.image_max_tokens = image_max_tokens
+        super().__init__(
+            image_min_tokens=self.image_min_tokens,
+            image_max_tokens=self.image_max_tokens,
+            **kwargs
+        )
+
+    def __call__(self, **kwargs):
+        # Set the specific stop token defined in the PaddleOCR template
+        kwargs['stop'] = [self.PADDLEOCR_EOS_TOKEN]
+
+        llama = kwargs['llama']
+        llama.reset()
+        llama._ctx.memory_clear(True)
+        llama.n_tokens = 0
+
+        if hasattr(llama, 'input_ids'):
+            llama.input_ids.fill(0)
+
+        if hasattr(self, '_last_image_embed'):
+            self._last_image_embed = None
+            self._last_image_hash = None
+
+        if self.verbose:
+            messages = kwargs.get('messages', [])
+            try:
+                image_count = len(self.get_image_urls(messages))
+                print(f"PaddleOCRChatHandler - Cleared state, Processing {image_count} images", file=sys.stderr)
+            except Exception:
+                print(f"PaddleOCRChatHandler - Cleared state", file=sys.stderr)
+
+        return super().__call__(**kwargs)
+
+
 class Qwen25VLChatHandler(Llava15ChatHandler):
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
