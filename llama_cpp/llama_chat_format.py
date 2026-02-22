@@ -2850,16 +2850,16 @@ while also answering every question accurately, clearly, and step-by-step when a
             self._mtmd_cpp.mtmd_helper_log_set(llama_log_callback, ctypes.c_void_p(0))
 
             # Get default parameters
-            mctx_params = self._mtmd_cpp.mtmd_context_params_default()
-            mctx_params.use_gpu = self.use_gpu
-            mctx_params.print_timings = self.verbose
-            mctx_params.n_threads = llama_model.n_threads
-            mctx_params.flash_attn_type  = self._mtmd_cpp.clip_flash_attn_type.CLIP_FLASH_ATTN_TYPE_AUTO
-            mctx_params.warmup = True
+            self.mctx_params = self._mtmd_cpp.mtmd_context_params_default()
+            self.mctx_params.use_gpu = self.use_gpu
+            self.mctx_params.print_timings = self.verbose
+            self.mctx_params.n_threads = llama_model.n_threads
+            self.mctx_params.flash_attn_type  = self._mtmd_cpp.clip_flash_attn_type.CLIP_FLASH_ATTN_TYPE_AUTO
+            self.mctx_params.warmup = True
             if self.image_min_tokens > 0:
-                mctx_params.image_min_tokens = self.image_min_tokens
+                self.mctx_params.image_min_tokens = self.image_min_tokens
             if self.image_max_tokens > 0:
-                mctx_params.image_max_tokens = self.image_max_tokens
+                self.mctx_params.image_max_tokens = self.image_max_tokens
             if (self.image_max_tokens < self.image_min_tokens) and self.image_max_tokens > 0:
                 raise ValueError(f"image_max_pixels {self.image_max_tokens} is less than image_min_pixels {self.image_min_tokens}")
 
@@ -2867,7 +2867,7 @@ while also answering every question accurately, clearly, and step-by-step when a
             self.mtmd_ctx = self._mtmd_cpp.mtmd_init_from_file(
                 self.clip_model_path.encode(),
                 llama_model.model,
-                mctx_params
+                self.mctx_params
             )
 
             if self.mtmd_ctx is None:
@@ -2877,13 +2877,21 @@ while also answering every question accurately, clearly, and step-by-step when a
             if not self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx):
                 raise ValueError("Vision is not supported by this model")
 
-            def mtmd_free():
-                with suppress_stdout_stderr(disable=self.verbose):
-                    if self.mtmd_ctx is not None:
-                        self._mtmd_cpp.mtmd_free(self.mtmd_ctx)
-                        self.mtmd_ctx = None
+    def close(self) -> None:
+        """Explicitly free the mtmd context and vision model resources."""
+        if getattr(self, "mtmd_ctx", None) is not None:
+            try:
+                with suppress_stdout_stderr(disable=getattr(self, "verbose", True)):
+                    self._mtmd_cpp.mtmd_free(self.mtmd_ctx)
+            except Exception:
+                pass
+            self.mtmd_ctx = None
+            self.mctx_params = None
 
-            self._exit_stack.callback(mtmd_free)
+        self._exit_stack.close()
+
+    def __del__(self) -> None:
+        self.close()
 
     def load_image(self, image_url: str) -> bytes:
         return self._load_image(image_url)

@@ -634,8 +634,12 @@ class Llama:
             self._candidates.close()
             self._candidates = None
 
+        if hasattr(self, "chat_handler") and hasattr(self.chat_handler, "close"):
+            self.chat_handler.close()
+
         self.model_params =None
         self.context_params = None
+        self.chat_handler = None
         self.input_ids = None
         self.scores = None
         self.tokenizer_ = None
