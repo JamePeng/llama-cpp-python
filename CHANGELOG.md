@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.27]
+
+- feat: add `PaddleOCR-VL-1.5` multimodal chat handler `PaddleOCRChatHandler`
+
+- fix: resolve VRAM leak in multimodal models by explicitly closing mtmd context
+    - Remove the `ExitStack` closure in `Llava15ChatHandler` to break circular references preventing garbage collection of the vision context.
+    - Implement explicit `close()` and `__del__()` methods in the chat handler to safely free `mtmd_ctx`.
+    - Integrate `chat_handler.close()` into the main `Llama.close()` lifecycle and nullify related attributes for immediate memory reclamation.
+
+- fix: resolve reload memory leaks by breaking circular references in cleanup
+    - Remove closure-based `ExitStack` callbacks in `LlamaModel`, `LlamaContext`, and `LlamaBatch` to eliminate circular references.
+    - Move explicit C-level memory freeing (`llama_*_free`) directly into `close()` methods.
+    - Nullify additional attributes (`tokenizer_`, `model_params`, etc.) in `Llama.close()` to guarantee immediate garbage collection during unload.
+    - Add todo comment to LoRA process logic, the current LoRa loading logic is outdated and needs to be refactored.
+
+- feat: add memory breakdown and sampler performance timings APIs
+
+- feat: Search system paths for shared libraries(`by @benniekiss`)
+
+- Optimize `longest_token_prefix` to use zero-copy NumPy arrays and drop .tolist() overhead
+
+- Free _candidates and large numpy arrays during explicit close()
+
+- fix: resolve memory leaks in sampling context lifecycle
+    - Safely close temporary `LlamaSamplingContext` in `sample()` using a try-finally block.
+    - Explicitly release the previous `_sampling_ctx` in `generate()` before re-assignment to prevent orphaned pointers.
+    - Ensure `_sampling_ctx` is properly freed in `Llama.close()`.
+
+- Fix custom sampler memory cleanup and improve lifecycle management
+    - Add explicit `close()` and `__del__()` to CustomSampler to safely free C resources and break Python reference cycles
+    - Ensure custom samplers are properly detached and freed in `LlamaSampler.close()`
+    - Add minor documentation comments for clarity
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/cacc371f99fb3b5b431d3fa89ac0c752bbd62a3b](https://github.com/ggml-org/llama.cpp/commit/cacc371f99fb3b5b431d3fa89ac0c752bbd62a3b)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260223
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/3d0fd1b75ee564361a4babf21f88855225ba1fe0...1f8341ee74a2fea15a1008487cbecaccf918c755
+
 ## [0.3.26]
 - perf(llama-cpp): optimize LlamaTokenDataArray memory operations
     - Cache NumPy field views for 'id', 'logit', and 'p' to bypass expensive property lookups.
