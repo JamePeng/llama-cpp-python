@@ -497,7 +497,8 @@ class Llama:
 
             self._stack.callback(free_lora_adapter)
 
-            if llama_cpp.llama_set_adapter_lora(
+            # Todo(JamePeng): The current LoRa loading logic is outdated and needs to be refactored.
+            if llama_cpp.llama_set_adapters_lora(
                 self._ctx.ctx, self._lora_adapter, self.lora_scale
             ):
                 raise RuntimeError(
@@ -622,6 +623,30 @@ class Llama:
                 )
 
         self._sampling_ctx: Optional[LlamaSamplingContext] = None
+
+    def close(self) -> None:
+        """Explicitly free the model from memory."""
+        if getattr(self, "_sampling_ctx", None) is not None:
+            self._sampling_ctx.close()
+            self._sampling_ctx = None
+
+        if getattr(self, "_candidates", None) is not None:
+            self._candidates.close()
+            self._candidates = None
+
+        self.model_params =None
+        self.context_params = None
+        self.input_ids = None
+        self.scores = None
+        self.tokenizer_ = None
+
+        self._c_tensor_split = None
+        self._kv_overrides_array = None
+
+        self._stack.close()
+
+    def __del__(self) -> None:
+        self.close()
 
     @property
     def ctx(self) -> llama_cpp.llama_context_p:
@@ -2593,24 +2618,6 @@ prompt: The prompt to generate text from.
     def pooling_type(self) -> str:
         """Return the pooling type."""
         return self._ctx.pooling_type()
-
-    def close(self) -> None:
-        """Explicitly free the model from memory."""
-        if getattr(self, "_sampling_ctx", None) is not None:
-            self._sampling_ctx.close()
-            self._sampling_ctx = None
-
-        if getattr(self, "_candidates", None) is not None:
-            self._candidates.close()
-            self._candidates = None
-
-        self.scores = None
-        self.input_ids = None
-
-        self._stack.close()
-
-    def __del__(self) -> None:
-        self.close()
 
     @staticmethod
     def logits_to_logprobs(

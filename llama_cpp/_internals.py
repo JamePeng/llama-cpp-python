@@ -75,15 +75,16 @@ class LlamaModel:
         self.model = model
         self.vocab = vocab
 
-        def free_model():
-            if self.model is None:
-                return
-            llama_cpp.llama_model_free(self.model)
-            self.model = None
-
-        self._exit_stack.callback(free_model)
-
     def close(self):
+        """Manually free LlamaModel and Vocab resources."""
+        if getattr(self, "model", None) is not None:
+            try:
+                llama_cpp.llama_model_free(self.model)
+            except Exception:
+                pass
+            self.model = None
+        self.vocab = None
+
         self._exit_stack.close()
 
     def __del__(self):
@@ -377,15 +378,15 @@ class LlamaContext:
 
         self.ctx = ctx
 
-        def free_ctx():
-            if self.ctx is None:
-                return
-            llama_cpp.llama_free(self.ctx)
+    def close(self):
+        """Manually free LlamaContext resources."""
+        if getattr(self, "ctx", None) is not None:
+            try:
+                llama_cpp.llama_free(self.ctx)
+            except Exception:
+                pass
             self.ctx = None
 
-        self._exit_stack.callback(free_ctx)
-
-    def close(self):
         self._exit_stack.close()
 
     def __del__(self):
@@ -625,16 +626,15 @@ class LlamaBatch:
 
         self.batch = batch
 
-        def free_batch():
-            if self.batch is None:
-                return
-            llama_cpp.llama_batch_free(self.batch)
+    def close(self):
+        """Manually free LlamaBatch resources."""
+        if getattr(self, "batch", None) is not None:
+            try:
+                llama_cpp.llama_batch_free(self.batch)
+            except Exception:
+                pass
             self.batch = None
 
-        self._exit_stack.callback(free_batch)
-
-    def close(self):
-        """Manually free resources."""
         self._exit_stack.close()
 
     def __del__(self):
