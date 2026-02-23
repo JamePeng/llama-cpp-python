@@ -1077,14 +1077,28 @@ class Llama:
             longest_prefix = self.longest_token_prefix(self._input_ids, tokens[:-1])
             if longest_prefix > 0:
                 reset = False
+
+                # Physically erase trailing "ghost" tokens from the C++ KV cache
+                # to prevent attention misalignment in multi-round chats.
+                if longest_prefix < self.n_tokens:
+                    if self.verbose:
+                        print(f"Llama.generate: Truncating KV cache size from {self.n_tokens} to {longest_prefix}", file=sys.stderr)
+                    self._ctx.memory_seq_rm(0, longest_prefix, -1)
+
+                # Adjust the tokens array and cursor to reuse the matched cache
                 tokens = tokens[longest_prefix:]
                 self.n_tokens = longest_prefix
+
                 if self.verbose:
                     print(
                         f"Llama.generate: {longest_prefix} prefix-match hit, "
                         f"remaining {len(tokens)} prompt tokens to eval",
                         file=sys.stderr,
                     )
+            else:
+                # No prefix matched. Completely clear the KV cache to prevent context poisoning.
+                self.n_tokens = 0
+                self._ctx.memory_clear(True)
 
         # Reset the model state
         if reset:

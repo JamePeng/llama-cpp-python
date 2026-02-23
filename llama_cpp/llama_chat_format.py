@@ -3817,9 +3817,6 @@ class MiniCPMv45ChatHandler(Llava15ChatHandler):
         kwargs['stop'] = [self.MINICPMV_EOS_TOKEN, self.MINICPMV_PAD_TOKEN]
 
         llama = kwargs['llama']
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
@@ -3950,11 +3947,6 @@ class GLM41VChatHandler(Llava15ChatHandler):
 
         llama = kwargs['llama']
 
-        # Clear state for multiple runs
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
-
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
@@ -4053,9 +4045,6 @@ class GLM46VChatHandler(Llava15ChatHandler):
         kwargs['stop'] = [self.GLM46V_EOS_TOKEN, "<|user|>", "<|observation|>", "<|code_middle|>"] # Stop token patch
 
         llama = kwargs['llama']
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
@@ -4140,9 +4129,6 @@ class GraniteDoclingChatHandler(Llava15ChatHandler):
         kwargs['stop'] = [self.GRANITE_EOS_TOKEN]
 
         llama = kwargs['llama']
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
@@ -4205,9 +4191,6 @@ class LFM2VLChatHandler(Llava15ChatHandler):
     def __call__(self, **kwargs):
 
         llama = kwargs['llama']
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
@@ -4325,9 +4308,6 @@ class PaddleOCRChatHandler(Llava15ChatHandler):
         kwargs['stop'] = [self.PADDLEOCR_EOS_TOKEN]
 
         llama = kwargs['llama']
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
@@ -4380,11 +4360,6 @@ class Qwen25VLChatHandler(Llava15ChatHandler):
 
     def __call__(self, **kwargs):
         llama = kwargs['llama']
-
-        # Clear state for multiple runs
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
@@ -4524,11 +4499,6 @@ class Qwen3VLChatHandler(Llava15ChatHandler):
         self.extra_template_arguments["add_vision_id"] = self.add_vision_id
 
         llama = kwargs['llama']
-
-        # Clear state for multiple runs
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
 
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
