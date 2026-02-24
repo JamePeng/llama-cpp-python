@@ -198,6 +198,9 @@ class ChatFormatterResponse:
     stopping_criteria: Optional[llama.StoppingCriteriaList] = None
     added_special: bool = False
 
+    medias: List[Union[str, bytes, bytearray]] = None
+    media_types: List[str] = None
+
 
 class ChatFormatter(Protocol):
     """Base Protocol for a chat formatter. A chat formatter is a function that

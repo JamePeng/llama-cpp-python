@@ -6,7 +6,18 @@ from .mtmd_cpp import mtmd_input_chunk_type, mtmd_free
 from ._internals import LlamaContext, LlamaBatch
 
 import ctypes
-from typing import Union, List
+from typing import Union, List, Optional, Any, Tuple
+
+import llama_cpp.llama_types as llama_types
+import llama_cpp.llama as llama
+import jinja2
+from jinja2.sandbox import ImmutableSandboxedEnvironment
+import copy
+import numpy as np
+import numpy.typing as npt
+import os
+
+from .llama_chat_format import ChatFormatter, ChatFormatterResponse
 
 class TextChunk:
     def __init__(self, tokens: List[int]):
@@ -77,6 +88,242 @@ class MultiModalContext:
     def __del__(self):
         self.close()
 
+DEFAULT_MEDIA_MARKER = mtmd.mtmd_default_marker().decode('utf-8')
+
+class Jinja2MultimodalChatFormatter(ChatFormatter):
+    def __init__(
+            self,
+            template: str,
+            eos_token: str,
+            bos_token: str,
+            add_generation_prompt: bool = True,
+            stop_token_ids: Optional[List[int]] = None,
+            placeholders: List[str] = None
+    ):
+        """A chat formatter that uses jinja2 templates to format the prompt."""
+        self.template = template
+        self.eos_token = eos_token
+        self.bos_token = bos_token
+        self.add_generation_prompt = add_generation_prompt
+        self.stop_token_ids = (
+            set(stop_token_ids) if stop_token_ids is not None else None
+        )
+
+        self.chat_template = ImmutableSandboxedEnvironment(
+            loader=jinja2.BaseLoader(),
+            trim_blocks=True,
+            lstrip_blocks=True
+        ).from_string(template)
+
+        # Placeholder mapping, mtmd_tokenize requires <__media__>
+        self.placeholders = placeholders if placeholders else [
+            "<|vision_start|><|image_pad|><|vision_end|>", # Qwen3-VL
+            "<image>",            # LLaVA / Yi
+            "<image_placeholder>",# DeepSeek
+        ]
+
+    def __call__(
+            self,
+            messages: List[llama_types.ChatCompletionRequestMessage],
+            functions: Optional[List[llama_types.ChatCompletionFunction]] = None,
+            function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
+            tools: Optional[List[llama_types.ChatCompletionTool]] = None,
+            tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+            **kwargs: Any,
+    ) -> Tuple[str, List[Union[str, bytes, bytearray]], List[str]]:
+        def raise_exception(message: str):
+            raise ValueError(message)
+
+        def strftime_now(format_string="%Y-%m-%d %H:%M:%S") -> str:
+            """
+            Returns the current time formatted as a string.
+            """
+            return datetime.datetime.now().strftime(format_string)
+
+        messages = copy.deepcopy(messages)
+        media_urls, media_types = self.split_media(messages)
+        medias = []
+
+        for url, m_type in zip(media_urls, media_types):
+            if m_type == "video":
+                raise ValueError("Video input is not supported yet.")
+
+            data = self._fetch_media(url, m_type)
+
+            #if m_type == "image" and isinstance(data, bytes):
+            #    data = self._compress_image(data)
+
+            medias.append(data)
+
+        prompt = self.chat_template.render(
+            messages=messages,
+            eos_token=self.eos_token,
+            bos_token=self.bos_token,
+            raise_exception=raise_exception,
+            strftime_now=strftime_now,
+            add_generation_prompt=self.add_generation_prompt,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
+
+        for p in self.placeholders:
+            prompt = prompt.replace(p, DEFAULT_MEDIA_MARKER)
+
+        stopping_criteria = None
+        if self.stop_token_ids is not None:
+
+            def stop_on_last_token(
+                    tokens: npt.NDArray[np.intc], logits: npt.NDArray[np.single]
+            ) -> bool:
+                return tokens[-1] in self.stop_token_ids
+
+            stopping_criteria = llama.StoppingCriteriaList([stop_on_last_token])
+
+        return ChatFormatterResponse(
+            prompt=prompt,
+            stop=[self.eos_token],
+            stopping_criteria=stopping_criteria,
+            added_special=True,
+            medias=medias,
+            media_types=media_types
+        )
+
+    @staticmethod
+    def split_media(messages: List[llama_types.ChatCompletionRequestMessage]):
+        media_urls: List[Union[str, bytes, bytearray]] = []
+        media_types: List[str] = []
+
+        for message in messages:
+            if message.get("role") != "user" or not isinstance(message.get("content"), list):
+                continue
+
+            for content in message["content"]:
+                if not (isinstance(content, dict) and "type" in content):
+                    continue
+
+                c_type = content["type"]
+                if c_type == "text":
+                    continue
+
+                value = content[c_type]
+
+                if isinstance(value, dict) and "url" in value:
+                    media_urls.append(value["url"])
+                    value["url"] = DEFAULT_MEDIA_MARKER
+                else:
+                    media_urls.append(value)
+                    content[c_type] = DEFAULT_MEDIA_MARKER
+
+                if c_type == "image" or c_type == "image_url":
+                    media_types.append("image")
+
+                elif c_type == "audio" or c_type == "audio_url":
+                    media_types.append("audio")
+
+                elif c_type == "video" or c_type == "video_url":
+                    media_types.append("video")
+
+                else:
+                    raise ValueError(f"Unsupported content type {c_type}")
+
+        return media_urls, media_types
+
+    @staticmethod
+    def _fetch_media(media_input: Union[str, bytes], media_type: str) -> Union[str, bytes, bytearray]:
+        """
+        Fetch media (audio, image, video...) from local disk, memory, or internet
+        """
+
+        # --- from_buffer fast path ---
+        if isinstance(media_input, bytes) or isinstance(media_input, bytearray):
+            return media_input
+
+        if not isinstance(media_input, str):
+            raise ValueError(f"Unsupported media input type: {type(media_input)}")
+
+        # --- from_file fast path ---
+        if media_input.startswith("file://"):
+            parsed_path = urllib.parse.urlparse(media_input).path
+            # unquote 处理 URL 编码的字符
+            abs_path = os.path.abspath(urllib.parse.unquote(parsed_path))
+            if os.path.exists(abs_path):
+                return abs_path
+            else:
+                raise FileNotFoundError(f"Local file not found: {abs_path}")
+
+        # --- base64 or remote url ---
+        raw_bytes = b""
+        if media_input.startswith("data:"):
+            import base64
+            # Split only once from the right to correctly handle mime types containing commas
+            comma_pos = media_input.find(",")
+            if comma_pos == -1:
+                raise ValueError("Invalid data URI: missing comma separator")
+
+            raw_bytes = base64.b64decode(media_input[comma_pos+1:])
+        elif "://" in media_input:
+            import urllib.request
+            from urllib.error import URLError, HTTPError
+
+            headers = {"User-Agent": "Mozilla/5.0"}
+            req = urllib.request.Request(media_input, headers=headers)
+
+            try:
+                with urllib.request.urlopen(req, timeout=15) as f:
+                    raw_bytes = f.read()
+            except (URLError, HTTPError) as e:
+                raise ConnectionError(f"Failed to fetch media from {media_input}: {e}")
+
+        else:
+            # try direct path
+            if os.path.exists(media_input):
+                return os.path.abspath(media_input)
+            raise ValueError("Unrecognized media string format")
+
+        if not raw_bytes:
+            raise ValueError("Empty data received")
+
+        return raw_bytes
+
+    @staticmethod
+    def _compress_image(image_bytes: bytes) -> bytes:
+        try:
+            from PIL import Image, ImageStat
+        except ImportError:
+            raise ImportError("Pillow is required for image processing. Install with: pip install pillow")
+
+        import io
+        image = Image.open(io.BytesIO(image_bytes))
+
+        # 4. Handle transparency (RGBA, LA, P with transparency, etc.)
+        if image.mode in ("RGBA", "LA", "PA") or (image.mode == "P" and "transparency" in image.info):
+            # Use alpha channel as mask
+            if image.mode == "P":
+                image = image.convert("RGBA")
+
+            alpha = image.split()[-1]  # Last channel is alpha
+            # Compute average brightness of visible (non-transparent) pixels
+            stat = ImageStat.Stat(image.convert("L"), mask=alpha)
+
+            # Choose background: white for dark content, black for bright content
+            bg_color = (255, 255, 255)  # white
+            if stat.count[0] > 0 and stat.mean[0] > 127:
+                bg_color = (0, 0, 0)  # black
+
+            background = Image.new("RGB", image.size, bg_color)
+            background.paste(image, mask=alpha)
+            image = background
+
+        # 5. Ensure RGB mode for formats like CMYK, palette, etc.
+        elif image.mode != "RGB":
+            image = image.convert("RGB")
+
+        # 6. Save as high-quality JPEG, suitable for most vision models.
+        output = io.BytesIO()
+        image.save(output, format="JPEG", quality=95, optimize=True, progressive=True)
+        return output.getvalue()
 
 # Simple FNV-1a hash implementation to match fnv_hash in C++
 def fnv_hash(data: bytes) -> str:
@@ -89,12 +336,12 @@ def fnv_hash(data: bytes) -> str:
 def mtmd_tokenize(
     mctx: mtmd.mtmd_context_p,
     prompt: str,
-    files_data: list[bytes | str]) -> MultimodalTokenList:
+    medias_data: list[Union[str, bytes, bytearray]]) -> MultimodalTokenList:
 
     bitmaps = []
     do_hash = False
 
-    for data in files_data:
+    for data in medias_data:
 
         bmp = None
         if isinstance(data, str):
@@ -200,3 +447,5 @@ def mtmd_prefill(
                 raise RuntimeError(f"MTMD eval error: {result}")
 
             n_past = new_n_past.value
+
+    return n_past
