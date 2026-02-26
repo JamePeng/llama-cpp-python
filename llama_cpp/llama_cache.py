@@ -333,11 +333,10 @@ class HybridCheckpointCache(BaseLlamaCache):
     Manager for RNN state snapshots (Checkpoints) tailored for Hybrid/Recurrent models.
     Provides rollback capabilities for models that cannot physically truncate KV cache.
     """
-    def __init__(self, ctx: llama_cpp.llama_context_p, seq_id: int = 0, max_checkpoints: int = 16, verbose: bool = False):
+    def __init__(self, ctx: llama_cpp.llama_context_p, max_checkpoints: int = 16, verbose: bool = False):
         if ctx is None:
             raise ValueError("HybridCheckpointCache: Failed to create HybridCheckpointCache with model context")
         self._ctx = ctx
-        self.seq_id = seq_id
         self.max_checkpoints = max_checkpoints
         self.checkpoints: list[HybridCheckpoint] = []
         self._current_size = 0
@@ -361,6 +360,16 @@ class HybridCheckpointCache(BaseLlamaCache):
         self._current_size = 0
         if self.verbose:
             print("HybridCheckpointCache: cleared")
+
+    def close(self):
+        self.checkpoints = None
+        self._ctx = None
+        self._get_size_ext = None
+        self._get_data_ext = None
+        self._set_data_ext = None
+
+    def __del__(self) -> None:
+        self.close()
 
     # Helper tools
 
