@@ -3091,12 +3091,6 @@ while also answering every question accurately, clearly, and step-by-step when a
                         n_past = new_n_past.value
                         llama.n_tokens = n_past
 
-                n_past = llama.n_tokens
-                if n_past > 0:
-                    llama._ctx.memory_seq_rm(0, n_past - 1, -1)
-                    if llama._ctx.memory_seq_pos_min(0) == llama._ctx.memory_seq_pos_max(0):
-                        n_past += 1
-                        llama.n_tokens = n_past
                 # Get prompt tokens to avoid a cache miss
                 prompt = llama.input_ids[: llama.n_tokens].tolist()
 
