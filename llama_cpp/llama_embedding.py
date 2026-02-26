@@ -251,8 +251,20 @@ class LlamaEmbedding(Llama):
                 _decode_batch()
                 idx_in_batch = 0
 
+            pos_array = list(range(n_tokens))
+
+            if is_none:
+                logits_array = [True] * n_tokens
+            else:
+                logits_array = [False] * (n_tokens - 1) + [True]
+
             # Add to Batch
-            self._batch.add_sequence(tokens, idx_in_batch, logits_all=logits_all)
+            self._batch.add_sequence(
+                token_array=tokens,
+                pos_array=pos_array,
+                seq_ids=[idx_in_batch],
+                logits_array=logits_array
+            )
             batch_seq_lens.append(n_tokens)
             idx_in_batch += 1
 

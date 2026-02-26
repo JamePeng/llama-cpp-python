@@ -124,7 +124,7 @@ def test_real_model(llama_cpp_model_path):
 
     for _ in range(4):
         # Prepare batch with current tokens
-        batch.set_batch(curr_tokens, n_past=n_eval, logits_all=False)
+        batch.add_token(curr_tokens, pos=n_eval, seq_ids=[0], logits=False)
 
         # Decode (run inference)
         context.decode(batch)
