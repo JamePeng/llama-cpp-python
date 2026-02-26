@@ -34,10 +34,11 @@ from .llama_types import *
 from .llama_grammar import LlamaGrammar
 from .llama_cache import (
     BaseLlamaCache,
-    LlamaCache,      # type: ignore
-    LlamaDiskCache,  # type: ignore
-    LlamaRAMCache,   # type: ignore
-    LlamaTrieCache,  # type: ignore
+    LlamaCache,            # type: ignore
+    LlamaDiskCache,        # type: ignore
+    LlamaRAMCache,         # type: ignore
+    LlamaTrieCache,        # type: ignore
+    HybridCheckpointCache, # type: ignore
 )
 from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
 import llama_cpp.llama_cpp as llama_cpp
@@ -109,6 +110,8 @@ class Llama:
         op_offload: Optional[bool] = None,
         swa_full: Optional[bool] = None,
         kv_unified: Optional[bool] = None,
+        # HybridCheckpointCache Params
+        ctx_checkpoints: int = 16,
         # Sampling Params
         last_n_tokens_size: int = 64,
         # LoRA Params
@@ -197,6 +200,7 @@ class Llama:
             op_offload: whether to offload host tensor operations to device
             swa_full: whether to use full-size SWA cache
             kv_unified: use single unified KV buffer for the KV cache of all sequences
+            ctx_checkpoints: max number of context checkpoints to create per slot (default: 16)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
             last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
             lora_base: Optional path to base model, useful if using a quantized base model and you want to apply LoRA to an f16 model.
             lora_path: Path to a LoRA file to apply to the model.
@@ -466,6 +470,26 @@ class Llama:
             )
         )
 
+        # Hybrid architecture detection
+        _is_recurrent = self._model.is_recurrent()
+        _is_hybrid = self._model.is_hybrid()
+        _n_swa = self._model.n_swa()
+        # checkpoints are created only if:
+        # - the model uses SWA and we are not using `swa_full`
+        # - the model architecture is marked as recurrent or hybrid
+        self.is_hybrid = _is_recurrent or _is_hybrid or (_n_swa > 0 and not swa_full)
+
+        if self.is_hybrid:
+            if self.verbose:
+                print(f"Llama.__init__: Hybrid/Recurrent model detected."
+                      f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, n_swa: {_n_swa}), swa_full: {swa_full}. "
+                      f" Enabling HybridCheckpointCache(ctx_checkpoints={ctx_checkpoints}).",
+                      file=sys.stderr)
+            self.ctx_checkpoints = ctx_checkpoints
+            self._hybrid_cache_mgr = HybridCheckpointCache(self._ctx.ctx, max_checkpoints=self.ctx_checkpoints, verbose=self.verbose)
+        else:
+            self._hybrid_cache_mgr = None
+
         self._batch = self._stack.enter_context(
             contextlib.closing(
                 internals.LlamaBatch(
@@ -634,6 +658,10 @@ class Llama:
             self._candidates.close()
             self._candidates = None
 
+        if getattr(self, "_hybrid_cache_mgr", None) is not None and hasattr(self._hybrid_cache_mgr, "close"):
+            self._hybrid_cache_mgr.close()
+            self._hybrid_cache_mgr = None
+
         if hasattr(self, "chat_handler") and hasattr(self.chat_handler, "close"):
             self.chat_handler.close()
 
@@ -641,6 +669,7 @@ class Llama:
         self.context_params = None
         self.chat_handler = None
         self.input_ids = None
+        self.metadata = None
         self.scores = None
         self.tokenizer_ = None
 
@@ -1099,6 +1128,8 @@ class Llama:
                 # No prefix matched. Completely clear the KV cache to prevent context poisoning.
                 self.n_tokens = 0
                 self._ctx.memory_clear(True)
+                if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                    self._hybrid_cache_mgr.clear()
 
         # Reset the model state
         if reset:
