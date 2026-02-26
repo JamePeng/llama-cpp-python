@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+import array
 from collections import OrderedDict
 import ctypes
 from dataclasses import dataclass
@@ -383,7 +384,7 @@ class HybridCheckpointCache(BaseLlamaCache):
         tokens_size = len(tokens)
         if length > tokens_size:
             length = tokens_size
-        data = bytes(tokens[:length])
+        data = array.array('i', tokens[:length]).tobytes()
         return hashlib.sha256(data).hexdigest()[:32]
 
     def find_best_checkpoint(self, tokens: List[int], seq_id: int = 0) -> Optional[HybridCheckpoint]:
