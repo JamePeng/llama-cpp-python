@@ -419,7 +419,7 @@ class HybridCheckpointCache(BaseLlamaCache):
         flags = self._flag_partial
 
         # 1. Query the required buffer size
-        size = llama_cpp.llama_state_seq_get_size_ext(self._ctx, seq_id, flags)
+        size = self._get_size_ext(self._ctx, seq_id, flags)
         if size == 0:
             if self.verbose:
                 print("HybridCheckpointCache: size=0, skip")
@@ -427,7 +427,7 @@ class HybridCheckpointCache(BaseLlamaCache):
 
         # 2. Allocate buffer and extract data
         buffer = (ctypes.c_uint8 * size)()
-        n_written = llama_cpp.llama_state_seq_get_data_ext(self._ctx, buffer, size, seq_id, flags)
+        n_written = self._get_data_ext(self._ctx, buffer, size, seq_id, flags)
         if n_written != size:
             if self.verbose:
                 print(f"HybridCheckpointCache: get failed {n_written}/{size}")
@@ -466,13 +466,24 @@ class HybridCheckpointCache(BaseLlamaCache):
         """
         Injects a previously saved RNN state checkpoint back into the C++ backend memory.
         """
+        # 1. Verify sequence ID matches to prevent cross-sequence contamination
         if cp.seq_id != seq_id:
+            if self.verbose:
+                print(f"HybridCheckpointCache: [Error] Sequence ID mismatch: checkpoint has {cp.seq_id}, requested {seq_id}", file=sys.stderr)
             return False
         flags = self._flag_partial
 
-        # Copy data back to a ctypes buffer and push to backend
+        # 2. Verify the underlying C++ context still expects the exact same state size.
+        # This prevents buffer overflows if the backend context was unexpectedly altered or reallocated.
+        current_size = self._get_size_ext(self._ctx, seq_id, flags)
+        if current_size != cp.size:
+            if self.verbose:
+                print(f"HybridCheckpointCache: [Warning] State size mismatch before restore: expected {cp.size}, got {current_size} → possible invalidation")
+            return False
+
+        # 3. Copy data back to a ctypes buffer and push to the C++ backend
         buffer = (ctypes.c_uint8 * cp.size).from_buffer_copy(cp.data)
-        ret = llama_cpp.llama_state_seq_set_data_ext(
+        ret = self._set_data_ext(
             self._ctx, buffer, cp.size, seq_id, flags
         )
         success = (ret == cp.size)
