@@ -1,15 +1,21 @@
-import sys
 from abc import ABC, abstractmethod
+from collections import OrderedDict
+import ctypes
+from dataclasses import dataclass
+import diskcache
+import hashlib
+import sys
 from typing import (
+    Any,
+    List,
     Optional,
     Sequence,
     Tuple,
 )
-from collections import OrderedDict
-
-import diskcache
 
 import llama_cpp.llama
+import llama_cpp._internals as _internals
+import llama_cpp.llama_cpp as llama_cpp
 
 from .llama_types import *
 
@@ -44,6 +50,60 @@ class BaseLlamaCache(ABC):
         self, key: Sequence[int], value: "llama_cpp.llama.LlamaState"
     ) -> None:
         raise NotImplementedError
+
+
+class LlamaDiskCache(BaseLlamaCache):
+    """Cache for a llama.cpp model using disk."""
+
+    def __init__(
+        self, cache_dir: str = ".cache/llama_cache", capacity_bytes: int = (2 << 30)
+    ):
+        super().__init__(capacity_bytes)
+        self.cache = diskcache.Cache(cache_dir)
+
+    @property
+    def cache_size(self):
+        return int(self.cache.volume())  # type: ignore
+
+    def _find_longest_prefix_key(
+        self,
+        key: Tuple[int, ...],
+    ) -> Optional[Tuple[int, ...]]:
+        min_len = 0
+        min_key: Optional[Tuple[int, ...]] = None
+        for k in self.cache.iterkeys():  # type: ignore
+            prefix_len = llama_cpp.llama.Llama.longest_token_prefix(k, key)
+            if prefix_len > min_len:
+                min_len = prefix_len
+                min_key = k  # type: ignore
+        return min_key
+
+    def __getitem__(self, key: Sequence[int]) -> "llama_cpp.llama.LlamaState":
+        key = tuple(key)
+        _key = self._find_longest_prefix_key(key)
+        if _key is None:
+            raise KeyError("Key not found")
+        value: "llama_cpp.llama.LlamaState" = self.cache.pop(_key)  # type: ignore
+        # NOTE: This puts an integer as key in cache, which breaks,
+        # Llama.longest_token_prefix(k, key) above since k is not a tuple of ints/tokens
+        # self.cache.push(_key, side="front")  # type: ignore
+        return value
+
+    def __contains__(self, key: Sequence[int]) -> bool:
+        return self._find_longest_prefix_key(tuple(key)) is not None
+
+    def __setitem__(self, key: Sequence[int], value: "llama_cpp.llama.LlamaState"):
+        print("LlamaDiskCache.__setitem__: called", file=sys.stderr)
+        key = tuple(key)
+        if key in self.cache:
+            print("LlamaDiskCache.__setitem__: delete", file=sys.stderr)
+            del self.cache[key]
+        self.cache[key] = value
+        print("LlamaDiskCache.__setitem__: set", file=sys.stderr)
+        while self.cache_size > self.capacity_bytes and len(self.cache) > 0:
+            key_to_remove = next(iter(self.cache))
+            del self.cache[key_to_remove]
+        print("LlamaDiskCache.__setitem__: trim", file=sys.stderr)
 
 
 class LlamaRAMCache(BaseLlamaCache):
@@ -259,55 +319,166 @@ class LlamaTrieCache(BaseLlamaCache):
 LlamaCache = LlamaRAMCache
 
 
-class LlamaDiskCache(BaseLlamaCache):
-    """Cache for a llama.cpp model using disk."""
+@dataclass
+class HybridCheckpoint:
+    """Represents a single snapshot of the RNN/Hybrid model's hidden state."""
+    pos: int        # The token position (cursor) where this snapshot was taken
+    data: bytes     # The raw binary RNN state data
+    hash_val: str   # SHA-256 hash of the token prefix to ensure exact sequence matching
+    size: int       # Size of the state data in bytes
+    seq_id: int     # Sequence ID this checkpoint belongs to
 
-    def __init__(
-        self, cache_dir: str = ".cache/llama_cache", capacity_bytes: int = (2 << 30)
-    ):
-        super().__init__(capacity_bytes)
-        self.cache = diskcache.Cache(cache_dir)
+class HybridCheckpointCache(BaseLlamaCache):
+    """
+    Manager for RNN state snapshots (Checkpoints) tailored for Hybrid/Recurrent models.
+    Provides rollback capabilities for models that cannot physically truncate KV cache.
+    """
+    def __init__(self, ctx: llama_cpp.llama_context_p, seq_id: int = 0, max_checkpoints: int = 16, verbose: bool = False):
+        if ctx is None:
+            raise ValueError("HybridCheckpointCache: Failed to create HybridCheckpointCache with model context")
+        self._ctx = ctx
+        self.seq_id = seq_id
+        self.max_checkpoints = max_checkpoints
+        self.checkpoints: list[HybridCheckpoint] = []
+        self._current_size = 0
+
+        # Cache C-type API function pointers for performance
+        self._get_size_ext = llama_cpp.llama_state_seq_get_size_ext
+        self._get_data_ext = llama_cpp.llama_state_seq_get_data_ext
+        self._set_data_ext = llama_cpp.llama_state_seq_set_data_ext
+        self._flag_partial = llama_cpp.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
+
+        self.verbose = verbose
 
     @property
-    def cache_size(self):
-        return int(self.cache.volume())  # type: ignore
+    def cache_size(self) -> int:
+        """Returns the total memory used by all stored checkpoints in bytes."""
+        return self._current_size
 
-    def _find_longest_prefix_key(
+    def clear(self):
+        """Clears all stored checkpoints and resets memory tracking."""
+        self.checkpoints.clear()
+        self._current_size = 0
+        if self.verbose:
+            print("HybridCheckpointCache: cleared")
+
+    # Helper tools
+
+    def _hash_prefix(self, tokens: List[int], length: int) -> str:
+        """
+        Computes a SHA-256 hash for a sequence of tokens up to the specified length.
+        This ensures that checkpoints are only restored for the EXACT same conversation history.
+        """
+        if length <= 0:
+            return "empty"
+        tokens_size = len(tokens)
+        if length > tokens_size:
+            length = tokens_size
+        data = bytes(tokens[:length])
+        return hashlib.sha256(data).hexdigest()[:32]
+
+    def find_best_checkpoint(self, tokens: List[int], seq_id: int = 0) -> Optional[HybridCheckpoint]:
+        """
+        Finds the longest valid checkpoint that perfectly matches the provided token prefix.
+        Returns None if no matching checkpoint is found.
+        """
+        best_cp = None
+        best_pos = -1
+        for cp in self.checkpoints:
+            if cp.seq_id != seq_id or cp.pos > len(tokens):
+                # Skip if sequence ID mismatches or checkpoint is longer than the current prompt
+                continue
+
+            # Verify cryptographic integrity of the prompt history
+            if self._hash_prefix(tokens, cp.pos) == cp.hash_val:
+                if cp.pos > best_pos:
+                    # Keep the checkpoint with the longest matching prefix (highest pos)
+                    best_pos = cp.pos
+                    best_cp = cp
+        return best_cp
+
+    def save_checkpoint(
         self,
-        key: Tuple[int, ...],
-    ) -> Optional[Tuple[int, ...]]:
-        min_len = 0
-        min_key: Optional[Tuple[int, ...]] = None
-        for k in self.cache.iterkeys():  # type: ignore
-            prefix_len = llama_cpp.llama.Llama.longest_token_prefix(k, key)
-            if prefix_len > min_len:
-                min_len = prefix_len
-                min_key = k  # type: ignore
-        return min_key
+        current_pos: int,
+        tokens: List[int],
+        seq_id: int = 0
+    ) -> bool:
+        """
+        Extracts the RNN hidden state from the C++ backend and saves it as a checkpoint.
+        Manages eviction (FIFO) if the maximum number of checkpoints is exceeded.
+        """
+        flags = self._flag_partial
 
-    def __getitem__(self, key: Sequence[int]) -> "llama_cpp.llama.LlamaState":
-        key = tuple(key)
-        _key = self._find_longest_prefix_key(key)
-        if _key is None:
-            raise KeyError("Key not found")
-        value: "llama_cpp.llama.LlamaState" = self.cache.pop(_key)  # type: ignore
-        # NOTE: This puts an integer as key in cache, which breaks,
-        # Llama.longest_token_prefix(k, key) above since k is not a tuple of ints/tokens
-        # self.cache.push(_key, side="front")  # type: ignore
-        return value
+        # 1. Query the required buffer size
+        size = llama_cpp.llama_state_seq_get_size_ext(self._ctx, seq_id, flags)
+        if size == 0:
+            if self.verbose:
+                print("HybridCheckpointCache: size=0, skip")
+            return False
 
-    def __contains__(self, key: Sequence[int]) -> bool:
-        return self._find_longest_prefix_key(tuple(key)) is not None
+        # 2. Allocate buffer and extract data
+        buffer = (ctypes.c_uint8 * size)()
+        n_written = llama_cpp.llama_state_seq_get_data_ext(self._ctx, buffer, size, seq_id, flags)
+        if n_written != size:
+            if self.verbose:
+                print(f"HybridCheckpointCache: get failed {n_written}/{size}")
+            return False
 
-    def __setitem__(self, key: Sequence[int], value: "llama_cpp.llama.LlamaState"):
-        print("LlamaDiskCache.__setitem__: called", file=sys.stderr)
-        key = tuple(key)
-        if key in self.cache:
-            print("LlamaDiskCache.__setitem__: delete", file=sys.stderr)
-            del self.cache[key]
-        self.cache[key] = value
-        print("LlamaDiskCache.__setitem__: set", file=sys.stderr)
-        while self.cache_size > self.capacity_bytes and len(self.cache) > 0:
-            key_to_remove = next(iter(self.cache))
-            del self.cache[key_to_remove]
-        print("LlamaDiskCache.__setitem__: trim", file=sys.stderr)
+        data_bytes = bytes(buffer[:n_written])
+        hash_val = self._hash_prefix(tokens, current_pos)
+
+        # 3. Store the checkpoint
+        self.checkpoints.append(HybridCheckpoint(
+            pos=current_pos,
+            data=data_bytes,
+            hash_val=hash_val,
+            size=n_written,
+            seq_id=seq_id)
+        )
+        self._current_size += n_written
+
+        # 4. Enforce capacity limits (FIFO eviction)
+        while len(self.checkpoints) > self.max_checkpoints:
+            if not self.checkpoints:
+                break
+            old_cp = self.checkpoints.pop(0)
+            self._current_size -= old_cp.size
+            if self.verbose:
+                print(f"HybridCheckpointCache: evicted pos={old_cp.pos}")
+
+        if self.verbose:
+            print(f"HybridCheckpointCache: Saved checkpoint at pos {current_pos} ({size / 1024 / 1024:.2f} MiB)  "
+                  f"total={len(self.checkpoints)}  used={self._current_size / 1024 / 1024:.2f} MiB",
+                  file=sys.stderr)
+
+        return True
+
+    def restore_checkpoint(self, cp: HybridCheckpoint, seq_id: int = 0) -> bool:
+        """
+        Injects a previously saved RNN state checkpoint back into the C++ backend memory.
+        """
+        if cp.seq_id != seq_id:
+            return False
+        flags = self._flag_partial
+
+        # Copy data back to a ctypes buffer and push to backend
+        buffer = (ctypes.c_uint8 * cp.size).from_buffer_copy(cp.data)
+        ret = llama_cpp.llama_state_seq_set_data_ext(
+            self._ctx, buffer, cp.size, seq_id, flags
+        )
+        success = (ret == cp.size)
+
+        if self.verbose:
+            print(f"HybridCheckpointCache: restore {'OK' if success else 'FAIL'} pos={cp.pos}")
+        return success
+
+    # Disable BaseLlamaCache Dictionary Interfaces
+
+    def __getitem__(self, key):
+        raise NotImplementedError("HybridCheckpointCache: pls use save_checkpoint or restore_checkpoint method")
+
+    def __setitem__(self, key, value):
+        raise NotImplementedError("HybridCheckpointCache: pls use save_checkpoint or restore_checkpoint method")
+
+    def __contains__(self, key):
+        raise NotImplementedError("HybridCheckpointCache: pls use save_checkpoint or restore_checkpoint method")
