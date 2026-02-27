@@ -4467,7 +4467,6 @@ class Qwen3VLChatHandler(Llava15ChatHandler):
         self,
         force_reasoning: bool = False,
         add_vision_id: bool = True,
-        image_min_tokens: int = -1,
         **kwargs,
     ):
         """
@@ -4478,20 +4477,13 @@ class Qwen3VLChatHandler(Llava15ChatHandler):
         - add_vision_id (bool):
             - True (default): Count all the images. Recommended for multi-image.
             - False: Doesn't count the images. Can save tokens with single-image.
-        - image_min_tokens (int):
-            It only takes effect when the value is greater than zero. the default value is -1 (i.e., using the default parameters in the model's preprocessor_config.json).
-            Note: Qwen-VL models require at minimum 1024 image tokens to function correctly on bbox grounding tasks
         """
-        self.force_reasoning = force_reasoning
-        self.add_vision_id = add_vision_id
-        self.image_min_tokens = image_min_tokens
+        super().__init__(**kwargs)
 
-        super().__init__(image_min_tokens=self.image_min_tokens, **kwargs)
+        self.extra_template_arguments["force_reasoning"] = force_reasoning
+        self.extra_template_arguments["add_vision_id"] = add_vision_id
 
     def __call__(self, **kwargs):
-        self.extra_template_arguments["force_reasoning"] = self.force_reasoning
-        self.extra_template_arguments["add_vision_id"] = self.add_vision_id
-
         llama = kwargs['llama']
 
         if hasattr(llama, 'input_ids'):
@@ -4698,15 +4690,12 @@ class Qwen35ChatHandler(Llava15ChatHandler):
             - True (default): Count all the images. Recommended for multi-image.
             - False: Doesn't count the images. Can save tokens with single-image.
         """
-        self.reasoning = reasoning
-        self.add_vision_id = add_vision_id
-
         super().__init__(**kwargs)
 
-    def __call__(self, **kwargs):
-        self.extra_template_arguments["enable_thinking"] = self.reasoning
-        self.extra_template_arguments["add_vision_id"] = self.add_vision_id
+        self.extra_template_arguments["enable_thinking"] = reasoning
+        self.extra_template_arguments["add_vision_id"] = add_vision_id
 
+    def __call__(self, **kwargs):
         llama = kwargs['llama']
 
         # Clear state for multiple runs
