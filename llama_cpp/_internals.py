@@ -529,19 +529,43 @@ class LlamaContext:
         if return_code != 0:
             raise RuntimeError(f"llama_encode returned {return_code}")
 
-    def decode(self, batch: LlamaBatch):
+    def decode(self, batch: 'LlamaBatch') -> int:
+        """
+        Evaluate the batch of tokens using the transformer model.
+
+        This method executes the forward pass. If the KV cache is heavily fragmented
+        or out of space, it may return 1, indicating the caller should try to reduce
+        the batch size or evict idle sequences.
+
+        Returns:
+            0: Success.
+            1: No KV slot available (Recoverable). The caller should implement a
+               fallback strategy, such as reducing the batch size and retrying.
+
+        Raises:
+            RuntimeError: If a fatal, non-recoverable error occurs during decoding
+                          (e.g., negative error codes or invalid batch structures).
+        """
         return_code = llama_cpp.llama_decode(self.ctx, batch.batch)
 
         if return_code == 0:
-            return
+            return 0
 
+        # 1 means "No KV slot available".
+        # We explicitly return 1 instead of raising an exception so that the caller
+        # can gracefully handle it via dynamic batch sizing (batch_size //= 2).
+        elif return_code == 1:
+            return 1
+
+        # Any other code indicates a fatal failure.
         error_map = {
-             1: "No KV slot available: try reducing batch size or increasing context window",
-             2: "Decoding aborted",
-            -1: "Invalid input batch",
+             2: "Decoding aborted by user callback",
+            -1: "Invalid input batch (e.g. n_tokens == 0 or exceeding capacity)",
+            -2: "Could not allocate space for the compute graph (VRAM exhausted)",
+            -3: "Graph computation failed internally",
         }
 
-        msg = error_map.get(return_code, "Fatal internal error")
+        msg = error_map.get(return_code, "Unknown fatal internal error")
         raise RuntimeError(f"llama_decode failed (code {return_code}): {msg}")
 
     def set_n_threads(self, n_threads: int, n_threads_batch: int):

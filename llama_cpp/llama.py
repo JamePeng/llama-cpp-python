@@ -112,7 +112,8 @@ class Llama:
         swa_full: Optional[bool] = None,
         kv_unified: Optional[bool] = None,
         # HybridCheckpointCache Params
-        ctx_checkpoints: int = 16,
+        ctx_checkpoints: int = 32,
+        checkpoint_interval: int = 4096,
         # Sampling Params
         last_n_tokens_size: int = 64,
         # LoRA Params
@@ -203,6 +204,7 @@ class Llama:
             swa_full: whether to use full-size SWA cache
             kv_unified: use single unified KV buffer for the KV cache of all sequences
             ctx_checkpoints: max number of context checkpoints to create per slot (default: 16)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
+            checkpoint_interval: Hybrid model checkpoint token intervals, and archiving of text with interval sizes along the way.
             last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
             lora_base: Optional path to base model, useful if using a quantized base model and you want to apply LoRA to an f16 model.
             lora_path: Path to a LoRA file to apply to the model.
@@ -485,10 +487,11 @@ class Llama:
         if self.is_hybrid:
             if self.verbose:
                 print(f"Llama.__init__: Hybrid/Recurrent model detected."
-                      f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, n_swa: {_n_swa}), swa_full: {swa_full}. "
-                      f" Enabling HybridCheckpointCache(ctx_checkpoints={ctx_checkpoints}).",
+                      f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, n_swa: {_n_swa}, swa_full: {swa_full}). "
+                      f" Enabling HybridCheckpointCache(ctx_checkpoints={ctx_checkpoints}, checkpoint_interval={checkpoint_interval}).",
                       file=sys.stderr)
             self.ctx_checkpoints = ctx_checkpoints
+            self.checkpoint_interval = checkpoint_interval
             self._hybrid_cache_mgr = HybridCheckpointCache(self._ctx.ctx, max_checkpoints=self.ctx_checkpoints, verbose=self.verbose)
         else:
             self._hybrid_cache_mgr = None
@@ -784,7 +787,7 @@ class Llama:
         if n_eval == 0:
             return
 
-        # Context Shift
+        # Context Shift: Prevent OOM by discarding older tokens when context limit is reached.
         if self.n_tokens + n_eval > self._n_ctx:
             if self.is_hybrid:
                 raise RuntimeError(
@@ -793,7 +796,7 @@ class Llama:
                 )
             else:
                 _n_keep = min(self.n_keep, self.n_tokens)
-                # number of tokens after n_keep that may be discarded when shifting context
+                # Number of tokens after n_keep that may be discarded when shifting context
                 # defaults to half
                 _n_discard = (self.n_tokens - _n_keep) // 2
 
@@ -810,55 +813,107 @@ class Llama:
 
                 self.n_tokens -= _n_discard
 
-        for i in range(0, n_eval, self.n_batch):
-            batch_tokens = tokens[i : min(n_eval, i + self.n_batch)]
-            n_batch_tokens = len(batch_tokens)
+        # Adaptive batch downgrade limit initialization
+        current_max_batch = self.n_batch
+        last_ckpt_pos = self.n_tokens
+
+        # If KV slots are full, `current_batch_size` will be halved.
+        # A `while` loop allows us to correctly resume from the exact cut-off point.
+        i = 0
+        while i < n_eval:
+            # Chunk the tokens using the adaptive current_max_batch
+            n_chunk = min(n_eval - i, current_max_batch)
+            chunk = tokens[i : i + n_chunk]
             n_past = self.n_tokens
 
             self._batch.reset()
 
-            pos_array = [self.n_tokens + j for j in range(n_batch_tokens)]
+            pos_array = [self.n_tokens + j for j in range(n_chunk)]
 
+            # Configure logits extraction:
+            # If _logits_all is True, calculate for every token.
+            # Otherwise, only calculate for the very last token in the entire evaluation sequence.
             if self._logits_all:
-                logits_array = [True] * n_batch_tokens
+                logits_array = [True] * n_chunk
             else:
-                logits_array = [False] * n_batch_tokens
-                if i + n_batch_tokens == n_eval:
+                logits_array = [False] * n_chunk
+                if i + n_chunk == n_eval:
                     logits_array[-1] = True
 
             self._batch.add_sequence(
-                token_array=batch_tokens,
+                token_array=chunk,
                 pos_array=pos_array,
                 seq_ids=[0],
                 logits_array=logits_array
             )
-            current_batch_size = n_batch_tokens
-            try:
-                self._ctx.decode(self._batch)
-            except Exception as e:
-                raise RuntimeError(
-                    f"Decode Failed at "
-                    f"Batch size: {n_batch_tokens}. "
-                    f"Error: {str(e)}."
-                ) from e
 
-            # Save tokens
-            self.input_ids[n_past : n_past + n_batch_tokens] = batch_tokens
+            # Dynamic Batch Downgrade: Attempt to decode, reduce batch size if KV cache is fragmented
+            current_batch_size = n_chunk
+            success = False
 
-            # Save logits
-            logits_ptr = self._ctx.get_logits()
+            while current_batch_size > 0:
+                # Tell the C++ backend to only process up to `current_batch_size` tokens
+                self._batch.batch.n_tokens = current_batch_size
+
+                try:
+                    status = self._ctx.decode(self._batch)
+
+                    # 0: Success
+                    if status == 0:
+                        success = True
+                        # If we successfully decoded after a downgrade,
+                        # update current_max_batch to prevent repeated failures in next iterations.
+                        if current_batch_size < current_max_batch:
+                            current_max_batch = current_batch_size
+                        break
+
+                    # 1: No KV slot available (Recoverable)
+                    elif status == 1:
+                        if self.verbose:
+                            print(f"Llama.eval: KV slots full (Code 1). Halving batch size "
+                                  f"from {current_batch_size} to {current_batch_size // 2}...", file=sys.stderr)
+                        current_batch_size //= 2
+
+                except Exception as e:
+                    # Catch fatal backend failures (e.g., Code -2, -3)
+                    raise RuntimeError(f"Llama.eval(decode): Fatal Decode Error at Pos {self.n_tokens}, "
+                                       f"Batch size {current_batch_size}: {str(e)}") from e
+
+            if not success:
+                raise RuntimeError("Llama.eval(decode): Failed completely even with batch size 1.")
+
+            # Save successfully processed tokens into the Python-side ledger
+            self.input_ids[n_past : n_past + current_batch_size] = chunk[:current_batch_size]
+
+            # Extract and save all logits if requested, ensuring we only copy the successfully processed rows
             if self._logits_all:
-                rows = n_batch_tokens
+                logits_ptr = self._ctx.get_logits()
+                rows = current_batch_size
                 cols = self._n_vocab
                 logits_view = np.ctypeslib.as_array(logits_ptr, shape=(rows * cols,))
-                self.scores[n_past : n_past + n_batch_tokens, :].reshape(-1)[:] = logits_view
-            else:
-                logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
-                self.scores[0, :] = logits_view
+                self.scores[n_past : n_past + current_batch_size, :].reshape(-1)[:] = logits_view
 
-            # Update n_tokens
+            # Update indices based on actual processed batch size
             self.n_tokens += current_batch_size
             i += current_batch_size
+
+            # Periodic Checkpoint: Save states for hybrid models to avoid massive rollbacks
+            if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                if (self.n_tokens - last_ckpt_pos >= self.checkpoint_interval) and (i < n_eval):
+                    if self.verbose:
+                        print(f"Llama.eval: [Periodic Checkpoint] Saving hybrid state at pos {self.n_tokens}.", file=sys.stderr)
+                    self._hybrid_cache_mgr.save_checkpoint(
+                        current_pos=self.n_tokens,
+                        tokens=self.input_ids[:self.n_tokens].tolist(),
+                        seq_id=0
+                    )
+                    last_ckpt_pos = self.n_tokens
+
+        # Save the final logit if not in _logits_all mode
+        if not self._logits_all:
+            logits_ptr = self._ctx.get_logits()
+            logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
+            self.scores[0, :] = logits_view
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
     def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp.llama_logit_bias]:
