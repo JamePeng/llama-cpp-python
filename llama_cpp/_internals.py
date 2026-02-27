@@ -675,37 +675,82 @@ class LlamaBatch:
         if self.batch is not None:
             self.batch.n_tokens = 0
 
-    def set_batch(self, batch: Sequence[int], n_past: llama_cpp.llama_pos, logits_all: bool):
-        if len(batch) > self.n_tokens_capacity:
-             raise IndexError(f"Input batch size {len(batch)} exceeds capacity {self.n_tokens_capacity}")
+    def add_token(self, token: int, pos: int, seq_ids: Sequence[int], logits: bool):
+        """
+        Adds a single token to the batch.
+        This is a high-performance method for appending a single token during the generation loop,
+        avoiding the overhead of creating temporary lists required by add_sequence.
 
-        n_tokens = len(batch)
-        self.batch.n_tokens = n_tokens
-        for i in range(n_tokens):
-            self.batch.token[i] = batch[i]
-            self.batch.pos[i] = n_past + i
-            self.batch.seq_id[i][0] = 0
-            self.batch.n_seq_id[i] = 1
-            self.batch.logits[i] = logits_all
-        self.batch.logits[n_tokens - 1] = True
+        Args:
+            token: The integer ID of the token to add.
+            pos: The logical sequence position (n_past) of this token.
+            seq_ids: A sequence of sequence IDs this token belongs to (e.g., [0] for a standard single chat).
+                     A single token can be part of multiple sequences simultaneously.
+            logits: A boolean flag indicating whether the backend should compute logits for this token.
+        """
+        idx = self.batch.n_tokens
+        if idx >= self.n_tokens_capacity:
+            raise IndexError(f"LlamaBatch overflow[add_token]: Cannot add token. Capacity {self.n_tokens_capacity} reached.")
 
-    def add_sequence(self, batch: Sequence[int], seq_id: int, logits_all: bool):
-        n_tokens = len(batch)
+        self.batch.token[idx] = token
+        self.batch.pos[idx] = pos
+
+        n_seq_id = len(seq_ids)
+        if n_seq_id > self.n_seq_max:
+            raise ValueError(f"LlamaBatch Error[add_token]: Token belongs to {n_seq_id} sequences, "
+                             f"but n_seq_max was initialized to {self.n_seq_max}.")
+        self.batch.n_seq_id[idx] = n_seq_id
+
+        for i, seq_id in enumerate(seq_ids):
+            self.batch.seq_id[idx][i] = seq_id
+        self.batch.logits[idx] = logits
+
+        self.batch.n_tokens += 1
+
+    def add_sequence(
+        self,
+        token_array: Sequence[int],
+        pos_array: Sequence[int],
+        seq_ids: Sequence[Sequence[int]],
+        logits_array: Sequence[bool]
+    ):
+        """
+        Adds a sequence of tokens to the batch in a vectorized manner.
+        Strictly maps the provided arrays to the underlying C++ batch structure without subjective overriding.
+
+        Args:
+            token_array: A sequence of token IDs to be evaluated.
+            pos_array: A sequence of logical positions corresponding to each token.
+            seq_id_array: A sequence of lists, where each list contains the sequence IDs for the respective token.
+                          (e.g., [[0], [0], [0]] for 3 tokens belonging to sequence 0).
+            logits_array: A sequence of boolean flags indicating whether to compute logits for each token.
+        """
+        n_tokens = len(token_array)
         current_count = self.batch.n_tokens
+
         if current_count + n_tokens > self.n_tokens_capacity:
             raise IndexError(
-                f"LlamaBatch overflow: Cannot add {n_tokens} tokens. "
+                f"LlamaBatch overflow[add_sequence]: Cannot add {n_tokens} tokens. "
                 f"Space left: {self.n_tokens_capacity - current_count}"
             )
-        self.batch.n_tokens += n_tokens
+
+        n_seq_id = len(seq_ids)
+        if n_seq_id > self.n_seq_max:
+            raise ValueError(f"LlamaBatch Error[add_sequence]: Token belongs to {n_seq_id} sequences, "
+                             f"but n_seq_max was initialized to {self.n_seq_max}.")
+
         for i in range(n_tokens):
             j = current_count + i
-            self.batch.token[j] = batch[i]
-            self.batch.pos[j] = i
-            self.batch.seq_id[j][0] = seq_id
-            self.batch.n_seq_id[j] = 1
-            self.batch.logits[j] = logits_all
-        self.batch.logits[current_count + n_tokens - 1] = True
+            self.batch.token[j] = token_array[i]
+            self.batch.pos[j] = pos_array[i]
+
+            self.batch.n_seq_id[j] = n_seq_id
+            for k, seq_id in enumerate(seq_ids):
+                self.batch.seq_id[j][k] = seq_id
+
+            self.batch.logits[j] = logits_array[i]
+
+        self.batch.n_tokens += n_tokens
 
 
 # Embedding functions

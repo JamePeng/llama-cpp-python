@@ -85,6 +85,7 @@ class Llama:
         # Context Params
         seed: int = llama_cpp.LLAMA_DEFAULT_SEED,
         n_ctx: int = 512,
+        n_keep: int = 256,
         n_batch: int = 2048,
         n_ubatch: int = 512,
         n_seq_max: int = 1,
@@ -177,6 +178,7 @@ class Llama:
             kv_overrides: Key-value overrides for the model.
             seed: RNG seed, -1 for random
             n_ctx: Text context, 0 = from model
+            n_keep: Number of tokens to keep from initial prompt
             n_batch: Prompt processing maximum batch size
             n_ubatch: Physical batch size
             n_seq_max: max number of sequences (i.e. distinct states for recurrent models)
@@ -328,6 +330,7 @@ class Llama:
             self.model_params.kv_overrides = self._kv_overrides_array
 
         self.n_batch = min(n_ctx, n_batch)  # ???
+        self.n_keep = n_keep if n_keep > 0 else 256
         self.n_seq_max = n_seq_max
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
@@ -778,35 +781,69 @@ class Llama:
         if len(tokens) == 0:
             return
         n_eval = len(tokens)
-        current_pos = self.n_tokens
+        if n_eval == 0:
+            return
 
-        if self._ctx:
-            # Standard cleanup by current_pos
-            is_success = self._ctx.memory_seq_rm(0, current_pos, -1)
-            # Fallback: Broad cleanup
-            if not is_success:
+        # Context Shift
+        if self.n_tokens + n_eval > self._n_ctx:
+            if self.is_hybrid:
+                raise RuntimeError(
+                    f"Context length exceeded for Hybrid/SWA model! "
+                    f"(n_tokens: {self.n_tokens}, new: {n_eval}, max: {self._n_ctx})"
+                )
+            else:
+                _n_keep = min(self.n_keep, self.n_tokens)
+                # number of tokens after n_keep that may be discarded when shifting context
+                # defaults to half
+                _n_discard = (self.n_tokens - _n_keep) // 2
+
                 if self.verbose:
-                    print(f"WARN: memory_seq_rm(0, {current_pos}, -1) failed. Executing fallback: memory_seq_rm(0, 0, -1)")
-                is_success = self._ctx.memory_seq_rm(0, 0, -1)
+                    print(f"Llama.eval: Context limit reached. Shifting context: "
+                          f"discarding {_n_discard} tokens...", file=sys.stderr)
+
+                self._ctx.memory_seq_rm(0, _n_keep, _n_keep + _n_discard)
+                self._ctx.memory_seq_add(0, _n_keep + _n_discard, self.n_tokens, -_n_discard)
+
+                remaining_len = self.n_tokens - (_n_keep + _n_discard)
+                if remaining_len > 0:
+                    self.input_ids[_n_keep : _n_keep + remaining_len] = self.input_ids[_n_keep + _n_discard : self.n_tokens]
+
+                self.n_tokens -= _n_discard
 
         for i in range(0, n_eval, self.n_batch):
-            batch = tokens[i : min(n_eval, i + self.n_batch)]
+            batch_tokens = tokens[i : min(n_eval, i + self.n_batch)]
+            n_batch_tokens = len(batch_tokens)
             n_past = self.n_tokens
-            n_batch_tokens = len(batch)
-            self._batch.set_batch(
-                batch=batch, n_past=n_past, logits_all=self._logits_all
+
+            self._batch.reset()
+
+            pos_array = [self.n_tokens + j for j in range(n_batch_tokens)]
+
+            if self._logits_all:
+                logits_array = [True] * n_batch_tokens
+            else:
+                logits_array = [False] * n_batch_tokens
+                if i + n_batch_tokens == n_eval:
+                    logits_array[-1] = True
+
+            self._batch.add_sequence(
+                token_array=batch_tokens,
+                pos_array=pos_array,
+                seq_ids=[0],
+                logits_array=logits_array
             )
+            current_batch_size = n_batch_tokens
             try:
                 self._ctx.decode(self._batch)
             except Exception as e:
                 raise RuntimeError(
-                    f"Decode Failed at Pos {current_pos}. "
+                    f"Decode Failed at "
                     f"Batch size: {n_batch_tokens}. "
-                    f"Result of memory_seq_rm: {is_success}. "
                     f"Error: {str(e)}."
                 ) from e
+
             # Save tokens
-            self.input_ids[n_past : n_past + n_batch_tokens] = batch
+            self.input_ids[n_past : n_past + n_batch_tokens] = batch_tokens
 
             # Save logits
             logits_ptr = self._ctx.get_logits()
@@ -820,8 +857,8 @@ class Llama:
                 self.scores[0, :] = logits_view
 
             # Update n_tokens
-            current_pos += n_batch_tokens
-            self.n_tokens = current_pos
+            self.n_tokens += current_batch_size
+            i += current_batch_size
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
     def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp.llama_logit_bias]:
@@ -1026,6 +1063,63 @@ class Llama:
         Yields:
             The generated tokens.
         """
+        original_tokens = list(tokens)
+        # Check for kv cache prefix match
+        if reset and self.n_tokens > 0:
+            longest_prefix = self.longest_token_prefix(self._input_ids, tokens[:-1])
+            if longest_prefix > 0:
+                reset = False
+
+                if longest_prefix == len(tokens):
+                    if self.verbose:
+                        print(f"Llama.generate: Full match. Forcing prefix-- to evaluate 1 token.", file=sys.stderr)
+                    longest_prefix -= 1
+
+                # Physically erase trailing "ghost" tokens from the C++ KV cache
+                # to prevent attention misalignment in multi-round chats.
+                if longest_prefix < self.n_tokens:
+                    if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                        if self.verbose:
+                            print(f"Llama.generate: Hybrid model rollback triggered.", file=sys.stderr)
+
+                        best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(original_tokens, 0)
+                        if best_ckpt is not None and self._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
+                            actual_prefix = best_ckpt.pos
+                        else:
+                            actual_prefix = 0
+                            self._hybrid_cache_mgr.clear()
+                            self._ctx.memory_clear(True)
+
+                        self.n_tokens = actual_prefix
+                        tokens = original_tokens[actual_prefix:]
+                        if self.verbose:
+                            print(
+                                f"Llama.generate: {actual_prefix} prefix-match hit, "
+                                f"remaining {len(tokens)} prompt tokens to eval",
+                                file=sys.stderr,
+                            )
+                    else:
+                        if self.verbose:
+                            print(f"Llama.generate: Truncating KV cache size from {self.n_tokens} to {longest_prefix}", file=sys.stderr)
+                        self._ctx.memory_seq_rm(0, longest_prefix, -1)
+
+                        # Adjust the tokens array and cursor to reuse the matched cache
+                        self.n_tokens = longest_prefix
+                        tokens = tokens[longest_prefix:]
+
+                        if self.verbose:
+                            print(
+                                f"Llama.generate: {longest_prefix} prefix-match hit, "
+                                f"remaining {len(tokens)} prompt tokens to eval",
+                                file=sys.stderr,
+                            )
+            else:
+                # No prefix matched. Completely clear the KV cache to prevent context poisoning.
+                self.n_tokens = 0
+                self._ctx.memory_clear(True)
+                if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                    self._hybrid_cache_mgr.clear()
+
         # Reset mirostat sampling
         params = LlamaSamplingParams(
             # Core Sampling
@@ -1101,88 +1195,84 @@ class Llama:
 
         self._sampling_ctx = LlamaSamplingContext(params, self._model)
 
-        # Check for kv cache prefix match
-        if reset and self.n_tokens > 0:
-            longest_prefix = self.longest_token_prefix(self._input_ids, tokens[:-1])
-            if longest_prefix > 0:
-                reset = False
-
-                # Physically erase trailing "ghost" tokens from the C++ KV cache
-                # to prevent attention misalignment in multi-round chats.
-                if longest_prefix < self.n_tokens:
-                    if self.verbose:
-                        print(f"Llama.generate: Truncating KV cache size from {self.n_tokens} to {longest_prefix}", file=sys.stderr)
-                    self._ctx.memory_seq_rm(0, longest_prefix, -1)
-
-                # Adjust the tokens array and cursor to reuse the matched cache
-                tokens = tokens[longest_prefix:]
-                self.n_tokens = longest_prefix
-
-                if self.verbose:
-                    print(
-                        f"Llama.generate: {longest_prefix} prefix-match hit, "
-                        f"remaining {len(tokens)} prompt tokens to eval",
-                        file=sys.stderr,
-                    )
-            else:
-                # No prefix matched. Completely clear the KV cache to prevent context poisoning.
-                self.n_tokens = 0
-                self._ctx.memory_clear(True)
-                if self.is_hybrid and self._hybrid_cache_mgr is not None:
-                    self._hybrid_cache_mgr.clear()
-
-        # Reset the model state
-        if reset:
-            self.reset()
-
         sample_idx = self.n_tokens + len(tokens) - 1
         tokens = list(tokens)
 
         # Eval and sample
-        while True:
-            self.eval(tokens)
-            while sample_idx < self.n_tokens:
-                token = self._sampling_ctx.sample(self._ctx, idx=-1)
-                self._sampling_ctx.accept(token, False if grammar is None else True)
+        try:
+            while True:
+                if len(tokens) > 0:
+                    self.eval(tokens)
+                while sample_idx < self.n_tokens:
+                    token = self._sampling_ctx.sample(self._ctx, idx=-1)
+                    self._sampling_ctx.accept(token, False if grammar is None else True)
 
-                sample_idx += 1
-                if stopping_criteria is not None:
-                    if self._logits_all:
-                        logits_idx = sample_idx - self.n_tokens
-                        check_stopping = True
-                    else:
-                        if sample_idx == self.n_tokens:
-                            logits_idx = 0
+                    sample_idx += 1
+
+                    if stopping_criteria is not None:
+                        if self._logits_all:
+                            logits_idx = sample_idx - self.n_tokens
                             check_stopping = True
                         else:
-                            check_stopping = False
+                            if sample_idx == self.n_tokens:
+                                logits_idx = 0
+                                check_stopping = True
+                            else:
+                                check_stopping = False
 
-                    if check_stopping and stopping_criteria(
-                        self._input_ids[: sample_idx],
-                        self._scores[logits_idx, :]
-                    ):
-                        return
-                tokens_or_none = yield token
-                tokens.clear()
-                tokens.append(token)
+                        if check_stopping and stopping_criteria(
+                            self._input_ids[: sample_idx],
+                            self._scores[logits_idx, :]
+                        ):
+                            return
 
-                if tokens_or_none is not None:
-                    tokens.extend(tokens_or_none)
+                    tokens_or_none = yield token
+                    tokens.clear()
+                    tokens.append(token)
 
-                if sample_idx < self.n_tokens and token != self._input_ids[sample_idx]:
-                    self.n_tokens = sample_idx
-                    self._ctx.memory_seq_rm(0, self.n_tokens, -1)
-                    break
+                    if tokens_or_none is not None:
+                        tokens.extend(tokens_or_none)
 
-            if self.draft_model is not None:
-                self.input_ids[self.n_tokens : self.n_tokens + len(tokens)] = tokens
-                draft_tokens = self.draft_model(
-                    self.input_ids[: self.n_tokens + len(tokens)]
-                )
-                tokens.extend(
-                    draft_tokens.astype(int)[
-                        : self._n_ctx - self.n_tokens - len(tokens)
-                    ]
+                    if sample_idx < self.n_tokens and token != self._input_ids[sample_idx]:
+                        self.n_tokens = sample_idx
+                        if self.is_hybrid:
+                            if self.verbose:
+                                print("Llama.generate: Draft token rejected for Hybrid model. Rolling back via Checkpoint.", file=sys.stderr)
+                            if self._hybrid_cache_mgr:
+                                best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(self._input_ids[:self.n_tokens].tolist(), 0)
+                                if best_ckpt and self._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
+                                    self.n_tokens = best_ckpt.pos
+                                else:
+                                    self._hybrid_cache_mgr.clear()
+                                    self._ctx.memory_clear(True)
+                                    self.n_tokens = 0
+                        else:
+                            self._ctx.memory_seq_rm(0, self.n_tokens, -1)
+
+                        break
+
+                if self.draft_model is not None:
+                    if self.is_hybrid:
+                        if self.verbose:
+                            print("Llama.generate: Speculative decoding is skipped for Hybrid models.", file=sys.stderr)
+                    else:
+                        self.input_ids[self.n_tokens : self.n_tokens + len(tokens)] = tokens
+                        draft_tokens = self.draft_model(
+                            self.input_ids[: self.n_tokens + len(tokens)]
+                        )
+                        tokens.extend(
+                            draft_tokens.astype(int)[
+                                : self._n_ctx - self.n_tokens - len(tokens)
+                            ]
+                        )
+        finally:
+            if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                current_history = self._input_ids[:self.n_tokens].tolist()
+
+                self._hybrid_cache_mgr.save_checkpoint(
+                    current_pos=self.n_tokens,
+                    tokens=current_history,
+                    seq_id=0
                 )
 
     def create_embedding(

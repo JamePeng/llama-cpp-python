@@ -92,7 +92,7 @@ def test_real_model(llama_cpp_model_path):
 
     # 3. Setup Context Parameters
     cparams = llama_cpp.llama_context_default_params()
-    cparams.n_ctx = 16
+    cparams.n_ctx = 32
     cparams.n_batch = 16
     cparams.n_ubatch = 16
     cparams.n_threads = multiprocessing.cpu_count()
@@ -119,26 +119,35 @@ def test_real_model(llama_cpp_model_path):
     sampler.add_dist(seed)
 
     result = list(tokens)
-    n_eval = 0
-    curr_tokens = tokens
+    n_eval = len(tokens)
+    batch.reset()
+    pos_array = list(range(n_eval))
+    logits_array = [False] * (n_eval - 1) + [True]
+
+    batch.add_sequence(
+        token_array=tokens,
+        pos_array=pos_array,
+        seq_ids=[0],
+        logits_array=logits_array
+    )
+    context.decode(batch)
 
     for _ in range(4):
-        # Prepare batch with current tokens
-        batch.set_batch(curr_tokens, n_past=n_eval, logits_all=False)
-
-        # Decode (run inference)
-        context.decode(batch)
-        n_eval += len(curr_tokens)
-
-        # Sample the next token (index -1 means the last token in the batch)
         token_id = sampler.sample(context, -1)
-
-        # Accept the token to update internal sampler state
         sampler.accept(token_id)
-
-        # Update loop variables
-        curr_tokens = [token_id]
         result.append(token_id)
+
+        batch.reset()
+
+        batch.add_token(
+            token=token_id,
+            pos=n_eval,
+            seq_ids=[0],
+            logits=True
+        )
+
+        context.decode(batch)
+        n_eval += 1
 
     output = result[len(tokens):]
     output_text = model.detokenize(output, special=True)
