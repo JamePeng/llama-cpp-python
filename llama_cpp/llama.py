@@ -869,6 +869,11 @@ class Llama:
 
                     # 1: No KV slot available (Recoverable)
                     elif status == 1:
+                        if current_batch_size == 1:
+                            if self.verbose:
+                                print("Llama.eval: KV slots completely full. "
+                                      "Cannot reduce batch size below 1. Aborting...", file=sys.stderr)
+                            break
                         if self.verbose:
                             print(f"Llama.eval: KV slots full (Code 1). Halving batch size "
                                   f"from {current_batch_size} to {current_batch_size // 2}...", file=sys.stderr)
