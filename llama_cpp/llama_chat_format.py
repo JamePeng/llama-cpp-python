@@ -4514,7 +4514,7 @@ class Qwen35ChatHandler(Llava15ChatHandler):
         "        {{- content -}}"
         "    {%- elif content is iterable and content is not mapping -%}"
         "        {%- for item in content -%}"
-        "            {%- if 'image' in item or 'image_url' in item -%}"
+        "            {%- if 'image_url' in item or item.type == 'image_url' -%}"
         "                {%- if is_system_content -%}"
         "                    {{- raise_exception('System message cannot contain images.') -}}"
         "                {%- endif -%}"
@@ -4522,24 +4522,19 @@ class Qwen35ChatHandler(Llava15ChatHandler):
         "                    {%- set image_count.value = image_count.value + 1 -%}"
         "                {%- endif -%}"
         "                {%- if add_vision_id -%}"
-        "                    {{- 'Picture ' ~ image_count.value ~ ': ' -}}"
+        "                    {{- 'Picture ' -}}"
+        "                    {{- image_count.value | string -}}"
+        "                    {{- ': ' -}}"
         "                {%- endif -%}"
         "                {{- '<|vision_start|>' -}}"
-        "                {%- if 'image' in item -%}"
-        "                    {%- if item.image is string -%}"
-        "                        {{- item.image -}}"
-        "                    {%- else -%}"
-        "                        {{- item.image.url -}}"
-        "                    {%- endif -%}"
-        "                {%- elif 'image_url' in item -%}"
-        "                    {%- if item.image_url is string -%}"
-        "                        {{- item.image_url -}}"
-        "                    {%- else -%}"
-        "                        {{- item.image_url.url -}}"
-        "                    {%- endif -%}"
+        "                {%- if item.image_url is string -%}"
+        "                    {{- item.image_url -}}"
+        "                {%- else -%}"
+        "                    {{- item.image_url.url -}}"
         "                {%- endif -%}"
         "                {{- '<|vision_end|>' -}}"
         "            {%- elif 'video' in item -%}"
+        "                {{- raise_exception('llama.cpp does not currently support video.') -}}"  # Video not supported, raise exception
         "                {%- if is_system_content -%}"
         "                    {{- raise_exception('System message cannot contain videos.') -}}"
         "                {%- endif -%}"
@@ -4698,11 +4693,6 @@ class Qwen35ChatHandler(Llava15ChatHandler):
     def __call__(self, **kwargs):
         llama = kwargs['llama']
 
-        # Clear state for multiple runs
-        llama.reset()
-        llama._ctx.memory_clear(True)
-        llama.n_tokens = 0
-
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
@@ -4715,9 +4705,9 @@ class Qwen35ChatHandler(Llava15ChatHandler):
             messages = kwargs.get('messages', [])
             try:
                 image_count = len(self.get_image_urls(messages))
-                print(f"Qwen35ChatHandler(reasoning={self.reasoning}) - Cleared state, processing {image_count} images", file=sys.stderr)
+                print(f"Qwen35ChatHandler - Cleared state, processing {image_count} images", file=sys.stderr)
             except Exception:
-                print(f"Qwen35ChatHandler(reasoning={self.reasoning}) - Cleared state", file=sys.stderr)
+                print(f"Qwen35ChatHandler - Cleared state", file=sys.stderr)
 
         # Use parent implementation
         return super().__call__(**kwargs)
