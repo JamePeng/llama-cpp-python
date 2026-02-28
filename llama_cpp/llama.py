@@ -789,29 +789,25 @@ class Llama:
 
         # Context Shift: Prevent OOM by discarding older tokens when context limit is reached.
         if self.n_tokens + n_eval > self._n_ctx:
-            if self.is_hybrid:
-                raise RuntimeError(
-                    f"Context length exceeded for Hybrid/SWA model! "
-                    f"(n_tokens: {self.n_tokens}, new: {n_eval}, max: {self._n_ctx})"
-                )
-            else:
-                _n_keep = min(self.n_keep, self.n_tokens)
-                # Number of tokens after n_keep that may be discarded when shifting context
-                # defaults to half
-                _n_discard = (self.n_tokens - _n_keep) // 2
+            _n_keep = min(self.n_keep, self.n_tokens)
+            # Number of tokens after n_keep that may be discarded when shifting context
+            # defaults to half
+            _n_discard = (self.n_tokens - _n_keep) // 2
 
-                if self.verbose:
-                    print(f"Llama.eval: Context limit reached. Shifting context: "
-                          f"discarding {_n_discard} tokens...", file=sys.stderr)
+            if self.verbose:
+                model_type = "Hybrid/Recurrent/SWA" if self.is_hybrid else "Transformer"
+                print(f"Llama.eval: {model_type} context limit reached. Shifting context: "
+                      f"discarding {_n_discard} tokens...", file=sys.stderr)
 
-                self._ctx.memory_seq_rm(0, _n_keep, _n_keep + _n_discard)
-                self._ctx.memory_seq_add(0, _n_keep + _n_discard, self.n_tokens, -_n_discard)
+            # Use context memory methods for handles both Attention KV removal and RNN pos shifting automatically
+            self._ctx.memory_seq_rm(0, _n_keep, _n_keep + _n_discard)
+            self._ctx.memory_seq_add(0, _n_keep + _n_discard, self.n_tokens, -_n_discard)
 
-                remaining_len = self.n_tokens - (_n_keep + _n_discard)
-                if remaining_len > 0:
-                    self.input_ids[_n_keep : _n_keep + remaining_len] = self.input_ids[_n_keep + _n_discard : self.n_tokens]
+            remaining_len = self.n_tokens - (_n_keep + _n_discard)
+            if remaining_len > 0:
+                self.input_ids[_n_keep : _n_keep + remaining_len] = self.input_ids[_n_keep + _n_discard : self.n_tokens]
 
-                self.n_tokens -= _n_discard
+            self.n_tokens -= _n_discard
 
         # Adaptive batch downgrade limit initialization
         current_max_batch = self.n_batch
