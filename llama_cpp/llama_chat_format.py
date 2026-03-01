@@ -2892,13 +2892,16 @@ while also answering every question accurately, clearly, and step-by-step when a
                 raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Failed to load mtmd context from: {self.clip_model_path}")
 
             # Check if vision is supported
-            if self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx) and self.verbose:
-                print(f"{self.log_prefix}(_init_mtmd_context): Vision support detected.", file=sys.stderr)
+            if self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx):
+                if self.verbose:
+                    print(f"{self.log_prefix}(_init_mtmd_context): Vision support detected.", file=sys.stderr)
             else:
-                raise ValueError("Vision is not supported by this model")
+                raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Vision is not supported by this model")
+
             # Check if audio is supported
-            if self._mtmd_cpp.mtmd_support_audio(self.mtmd_ctx) and self.verbose:
-                print(f"{self.log_prefix}(_init_mtmd_context): Audio support detected.", file=sys.stderr)
+            if self._mtmd_cpp.mtmd_support_audio(self.mtmd_ctx):
+                if self.verbose:
+                    print(f"{self.log_prefix}(_init_mtmd_context): Audio support detected.", file=sys.stderr)
 
     def close(self) -> None:
         """Explicitly free the mtmd context and vision model resources."""
