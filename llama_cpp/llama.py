@@ -845,6 +845,12 @@ class Llama:
         current_max_batch = self.n_batch
         last_ckpt_pos = self.n_tokens
 
+        # Adaptive Periodic Checkpointing for Hybrid Models
+        # Following the "no more than three times" principle :)
+        # when pre-filling very large blocks, dilute the save frequency to minimize I/O blocking.
+        if self.is_hybrid and self._hybrid_cache_mgr is not None:
+            dynamic_interval = max(self.checkpoint_interval, n_eval // 3)  # Maximum of 3 triggers
+
         # If KV slots are full, `current_batch_size` will be halved.
         # A `while` loop allows us to correctly resume from the exact cut-off point.
         i = 0
@@ -932,15 +938,23 @@ class Llama:
 
             # Periodic Checkpoint: Save states for hybrid models to avoid massive rollbacks
             if self.is_hybrid and self._hybrid_cache_mgr is not None:
-                if (self.n_tokens - last_ckpt_pos >= self.checkpoint_interval) and (i < n_eval):
+                current_pos = self.n_tokens
+                if (current_pos - last_ckpt_pos >= dynamic_interval) and (i < n_eval):
+
                     if self.verbose:
-                        print(f"Llama.eval: [Periodic Checkpoint] Saving hybrid state at pos {self.n_tokens}.", file=sys.stderr)
-                    self._hybrid_cache_mgr.save_checkpoint(
-                        current_pos=self.n_tokens,
-                        tokens=self.input_ids[:self.n_tokens].tolist(),
+                        print(f"Llama.eval: [Periodic Checkpoint] Saving hybrid state at pos {current_pos} "
+                              f"(checkpoint_interval({dynamic_interval}) reached, last={last_ckpt_pos}).", file=sys.stderr)
+
+                    success = self._hybrid_cache_mgr.save_checkpoint(
+                        current_pos=current_pos,
+                        tokens=self.input_ids[:current_pos].tolist(),
                         seq_id=0
                     )
-                    last_ckpt_pos = self.n_tokens
+                    if success:
+                        last_ckpt_pos = current_pos
+                    else:
+                        if self.verbose:
+                            print(f"Llama.eval: [Periodic Checkpoint] HybridCheckpoint save failed at pos {current_pos}, skipping update", file=sys.stderr)
 
         # Save the final logit if not in _logits_all mode
         if not self._logits_all:
