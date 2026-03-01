@@ -4681,7 +4681,7 @@ class Qwen3VLChatHandler(MTMDChatHandler):
             - False: Doesn't count the images. Can save tokens with single-image.
         """
         super().__init__(**kwargs)
-
+        self.force_reasoning = force_reasoning
         self.extra_template_arguments["force_reasoning"] = force_reasoning
         self.extra_template_arguments["add_vision_id"] = add_vision_id
 
@@ -4697,7 +4697,7 @@ class Qwen3VLChatHandler(MTMDChatHandler):
         # Use parent implementation
         return super().__call__(**kwargs)
 
-class Qwen35ChatHandler(Llava15ChatHandler):
+class Qwen35ChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (
         "{%- set image_count = namespace(value=0) -%}"
         "{%- set video_count = namespace(value=0) -%}"
@@ -4864,13 +4864,13 @@ class Qwen35ChatHandler(Llava15ChatHandler):
 
     def __init__(
         self,
-        reasoning: bool = True,
+        enable_thinking: bool = True,
         add_vision_id: bool = True,
         **kwargs,
     ):
         """
         Parameters:
-        - reasoning (bool):
+        - enable_thinking (bool):
             - True (default): Enables reasoning for better results.
             - False: Disables reasoning for faster results.
         - add_vision_id (bool):
@@ -4878,8 +4878,8 @@ class Qwen35ChatHandler(Llava15ChatHandler):
             - False: Doesn't count the images. Can save tokens with single-image.
         """
         super().__init__(**kwargs)
-
-        self.extra_template_arguments["enable_thinking"] = reasoning
+        self.enable_thinking = enable_thinking
+        self.extra_template_arguments["enable_thinking"] = enable_thinking
         self.extra_template_arguments["add_vision_id"] = add_vision_id
 
     def __call__(self, **kwargs):
@@ -4888,18 +4888,8 @@ class Qwen35ChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        # Clear any handler state
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"Qwen35ChatHandler - Cleared state, processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"Qwen35ChatHandler - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
 
         # Use parent implementation
         return super().__call__(**kwargs)
