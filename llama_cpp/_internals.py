@@ -442,6 +442,9 @@ class LlamaContext:
     def memory_seq_pos_min(self, seq_id: int) -> int:
         return llama_cpp.llama_memory_seq_pos_min(self.get_memory(), seq_id)
 
+    def memory_can_shift(self) -> bool:
+        return llama_cpp.llama_memory_can_shift(self.get_memory())
+
     # // State / sessions API
 
     def get_state_size(self) -> int:
