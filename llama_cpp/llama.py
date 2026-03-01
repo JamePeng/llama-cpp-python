@@ -682,7 +682,9 @@ class Llama:
         self._c_tensor_split = None
         self._kv_overrides_array = None
 
-        self._stack.close()
+        if getattr(self, "_stack", None) is not None and hasattr(self._stack, "close"):
+            self._stack.close()
+            self._stack = None
 
     def __del__(self) -> None:
         self.close()
@@ -789,29 +791,67 @@ class Llama:
 
         # Context Shift: Prevent OOM by discarding older tokens when context limit is reached.
         if self.n_tokens + n_eval > self._n_ctx:
-            _n_keep = min(self.n_keep, self.n_tokens)
-            # Number of tokens after n_keep that may be discarded when shifting context
-            # defaults to half
-            _n_discard = (self.n_tokens - _n_keep) // 2
+            # 0. Check if the memory supports shifting
+            if not self._ctx.memory_can_shift():
+                raise RuntimeError(
+                    f"Llama.eval: Context Shift is explicitly disabled by the C++ backend "
+                    f"(n_pos_per_embd > 1 or incompatible M-RoPE). "
+                    f"You MUST increase n_ctx (currently {self._n_ctx}) to fit the dialogue."
+                )
+            # 1. Calculate the absolute minimum number of tokens we must discard to fit the new chunk.
+            required_discard = (self.n_tokens + n_eval) - self._n_ctx
 
-            if self.verbose:
-                model_type = "Hybrid/Recurrent/SWA" if self.is_hybrid else "Transformer"
-                print(f"Llama.eval: {model_type} context limit reached. Shifting context: "
-                      f"discarding {_n_discard} tokens...", file=sys.stderr)
+            # 2. Sanity check: If the incoming chunk itself is larger than the entire context window,
+            # shifting is physically impossible.
+            if required_discard > self.n_tokens:
+                raise RuntimeError(f"Llama.eval: Context shift failed. The incoming chunk ({n_eval} tokens) "
+                                   f"is larger than the entire context window ({self._n_ctx}).")
 
-            # Use context memory methods for handles both Attention KV removal and RNN pos shifting automatically
-            self._ctx.memory_seq_rm(0, _n_keep, _n_keep + _n_discard)
-            self._ctx.memory_seq_add(0, _n_keep + _n_discard, self.n_tokens, -_n_discard)
+            # 3. Determine how many tokens to keep at the beginning (usually the System Prompt).
+            _n_keep_desired = min(self.n_keep, self.n_tokens)
 
-            remaining_len = self.n_tokens - (_n_keep + _n_discard)
-            if remaining_len > 0:
-                self.input_ids[_n_keep : _n_keep + remaining_len] = self.input_ids[_n_keep + _n_discard : self.n_tokens]
+            # Ensure that keeping these tokens doesn't prevent us from discarding the required amount.
+            max_keep_allowed = max(0, self.n_tokens - required_discard)
+            _n_keep = min(_n_keep_desired, max_keep_allowed)
 
-            self.n_tokens -= _n_discard
+            # 4. Calculate the final discard count. Default strategy is to discard half of the available
+            # past tokens to minimize frequent shifting, but it must be at least `required_discard`.
+            _n_discard = max(required_discard, (self.n_tokens - _n_keep) // 2)
+
+            # 5. Execute the shift only if there are tokens to discard.
+            if _n_discard > 0:
+                if self.verbose:
+                    model_type = "Hybrid/Recurrent/SWA" if getattr(self, 'is_hybrid', False) else "Transformer"
+                    print(f"Llama.eval: {model_type} context limit reached. Shifting context: "
+                          f"keeping {_n_keep}, discarding {_n_discard} tokens...", file=sys.stderr)
+
+                try:
+                    # Remove the specified block of tokens from the physical KV cache
+                    self._ctx.memory_seq_rm(0, _n_keep, _n_keep + _n_discard)
+
+                    # Shift the positional IDs of all subsequent tokens to the left to close the gap
+                    self._ctx.memory_seq_add(0, _n_keep + _n_discard, self.n_tokens, -_n_discard)
+                except Exception as e:
+                    # Defense-in-depth: Catch any other recoverable backend errors
+                    raise RuntimeError(f"Llama.eval: Context Shift failed at the C++ level. Error: {str(e)}") from e
+
+                # 6. Synchronize the Python-side token tracking array (ledger)
+                remaining_len = self.n_tokens - (_n_keep + _n_discard)
+                if remaining_len > 0:
+                    self.input_ids[_n_keep : _n_keep + remaining_len] = self.input_ids[_n_keep + _n_discard : self.n_tokens]
+
+                # 7. Update the global token counter
+                self.n_tokens -= _n_discard
 
         # Adaptive batch downgrade limit initialization
         current_max_batch = self.n_batch
         last_ckpt_pos = self.n_tokens
+
+        # Adaptive Periodic Checkpointing for Hybrid Models
+        # Following the "no more than three times" principle :)
+        # when pre-filling very large blocks, dilute the save frequency to minimize I/O blocking.
+        if self.is_hybrid and self._hybrid_cache_mgr is not None:
+            dynamic_interval = max(self.checkpoint_interval, n_eval // 3)  # Maximum of 3 triggers
 
         # If KV slots are full, `current_batch_size` will be halved.
         # A `while` loop allows us to correctly resume from the exact cut-off point.
@@ -900,15 +940,23 @@ class Llama:
 
             # Periodic Checkpoint: Save states for hybrid models to avoid massive rollbacks
             if self.is_hybrid and self._hybrid_cache_mgr is not None:
-                if (self.n_tokens - last_ckpt_pos >= self.checkpoint_interval) and (i < n_eval):
+                current_pos = self.n_tokens
+                if (current_pos - last_ckpt_pos >= dynamic_interval) and (i < n_eval):
+
                     if self.verbose:
-                        print(f"Llama.eval: [Periodic Checkpoint] Saving hybrid state at pos {self.n_tokens}.", file=sys.stderr)
-                    self._hybrid_cache_mgr.save_checkpoint(
-                        current_pos=self.n_tokens,
-                        tokens=self.input_ids[:self.n_tokens].tolist(),
+                        print(f"Llama.eval: [Periodic Checkpoint] Saving hybrid state at pos {current_pos} "
+                              f"(checkpoint_interval({dynamic_interval}) reached, last={last_ckpt_pos}).", file=sys.stderr)
+
+                    success = self._hybrid_cache_mgr.save_checkpoint(
+                        current_pos=current_pos,
+                        tokens=self.input_ids[:current_pos].tolist(),
                         seq_id=0
                     )
-                    last_ckpt_pos = self.n_tokens
+                    if success:
+                        last_ckpt_pos = current_pos
+                    else:
+                        if self.verbose:
+                            print(f"Llama.eval: [Periodic Checkpoint] HybridCheckpoint save failed at pos {current_pos}, skipping update", file=sys.stderr)
 
         # Save the final logit if not in _logits_all mode
         if not self._logits_all:
