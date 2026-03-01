@@ -85,7 +85,9 @@ class LlamaModel:
             self.model = None
         self.vocab = None
 
-        self._exit_stack.close()
+        if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
+            self._exit_stack.close()
+            self._exit_stack = None
 
     def __del__(self):
         self.close()
@@ -386,8 +388,11 @@ class LlamaContext:
             except Exception:
                 pass
             self.ctx = None
+        self.params = None
 
-        self._exit_stack.close()
+        if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
+            self._exit_stack.close()
+            self._exit_stack = None
 
     def __del__(self):
         self.close()
@@ -662,7 +667,9 @@ class LlamaBatch:
                 pass
             self.batch = None
 
-        self._exit_stack.close()
+        if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
+            self._exit_stack.close()
+            self._exit_stack = None
 
     def __del__(self):
         self.close()

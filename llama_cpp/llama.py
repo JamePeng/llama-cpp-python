@@ -682,7 +682,9 @@ class Llama:
         self._c_tensor_split = None
         self._kv_overrides_array = None
 
-        self._stack.close()
+        if getattr(self, "_stack", None) is not None and hasattr(self._stack, "close"):
+            self._stack.close()
+            self._stack = None
 
     def __del__(self) -> None:
         self.close()

@@ -2779,7 +2779,7 @@ def functionary_v1_v2_chat_handler(
         )
 
 
-class Llava15ChatHandler:
+class MTMDChatHandler:
     DEFAULT_SYSTEM_MESSAGE: Optional[str] = (
 """You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels at deeply understanding and richly describing images, charts, diagrams, text in images, scenes, and any visual content,
 while also answering every question accurately, clearly, and step-by-step when appropriate — always responding in the same language as the user's question, remaining polite, professional, and maximally helpful."""
@@ -2819,21 +2819,38 @@ while also answering every question accurately, clearly, and step-by-step when a
         "{% endif %}"
     )
 
-    def __init__(self, clip_model_path: str, verbose: bool = True, use_gpu: bool = True, image_min_tokens: int = -1, image_max_tokens: int = -1):
-        import llama_cpp.mtmd_cpp as mtmd_cpp
+    def __init__(
+            self,
+            clip_model_path: str,
+            verbose: bool = True,
+            use_gpu: bool = True,
+            image_min_tokens: int = -1,
+            image_max_tokens: int = -1,
+            **kwargs
+    ):
+
+        self.log_prefix = self.__class__.__name__
+        if kwargs:
+            unexpected_args = ", ".join(f"'{k}'" for k in kwargs.keys())
+            raise TypeError(
+                f"Initialization Error in {self.log_prefix}: Received unexpected keyword argument(s) {unexpected_args}.\n"
+                f"If you are passing model-specific parameters, ensure they are supported by {self.log_prefix}."
+            )
 
         self.clip_model_path = clip_model_path
         self.image_min_tokens = image_min_tokens
         self.image_max_tokens = image_max_tokens
         self.use_gpu = use_gpu
         self.verbose = verbose
+
+        import llama_cpp.mtmd_cpp as mtmd_cpp
         self._mtmd_cpp = mtmd_cpp
         self._exit_stack = ExitStack()
         self.mtmd_ctx: Optional[mtmd_cpp.mtmd_context_p] = None
         self.extra_template_arguments: dict[str, Any] = {}
 
         if not os.path.exists(clip_model_path):
-            raise ValueError(f"Clip model path does not exist: {clip_model_path}")
+            raise ValueError(f"{self.log_prefix}(__init__): Clip model path does not exist: {clip_model_path}")
 
         # Pre-compile Jinja template
         self.chat_template = ImmutableSandboxedEnvironment(
@@ -2861,7 +2878,8 @@ while also answering every question accurately, clearly, and step-by-step when a
             if self.image_max_tokens > 0:
                 self.mctx_params.image_max_tokens = self.image_max_tokens
             if (self.image_max_tokens < self.image_min_tokens) and self.image_max_tokens > 0:
-                raise ValueError(f"image_max_pixels {self.image_max_tokens} is less than image_min_pixels {self.image_min_tokens}")
+                raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Configuration Error! image_max_tokens ({self.image_max_tokens}) "
+                                 f"cannot be less than image_min_tokens ({self.image_min_tokens}).")
 
             # Initialize mtmd context
             self.mtmd_ctx = self._mtmd_cpp.mtmd_init_from_file(
@@ -2871,11 +2889,16 @@ while also answering every question accurately, clearly, and step-by-step when a
             )
 
             if self.mtmd_ctx is None:
-                raise ValueError(f"Failed to load mtmd context from: {self.clip_model_path}")
+                raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Failed to load mtmd context from: {self.clip_model_path}")
 
             # Check if vision is supported
-            if not self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx):
+            if self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx) and self.verbose:
+                print(f"{self.log_prefix}(_init_mtmd_context): Vision support detected.", file=sys.stderr)
+            else:
                 raise ValueError("Vision is not supported by this model")
+            # Check if audio is supported
+            if self._mtmd_cpp.mtmd_support_audio(self.mtmd_ctx) and self.verbose:
+                print(f"{self.log_prefix}(_init_mtmd_context): Audio support detected.", file=sys.stderr)
 
     def close(self) -> None:
         """Explicitly free the mtmd context and vision model resources."""
@@ -2887,14 +2910,14 @@ while also answering every question accurately, clearly, and step-by-step when a
                 pass
             self.mtmd_ctx = None
             self.mctx_params = None
+            self.chat_template = None
 
-        self._exit_stack.close()
+        if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
+            self._exit_stack.close()
+            self._exit_stack = None
 
     def __del__(self) -> None:
         self.close()
-
-    def load_image(self, image_url: str) -> bytes:
-        return self._load_image(image_url)
 
     def _create_bitmap_from_bytes(self, image_bytes: bytes):
         """Create mtmd_bitmap from image bytes."""
@@ -2913,6 +2936,15 @@ while also answering every question accurately, clearly, and step-by-step when a
                 raise ValueError("Failed to create bitmap from image bytes")
 
             return bitmap
+
+    # Todo(JamePeng): Separate the workflow for building the prompt in __call__
+    def _process_mtmd_prompt(
+        self,
+        llama: llama.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+    ) -> Tuple[List[int], List[tuple], Any, List[Any]]:
+        pass
+
 
     def __call__(
         self,
@@ -2975,7 +3007,13 @@ while also answering every question accurately, clearly, and step-by-step when a
                 )
             ] + messages
 
-        image_urls = self.get_image_urls(messages)
+        try:
+            image_urls = self.get_image_urls(messages)
+            image_count = len(image_urls)
+            if self.verbose:
+                print(f"{self.log_prefix} - processing {image_count} images", file=sys.stderr)
+        except Exception:
+            print(f"{self.log_prefix} - get_image_urls() failed from the messages", file=sys.stderr)
 
         # Get the default media marker
         media_marker = self._mtmd_cpp.mtmd_default_marker().decode('utf-8')
@@ -3031,10 +3069,6 @@ while also answering every question accurately, clearly, and step-by-step when a
 
                 if result != 0:
                     raise ValueError(f"Failed to tokenize input: error code {result}")
-
-                # Reset llama context
-                llama.reset()
-                llama._ctx.memory_clear(True)
 
                 # Process each chunk
                 n_past = 0
@@ -3101,6 +3135,7 @@ while also answering every question accurately, clearly, and step-by-step when a
             # Cleanup bitmaps
             for bitmap in bitmap_cleanup:
                 self._mtmd_cpp.mtmd_bitmap_free(bitmap)
+            bitmap_array = None
 
         # Handle response format and tools (same as before)
         if response_format is not None and response_format["type"] == "json_object":
@@ -3194,6 +3229,9 @@ while also answering every question accurately, clearly, and step-by-step when a
                 tool_name, completion_or_chunks, stream
             )
         return _convert_completion_to_chat(completion_or_chunks, stream=stream)
+
+    def load_image(self, image_url: str) -> bytes:
+        return self._load_image(image_url)
 
     @staticmethod
     def _load_image(image_url: str) -> bytes:
@@ -3328,7 +3366,7 @@ while also answering every question accurately, clearly, and step-by-step when a
         local_dir_use_symlinks: Union[bool, Literal["auto"]] = "auto",
         cache_dir: Optional[Union[str, os.PathLike[str]]] = None,
         **kwargs: Any,
-    ) -> "Llava15ChatHandler":
+    ) -> "MTMDChatHandler":
         import fnmatch
         from pathlib import Path
 
@@ -3404,7 +3442,43 @@ while also answering every question accurately, clearly, and step-by-step when a
         )
 
 
-class ObsidianChatHandler(Llava15ChatHandler):
+class Llava15ChatHandler(MTMDChatHandler):
+    CHAT_FORMAT = (
+        "{% for message in messages %}"
+            "{% if message.role == 'system' %}"
+                "{{ message.content }}"
+            "{% endif %}"
+
+            "{% if message.role == 'user' %}"
+                "{% if message.content is string %}"
+                    "\nUSER: {{ message.content }}"
+                "{% elif message.content is iterable %}"
+                    "\nUSER: "
+                    "{% for content in message.content %}"
+                        "{% if content.type == 'image_url' %}"
+                            "{{ content.image_url if content.image_url is string else content.image_url.url }}"
+                        "{% endif %}"
+                    "{% endfor %}"
+                    "{% for content in message.content %}"
+                        "{% if content.type == 'text' %}"
+                            "{{ content.text }}"
+                        "{% endif %}"
+                    "{% endfor %}"
+                "{% endif %}"
+            "{% endif %}"
+
+            "{% if message.role == 'assistant' and message.content is not none %}"
+                "\nASSISTANT: {{ message.content }}"
+            "{% endif %}"
+        "{% endfor %}"
+
+        "{% if add_generation_prompt %}"
+            "\nASSISTANT: "
+        "{% endif %}"
+    )
+
+
+class ObsidianChatHandler(MTMDChatHandler):
     # Prompt Format
     # The model followed ChatML format. However, with ### as the seperator
 
@@ -3460,7 +3534,7 @@ class ObsidianChatHandler(Llava15ChatHandler):
     )
 
 
-class MoondreamChatHandler(Llava15ChatHandler):
+class MoondreamChatHandler(MTMDChatHandler):
     # Chat Format:
     # f"<image>\n\n{chat_history}Question: {question}\n\nAnswer:"
     CHAT_FORMAT = (
@@ -3502,7 +3576,7 @@ class MoondreamChatHandler(Llava15ChatHandler):
     )
 
 
-class Llava16ChatHandler(Llava15ChatHandler):
+class Llava16ChatHandler(MTMDChatHandler):
     # Example prompt
     # "DEFAULT_SYSTEM_MESSAGE + USER: <image>\nWhat is shown in this image? ASSISTANT:"
 
@@ -3548,7 +3622,7 @@ class Llava16ChatHandler(Llava15ChatHandler):
     )
 
 
-class NanoLlavaChatHandler(Llava15ChatHandler):
+class NanoLlavaChatHandler(MTMDChatHandler):
     # Prompt Format
     # The model follow the ChatML standard, however, without \n at the end of <|im_end|>:
 
@@ -3603,7 +3677,7 @@ class NanoLlavaChatHandler(Llava15ChatHandler):
     )
 
 
-class Llama3VisionAlphaChatHandler(Llava15ChatHandler):
+class Llama3VisionAlphaChatHandler(MTMDChatHandler):
     # question = "<image>" + q
 
     # prompt = f"<|start_header_id|>user<|end_header_id|>\n\n{question}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
@@ -3655,7 +3729,7 @@ class Llama3VisionAlphaChatHandler(Llava15ChatHandler):
 Llama3VisionAlpha = Llama3VisionAlphaChatHandler
 
 
-class MiniCPMv26ChatHandler(Llava15ChatHandler):
+class MiniCPMv26ChatHandler(MTMDChatHandler):
 
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
@@ -3695,7 +3769,7 @@ class MiniCPMv26ChatHandler(Llava15ChatHandler):
     )
 
 
-class MiniCPMv45ChatHandler(Llava15ChatHandler):
+class MiniCPMv45ChatHandler(MTMDChatHandler):
     """
     Handler for MiniCPM-V 4.5 models.
 
@@ -3798,7 +3872,7 @@ class MiniCPMv45ChatHandler(Llava15ChatHandler):
 
         Args:
             enable_thinking (bool): If True, model generates reasoning before the final answer.
-            **kwargs: Additional arguments for the base Llava15ChatHandler.
+            **kwargs: Additional arguments for the base MTMDChatHandler.
         """
         self.enable_thinking = enable_thinking
         super().__init__(**kwargs)
@@ -3815,22 +3889,12 @@ class MiniCPMv45ChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"MiniCPMV45ChatHandler(enable_thinking={self.enable_thinking}) - Processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"MiniCPMV45ChatHandler - Cleared state", file=sys.stderr)
-
+            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
         return super().__call__(**kwargs)
 
 
-class Gemma3ChatHandler(Llava15ChatHandler):
+class Gemma3ChatHandler(MTMDChatHandler):
 
     GEMMA3_BOI_TOKEN  = "<start_of_image>"
     GEMMA3_EOI_TOKEN = "<end_of_image>"
@@ -3888,7 +3952,7 @@ class Gemma3ChatHandler(Llava15ChatHandler):
     )
 
 
-class GLM41VChatHandler(Llava15ChatHandler):
+class GLM41VChatHandler(MTMDChatHandler):
     # Note: Make sure the GGUF files of your converted model and mmproj are F16 or F32.
 
     GLM41V_EOS_TOKEN = "<|endoftext|>"
@@ -3944,24 +4008,14 @@ class GLM41VChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        # Clear any handler state
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"GLM4VChatHandler - Cleared state, processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"GLM4VChatHandler - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix} - Start processing")
 
         # Use parent implementation
         return super().__call__(**kwargs)
 
 
-class GLM46VChatHandler(Llava15ChatHandler):
+class GLM46VChatHandler(MTMDChatHandler):
     GLM46V_EOS_TOKEN = "<|endoftext|>"
     GLM46V_PAD_TOKEN = "<|endoftext|>"
     GLM46V_IMAGE_START_TOKEN = "<|begin_of_image|>"
@@ -4043,22 +4097,13 @@ class GLM46VChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"GLM46VChatHandler(enable_thinking={self.enable_thinking}) - Processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"GLM46VChatHandler(enable_thinking={self.enable_thinking}) - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
 
         return super().__call__(**kwargs)
 
 
-class GraniteDoclingChatHandler(Llava15ChatHandler):
+class GraniteDoclingChatHandler(MTMDChatHandler):
     """
     Handler for Granite-Docling models.
 
@@ -4127,22 +4172,14 @@ class GraniteDoclingChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"GraniteDoclingChatHandler - Cleared state, processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"GraniteDoclingChatHandler - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix} - Start processing")
+
 
         return super().__call__(**kwargs)
 
 
-class LFM2VLChatHandler(Llava15ChatHandler):
+class LFM2VLChatHandler(MTMDChatHandler):
     LFM2VL_BOS_TOKEN = "<|startoftext|>"
     LFM2VL_EOS_TOKEN = "<|im_end|>"
     LFM2VL_IMAGE_START_TOKEN = "<|image_start|>"
@@ -4189,22 +4226,13 @@ class LFM2VLChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"LFM2VLChatHandler - Cleared state, Processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"LFM2VLChatHandler - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix} - Start processing")
 
         return super().__call__(**kwargs)
 
 
-class PaddleOCRChatHandler(Llava15ChatHandler):
+class PaddleOCRChatHandler(MTMDChatHandler):
     """
     Handler for PaddleOCR 1.5 multimodal models.
     """
@@ -4306,22 +4334,13 @@ class PaddleOCRChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"PaddleOCRChatHandler - Cleared state, Processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"PaddleOCRChatHandler - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix} - Start processing")
 
         return super().__call__(**kwargs)
 
 
-class Qwen25VLChatHandler(Llava15ChatHandler):
+class Qwen25VLChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
         "{% for message in messages %}"
@@ -4358,24 +4377,14 @@ class Qwen25VLChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        # Clear any handler state
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"Qwen25VLChatHandler - Cleared state, processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"Qwen25VLChatHandler - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix} - Start processing")
 
         # Use parent implementation
         return super().__call__(**kwargs)
 
 
-class Qwen3VLChatHandler(Llava15ChatHandler):
+class Qwen3VLChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (
         "{{- '<|im_start|>system\n' -}}"
         "{%- if messages[0].content is string and messages[0].role == 'system' -%}"
@@ -4497,18 +4506,8 @@ class Qwen3VLChatHandler(Llava15ChatHandler):
         if hasattr(llama, 'input_ids'):
             llama.input_ids.fill(0)
 
-        # Clear any handler state
-        if hasattr(self, '_last_image_embed'):
-            self._last_image_embed = None
-            self._last_image_hash = None
-
         if self.verbose:
-            messages = kwargs.get('messages', [])
-            try:
-                image_count = len(self.get_image_urls(messages))
-                print(f"Qwen3VLHandler(force_reasoning={self.force_reasoning}) - Cleared state, processing {image_count} images", file=sys.stderr)
-            except Exception:
-                print(f"Qwen3VLHandler(force_reasoning={self.force_reasoning}) - Cleared state", file=sys.stderr)
+            print(f"{self.log_prefix}(force_reasoning={self.force_reasoning}) - Start processing")
 
         # Use parent implementation
         return super().__call__(**kwargs)
