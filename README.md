@@ -28,6 +28,28 @@ This package provides:
 
 Documentation is available at [https://llama-cpp-python.readthedocs.io/en/latest](https://llama-cpp-python.readthedocs.io/en/latest).
 
+
+## Discussions
+
+Starting March 2026, I am excited to announce that we have officially enabled the **Discussions** tab for `llama-cpp-python`!
+
+You can access it right here: [GitHub Discussions](https://github.com/JamePeng/llama-cpp-python/discussions).
+
+**Why Discussions? & Updates on Documentation**
+As the project has evolved, our existing documentation (`docs`) has unfortunately become a bit bloated and outdated. To provide you with more timely and clear information:
+
+* **New Feature Releases:** Moving forward, whenever a new feature is rolled out, I will publish a dedicated standalone article in the Discussions section. These posts will include detailed explanations, usage guides, and important caveats.
+* This approach will serve as a more agile and interactive "live documentation" while we figure out the best way to refactor the old docs.
+
+**Join the Community**
+I warmly welcome all of you to use this new space. Let's build together:
+
+* 💬 **Discuss & Share:** Have a question, an idea, or a cool use case? Share it with the community!
+* 🛠️ **Maintain & Test:** Help us test new features, troubleshoot issues, and collaboratively maintain the repository.
+* 📚 **Learn & Grow:** I hope everyone can benefit from this project, learn from each other, and gain valuable insights.
+
+Thank you for your continuous support!
+
 ## Installation
 
 Requirements:
@@ -522,6 +544,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [paddleocr-vl-1.5](https://huggingface.co/JamePeng2023/PaddleOCR-VL-1.5-GGUF) | `PaddleOCRChatHandler` | `paddleocr` |
 | [qwen2.5-vl](https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
 | [qwen3-vl](https://huggingface.co/unsloth/Qwen3-VL-8B-Thinking-GGUF) | `Qwen3VLChatHandler` | `qwen3-vl` |
+| [qwen3.5](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF) | `Qwen35ChatHandler` | `qwen3.5` |
 
 Then you'll need to use a custom chat handler to load the clip model and process the chat messages and images.
 
@@ -1039,7 +1062,7 @@ This package is under active development and I welcome any contributions.
 To get started, clone the repository and install the package in editable / development mode:
 
 ```bash
-git clone --recurse-submodules https://github.com/abetlen/llama-cpp-python.git
+git clone https://github.com/JamePeng/llama-cpp-python --recursive
 cd llama-cpp-python
 
 # Upgrade pip (required for editable mode)
