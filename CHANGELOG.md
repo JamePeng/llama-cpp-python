@@ -7,6 +7,133 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.30] Milestone Release
+
+I will update the release notes for version 0.3.30 in the [discussion](https://github.com/JamePeng/llama-cpp-python/discussions).
+
+- refactor(mtmd): redesign multimodal pipeline for concurrent I/O and hybrid state management
+This commit fundamentally restructures the `MTMDChatHandler` pipeline, decoupling the prefill and evaluation stages to resolve previous I/O bottlenecks and state-sync issues. The new architecture fully supports hybrid/recurrent multimodal models (e.g., Qwen3.5s, LFM2-VL) with robust context management.
+
+    Key structural advantages and changes:
+    - Concurrent Media Decoding: Implemented `ThreadPoolExecutor` in `_process_mtmd_prompt` with pre-allocated arrays, allowing thread-safe parallel image/audio decoding while strictly preserving the chronological order of user inputs, and can be used in the future to process large numbers of video frames.
+    - O(1) Prefix Matching ("Negative Reverse Vocabulary"): Replaced slow dictionary lookups with a deterministic hash-to-negative-integer mapping for media IDs. This isolates media tokens from the LLM's positive vocabulary space, enabling native, ultra-fast `longest_token_prefix` array comparisons in Python.
+    - Hybrid Model State Management: Replaced aggressive mid-turn saving with highly efficient "End-of-Turn" checkpointing. This ensures multi-image prompts consume only a single LRU slot while allowing precise rollback to the nearest valid state upon cache misses.
+    - Robust Context Shift (OOM Defense): The `__call__` loop now preemptively calculates token boundaries for upcoming multimodal chunks, safely discarding the oldest unpinned tokens from both the physical KV cache and the Python virtual ledger to prevent backend crashes.
+    - Qwen3.5 Support CONFRIMED, waiting Qwen35ChatHandler PR merge
+
+- merge: Implemented Qwen35ChatHandler for Qwen3.5(by **@alcoftTAO**)
+
+- fix: Correct the mtmd vision check condition bug
+
+- refactor(chat_handler): extract MTMDChatHandler base class and Simplify the complexity of subsequent multimodal adaptation
+    - Extracted the core multimodal processing pipeline from `Llava15ChatHandler` into a generic `MTMDChatHandler` base class, separating pipeline logic from model-specific prompt formats.
+    - Updated all multimodal subclass handlers (e.g., Gemma3,  Granite-Docling, PaddleOCR, Qwen2.5vl, Qwen3-vl, MiniCPM, GLM4.xV, LFM2-VL) to inherit from the new base class `MTMDChatHandler`.
+    - Implemented strict `**kwargs` validation in the baseconstructor to gracefully intercept and report unsupported parameters, significantly improving Developer Experience (DX).
+    - Introduced dynamic `self.log_prefix` (`self.__class__.__name__`) for accurate and consistent logging across all subclasses.
+    - Cleaned up redundant state-clearing, image-count logic and hardcoded print statements across subclass `__call__` implementations.
+    - To avoid exceptions occurring when the close method is called due to initialization failure and the call to exit_stack.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/2afcdb9777b1bac79fa4bfe284b9bf23085b0469](https://github.com/ggml-org/llama.cpp/commit/2afcdb9777b1bac79fa4bfe284b9bf23085b0469)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260301
+
+Many thanks to **@yamikumo-DSD** and **@roj234** for providing detailed testing and valuable suggestions.
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/e4861df5fd44bb83ec2b9063ca3375759416aead...3f8f0f89a2b72ec2f9494fa5f14206591a5cde49
+
+## [0.3.29]
+
+- perf(eval): implement adaptive checkpoint intervals for hybrid models
+    - Dynamically scale checkpoint frequency during large prompt pre-filling (max 3 triggers per eval) to minimize I/O bottlenecks and stuttering.
+    - Add success validation to `save_checkpoint`, ensuring the `last_ckpt_pos` tracker is only updated when the state is successfully saved to disk/memory.
+    - Enhance verbose logging to track dynamic interval calculations and save failures.
+
+- fix(eval): make context shift mathematically robust and architecture-safe
+    - Added a `memory_can_shift()` pre-flight check to proactively intercept and abort gracefully on architectures that physically forbid shifting (e.g., multimodal mmproj where `n_pos_per_embd > 1` or incompatible M-RoPE), preventing fatal `GGML_ASSERT` C++ crashes.
+    - Implemented dynamic mathematical bounds for `n_keep` and `n_discard` to guarantee that enough space is always freed, completely eliminating the edge-case where `n_discard` evaluates to 0 (causing a dead-loop when `n_ctx` is extremely small).
+    - Wrapped underlying C++ memory shift operations in a try-except block for defense-in-depth against unexpected backend failures.
+    - Expanded in-code documentation to clarify the arithmetic constraints and architectural limitations of the KV shift mechanism.
+
+- Add the memory_can_shift API to class LlamaContext
+
+- feat(eval): enable native context shift for hybrid/recurrent models
+    - Removed the `RuntimeError` that previously blocked context shifting for hybrid and SWA architectures.
+    - Delegated the shift logic to the underlying C++ backend, which automatically handles Attention KV removal and RNN `pos` shifting.
+    - Added dynamic verbose logging to clearly identify the model type (Transformer vs. Hybrid/Recurrent/SWA) during a context shift event.
+
+- fix(eval): prevent batch size from halving below 1 during KV slot exhaustion
+    - Added an explicit guard to break the dynamic batch downgrade loop when `current_batch_size` is exactly 1 and a Code 1 (No KV slot) is returned.
+    - Prevents the engine from executing an invalid `1 // 2` operation and generating the confusing "Halving batch size from 1 to 0" verbose log.
+    - Ensures the evaluation process fails fast and aborts gracefully when physical VRAM is completely depleted and no further fallback is mathematically possible.
+
+- feat(hybrid): add periodic checkpointing and adaptive batch handling
+    - Increase default `ctx_checkpoints` from 16 to 32
+    - Add new parameter `checkpoint_interval` (default: 4096) for hybrid model state snapshots
+    - Implement robust dynamic batch downgrade on KV cache exhaustion (status=1)
+    - Introduce periodic checkpoint saves during eval in hybrid mode
+    - Improve error handling and logging around context shifts and decoding failures
+
+- Optimization (decode): treat KV slot exhaustion (code 1) as a recoverable return value
+    - Updated the `decode` wrapper to explicitly return `1` instead of raising a `RuntimeError` when `llama_decode` indicates no KV slots are available.
+    - Aligned Python API behavior with the underlying C++ contract, treating code 1 as a recoverable signal rather than a fatal crash.
+    - Enabled upper-level caller loops (like `eval`) to gracefully handle VRAM fragmentation via dynamic batch halving without relying on clumsy try-except block string parsing.
+    - Retained strict `RuntimeError` exceptions for truly fatal backend failures (e.g., codes -1, -2, -3).
+    - Added comprehensive docstrings detailing return codes and exception scenarios.
+
+- feat(core): overhaul generate and eval for hybrid model support(Qwen3-next、Qwen3.5 etc.)
+    - Integrated `HybridCheckpointCache` into the generation loop to support state rollback for recurrent/hybrid architectures.
+    - Implemented Context Shift (sliding window) in `eval` to gracefully prevent OOM when exceeding `n_ctx`.
+    - Adapted `eval` to use the newly vectorized `LlamaBatch.add_sequence` API with dynamic `logits_array` configuration.
+    - Fixed the full prefix match bug by forcing a 1-token re-evaluation to refresh logits.
+    - Disabled speculative decoding for hybrid models to prevent irreversible state pollution.
+    - Wrapped the generation loop in a `try...finally` block to guarantee safe checkpoint saving.
+
+- refactor(LlamaBatch): replace set_batch with granular add_token + vectorized add_sequence
+    - Introduce high-performance add_token() for single-token append in generation loop
+    - Add flexible add_sequence() with per-token pos/seq_ids/logits arrays
+    - Remove old set_batch() that assumed single-seq + forced last logit
+    - Better support for multi-sequence and precise logit control
+
+## [0.3.28]
+
+- fix(HybridCheckpointCache): ValueError: bytes must be in range(0, 256)
+
+- feat: add HybridCheckpointCache detect support for recurrent/hybrid/SWA models
+    - Introduce ctx_checkpoints parameter (default 16)
+    - Detect recurrent / hybrid / n_swa > 0 models in __init__
+    - Automatically use HybridCheckpointCache when hybrid architecture is detected
+    - Properly close and clear HybridCheckpointCache in __del__
+
+- fix(cache): add safety guards to checkpoint restore and optimize API calls
+    - Replaced direct `llama_cpp` API calls with cached function pointers (`self._get_size_ext`, etc.) for better performance and consistency.
+    - Added sequence ID validation with verbose error logging to prevent cross-sequence contamination.
+    - Added strict state size validation before restoration to prevent buffer overflows and backend segmentation faults.
+
+- Remove redundant seq_id and add resource cleanup
+    - Removed `seq_id` from `HybridCheckpointCache` initialization to make it a stateless, global multi-sequence manager.
+    - Added `close()` and `__del__()` methods to safely release C++ context references and prevent memory leaks.
+
+- feat(cache): implement HybridCheckpointCache for hybrid/recurrent models
+Introduces a dedicated caching mechanism to support state rollback for
+models that cannot physically truncate their KV cache (e.g., Qwen3-Next, Qwen3.5,
+etc.).
+
+    Key additions and changes:
+    - Add `HybridCheckpoint` dataclass to store RNN state snapshots along with their binary data and metadata.
+    - Implement `HybridCheckpointCache` to manage sequence-specific states using the `llama_state_seq_*_ext` C++ APIs.
+    - Introduce `_hash_prefix` using SHA-256 to guarantee cryptographic certainty when matching prompt histories, preventing state corruption.
+    - Add `save_checkpoint` with a FIFO eviction policy to strictly bound memory usage based on `max_checkpoints`.
+    - Add `restore_checkpoint` to securely inject valid RNN states back into the C++ backend.
+    - Explicitly disable incompatible dictionary interfaces (`__getitem__`, `__setitem__`, `__contains__`) inherited from `BaseLlamaCache`.
+    - Refactor module imports (alphabetical sorting) and relocate `LlamaDiskCache` for better structural consistency.
+
+- Remove the hack code in llama_chat_format.py
+
+- LLama: Optimize KV cache management for multi-round conversations
+    - Implements prefix-matching logic to truncate stale "ghost" tokens in C++ KV cache
+    - Prevents attention misalignment and context poisoning during multi-turn interactions
+    - Reduces memory overhead by reusing matched prefixes efficiently
+
 ## [0.3.27]
 
 - feat: add `PaddleOCR-VL-1.5` multimodal chat handler `PaddleOCRChatHandler`
