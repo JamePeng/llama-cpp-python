@@ -15,6 +15,7 @@ from typing import (
 )
 
 import llama_cpp.llama
+import llama_cpp.llama as llama_module
 import llama_cpp._internals as _internals
 import llama_cpp.llama_cpp as llama_cpp
 
@@ -73,7 +74,7 @@ class LlamaDiskCache(BaseLlamaCache):
         min_len = 0
         min_key: Optional[Tuple[int, ...]] = None
         for k in self.cache.iterkeys():  # type: ignore
-            prefix_len = llama_cpp.llama.Llama.longest_token_prefix(k, key)
+            prefix_len = llama_module.Llama.longest_token_prefix(k, key)
             if prefix_len > min_len:
                 min_len = prefix_len
                 min_key = k  # type: ignore
@@ -128,7 +129,7 @@ class LlamaRAMCache(BaseLlamaCache):
         min_len = 0
         min_key = None
         keys = (
-            (k, llama_cpp.llama.Llama.longest_token_prefix(k, key))
+            (k, llama_module.Llama.longest_token_prefix(k, key))
             for k in self.cache_state.keys()
         )
         for k, prefix_len in keys:
