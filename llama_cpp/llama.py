@@ -59,6 +59,9 @@ from ._internals import (
 from ._logger import set_verbose
 from ._utils import suppress_stdout_stderr
 
+from .mtmd_cpp import mtmd_context_params_default, mtmd_init_from_file
+from .mtmd import MultiModalContext
+
 
 class Llama:
     """High-level Python wrapper for a llama.cpp model."""
@@ -135,6 +138,10 @@ class Llama:
         # Misc
         spm_infill: bool = False,
         verbose: bool = True,
+        mmproj_path: str = None,
+        mmproj_use_gpu: Optional[bool] = None,
+        image_min_tokens: int = -1,
+        image_max_tokens: int = -1,
         # Extra Params
         **kwargs,  # type: ignore
     ):
@@ -434,6 +441,29 @@ class Llama:
                 )
             )
         )
+
+        if mmproj_path != None:
+            mparams = mtmd_context_params_default();
+            mparams.use_gpu          = mmproj_use_gpu if mmproj_use_gpu != None else n_gpu_layers == -1
+            mparams.print_timings    = verbose
+            mparams.n_threads        = self.n_threads
+            mparams.flash_attn_type  = self.context_params.flash_attn_type
+            mparams.warmup           = True
+            if image_min_tokens > 0:
+                mparams.image_min_tokens = image_min_tokens
+            if image_max_tokens > 0:
+                mparams.image_max_tokens = image_max_tokens
+
+            with suppress_stdout_stderr(disable=verbose):
+                mctx = mtmd_init_from_file(mmproj_path.encode("utf-8"), self._model.model, mparams)
+            if mctx is None:
+                raise RuntimeError(f"failed to load multimodal projection '{mmproj_path}'")
+
+            self.mtmd_context = self._stack.enter_context(
+                contextlib.closing(
+                    MultiModalContext(mctx)
+                )
+            )
 
         # Check for Encoder-Decoder architecture
         self._has_encoder = self._model.has_encoder()
