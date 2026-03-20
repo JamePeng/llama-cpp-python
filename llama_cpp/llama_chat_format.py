@@ -3185,6 +3185,10 @@ while also answering every question accurately, clearly, and step-by-step when a
                         self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO
                     ]:
                     # Extract media properties
+                    # Note(JamePeng):
+                    # The M-RoPE model is based on `n_pos` instead of `n_tokens` (of course, there's no difference in non-M-RoPE models).
+                    # However, I still keep `n_tokens` because if `n_pos` is used, the underlying system will assume it is a full-match and will skip eval and sample.
+                    # chunk_n_pos = self._mtmd_cpp.mtmd_input_chunk_get_n_pos(chunk) # equals to max(t,h,w) for M-RoPE; equals to `n_tokens` otherwise
                     chunk_n_tokens = self._mtmd_cpp.mtmd_input_chunk_get_n_tokens(chunk)
 
                     if media_items_cur < media_items_count:
@@ -3318,10 +3322,14 @@ while also answering every question accurately, clearly, and step-by-step when a
                             if self.verbose:
                                 print(f"{self.log_prefix}(__call__): Successfully rolled back to checkpoint at pos {llama.n_tokens}.", file=sys.stderr)
                         else:
+                            if self.verbose:
+                                print(f"{self.log_prefix}(__call__): No suitable checkpoint found or restore failed. Clearing hybrid cache entirely.", file=sys.stderr)
                             llama._hybrid_cache_mgr.clear()
                             llama._ctx.memory_clear(True)
                             llama.n_tokens = 0
                     else:
+                        if self.verbose:
+                            print(f"{self.log_prefix}(__call__): Hybrid cache enabled but max_checkpoints is 0. Clearing cache entirely.", file=sys.stderr)
                         llama._hybrid_cache_mgr.clear()
                         llama._ctx.memory_clear(True)
                         llama.n_tokens = 0
