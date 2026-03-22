@@ -1911,6 +1911,10 @@ def llama_model_quantize(
     ...
 
 
+# //
+# // Adapters
+# //
+
 # // Load a LoRA adapter from file
 # // The adapter is valid as long as the associated model is not freed
 # LLAMA_API struct llama_adapter_lora * llama_adapter_lora_init(
@@ -2058,14 +2062,23 @@ def llama_adapter_get_alora_invocation_tokens(adapter: llama_adapter_lora_p, /) 
 #         float * scales);
 @ctypes_function(
     "llama_set_adapters_lora",
-    [llama_context_p_ctypes, ctypes.POINTER(llama_adapter_lora_p_ctypes), ctypes.c_size_t, ctypes.c_float],
+    [llama_context_p_ctypes,
+     ctypes.POINTER(llama_adapter_lora_p_ctypes),
+     ctypes.c_size_t,
+     ctypes.POINTER(ctypes.c_float)
+    ],
     ctypes.c_int32,
 )
 def llama_set_adapters_lora(
-    ctx: llama_context_p, adapters: CtypesArray[llama_adapter_lora_p], n_adapters: ctypes.c_size_t, scale: float, /
+    ctx: llama_context_p,
+    adapters: Optional[CtypesArray[llama_adapter_lora_p]],
+    n_adapters: ctypes.c_size_t,
+    scales: Optional[CtypesArray[ctypes.c_float]], /
 ) -> int:
-    """Set LoRa adapters on the context.
-    Will only modify if the adapters currently in context are different."""
+    """
+    Set LoRa adapters on the context.
+    Will only modify if the adapters currently in context are different.
+    """
     ...
 
 
