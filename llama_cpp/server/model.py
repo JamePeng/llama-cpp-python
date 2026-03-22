@@ -306,9 +306,6 @@ class LlamaProxy:
             kv_unified=settings.kv_unified,
             # Sampling Params
             last_n_tokens_size=settings.last_n_tokens_size,
-            # LoRA Params
-            lora_base=settings.lora_base,
-            lora_path=settings.lora_path,
             # Backend Params
             numa=settings.numa,
             # Chat Format Params

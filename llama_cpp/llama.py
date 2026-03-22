@@ -116,10 +116,6 @@ class Llama:
         checkpoint_interval: int = 4096,
         # Sampling Params
         last_n_tokens_size: int = 64,
-        # LoRA Params
-        lora_base: Optional[str] = None,
-        lora_scale: float = 1.0,
-        lora_path: Optional[str] = None,
         # Backend Params
         numa: Union[bool, int] = False,
         # Chat Format Params
@@ -206,8 +202,6 @@ class Llama:
             ctx_checkpoints: max number of context checkpoints to create per slot (default: 16)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
             checkpoint_interval: Hybrid model checkpoint token intervals, and archiving of text with interval sizes along the way.
             last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
-            lora_base: Optional path to base model, useful if using a quantized base model and you want to apply LoRA to an f16 model.
-            lora_path: Path to a LoRA file to apply to the model.
             numa: numa policy
             chat_format: String specifying the chat format to use when calling create_chat_completion.
             chat_handler: Optional chat handler to use when calling create_chat_completion.
@@ -270,7 +264,7 @@ class Llama:
             )  # keep a reference to the array so it is not gc'd
             self.model_params.tensor_split = self._c_tensor_split
         self.model_params.vocab_only = vocab_only
-        self.model_params.use_mmap = use_mmap if lora_path is None else False
+        self.model_params.use_mmap = use_mmap
         self.model_params.use_direct_io = use_direct_io
         self.model_params.use_mlock = use_mlock
         self.model_params.check_tensors = check_tensors
@@ -416,10 +410,6 @@ class Llama:
 
         self.cache: Optional[BaseLlamaCache] = None
 
-        self.lora_base = lora_base
-        self.lora_scale = lora_scale
-        self.lora_path = lora_path
-
         self.spm_infill = spm_infill
 
         if not os.path.exists(model_path):
@@ -513,34 +503,6 @@ class Llama:
                 )
             )
         )
-
-        self._lora_adapter: Optional[llama_cpp.llama_adapter_lora_p] = None
-
-        if self.lora_path:
-            self._lora_adapter = llama_cpp.llama_adapter_lora_init(
-                self._model.model,
-                self.lora_path.encode("utf-8"),
-            )
-            if self._lora_adapter is None:
-                raise RuntimeError(
-                    f"Failed to initialize LoRA adapter from lora path: {self.lora_path}"
-                )
-
-            def free_lora_adapter():
-                if self._lora_adapter is None:
-                    return
-                llama_cpp.llama_adapter_lora_free(self._lora_adapter)
-                self._lora_adapter = None
-
-            self._stack.callback(free_lora_adapter)
-
-            # Todo(JamePeng): The current LoRa loading logic is outdated and needs to be refactored.
-            if llama_cpp.llama_set_adapters_lora(
-                self._ctx.ctx, self._lora_adapter, self.lora_scale
-            ):
-                raise RuntimeError(
-                    f"Failed to set LoRA adapter from lora path: {self.lora_path}"
-                )
 
         if self.verbose:
             print(llama_cpp.llama_print_system_info().decode("utf-8"), file=sys.stderr)
@@ -2802,10 +2764,6 @@ prompt: The prompt to generate text from.
             # Sampling Params
             no_perf=self.context_params.no_perf,
             last_n_tokens_size=self.last_n_tokens_size,
-            # LoRA Params
-            lora_base=self.lora_base,
-            lora_scale=self.lora_scale,
-            lora_path=self.lora_path,
             # Backend Params
             numa=self.numa,
             # Chat Format Params
