@@ -2045,7 +2045,7 @@ def llama_adapter_get_alora_n_invocation_tokens(adapter: llama_adapter_lora_p, /
 @ctypes_function(
     "llama_adapter_get_alora_invocation_tokens",
     [llama_adapter_lora_p_ctypes],
-    ctypes.c_uint64,
+    ctypes.POINTER(llama_token),
 )
 def llama_adapter_get_alora_invocation_tokens(adapter: llama_adapter_lora_p, /) -> CtypesPointer[llama_token]:
     ...
