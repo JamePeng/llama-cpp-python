@@ -1312,6 +1312,24 @@ def llama_model_load_from_file(
     ...
 
 
+# // Load a model from an open FILE pointer
+# LLAMA_API struct llama_model * llama_model_load_from_file_ptr(
+#                                 FILE * file,
+#             struct llama_model_params   params);
+@ctypes_function(
+    "llama_model_load_from_file_ptr",
+    [ctypes.c_void_p, llama_model_params],
+    llama_model_p_ctypes,
+)
+def llama_model_load_from_file_ptr(
+    file: ctypes.c_void_p, params: llama_model_params, /
+) -> Optional[llama_model_p]:
+    """
+    Load a model from an open FILE pointer
+    """
+    ...
+
+
 # // Load a model from multiple splits (support custom naming scheme)
 # // The paths must be in the correct order
 # LLAMA_API struct llama_model * llama_model_load_from_splits(
