@@ -75,8 +75,10 @@ class LlamaModel:
         self.model = model
         self.vocab = vocab
 
+        self._lora_registry: Dict[str, LlamaLoraAdapter] = {}
+
     def close(self):
-        """Manually free LlamaModel and Vocab resources."""
+        """Manually free LlamaModel and Vocab/Lora resources."""
         if getattr(self, "model", None) is not None:
             try:
                 llama_cpp.llama_model_free(self.model)
@@ -84,6 +86,10 @@ class LlamaModel:
                 pass
             self.model = None
         self.vocab = None
+
+        if hasattr(self, "_lora_registry") and self._lora_registry:
+            self.unload_all_loras()
+            self._lora_registry = None
 
         if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
             self._exit_stack.close()
@@ -311,8 +317,62 @@ class LlamaModel:
 
         return bytes(buffer[:n_chars])
 
+    # Lora
+
+    def load_lora(self, name: str, path: str):
+        """Loads a LoRA adapter into VRAM without applying it yet."""
+        # Skip if it's already loaded
+        if name in self._lora_registry:
+            return
+
+        adapter = LlamaLoraAdapter(self.model, path)
+        self._lora_registry[name] = adapter
+
+        self._exit_stack.callback(adapter.free)
+
+        if self.verbose:
+            print(f"Loaded LoRA '{name}' into memory.")
+
+    def unload_lora(self, name: str):
+        """Actively unloads a specific LoRA to free up VRAM."""
+        if name in self._lora_registry:
+            adapter = self._lora_registry.pop(name)
+            adapter.free()
+            if self.verbose:
+                print(f"Unloaded LoRA '{name}' and freed memory.")
+
+    @property
+    def loaded_lora_count(self) -> int:
+        """
+        Returns the total number of LoRA adapters currently loaded in VRAM.
+        """
+        return len(self._lora_registry)
+
+    def list_loras(self) -> List[str]:
+        """
+        Returns a list of all registered LoRA names.
+        """
+        return list(self._lora_registry.keys())
+
+    def unload_all_loras(self):
+        """
+        Iterates through the registry and forces VRAM release for all loaded LoRAs.
+        """
+        if not self._lora_registry:
+            return
+
+        # Cast keys to a list first to avoid RuntimeError:
+        # 'dictionary changed size during iteration' when pop() is called inside unload_lora.
+        loaded_names = list(self._lora_registry.keys())
+
+        for name in loaded_names:
+            self.unload_lora(name)
+
+        if self.verbose:
+            print(f"Successfully unloaded all {len(loaded_names)} LoRA adapters and cleared the registry.")
 
     # Extra
+
     def metadata(self) -> Dict[str, str]:
         metadata: Dict[str, str] = {}
         # Pre-allocate a 16KB buffer. This is large enough to handle almost all
@@ -354,6 +414,61 @@ class LlamaModel:
     def default_params():
         """Get the default llama_model_params."""
         return llama_cpp.llama_model_default_params()
+
+
+class LlamaLoraAdapter:
+    """Wrapper for llama_adapter_lora_p to safely manage C++ memory lifecycle."""
+    def __init__(self, model: llama_cpp.llama_model_p, path: str):
+        """
+        Initializes and loads the LoRA adapter into memory.
+
+        Args:
+            model: The pointer to the base Llama model.
+            path: The file path to the LoRA adapter (.gguf).
+        """
+        self.path = path
+        # Load the LoRA adapter from file into memory via llama.cpp API
+        # Note: The path string must be encoded to UTF-8 bytes for ctypes compatibility.
+        self.adapter = llama_cpp.llama_adapter_lora_init(
+            model,
+            path.encode("utf-8")
+        )
+        if not self.adapter:
+            raise RuntimeError(f"Failed to load LoRA from {path}")
+
+    def free(self):
+        """
+        Explicitly frees the underlying C++ memory allocated for the LoRA adapter.
+        Should be called when the adapter is actively unloaded to instantly release VRAM.
+        """
+        # Check if the adapter exists and hasn't been freed yet
+        if getattr(self, "adapter", None) is not None:
+            llama_cpp.llama_adapter_lora_free(self.adapter)
+            self.adapter = None
+        self.path = None
+
+    def __del__(self):
+        self.free()
+
+    @property
+    def alora_invocation_tokens(self) -> List[int]:
+        """
+        Retrieves the list of invocation (trigger) tokens if this adapter is an ALoRA (Activation LoRA).
+        Returns an empty list for standard LoRA adapters.
+        """
+        if getattr(self, "adapter", None) is None:
+            return []
+
+        # 1. Query the C++ backend for the exact number of trigger tokens
+        n_tokens = llama_cpp.llama_adapter_get_alora_n_invocation_tokens(self.adapter)
+        if n_tokens == 0:
+            return []
+
+        # 2. Retrieve the underlying C pointer to the contiguous array of tokens
+        tokens_ptr = llama_cpp.llama_adapter_get_alora_invocation_tokens(self.adapter)
+
+        # 3. Safely iterate through the C memory block and convert it into a native Python list
+        return [tokens_ptr[i] for i in range(n_tokens)]
 
 
 class LlamaContext:
@@ -577,21 +692,43 @@ class LlamaContext:
         raise RuntimeError(f"llama_decode failed (code {return_code}): {msg}")
 
     def set_n_threads(self, n_threads: int, n_threads_batch: int):
+        """
+        Set the number of threads used for decoding
+
+        Args:
+            n_threads: the number of threads used for generation (single token)
+            n_threads_batch: the number of threads used for prompt and batch processing (multiple tokens)
+        """
         llama_cpp.llama_set_n_threads(self.ctx, n_threads, n_threads_batch)
 
     def n_threads(self) -> int:
+        """Get the number of threads used for generation of a single token."""
         return llama_cpp.llama_n_threads(self.ctx)
 
     def n_threads_batch(self) -> int:
+        """Get the number of threads used for prompt and batch processing (multiple token)."""
         return llama_cpp.llama_n_threads_batch(self.ctx)
 
     def set_causal_attn(self, causal_attn: bool):
+        """
+        Set whether to use causal attention or not
+        If set to true, the model will only attend to the past tokens
+        """
         llama_cpp.llama_set_causal_attn(self.ctx, causal_attn)
 
     def set_warmup(self, warmup: bool):
+        """
+        Set whether the model is in warmup mode or not
+        If true, all model tensors are activated during llama_decode() to load and cache their weights.
+        """
         llama_cpp.llama_set_warmup(self.ctx, warmup)
 
     def synchronize(self):
+        """
+        Wait until all computations are finished
+        This is automatically done when using one of the functions below to obtain the computation results
+        and is not necessary to call it explicitly in most cases
+        """
         llama_cpp.llama_synchronize(self.ctx)
 
     def get_logits(self):
@@ -619,9 +756,128 @@ class LlamaContext:
         llama_cpp.llama_perf_context_print(self.ctx)
 
     def print_memory_breakdown(self):
+        """print a breakdown of per-device memory use via LLAMA_LOG"""
         llama_cpp.llama_memory_breakdown_print(self.ctx)
 
+    # LoRA / ALoRA Dynamic Routing Methods
+
+    def clear_loras(self):
+        """
+        Clears all currently applied LoRA weights from the context.
+        Restores the computational graph to the base model state.
+        """
+        llama_cpp.llama_set_adapters_lora(self.ctx, None, 0, None)
+
+    def apply_loras(self, active_loras: List[Tuple["LlamaLoraAdapter", float]]):
+        """
+        Dynamically mounts a combination of LoRAs and their scales to the current context.
+        This must be called immediately before evaluating/decoding the computation graph.
+
+        Args:
+            active_loras: A list of tuples containing (LlamaLoraAdapter instance, scale float).
+        """
+        # If no LoRAs are requested, ensure the context is wiped clean to prevent contamination
+        if not active_loras:
+            self.clear_loras()
+            return
+
+        n_adapters = len(active_loras)
+
+        # 1. Dynamically construct contiguous C-array types required by the C++ backend
+        AdapterArrayType = llama_cpp.llama_adapter_lora_p_ctypes * n_adapters
+        ScaleArrayType = ctypes.c_float * n_adapters
+
+        # 2. Instantiate the arrays in memory
+        c_adapters = AdapterArrayType()
+        c_scales = ScaleArrayType()
+
+        # 3. Populate the C-arrays with the underlying adapter pointers and float scales
+        for i, (adapter_obj, scale) in enumerate(active_loras):
+            c_adapters[i] = adapter_obj.adapter
+            c_scales[i] = scale
+
+        # 4. Atomically apply the requested adapters to the computation graph
+        ret = llama_cpp.llama_set_adapters_lora(
+            self.ctx,
+            c_adapters,
+            n_adapters,
+            c_scales
+        )
+
+        if ret != 0:
+            raise RuntimeError("LlamaContext(apply_loras): Failed to set LoRA adapters dynamically.")
+
+        if self.verbose:
+            print(f"LlamaContext(apply_loras): Successfully applied {n_adapters} LoRA adapter(s) to the compute graph.")
+
+    # Control Vector (CVec) Methods
+
+    def clear_cvec(self):
+        """
+        Clears the currently loaded control vector from the context.
+        Passing NULL (None) and zeros safely resets the graph.
+        """
+        llama_cpp.llama_set_adapter_cvec(self.ctx, None, 0, 0, 0, 0)
+
+    def apply_cvec(self, data: List[float], n_embd: int, il_start: int, il_end: int):
+        """
+        Dynamically applies a Control Vector (CVec) to the specified layer range.
+
+        Args:
+            data: Flattened 1D list of floats.
+                  [CRITICAL_LAYOUT_RULE]: Based on llama.cpp source, the data buffer
+                  is strictly mapped starting from Layer 1. Even if il_start > 1,
+                  the `data` array must contain zero-padding for the skipped early layers.
+                  Total length MUST be >= n_embd * il_end.
+            n_embd: The embedding dimension of the model.
+            il_start: The starting layer to apply the vector (inclusive, 1-indexed).
+            il_end: The ending layer to apply the vector (inclusive).
+        """
+        if not data:
+            self.clear_cvec()
+            return
+
+        length = len(data)
+
+        # Strictly validate length based on C++ buffer mapping rules
+        # The C++ backend uses offset: off = n_embd * (il - 1).
+        # To successfully write up to il_end, the buffer length must be at least n_embd * il_end.
+        minimum_required_len = n_embd * il_end
+        if length < minimum_required_len:
+            raise ValueError(
+                f"LlamaContext(apply_cvec): "
+                f"[Memory Layout Error] Control vector data length ({length}) is too short. "
+                f"llama.cpp requires the buffer to map continuously from Layer 1. "
+                f"To apply up to layer {il_end}, length must be at least {minimum_required_len}."
+            )
+
+        # 1. Convert to C Array
+        CFloatArrayType = ctypes.c_float * length
+        c_data = CFloatArrayType(*data)
+
+        # 2. Inject into graph
+        ret = llama_cpp.llama_set_adapter_cvec(
+            self.ctx,
+            c_data,
+            length,
+            n_embd,
+            il_start,
+            il_end
+        )
+
+        # 3. Handle specific C++ boolean false (converted to -1)
+        if ret != 0:
+            raise RuntimeError(
+                f"LlamaContext(apply_cvec): "
+                f"C++ backend rejected the Control Vector. "
+                f"Usually indicates n_embd ({n_embd}) does not match the model's actual embedding dimension."
+            )
+
+        if self.verbose:
+            print(f"LlamaContext(apply_cvec): Applied Control Vector to layers {il_start}-{il_end} (Buffer size matched C++ layout).")
+
     # Utility functions
+
     @staticmethod
     def default_params():
         """Get the default llama_context_params."""
