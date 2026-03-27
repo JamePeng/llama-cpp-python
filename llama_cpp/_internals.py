@@ -495,6 +495,9 @@ class LlamaContext:
 
         self.ctx = ctx
 
+        self._loras_applied: bool = False
+        self._cvec_applied: bool = False
+
     def close(self):
         """Manually free LlamaContext resources."""
         if getattr(self, "ctx", None) is not None:
@@ -766,7 +769,10 @@ class LlamaContext:
         Clears all currently applied LoRA weights from the context.
         Restores the computational graph to the base model state.
         """
+        if not self._loras_applied:
+            return
         llama_cpp.llama_set_adapters_lora(self.ctx, None, 0, None)
+        self._loras_applied = False
 
     def apply_loras(self, active_loras: List[Tuple["LlamaLoraAdapter", float]]):
         """
@@ -807,6 +813,8 @@ class LlamaContext:
         if ret != 0:
             raise RuntimeError("LlamaContext(apply_loras): Failed to set LoRA adapters dynamically.")
 
+        self._loras_applied = True
+
         if self.verbose:
             print(f"LlamaContext(apply_loras): Successfully applied {n_adapters} LoRA adapter(s) to the compute graph.")
 
@@ -817,7 +825,10 @@ class LlamaContext:
         Clears the currently loaded control vector from the context.
         Passing NULL (None) and zeros safely resets the graph.
         """
+        if not self._cvec_applied:
+            return
         llama_cpp.llama_set_adapter_cvec(self.ctx, None, 0, 0, 0, 0)
+        self._cvec_applied = False
 
     def apply_cvec(self, data: List[float], n_embd: int, il_start: int, il_end: int):
         """
@@ -872,6 +883,8 @@ class LlamaContext:
                 f"C++ backend rejected the Control Vector. "
                 f"Usually indicates n_embd ({n_embd}) does not match the model's actual embedding dimension."
             )
+
+        self._cvec_applied = True
 
         if self.verbose:
             print(f"LlamaContext(apply_cvec): Applied Control Vector to layers {il_start}-{il_end} (Buffer size matched C++ layout).")
