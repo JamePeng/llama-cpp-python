@@ -521,6 +521,68 @@ llm = Llama.from_pretrained(
 
 ---
 
+## Dynamic LoRA Routing & Control Vectors (Multi-Tenant Serving)
+
+Historically, `llama-cpp-python` only supported "static loading" where a LoRA was permanently baked into the context during initialization. Switching personas required reloading the entire model or duplicating it in VRAM.
+
+`llama-cpp-python` now supports **Just-In-Time (JIT)** dynamic adapter routing. Instead of statically binding a single LoRA to a model during initialization (which locks the instance to a single task), you can now preload multiple adapters into VRAM and seamlessly apply them on-the-fly per request.
+
+This architecture unlocks true **Multi-Tenant Serving**:
+* **Zero-Latency Switching:** Compute graph weights are atomically modified in C++ memory instantly before evaluation.
+* **VRAM Efficiency:** You only load the heavy base model once. Multiple LoRAs share the same base model memory.
+* **Thread-Safe & Contamination-Free:** Strict internal state debouncing ensures that weights are perfectly cleaned between requests, guaranteeing zero persona contamination.
+
+### Dynamic LoRA Example
+
+```python
+from llama_cpp import Llama
+
+# 1. Load the pure base model once
+llm = Llama(model_path="path/to/llama-3-8b.gguf")
+
+# 2. Preload multiple LoRAs into VRAM
+llm.load_lora("python_coder", "path/to/python-coder-lora.gguf")
+llm.load_lora("translator", "path/to/spanish-translator-lora.gguf")
+
+# 3. User A: Coding Task (Instantly applies the coder LoRA)
+response_a = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Write a fast inverse square root in C."}],
+    active_loras=[{"name": "python_coder", "scale": 1.0}]
+)
+
+# 4. User B: Translation Task (Zero-latency switch to the translator LoRA)
+response_b = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Explain quantum physics in Spanish."}],
+    active_loras=[{"name": "translator", "scale": 0.85}] # Apply at 85% strength
+)
+
+# 5. User C: General Query (Automatically wipes graph weights for a clean base model state)
+response_c = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "What is the capital of France?"}]
+)
+
+# 6. Cleanup (Optional: manually free VRAM for specific LoRAs)
+llm.unload_lora("python_coder")
+```
+
+### Control Vector Injection (Representation Engineering)
+
+In addition to LoRA, the API supports dynamic injection of **Control Vectors (CVec)**. This allows you to steer the model's behavior, emotion, or alignment by directly modifying the activation values at specific hidden layers, without needing `.gguf` weight files.
+
+```python
+response = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Tell me a story about a futuristic city."}],
+    control_vector={
+        "data": [...],         # A flattened 1D list of floats representing the vector
+        "layer_start": 15,     # Apply starting from this layer (inclusive)
+        "layer_end": 32        # Apply up to this layer (inclusive)
+    }
+)
+```
+*Note(JamePeng): Ensure your `data` array length exactly matches `embedding_length * layer_end`. The C++ backend maps the buffer continuously starting from layer 1, so early skipped layers must be zero-padded in your array.*
+
+---
+
 ##  Sampling Configuration & Usage (LlamaSamplingParams)
 
 The `Llama` class provides extensive control over the `llama.cpp` sampling chain during text generation. You can configure state-of-the-art sampling algorithms, dynamic temperature, and advanced repetition penalties directly via the `generate`, `create_completion`, or `__call__` methods.
