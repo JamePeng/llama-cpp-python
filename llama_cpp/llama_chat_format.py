@@ -129,6 +129,7 @@ class LlamaChatCompletionHandler(Protocol):
         grammar: Optional[llama_grammar.LlamaGrammar] = None,
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
+        assistant_prefill: bool = False,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
@@ -627,11 +628,30 @@ def chat_formatter_to_chat_completion_handler(
         logit_bias: Optional[Dict[str, float]] = None,
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
+        assistant_prefill: bool = False,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
     ]:
+
+        # JIT Interception for Assistant Prefill (Continue Generation)
+        partial_assistant_text = ""
+        if assistant_prefill:
+            if not messages:
+                if llama.verbose:
+                    print("Llama.create_chat_completion: Warning! 'assistant_prefill=True' but messages list is empty. Ignoring prefill.", file=sys.stderr)
+            elif messages[-1].get("role") != "assistant":
+                if llama.verbose:
+                    print(f"Llama.create_chat_completion: Warning! 'assistant_prefill=True' but last message role is '{messages[-1].get('role')}'. Expected 'assistant'. Ignoring prefill.", file=sys.stderr)
+            else:
+                # Safe to prefill: pop the last message without mutating the user's original list
+                messages = messages.copy()
+                partial_message = messages.pop()
+                partial_assistant_text = partial_message.get("content", "") or ""
+                if not partial_assistant_text and llama.verbose:
+                    print("Llama.create_chat_completion: Warning! 'assistant_prefill=True' but the assistant message has no content.", file=sys.stderr)
+
         result = chat_formatter(
             messages=messages,
             functions=functions,
@@ -639,6 +659,11 @@ def chat_formatter_to_chat_completion_handler(
             tools=tools,
             tool_choice=tool_choice,
         )
+
+        # Seamlessly append the partial assistant text to the standard generated Jinja template
+        if partial_assistant_text:
+            result.prompt += partial_assistant_text
+
         prompt = llama.tokenize(
             result.prompt.encode("utf-8"),
             add_bos=not result.added_special,
