@@ -344,20 +344,23 @@ By default `llama-cpp-python` generates completions in an OpenAI compatible form
 
 Text completion is available through the [`__call__`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.__call__) and [`create_completion`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_completion) methods of the [`Llama`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama) class.
 
-### Pulling models from Hugging Face Hub
+### Pulling models from [Hugging Face Hub](https://huggingface.co/models)
 
 You can download `Llama` models in `gguf` format directly from Hugging Face using the [`from_pretrained`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.from_pretrained) method.
-You'll need to install the `huggingface-hub` package to use this feature (`pip install huggingface-hub`).
+
+You'll need to install the `huggingface_hub` package to use this feature (`pip install --upgrade huggingface_hub`).
+
+
 
 ```python
 llm = Llama.from_pretrained(
-    repo_id="Qwen/Qwen2-0.5B-Instruct-GGUF",
-    filename="*q8_0.gguf",
+    repo_id="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+    filename="qwen2.5-0.5b-instruct-q4_k_m.gguf",
     verbose=False
 )
 ```
 
-By default [`from_pretrained`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.from_pretrained) will download the model to the huggingface cache directory, you can then manage installed model files with the [`huggingface-cli`](https://huggingface.co/docs/huggingface_hub/en/guides/cli) tool.
+By default [`from_pretrained`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.from_pretrained) will download the model to the huggingface cache directory, you can then manage installed model files with the [`hf`](https://huggingface.co/docs/huggingface_hub/en/guides/cli) tool.
 
 ### Chat Completion
 
@@ -518,6 +521,39 @@ llm = Llama.from_pretrained(
 
 **NOTE**: There is no need to provide the default system messages used in Functionary as they are added automatically in the Functionary chat handler. Thus, the messages should contain just the chat messages and/or system messages that provide additional context for the model (e.g.: datetime, etc.).
 </details>
+
+---
+
+## Continuing Assistant Responses (Prefill)
+
+`llama-cpp-python` supports native **Assistant Prefill** for seamless message continuation. You can now simply use the `assistant_prefill=True` parameter in the `create_chat_completion` function.
+
+This safely renders the `N-1` conversation history using standard Jinja templates (preserving exact control tokens) and flawlessly appends your partial text directly to the prompt.
+
+```python
+from llama_cpp import Llama
+
+llm = Llama(model_path="path/to/model.gguf")
+
+# An interrupted/partial conversation
+messages = [
+    {"role": "user", "content": "What are the first 5 planets in the solar system?"},
+    {"role": "assistant", "content": "The first 5 planets in our solar system are:\n1. Mercury\n2."}
+]
+
+# Seamlessly continue the generation
+response = llm.create_chat_completion(
+    messages=messages,
+    max_tokens=50,
+    assistant_prefill=True # <--- Enables seamless continuation
+)
+
+prefilled_text = messages[-1]["content"]
+# The model will flawlessly continue from " Venus\n3. Earth..."
+generated_text = response["choices"][0]["message"]["content"]
+
+print(prefilled_text + generated_text)
+```
 
 ---
 

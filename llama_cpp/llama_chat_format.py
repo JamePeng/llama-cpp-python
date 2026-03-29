@@ -3758,8 +3758,8 @@ while also answering every question accurately, clearly, and step-by-step when a
             from huggingface_hub.utils import validate_repo_id  # type: ignore
         except ImportError:
             raise ImportError(
-                "Llama.from_pretrained requires the huggingface-hub package. "
-                "You can install it with `pip install huggingface-hub`."
+                "Llama.from_pretrained requires the huggingface_hub package. "
+                "You can install it with `pip install --upgrade huggingface_hub`."
             )
 
         validate_repo_id(repo_id)

@@ -3141,8 +3141,8 @@ prompt: The prompt to generate text from.
         **kwargs: Any,
     ) -> "Llama":
         """Create a Llama model from a pretrained model name or path.
-        This method requires the huggingface-hub package.
-        You can install it with `pip install huggingface-hub`.
+        This method requires the huggingface_hub package.
+        You can install it with `pip install --upgrade huggingface_hub`.
 
         Args:
             repo_id: The model repo id.
@@ -3160,7 +3160,7 @@ prompt: The prompt to generate text from.
         except ImportError:
             raise ImportError(
                 "Llama.from_pretrained requires the huggingface-hub package. "
-                "You can install it with `pip install huggingface-hub`."
+                "You can install it with `pip install --upgrade huggingface_hub`."
             )
 
         validate_repo_id(repo_id)
