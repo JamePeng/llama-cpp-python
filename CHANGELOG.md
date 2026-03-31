@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.34] Dynamic LoRA Routing, Control Vectors, and Assistant Prefill
+
+- **feat(chat_format): added assistant_prefill to seamlessly continue responses**
+    - This commit introduces the `assistant_prefill` parameter to the chat completion API, satisfying the highly requested need to continue interrupted or partially generated assistant messages.
+    - Resolves #97 (Chat completion from unfinished response)
+    - Usage:
+        - Simply set `assistant_prefill=True` in `create_chat_completion` when the final item in your `messages` list is a partial `assistant` response. The engine will use it as a prompt base and continue generating seamlessly.
+    - docs(readme): add documentation for Assistant Prefill features
+        - Also slightly updated the `huggingface_hub` installation instructions for accuracy.
+
+- **feat(internals): implement dynamic LoRA routing and Control Vector support**
+    * This commit overhauls the adapter management architecture in `_internals.py` to support **dynamic, per-request LoRA routing and Control Vector (CVec) injection** with strict C++ memory safety.
+
+    * Key changes:
+        - Secure Memory Management: Introduced the `LlamaLoraAdapter` wrapper class to securely handle the lifecycle of `llama_adapter_lora_p` pointers, preventing VRAM leaks. Also added support for extracting ALoRA invocation tokens.
+        - Model-Level Registry: Added `_lora_registry` to `LlamaModel` with robust methods (`load_lora`, `unload_lora`, `unload_all_loras`) to preload adapters into VRAM. Integrated cleanup into the model's `ExitStack` and `close()` methods for deterministic memory release.
+        - Context-Level Dynamic Routing: Implemented `apply_loras` and `clear_loras` in `LlamaContext` to dynamically swap compute graph weights using contiguous C arrays, enabling zero-delay multi-tenant LoRA switching.
+        - Control Vector Integration: Added `apply_cvec` and `clear_cvec` to `LlamaContext` for representation engineering. Includes strict C++ memory layout validation (enforcing buffer zero-padding up to `n_embd * il_end`) to prevent silent write failures in the GGML backend.
+        - Observability & Docs: Added verbose logging for adapter/CVec application and expanded docstrings for context utility methods (e.g., threading, causal attention, warmup).
+        - Update README.md for Dynamic LoRA Routing & Control Vectors
+
+- fix(types): correct llama_adapter_get_alora_invocation_tokens ctypes signature and use pointer for llama_token
+
+- fix(types): correct llama_set_adapters_lora LoRA adapter ctypes signature and use pointer for scales
+    - change scale: float to float* (POINTER(c_float))
+    - make adapters and scales optional arrays to match C API
+
+- refactor: remove legacy static LoRA initialization
+    - Removed `lora_base`, `lora_path`, and `lora_scale` from `Llama` init parameters and state.
+    - Dropped outdated `llama_adapter_lora_init` and `llama_set_adapters_lora` bindings in the constructor.
+    - Restored default `use_mmap` behavior (no longer forced to False when LoRA is present).
+
+    * This removes the global context pollution and paves the way for the new dynamic, per-request LoRA routing architecture.
+
+- chore: enhance hybrid cache logging and document M-RoPE token usage
+    - Added explanatory comments detailing why n_tokens is used instead of chunk_n_pos for M-RoPE models (to prevent the system from skipping evaluation).
+    - Added verbose logging for hybrid cache clearance scenarios (when checkpoints are missing, restore fails, or max_checkpoints is 0).
+
+- feat(core): add verbose debug logging to longest_token_prefix fast paths
+    - Added an optional `verbose` parameter to `Llama.longest_token_prefix` to explicitly log early-exit conditions. This provides crucial visibility into cache-miss behaviors during debugging by outputting the specific reason for a fast exit (e.g., empty sequence vs. mismatched first token) along with the offending sequence lengths or token values.
+
+- Update MIT license copyright to collective authorship (2023-2026)
+    - Change `single-author` copyright to `The llama-cpp-python authors`
+      and apply standard multi-line formatting for better readability.
+    - Every contributor who participates and makes an effort makes the project more reliable, efficient,
+      and user-friendly, and they all deserve to be remembered.
+    - Welcome to join us in promoting the project and enriching the open-source community.
+
+- Update CMakeLists.txt
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/0fcb3760b2b9a3a496ef14621a7e4dad7a8df90f](https://github.com/ggml-org/llama.cpp/commit/0fcb3760b2b9a3a496ef14621a7e4dad7a8df90f)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260325
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/6bbc8d2306319c67c9f7d0d2d0576496f3587a3c...a8cec004466493db57d3cbc043cdc897b2b37f9b
+
 ## [0.3.33] Fixing Multimodal Image Freezes, Stabilizing Logits, and Optimized Legacy Cache Logic
 
 - perf(mtmd): optimize media_id masking with bitwise AND
