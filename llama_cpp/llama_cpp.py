@@ -677,6 +677,8 @@ class llama_model_kv_override(ctypes.Structure):
         key: bytes
         value: Union[int, float, bool, bytes]
 
+llama_model_kv_override_p = ctypes.POINTER(llama_model_kv_override)
+
 # struct llama_model_tensor_buft_override {
 #     const char * pattern;
 #     ggml_backend_buffer_type_t buft;
@@ -975,22 +977,59 @@ class llama_context_params(ctypes.Structure):
 llama_context_params_p = ctypes.POINTER(llama_context_params)
 
 
+# struct llama_model_tensor_override {
+#     const char * pattern;
+#     enum ggml_type type;
+# };
+class llama_model_tensor_override(ctypes.Structure):
+    _fields_ = [
+        ("pattern", ctypes.c_char_p),
+        ("type", ctypes.c_int),
+    ]
+
+    if TYPE_CHECKING:
+        pattern: ctypes.c_char_p
+        type: ctypes.c_int
+
+llama_model_tensor_override_p = ctypes.POINTER(llama_model_tensor_override)
+
+
+# struct llama_model_imatrix_data {
+#     const char * name;
+#     const float * data;
+#     size_t size;
+# };
+class llama_model_imatrix_data(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char_p),
+        ("data", ctypes.POINTER(ctypes.c_float)),
+        ("size", ctypes.c_size_t),
+    ]
+
+    if TYPE_CHECKING:
+        name: ctypes.c_char_p
+        data: ctypes.POINTER(ctypes.c_float)
+        size: ctypes.c_size_t
+
+llama_model_imatrix_data_p = ctypes.POINTER(llama_model_imatrix_data)
+
+
 # // model quantization parameters
 # typedef struct llama_model_quantize_params {
-#     int32_t nthread;                      // number of threads to use for quantizing, if <=0 will use std::thread::hardware_concurrency()
-#     enum llama_ftype ftype;               // quantize to this llama_ftype
-#     enum ggml_type output_tensor_type;    // output tensor type
-#     enum ggml_type token_embedding_type;  // token embeddings tensor type
-#     bool allow_requantize;                // allow quantizing non-f32/f16 tensors
-#     bool quantize_output_tensor;          // quantize output.weight
-#     bool only_copy;                       // only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
-#     bool pure;                            // quantize all tensors to the default type
-#     bool keep_split;                      // quantize to the same number of shards
-#     bool dry_run;                         // calculate and show the final quantization size without performing quantization
-#     void * imatrix;                       // pointer to importance matrix data
-#     void * kv_overrides;                  // pointer to vector containing overrides
-#     void * tensor_types;                  // pointer to vector containing tensor types
-#     void * prune_layers;                  // pointer to vector containing layer indices to prune
+#     int32_t nthread;                                            // number of threads to use for quantizing, if <=0 will use std::thread::hardware_concurrency()
+#     enum llama_ftype ftype;                                     // quantize to this llama_ftype
+#     enum ggml_type output_tensor_type;                          // output tensor type
+#     enum ggml_type token_embedding_type;                        // token embeddings tensor type
+#     bool allow_requantize;                                      // allow quantizing non-f32/f16 tensors
+#     bool quantize_output_tensor;                                // quantize output.weight
+#     bool only_copy;                                             // only copy tensors - ftype, allow_requantize and quantize_output_tensor are ignored
+#     bool pure;                                                  // quantize all tensors to the default type
+#     bool keep_split;                                            // quantize to the same number of shards
+#     bool dry_run;                                               // calculate and show the final quantization size without performing quantization
+#     const struct llama_model_imatrix_data * imatrix;            // pointer to importance matrix data
+#     const struct llama_model_kv_override * kv_overrides;        // pointer to kv overrides
+#     const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
+#     const int32_t * prune_layers;                               // pointer to layer indices to prune
 # } llama_model_quantize_params;
 class llama_model_quantize_params(ctypes.Structure):
     """Parameters for llama_model_quantize
@@ -1006,10 +1045,10 @@ class llama_model_quantize_params(ctypes.Structure):
         pure (bool): quantize all tensors to the default type
         keep_split (bool): quantize to the same number of shards
         dry_run (bool): calculate and show the final quantization size without performing quantization
-        imatrix (ctypes.c_void_p): pointer to importance matrix data
-        kv_overrides (ctypes.c_void_p): pointer to vector containing overrides
-        tensor_types (ctypes.c_void_p): pointer to vector containing tensor types
-        prune_layers (ctypes.c_void_p): pointer to vector containing layer indices to prune
+        imatrix (POINTER(llama_model_imatrix_data)): Pointer to importance matrix data.
+        kv_overrides (POINTER(llama_model_kv_override)): Pointer to KV overrides.
+        tt_overrides (POINTER(llama_model_tensor_override)): Pointer to tensor overrides.
+        prune_layers (POINTER(c_int32)): Pointer to layer indices to prune.
     """
 
     if TYPE_CHECKING:
@@ -1023,10 +1062,10 @@ class llama_model_quantize_params(ctypes.Structure):
         pure: bool
         keep_split: bool
         dry_run: bool
-        imatrix: ctypes.c_void_p
-        kv_overrides: ctypes.c_void_p
-        tensor_types: ctypes.c_void_p
-        prune_layers: ctypes.c_void_p
+        imatrix: ctypes.POINTER(llama_model_imatrix_data)
+        kv_overrides: ctypes.POINTER(llama_model_kv_override)
+        tensor_types: ctypes.POINTER(llama_model_tensor_override)
+        prune_layers: ctypes.POINTER(ctypes.c_int32)
 
     _fields_ = [
         ("nthread", ctypes.c_int32),
@@ -1039,10 +1078,10 @@ class llama_model_quantize_params(ctypes.Structure):
         ("pure", ctypes.c_bool),
         ("keep_split", ctypes.c_bool),
         ("dry_run", ctypes.c_bool),
-        ("imatrix", ctypes.c_void_p),
-        ("kv_overrides", ctypes.c_void_p),
-        ("tensor_types", ctypes.c_void_p),
-        ("prune_layers", ctypes.c_void_p),
+        ("imatrix", ctypes.POINTER(llama_model_imatrix_data)),
+        ("kv_overrides", ctypes.POINTER(llama_model_kv_override)),
+        ("tt_overrides", ctypes.POINTER(llama_model_tensor_override)),
+        ("prune_layers", ctypes.POINTER(ctypes.c_int32)),
     ]
 
 
