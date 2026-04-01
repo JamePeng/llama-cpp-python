@@ -974,21 +974,6 @@ class llama_context_params(ctypes.Structure):
 
 llama_context_params_p = ctypes.POINTER(llama_context_params)
 
-# // Signature for logging events
-# // Note that text includes the new line character at the end for most events.
-# // If your logging mechanism cannot handle that, check if the last character is '\n' and strip it
-# // if it exists.
-# // It might not exist for progress report where '.' is output repeatedly.
-# typedef void (*llama_log_callback)(enum llama_log_level level, const char * text, void * user_data);
-llama_log_callback = ctypes.CFUNCTYPE(
-    None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p
-)
-"""Signature for logging events
-Note that text includes the new line character at the end for most events.
-If your logging mechanism cannot handle that, check if the last character is '\n' and strip it
-if it exists.
-It might not exist for progress report where '.' is output repeatedly."""
-
 
 # // model quantization parameters
 # typedef struct llama_model_quantize_params {

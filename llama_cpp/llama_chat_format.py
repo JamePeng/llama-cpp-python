@@ -40,7 +40,7 @@ import llama_cpp.llama_types as llama_types
 import llama_cpp.llama_grammar as llama_grammar
 
 from ._ggml import GGMLLogLevel
-from ._logger import logger, llama_log_callback
+from ._logger import logger, ggml_log_callback
 from ._utils import suppress_stdout_stderr, Singleton
 
 ### Common Chat Templates and Special Tokens ###
@@ -2899,7 +2899,7 @@ while also answering every question accurately, clearly, and step-by-step when a
         if self.mtmd_ctx is not None:
             return  # Already initialized
 
-        self._mtmd_cpp.mtmd_helper_log_set(llama_log_callback, ctypes.c_void_p(0))
+        self._mtmd_cpp.mtmd_helper_log_set(ggml_log_callback, ctypes.c_void_p(0))
 
         # Get default parameters
         self.mctx_params = self._mtmd_cpp.mtmd_context_params_default()
