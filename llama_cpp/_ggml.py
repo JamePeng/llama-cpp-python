@@ -740,8 +740,8 @@ ggml_log_callback = ctypes.CFUNCTYPE(
     None,
 )
 def ggml_log_get(
-    log_callback: Optional[ctypes.pointer(ggml_log_callback)],
-    user_data: ctypes.pointer(ctypes.c_void_p),
+    log_callback: Optional[ctypes.POINTER(ggml_log_callback)],
+    user_data: ctypes.POINTER(ctypes.c_void_p),
     /,
 ):
     """
