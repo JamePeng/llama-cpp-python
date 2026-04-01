@@ -31,6 +31,10 @@ libggml = load_shared_library("ggml", libggml_base_paths)
 
 ggml_function = ctypes_function_for_shared_library(libggml)
 
+libggml_base = load_shared_library("ggml-base", libggml_base_paths)
+
+ggml_base_function = ctypes_function_for_shared_library(libggml_base)
+
 # // ====== ggml.h ======
 
 GGML_FILE_MAGIC = 0x67676d6c # b"ggml"
@@ -725,6 +729,62 @@ ggml_abort_callback = ctypes.CFUNCTYPE(ctypes.c_bool, ctypes.c_void_p)
 ggml_log_callback = ctypes.CFUNCTYPE(
     None, ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p
 )
+
+# // Set callback for all future logging events.
+# // If this is not called, or NULL is supplied, everything is output on stderr.
+# // The logger state is global so these functions are NOT thread safe.
+# GGML_API void ggml_log_get(ggml_log_callback * log_callback, void ** user_data);
+@ggml_base_function(
+    "ggml_log_get",
+    [ctypes.POINTER(ggml_log_callback), ctypes.POINTER(ctypes.c_void_p)],
+    None,
+)
+def ggml_log_get(
+    log_callback: Optional[ctypes.pointer(ggml_log_callback)],
+    user_data: ctypes.pointer(ctypes.c_void_p),
+    /,
+):
+    """
+    Get callback for all future logging events.
+    If this is not called, or NULL is supplied, everything is output on stderr.
+    The logger state is global so these functions are NOT thread safe.
+    """
+    ...
+
+
+# GGML_API void ggml_log_set(ggml_log_callback   log_callback, void *  user_data);
+@ggml_base_function(
+    "ggml_log_set",
+    [ggml_log_callback, ctypes.c_void_p],
+    None,
+)
+def ggml_log_set(
+    log_callback: Optional[ggml_log_callback],
+    user_data: ctypes.c_void_p,
+    /,
+):
+    """
+    Set callback for all future logging events.
+    If this is not called, or NULL is supplied, everything is output on stderr.
+    The logger state is global so these functions are NOT thread safe.
+    """
+    ...
+
+
+# GGML_API struct ggml_tensor * ggml_set_zero(struct ggml_tensor * tensor);
+@ggml_base_function(
+    "ggml_set_zero",
+    [ggml_tensor_p],
+    ggml_tensor_p,
+)
+def ggml_set_zero(
+    tensor: ctypes.c_void_p,
+    /,
+) -> ctypes.c_void_p:
+    """
+    Memset tensor data to zero
+    """
+    ...
 
 
 # // ====== ggml-opt.h ======
