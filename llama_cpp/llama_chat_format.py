@@ -5084,6 +5084,72 @@ class Qwen35ChatHandler(MTMDChatHandler):
         # Use parent implementation
         return super().__call__(**kwargs)
 
+class LFM25VLChatHandler(MTMDChatHandler):
+    CHAT_FORMAT = (
+        "{{- bos_token -}}"
+        "{%- set keep_past_thinking = keep_past_thinking | default(false) -%}"
+        "{%- set ns = namespace(system_prompt='', last_assistant_index=-1) -%}"
+        "{%- if messages[0]['role'] == 'system' -%}"
+            "{%- if messages[0]['content'] is string -%}"
+                "{%- set ns.system_prompt = messages[0]['content'] -%}"
+            "{%- else -%}"
+                "{%- for item in sys_content -%}"
+                    "{%- if item['type'] == 'text' or 'text' in item -%}"
+                        "{%- set ns.system_prompt = ns.system_prompt + item['text'] -%}"
+                    "{%- endif -%}"
+                "{%- endfor -%}"
+            "{%- endif -%}"
+            "{%- set messages = messages[1:] -%}"
+        "{%- endif -%}"
+        "{%- if tools -%}"
+            "{%- set ns.system_prompt = ns.system_prompt ~ ('\n' if ns.system_prompt else '') ~ 'List of tools: [' -%}"
+            "{%- for tool in tools -%}"
+                "{%- set tool = (tool | tojson) if tool is not string else tool -%}"
+                "{%- set ns.system_prompt = ns.system_prompt ~ tool ~ (', ' if not loop.last else '') -%}"
+            "{%- endfor -%}"
+            "{%- set ns.system_prompt = ns.system_prompt ~ ']' -%}"
+        "{%- endif -%}"
+        "{{- ('<|im_start|>system\n' ~ ns.system_prompt ~ '<|im_end|>\n') if ns.system_prompt else '' -}}"
+        "{%- for message in messages -%}"
+            "{%- if message['role'] == 'assistant' -%}"
+                "{%- set ns.last_assistant_index = loop.index0 -%}"
+            "{%- endif -%}"
+        "{%- endfor -%}"
+        "{%- for message in messages -%}"
+            "{{- '<|im_start|>' ~ message['role'] ~ '\n' -}}"
+            "{%- if message['content'] is string -%}"
+                "{%- set content = message['content'] -%}"
+            "{%- else -%}"
+                "{%- set content = '' -%}"
+                "{%- for item in message['content'] -%}"
+                    "{%- if item['type'] in ['image', 'image_url'] and item['type'] in item -%}"
+                        "{%- set content = content ~ (item[item['type']] if item[item['type']] is string else item[item['type']]['url']) -%}"
+                    "{%- elif item['type'] == 'text' and 'text' in item -%}"
+                        "{%- set content = content ~ item['text'] -%}"
+                    "{%- endif -%}"
+                "{%- endfor -%}"
+            "{%- endif -%}"
+            "{%- if message['role'] == 'assistant' and not keep_past_thinking and loop.index0 != ns.last_assistant_index and '</think>' in content -%}"
+                "{%- set content = content.split('</think>')[-1] | trim -%}"
+            "{%- endif -%}"
+            "{{- content ~ '<|im_end|>\n' -}}"
+        "{%- endfor -%}"
+        "{%- if add_generation_prompt -%}"
+            "{{- '<|im_start|>assistant\n' -}}"
+            "{%- if not enable_thinking -%}"
+                "{{- '<think>\n\n</think>\n' -}}"
+            "{%- endif -%}"
+        "{%- endif -%}"
+    )  # Variables: keep_past_thinking, enable_thinking
+
+    def __init__(self, enable_thinking: bool = True, keep_past_thinking: bool = False, **kwargs):
+        super().__init__(**kwargs)
+        self.extra_template_arguments["enable_thinking"] = enable_thinking
+        self.extra_template_arguments["keep_past_thinking"] = keep_past_thinking
+
+    def __call__(self, **kwargs):
+        super().__call__(**kwargs)
+
 @register_chat_completion_handler("chatml-function-calling")
 def chatml_function_calling(
     llama: llama_core.Llama,
