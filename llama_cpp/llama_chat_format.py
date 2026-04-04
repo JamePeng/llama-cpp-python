@@ -5338,7 +5338,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
         "                    {{- '\n<tool_call>\n<function=' + tool_call.name + '>\n' -}}"
         "                {%- endif -%}"
         "                {%- if tool_call.arguments is defined -%}"
-        "                    {%- for (args_name, args_value) in tool_calls.arguments | items -%}"
+        "                    {%- for (args_name, args_value) in tool_call.arguments | items -%}"
         "                        {{- '<parameter=' + args_name + '>\n' -}}"
         "                        {%- set args_value = args_value | tojson | safe if args_value is mapping or args_value is sequence and args_value is not string else args_value | string -%}"
         "                        {{- args_value -}}"
