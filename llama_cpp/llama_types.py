@@ -3,7 +3,7 @@
 NOTE: These types may change to match the OpenAI OpenAPI specification.
 
 Based on the OpenAI OpenAPI specification:
-https://github.com/openai/openai-openapi/blob/master/openapi.yaml
+https://app.stainless.com/api/spec/documented/openai/openapi.documented.yml
 
 """
 
