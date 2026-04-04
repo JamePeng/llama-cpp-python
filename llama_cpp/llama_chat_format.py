@@ -4338,6 +4338,10 @@ class Gemma3ChatHandler(MTMDChatHandler):
 class Gemma4ChatHandler(MTMDChatHandler):
     """
     Handler for Gemma 4 models.
+
+    Note on `enable_thinking`:
+        The `enable_thinking` toggle is currently ONLY supported by Gemma4 31B and 26BA4B models.
+        It is NOT supported by Gemma4 E2B and E4B models.
     """
 
     # The special token in Gemma 4
@@ -4641,6 +4645,8 @@ class Gemma4ChatHandler(MTMDChatHandler):
         Args:
             enable_thinking (bool): Controls whether the <|think|> tag is injected and
                                     manages <|channel>thought behavior.
+                                    Note: ONLY supported on Gemma4 31B and 26BA4B models.
+                                    NOT supported on Gemma4 E2B and E4B models.
         """
         self.enable_thinking = enable_thinking
         super().__init__(**kwargs)
