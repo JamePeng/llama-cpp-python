@@ -3,7 +3,7 @@
 NOTE: These types may change to match the OpenAI OpenAPI specification.
 
 Based on the OpenAI OpenAPI specification:
-https://github.com/openai/openai-openapi/blob/master/openapi.yaml
+https://app.stainless.com/api/spec/documented/openai/openapi.documented.yml
 
 """
 
@@ -46,7 +46,7 @@ class CompletionChoice(TypedDict):
     text: str
     index: int
     logprobs: Optional[CompletionLogprobs]
-    finish_reason: Optional[Literal["stop", "length"]]
+    finish_reason: Optional[Literal["stop", "length", "content_filter"]]
 
 
 class CompletionUsage(TypedDict):
@@ -61,6 +61,7 @@ class CreateCompletionResponse(TypedDict):
     created: int
     model: str
     choices: List[CompletionChoice]
+    object: Optional[Literal["text_completion"]]
     usage: NotRequired[CompletionUsage]
 
 
@@ -69,11 +70,37 @@ class ChatCompletionResponseFunctionCall(TypedDict):
     arguments: str
 
 
+class ChatCompletionResponseMessageFunctionCall(TypedDict):
+    arguments: str
+    name: str
+
+
+class ChatCompletionResponseMessageAudio(TypedDict):
+    id: str
+    expires_at: int
+    data: str
+    transcript: str
+
+
+class ChatCompletionResponseMessageAnnotationURLCitation(TypedDict):
+    end_index: int
+    start_index: int
+    url: str
+    title: str
+
+class ChatCompletionResponseMessageAnnotation(TypedDict):
+    type: Literal["url_citation"]
+    url_citation: ChatCompletionResponseMessageAnnotationURLCitation
+
+
 class ChatCompletionResponseMessage(TypedDict):
     content: Optional[str]
+    refusal: Optional[str]
+    role: Literal["assistant"]
     tool_calls: NotRequired["ChatCompletionMessageToolCalls"]
-    role: Literal["assistant", "function"]  # NOTE: "function" may be incorrect here
-    function_call: NotRequired[ChatCompletionResponseFunctionCall]  # DEPRECATED
+    annotations: NotRequired[List[ChatCompletionResponseMessageAnnotation]]
+    function_call: NotRequired[ChatCompletionResponseMessageFunctionCall]  # DEPRECATED
+    audio: NotRequired[Optional[ChatCompletionResponseMessageAudio]]
 
 
 class ChatCompletionFunction(TypedDict):
@@ -137,13 +164,23 @@ class ChatCompletionStreamResponseDeltaFunctionCall(TypedDict):
     arguments: str
 
 
+ChatCompletionRole = Literal[
+    "developer",
+    "system",
+    "user",
+    "assistant",
+    "tool",
+    "function"
+]
+
+
 class ChatCompletionStreamResponseDelta(TypedDict):
     content: NotRequired[Optional[str]]
     function_call: NotRequired[
         Optional[ChatCompletionStreamResponseDeltaFunctionCall]
     ]  # DEPRECATED
     tool_calls: NotRequired[Optional[List[ChatCompletionMessageToolCallChunk]]]
-    role: NotRequired[Optional[Literal["system", "user", "assistant", "tool"]]]
+    role: NotRequired[Optional[Literal["developer", "system", "user", "assistant", "tool"]]]
 
 
 class ChatCompletionStreamResponseChoice(TypedDict):
@@ -151,7 +188,7 @@ class ChatCompletionStreamResponseChoice(TypedDict):
     delta: Union[
         ChatCompletionStreamResponseDelta, ChatCompletionStreamResponseDeltaEmpty
     ]
-    finish_reason: Optional[Literal["stop", "length", "tool_calls", "function_call"]]
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "function_call"]]
     logprobs: NotRequired[Optional[ChatCompletionLogprobs]]
 
 
@@ -173,11 +210,16 @@ class ChatCompletionFunctionCallOption(TypedDict):
     name: str
 
 
+class ChatCompletionResponseFormatJSONSchema(TypedDict):
+    name: str
+    description: NotRequired[str]
+    schema: NotRequired[Dict[str, Any]]
+    strict: NotRequired[Optional[bool]]
+
+
 class ChatCompletionRequestResponseFormat(TypedDict):
-    type: Literal["text", "json_object"]
-    schema: NotRequired[
-        JsonType
-    ]  # https://docs.endpoints.anyscale.com/guides/json_mode/
+    type: Literal["text", "json_object", "json_schema"]
+    json_schema: NotRequired[ChatCompletionResponseFormatJSONSchema]
 
 
 class ChatCompletionRequestMessageContentPartText(TypedDict):
@@ -195,10 +237,43 @@ class ChatCompletionRequestMessageContentPartImage(TypedDict):
     image_url: Union[str, ChatCompletionRequestMessageContentPartImageImageUrl]
 
 
+class ChatCompletionRequestMessageContentPartInputAudioData(TypedDict):
+    data: str
+    format: Literal["wav", "mp3"]
+
+
+class ChatCompletionRequestMessageContentPartAudio(TypedDict):
+    type: Literal["input_audio"]
+    input_audio: ChatCompletionRequestMessageContentPartInputAudioData
+
+
+class ChatCompletionRequestMessageContentPartFileData(TypedDict):
+    filename: NotRequired[str]
+    file_data: NotRequired[str]
+    file_id: NotRequired[str]
+
+
+class ChatCompletionRequestMessageContentPartFile(TypedDict):
+    type: Literal["file"]
+    file: ChatCompletionRequestMessageContentPartFileData
+
+
+class ChatCompletionRequestMessageContentPartRefusal(TypedDict):
+    type: Literal["refusal"]
+    refusal: str
+
+
 ChatCompletionRequestMessageContentPart = Union[
     ChatCompletionRequestMessageContentPartText,
     ChatCompletionRequestMessageContentPartImage,
+    ChatCompletionRequestMessageContentPartAudio,
+    ChatCompletionRequestMessageContentPartFile,
 ]
+
+
+class ChatCompletionRequestDeveloperMessage(TypedDict):
+    role: Literal["developer"]
+    content: Optional[str]
 
 
 class ChatCompletionRequestSystemMessage(TypedDict):
@@ -252,6 +327,7 @@ class ChatCompletionRequestFunctionMessage(TypedDict):
 
 
 ChatCompletionRequestMessage = Union[
+    ChatCompletionRequestDeveloperMessage,
     ChatCompletionRequestSystemMessage,
     ChatCompletionRequestUserMessage,
     ChatCompletionRequestAssistantMessage,

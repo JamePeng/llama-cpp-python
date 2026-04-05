@@ -735,6 +735,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [minicpm-v-2.6](https://huggingface.co/openbmb/MiniCPM-V-2_6-gguf) | `MiniCPMv26ChatHandler` | `minicpm-v-2.6`, `minicpm-v-4.0` |
 | [minicpm-v-4.5](https://huggingface.co/openbmb/MiniCPM-V-4_5-gguf) | `MiniCPMv45ChatHandler` | `minicpm-v-4.5` |
 | [gemma3](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | `Gemma3ChatHandler` | `gemma3` |
+| [gemma4](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | `Gemma4ChatHandler` | `gemma4` |
 | [glm4.1v](https://huggingface.co/unsloth/GLM-4.1V-9B-Thinking-GGUF) | `GLM41VChatHandler` | `glm4.1v` |
 | [glm4.6v](https://huggingface.co/unsloth/GLM-4.6V-Flash-GGUF) | `GLM46VChatHandler` | `glm4.6v` |
 | [granite-docling](https://huggingface.co/ibm-granite/granite-docling-258M-GGUF) | `GraniteDoclingChatHandler` | `granite-docling` |
