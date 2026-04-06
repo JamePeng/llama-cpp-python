@@ -727,7 +727,6 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | Model | `LlamaChatHandler` | `chat_format` |
 |:--- |:--- |:--- |
 | [llava-v1.5-7b](https://huggingface.co/mys/ggml_llava-v1.5-7b) | `Llava15ChatHandler` | `llava-1-5` |
-| [llava-v1.5-13b](https://huggingface.co/mys/ggml_llava-v1.5-13b) | `Llava15ChatHandler` | `llava-1-5` |
 | [llava-v1.6-34b](https://huggingface.co/cjpais/llava-v1.6-34B-gguf) | `Llava16ChatHandler` | `llava-1-6` |
 | [moondream2](https://huggingface.co/vikhyatk/moondream2) | `MoondreamChatHandler` | `moondream2` |
 | [nanollava](https://huggingface.co/abetlen/nanollava-gguf) | `NanollavaChatHandler` | `nanollava` |
@@ -751,12 +750,16 @@ Then you'll need to use a custom chat handler to load the clip model and process
 ```python
 from llama_cpp import Llama
 from llama_cpp.llama_chat_format import Llava15ChatHandler
-chat_handler = Llava15ChatHandler(clip_model_path="path/to/llava/mmproj.bin")
+
+model_path="path/to/llava/ggml-model-f16.gguf"
+mmproj_path="path/to/llava/mmproj-model-f16.gguf"
+
 llm = Llama(
-  model_path="./path/to/llava/llama-model.gguf",
-  chat_handler=chat_handler,
-  n_ctx=2048, # n_ctx should be increased to accommodate the image embedding
+  model_path=model_path,
+  chat_handler=Llava15ChatHandler(clip_model_path=mmproj_path),
+  n_ctx=2048,
 )
+
 llm.create_chat_completion(
     messages = [
         {"role": "system", "content": "You are an assistant who perfectly describes images."},
@@ -806,38 +809,6 @@ print(response["choices"][0]["text"])
 
 **Note**: Multi-modal models also support tool calling and JSON mode.
 
-<details>
-<summary>Loading a Local Image</summary>
-
-Images can be passed as base64 encoded data URIs. The following example demonstrates how to do this.
-
-```python
-import base64
-
-def image_to_base64_data_uri(file_path):
-    with open(file_path, "rb") as img_file:
-        base64_data = base64.b64encode(img_file.read()).decode('utf-8')
-        return f"data:image/png;base64,{base64_data}"
-
-# Replace 'file_path.png' with the actual path to your PNG file
-file_path = 'file_path.png'
-data_uri = image_to_base64_data_uri(file_path)
-
-messages = [
-    {"role": "system", "content": "You are an assistant who perfectly describes images."},
-    {
-        "role": "user",
-        "content": [
-            {"type": "image_url", "image_url": {"url": data_uri }},
-            {"type" : "text", "text": "Describe this image in detail please."}
-        ]
-    }
-]
-
-```
-
-</details>
-
 ## Loading a Local Image With Qwen3VL(Thinking/Instruct)
 
 This script demonstrates how to load a local image, encode it as a base64 Data URI, and pass it to a local Qwen3-VL model (with the 'force_reasoning' parameter enabled for thinking model, disabled for instruct model) for processing using the llama-cpp-python library.
@@ -861,8 +832,8 @@ llm = Llama(
     # Set up the chat handler for Qwen3-VL, specifying the projector path
     chat_handler=Qwen3VLChatHandler(
       clip_model_path=MMPROJ_PATH,
-      force_reasoning=True,
-      image_min_tokens=1024, # Note: Qwen-VL models require at minimum 1024 image tokens to function correctly on bbox grounding tasks
+      force_reasoning=True,  # Note: Some models use `enable_thinking` as a switch variable. See the comments in the corresponding model's chathandler for details.
+      image_min_tokens=1024, # Note: Qwen3-VL models require at minimum 1024 image tokens to function correctly on bbox grounding tasks
     ),
     n_gpu_layers=-1,  # Offload all layers to the GPU
     n_ctx=10240,      # Set the context window size
@@ -1165,8 +1136,12 @@ The context window of the Llama models determines the maximum number of tokens t
 For instance, if you want to work with larger contexts, you can expand the context window by setting the n_ctx parameter when initializing the Llama object:
 
 ```python
-llm = Llama(model_path="./models/7B/llama-model.gguf", n_ctx=2048)
+llm = Llama(model_path="./models/llama-model.gguf", n_ctx=2048)
 ```
+
+## Docker image
+
+See here: https://github.com/JamePeng/llama-cpp-python/tree/main/docker#cuda_simple
 
 ## OpenAI Compatible Web Server (Deprecated)
 
@@ -1213,16 +1188,6 @@ python3 -m llama_cpp.server --hf_model_repo_id Qwen/Qwen2-0.5B-Instruct-GGUF --m
 - [Function Calling support](https://llama-cpp-python.readthedocs.io/en/latest/server/#function-calling)
 - [Vision API support](https://llama-cpp-python.readthedocs.io/en/latest/server/#multimodal-models)
 - [Multiple Models](https://llama-cpp-python.readthedocs.io/en/latest/server/#configuration-and-multi-model-support)
-
-## Docker image
-
-A Docker image is available on [GHCR](https://ghcr.io/abetlen/llama-cpp-python). To run the server:
-
-```bash
-docker run --rm -it -p 8000:8000 -v /path/to/models:/models -e MODEL=/models/llama-model.gguf ghcr.io/abetlen/llama-cpp-python:latest
-```
-
-[Docker on termux (requires root)](https://gist.github.com/FreddieOliveira/efe850df7ff3951cb62d74bd770dce27) is currently the only known way to run this on phones, see [termux support issue](https://github.com/abetlen/llama-cpp-python/issues/389)
 
 ## Low-level API
 
@@ -1362,6 +1327,17 @@ The reason libraries from other authors are smaller is that they often **only co
 * 1. I've determined that `llama_cpp.server` is currently in a semi-deprecated state (meaning it won't be maintained unless absolutely necessary, and I might even consider deleting or separating it to reduce the library size). I highly recommend using the `llama-server` program maintained by the upstream `llama.cpp` project, which offers a lower-level implementation, more frequent maintenance and optimization, and more reliable API calls.
 
 * 2. Regarding AMD and Intel graphics cards, AMD can certainly use ROCm as the primary backend (but the drawback is that it's basically only stable on Linux platforms), and Intel's Sycl will also encounter some compilation difficulties. I consistently recommend using the Vulkan backend for these two types of graphics cards for greater efficiency and stability, because the upstream `llama.cpp` Vulkan backend is actively maintained by many developers, generally allowing you to enjoy new feature optimizations and bug fixes earlier and faster.
+
+* 3. If you are using hybrid multimodal model for building ComfyUI nodes or running single-turn API wrappers where you do not need multi-turn state rollbacks, simply initialize your Llama instance with `ctx_checkpoints=0`:
+
+        ```python
+        llm = Llama(
+            model_path="./Qwen3.5-VL-9B.gguf",
+            chat_handler=MTMDChatHandler(clip_model_path="./mmproj.gguf"),
+            n_ctx=4096,
+            ctx_checkpoints=0  # <-- SET THIS TO 0 TO ENABLE ZERO-LATENCY FAST PATH
+        )
+        ```
 
 
 ### Any suggestions, contributions, and modifications to this package will be directed toward building a user-friendly, efficient, and secure Python library.
