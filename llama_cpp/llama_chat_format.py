@@ -5413,6 +5413,98 @@ class Qwen35ChatHandler(MTMDChatHandler):
         # Use parent implementation
         return super().__call__(**kwargs)
 
+class LFM25VLChatHandler(MTMDChatHandler):
+    # Aligned with LFM2.5-VL tokenizer_config
+    LFM25VL_BOS_TOKEN = "<|startoftext|>"
+    LFM25VL_EOS_TOKEN = "<|im_end|>"
+    LFM25VL_PAD_TOKEN = "<|pad|>"
+
+    # Image specific tokens
+    LFM25VL_IMAGE_TOKEN = "<image>"
+    LFM25VL_IMAGE_START_TOKEN = "<|image_start|>"
+    LFM25VL_IMAGE_END_TOKEN = "<|image_end|>"
+    LFM25VL_IMAGE_THUMBNAIL = "<|img_thumbnail|>"
+
+    CHAT_FORMAT = (
+        "{{- bos_token -}}\n"
+        "{%- set keep_past_thinking = keep_past_thinking | default(false) -%}\n"
+        "{%- set ns = namespace(system_prompt='', content='') -%}\n"
+        "{%- if messages[0]['role'] == 'system' -%}\n"
+        "    {%- set ns.system_prompt = messages[0]['content'] -%}\n"
+        "    {%- set messages = messages[1:] -%}\n"
+        "{%- endif -%}\n"
+        "{%- if tools -%}\n"
+        "    {%- set ns.system_prompt = ns.system_prompt + ('\\n' if ns.system_prompt else '') + 'List of tools: [' -%}\n"
+        "    {%- for tool in tools -%}\n"
+        "        {%- if tool is not string -%}\n"
+        "            {%- set tool = tool | tojson -%}\n"
+        "        {%- endif -%}\n"
+        "        {%- set ns.system_prompt = ns.system_prompt + tool -%}\n"
+        "        {%- if not loop.last -%}\n"
+        "            {%- set ns.system_prompt = ns.system_prompt + ', ' -%}\n"
+        "        {%- endif -%}\n"
+        "    {%- endfor -%}\n"
+        "    {%- set ns.system_prompt = ns.system_prompt + ']' -%}\n"
+        "{%- endif -%}\n"
+        "{%- if ns.system_prompt -%}\n"
+        "    {{- '<|im_start|>system\\n' + ns.system_prompt + '<|im_end|>\\n' -}}\n"
+        "{%- endif -%}\n"
+        "{%- set ns.last_assistant_index = -1 -%}\n"
+        "{%- for message in messages -%}\n"
+        "    {%- if message['role'] == 'assistant' -%}\n"
+        "        {%- set ns.last_assistant_index = loop.index0 -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "{%- for message in messages -%}\n"
+        "    {{- '<|im_start|>' + message['role'] + '\\n' -}}\n"
+        "    {%- set content = message['content'] -%}\n"
+        "    {%- if content is not string -%}\n"
+        "        {%- set ns.content = '' -%}\n"
+        "        {#- MTMD-style Multimodal Injection (Audio stripped for VL model) -#}\n"
+        "        {%- for item in content -%}\n"
+        "            {%- if item['type'] == 'image_url' -%}\n"
+        "                {%- set img_val = item['image_url'] if item['image_url'] is string else item['image_url']['url'] -%}\n"
+        "                {%- set ns.content = ns.content + img_val -%}\n"
+        "            {%- elif item['type'] == 'text' -%}\n"
+        "                {%- set ns.content = ns.content + item['text'] -%}\n"
+        "            {%- else -%}\n"
+        "                {%- set ns.content = ns.content + (item | tojson) -%}\n"
+        "            {%- endif -%}\n"
+        "        {%- endfor -%}\n"
+        "        {%- set content = ns.content -%}\n"
+        "    {%- endif -%}\n"
+        "    {%- if message['role'] == 'assistant' and not keep_past_thinking and loop.index0 != ns.last_assistant_index -%}\n"
+        "        {%- if '</think>' in content -%}\n"
+        "            {%- set content = content.split('</think>')[-1] | trim -%}\n"
+        "        {%- endif -%}\n"
+        "    {%- endif -%}\n"
+        "    {{- content + '<|im_end|>\\n' -}}\n"
+        "{%- endfor -%}\n"
+        "{%- if add_generation_prompt -%}\n"
+        "    {{- '<|im_start|>assistant\\n' -}}\n"
+        "{%- endif -%}\n"
+    )
+
+    def __init__(self, keep_past_thinking: bool = False, **kwargs):
+        self.keep_past_thinking = keep_past_thinking
+        super().__init__(**kwargs)
+
+
+    def __call__(self, **kwargs):
+        if self.image_min_tokens > 256:
+            if self.verbose:
+                print(f"For LFM2.5-VL, using values higher than 256 for `image_min_tokens` could cause errors. Setting to **256**.")
+
+            self.image_min_tokens = 256
+
+        self.extra_template_arguments["keep_past_thinking"] = self.keep_past_thinking
+
+        kwargs['stop'] = [self.LFM25VL_EOS_TOKEN]
+
+        if self.verbose:
+            print(f"{self.log_prefix}(keep_past_thinking={self.keep_past_thinking}) - Start processing")
+        return super().__call__(**kwargs)
+
 @register_chat_completion_handler("chatml-function-calling")
 def chatml_function_calling(
     llama: llama_core.Llama,
