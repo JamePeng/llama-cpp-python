@@ -4656,7 +4656,8 @@ class Gemma4ChatHandler(MTMDChatHandler):
         self.extra_template_arguments["enable_thinking"] = self.enable_thinking
 
         # Set the stop token based on Gemma 4's format (<turn|>)
-        kwargs['stop'] = [self.GEMMA4_EOT_TOKEN]
+        # generation_config.json:   "eos_token_id": [ 1, 106, 50]
+        kwargs['stop'] = [self.GEMMA4_EOS_TOKEN, self.GEMMA4_EOT_TOKEN, self.GEMMA4_STR_TOKEN]
 
         if self.verbose:
             print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
