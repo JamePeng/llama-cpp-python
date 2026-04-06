@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.35] Gemma 4 series & LFM 2.5-VL Support, OpenAI OpenAPI Alignment and Logging Architecture Migration
+
+- fix: expand stop sequences for `Gemma4ChatHandler`
+    - Add `GEMMA4_EOS_TOKEN` and `GEMMA4_STR_TOKEN` to the generation stop criteria.
+    - Align the stopping logic with the model's `generation_config.json` definitions.
+    - Prevent potential over-generation by ensuring the model halts correctly at standard EOS or when initiating a tool response.
+
+- feat(types): align with latest OpenAI OpenAPI spec (audio, structured outputs)
+    - Update llama_types.py OpenAI [OpenAPI Link](https://app.stainless.com/api/spec/documented/openai/openapi.documented.yml)
+    - Add `developer` role.
+    - Replace Anyscale-specific JSON schema with official OpenAI `json_schema` response format for Structured Outputs.
+    - Add `input_audio` and `file` types to request message content parts.
+    - Add `audio`, `refusal`, and `annotations` (e.g., URL citations) fields to response messages.
+    - Add `content_filter` to finish reasons and strictly define global `ChatCompletionRole`.
+
+- docs: clarify `enable_thinking` compatibility for **Gemma 4** models
+    - Update `Gemma4ChatHandler` class docstring and `__init__` args documentation.
+    - Specify that the `enable_thinking` toggle is exclusively supported by Gemma4 31B and 26BA4B variants.
+    - Explicitly note that E2B and E4B models do not currently support this feature to prevent configuration errors.
+
+- feat(chat_format): Implemented `Gemma4ChatHandler`, add Gemma 4 chat handler with multimodal and tool support
+    - Implement `Gemma4ChatHandler` with Gemma 4 specific tokens (`<|turn>`, `<|channel>`, etc.).
+    - Add complex Jinja2 template for advanced nested tool/function schema formatting.
+    - Support multimodal content injection for `image_url`, `audio_url`, and `input_audio` (including base64 reconstruction).
+    - Integrate reasoning/thinking controls via `enable_thinking` toggle and `<|channel>thought` formatting.
+    - Configure `<turn|>` as the primary stop sequence for generation boundaries.
+
+- feat(chat_format) Implemented `LFM25VLChatHandler` for **LFM2.5-VL** (by **@alcoftTAO**)
+
+- fix Qwen3.5 chat template typos(reported by **@abdullah-cod9**)
+
+- refactor(logger): migrate from llama_log_callback to ggml_log_callback
+    - Remove the deprecated `llama_log_callback` typedef from `llama_cpp.py`.
+    - Update `_logger.py` to use `ggml_log_callback` from `_ggml`, aligning with the upstream GGML logging architecture.
+    - Rename the callback references across the codebase, including the MTMD context initialization in `llama_chat_format.py`.
+
+- feat(ggml): add support for ggml-base library and new function bindings
+    - Load the new `ggml-base` shared library alongside `ggml`.
+    - Add `ctypes` bindings for `ggml_log_get`, `ggml_log_set`, and `ggml_set_zero` using the `ggml_base_function` decorator.
+
+- Update README.md
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/58190cc84d846d8575ba26e8486bc29d9fd8ad55](https://github.com/ggml-org/llama.cpp/commit/58190cc84d846d8575ba26e8486bc29d9fd8ad55)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260402
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/a184583e908cc138fd15794986b3581521fb9b0c...232092e32b3563159a86aacb168da06c4937192b
+
 ## [0.3.34] Dynamic LoRA Routing, Control Vectors, and Assistant Prefill
 
 - **feat(chat_format): added assistant_prefill to seamlessly continue responses**
