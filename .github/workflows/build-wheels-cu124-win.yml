@@ -1,4 +1,4 @@
-name: Build Wheels (CU124-126) for Windows
+name: Build Wheels (CU124) for Windows
 
 on:
   workflow_dispatch:
@@ -14,7 +14,7 @@ jobs:
       matrix:
         os: ['windows-2022']
         pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        cuda: ["12.4.1","12.6.3"]
+        cuda: ["12.4.1"]
         releasetag: ["Basic"]
         cudaarch: ["all"]
     defaults:
