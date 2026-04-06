@@ -5491,6 +5491,12 @@ class LFM25VLChatHandler(MTMDChatHandler):
 
 
     def __call__(self, **kwargs):
+        if self.image_min_tokens > 256:
+            if self.verbose:
+                print(f"For LFM2.5-VL, using values higher than 256 for `image_min_tokens` could cause errors. Setting to **256**.")
+
+            self.image_min_tokens = 256
+
         self.extra_template_arguments["keep_past_thinking"] = self.keep_past_thinking
 
         kwargs['stop'] = [self.LFM25VL_EOS_TOKEN]
