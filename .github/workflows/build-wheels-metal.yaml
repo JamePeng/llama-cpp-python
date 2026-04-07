@@ -88,6 +88,9 @@ jobs:
       - name: Publish Release via GitHub CLI
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run:
+        run: |
           TAG_NAME="v${{ needs.build_wheels.outputs.version }}-Metal-macos-$BUILD_DATE"
+
+          echo "Ready to create release with tag: $TAG_NAME"
+
           gh release create "$TAG_NAME" dist2/* --title "$TAG_NAME" --generate-notes
