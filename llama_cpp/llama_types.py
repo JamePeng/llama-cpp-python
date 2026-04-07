@@ -49,10 +49,24 @@ class CompletionChoice(TypedDict):
     finish_reason: Optional[Literal["stop", "length", "content_filter"]]
 
 
+class PromptTokensDetails(TypedDict):
+    cached_tokens: NotRequired[int]
+    audio_tokens: NotRequired[int]
+
+
+class CompletionTokensDetails(TypedDict):
+    reasoning_tokens: NotRequired[int]
+    audio_tokens: NotRequired[int]
+    accepted_prediction_tokens: NotRequired[int]
+    rejected_prediction_tokens: NotRequired[int]
+
+
 class CompletionUsage(TypedDict):
     prompt_tokens: int
     completion_tokens: int
     total_tokens: int
+    prompt_tokens_details: NotRequired[PromptTokensDetails]
+    completion_tokens_details: NotRequired[CompletionTokensDetails]
 
 
 class CreateCompletionResponse(TypedDict):
@@ -61,7 +75,6 @@ class CreateCompletionResponse(TypedDict):
     created: int
     model: str
     choices: List[CompletionChoice]
-    object: Optional[Literal["text_completion"]]
     usage: NotRequired[CompletionUsage]
 
 
@@ -198,6 +211,7 @@ class CreateChatCompletionStreamResponse(TypedDict):
     object: Literal["chat.completion.chunk"]
     created: int
     choices: List[ChatCompletionStreamResponseChoice]
+    usage: NotRequired[CompletionUsage]
 
 
 class ChatCompletionFunctions(TypedDict):
@@ -307,7 +321,8 @@ class ChatCompletionRequestAssistantMessageFunctionCall(TypedDict):
 
 class ChatCompletionRequestAssistantMessage(TypedDict):
     role: Literal["assistant"]
-    content: NotRequired[str]
+    content: NotRequired[Optional[str]]
+    refusal: NotRequired[Optional[str]]
     tool_calls: NotRequired[ChatCompletionMessageToolCalls]
     function_call: NotRequired[
         ChatCompletionRequestAssistantMessageFunctionCall
@@ -331,7 +346,6 @@ ChatCompletionRequestMessage = Union[
     ChatCompletionRequestSystemMessage,
     ChatCompletionRequestUserMessage,
     ChatCompletionRequestAssistantMessage,
-    ChatCompletionRequestUserMessage,
     ChatCompletionRequestToolMessage,
     ChatCompletionRequestFunctionMessage,
 ]
@@ -359,6 +373,16 @@ class ChatCompletionTool(TypedDict):
     function: ChatCompletionToolFunction
 
 
+class ChatCompletionAllowedTools(TypedDict):
+    mode: Literal["auto", "required"]
+    tools: List[Dict[str, Any]]
+
+
+class ChatCompletionAllowedToolsChoice(TypedDict):
+    type: Literal["allowed_tools"]
+    allowed_tools: ChatCompletionAllowedTools
+
+
 class ChatCompletionNamedToolChoiceFunction(TypedDict):
     name: str
 
@@ -368,8 +392,20 @@ class ChatCompletionNamedToolChoice(TypedDict):
     function: ChatCompletionNamedToolChoiceFunction
 
 
+class ChatCompletionNamedToolChoiceCustomObject(TypedDict):
+    name: str
+
+
+class ChatCompletionNamedToolChoiceCustom(TypedDict):
+    type: Literal["custom"]
+    custom: ChatCompletionNamedToolChoiceCustomObject
+
+
 ChatCompletionToolChoiceOption = Union[
-    Literal["none", "auto", "required"], ChatCompletionNamedToolChoice
+    Literal["none", "auto", "required"],
+    ChatCompletionAllowedToolsChoice,
+    ChatCompletionNamedToolChoice,
+    ChatCompletionNamedToolChoiceCustom
 ]
 
 
