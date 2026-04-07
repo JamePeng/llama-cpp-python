@@ -16,7 +16,7 @@ jobs:
         pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         cuda: ["12.4.1"]
         releasetag: ["Basic"]
-        cudaarch: ["all"]
+        cudaarch: ["70-real;75-real;80-real;86-real;87-real;89-real;90-real"]
     defaults:
       run:
         shell: pwsh
