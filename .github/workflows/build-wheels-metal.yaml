@@ -60,7 +60,7 @@ jobs:
           output-dir: wheelhouse2
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: wheels-metal_${{ matrix.os }}
           path: ./wheelhouse2/*.whl
@@ -72,7 +72,7 @@ jobs:
 
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v6
         with:
           merge-multiple: true
           path: dist2

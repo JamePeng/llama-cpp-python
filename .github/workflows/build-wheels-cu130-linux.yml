@@ -34,7 +34,7 @@ jobs:
             apt update
             apt install -y build-essential ccache cmake curl git libgomp1 libjpeg-dev libssl-dev
 
-      - uses: actions/checkout@v5 # Checkout code
+      - uses: actions/checkout@v6 # Checkout code
         with:
           submodules: "recursive"
 
