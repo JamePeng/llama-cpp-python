@@ -85,10 +85,9 @@ jobs:
           # Store the date in environment variable for the release step
           echo "BUILD_DATE=$currentDate" >> $GITHUB_ENV
 
-      - name: Publish Release
-        uses: softprops/action-gh-release@v2.2.2
-        with:
-          files: dist2/*
-          tag_name: v${{ needs.build_wheels.outputs.version }}-Metal-macos-${{ env.BUILD_DATE }}
+      - name: Publish Release via GitHub CLI
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run:
+          TAG_NAME="v${{ needs.build_wheels.outputs.version }}-Metal-macos-$BUILD_DATE"
+          gh release create "$TAG_NAME" dist2/* --title "$TAG_NAME" --generate-notes
