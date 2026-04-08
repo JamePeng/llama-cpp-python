@@ -5512,6 +5512,143 @@ class Qwen35ChatHandler(MTMDChatHandler):
         return super().__call__(**kwargs)
 
 
+class Step3VLChatHandler(MTMDChatHandler):
+    """
+    Handler for Step3-VL models.
+    """
+
+    STEP3VL_BOS_TOKEN = "<|im_start|>"
+    STEP3VL_EOS_TOKEN = "<|im_end|>"
+    STEP3VL_PAD_TOKEN = "<|endoftext|>"
+    STEP3VL_IMAGE_TOKEN = "<im_patch>"
+
+    CHAT_FORMAT = (
+        "{%- macro render_content(content) -%}\n"
+        "    {%- if content is none -%}{{- '' -}}\n"
+        "    {%- elif content is string -%}{{- content -}}\n"
+        "    {%- elif content is mapping -%}{{- content['value'] if 'value' in content else content['text'] -}}\n"
+        "    {%- elif content is iterable -%}\n"
+        "        {%- for item in content -%}\n"
+        "            {%- if item.type == 'text' -%}\n"
+        "                {{- item['value'] if 'value' in item else item['text'] -}}\n"
+        "            {%- elif item.type in ['image', 'image_url'] -%}\n"
+        "                {%- set url_val = '' -%}\n"
+        "                {%- if item.image_url -%}\n"
+        "                    {%- set url_val = item.image_url if item.image_url is string else item.image_url.url -%}\n"
+        "                {%- endif -%}\n"
+        "                {{- '<im_patch>' + url_val -}}\n"
+        "            {%- endif -%}\n"
+        "        {%- endfor -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endmacro -%}\n"
+        "\n"
+        "{%- if tools -%}\n"
+        "    {{- '<|im_start|>system\\n' -}}\n"
+        "    {%- if messages[0].role == 'system' -%}\n"
+        "        {{- render_content(messages[0].content) + '\\n\\n' -}}\n"
+        "    {%- endif -%}\n"
+        "    {{- '# Tools\\n\\nYou may call one or more functions to assist with the user query.\\n\\nYou are provided with function signatures within <tools></tools> XML tags:\\n<tools>' -}}\n"
+        "    {%- for tool in tools -%}\n"
+        "        {{- '\\n' -}}\n"
+        "        {{- tool | tojson -}}\n"
+        "    {%- endfor -%}\n"
+        "    {{- '\\n</tools>\\n\\nAlways adhere to this exact format for tool use:\\n<tool_calls>\\n<tool_call>\\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\\n</tool_call>\\n{additional_tool_calls}</tool_calls>\\n\\nNote:\\n- For each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags.\\n- `<function-name>` must be an exact match to one of the available tools.\\n- `<args-json-object>` must be valid JSON that strictly follows the tool\\'s parameters schema.<|im_end|>\\n' -}}\n"
+        "{%- else -%}\n"
+        "    {%- if messages[0].role == 'system' -%}\n"
+        "        {{- '<|im_start|>system\\n' + render_content(messages[0].content) + '<|im_end|>\\n' -}}\n"
+        "    {%- endif -%}\n"
+        "{%- endif -%}\n"
+        "\n"
+        "{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) -%}\n"
+        "{%- for message in messages[::-1] -%}\n"
+        "    {%- set index = (messages|length - 1) - loop.index0 -%}\n"
+        "    {%- if ns.multi_step_tool and message.role == 'user' and render_content(message.content) is string and not(render_content(message.content).startswith('<tool_response>') and render_content(message.content).endswith('</tool_response>')) -%}\n"
+        "        {%- set ns.multi_step_tool = false -%}\n"
+        "        {%- set ns.last_query_index = index -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "\n"
+        "{%- for message in messages -%}\n"
+        "    {%- set content = render_content(message.content) -%}\n"
+        "    {%- if (message.role == 'user') or (message.role == 'system' and not loop.first) -%}\n"
+        "        {%- set role_name = 'observation' if (message.role == 'system' and not loop.first and message.name == 'observation') else message.role -%}\n"
+        "        {{- '<|im_start|>' + role_name + '\\n' + content + '<|im_end|>' + '\\n' -}}\n"
+        "    {%- elif message.role == 'assistant' -%}\n"
+        "        {%- if message.reasoning_content is string -%}\n"
+        "            {%- set reasoning_content = render_content(message.reasoning_content) -%}\n"
+        "        {%- else -%}\n"
+        "            {%- if '</think>' in content -%}\n"
+        "                {%- set reasoning_content = content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') -%}\n"
+        "                {%- set content = content.split('</think>')[-1].lstrip('\\n') -%}\n"
+        "            {%- else -%}\n"
+        "                {%- set reasoning_content = '' -%}\n"
+        "            {%- endif -%}\n"
+        "        {%- endif -%}\n"
+        "        {%- if loop.index0 > ns.last_query_index -%}\n"
+        "            {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n' + content -}}\n"
+        "        {%- else -%}\n"
+        "            {{- '<|im_start|>' + message.role + '\\n' + content -}}\n"
+        "        {%- endif -%}\n"
+        "        {%- if message.tool_calls -%}\n"
+        "            {{- '\\n<tool_calls>' -}}\n"
+        "            {%- for tool_call in message.tool_calls -%}\n"
+        "                {{- '\\n' -}}\n"
+        "                {%- if tool_call.function -%}\n"
+        "                    {%- set tool_call = tool_call.function -%}\n"
+        "                {%- endif -%}\n"
+        "                {{- '<tool_call>\\n{\"name\": \"' -}}\n"
+        "                {{- tool_call.name -}}\n"
+        "                {{- '\", \"arguments\": ' -}}\n"
+        "                {%- if tool_call.arguments is string -%}\n"
+        "                    {{- tool_call.arguments -}}\n"
+        "                {%- else -%}\n"
+        "                    {{- tool_call.arguments | tojson -}}\n"
+        "                {%- endif -%}\n"
+        "                {{- '}\\n</tool_call>' -}}\n"
+        "            {%- endfor -%}\n"
+        "            {{- '\\n</tool_calls>' -}}\n"
+        "        {%- endif -%}\n"
+        "        {{- '<|im_end|>\\n' -}}\n"
+        "    {%- elif message.role == 'tool' -%}\n"
+        "        {%- if loop.first or (messages[loop.index0 - 1].role != 'tool') -%}\n"
+        "            {{- '<|im_start|>tool_response' -}}\n"
+        "        {%- endif -%}\n"
+        "        {{- '\\n<tool_response>\\n' -}}\n"
+        "        {{- content -}}\n"
+        "        {{- '\\n</tool_response>' -}}\n"
+        "        {%- if loop.last or (messages[loop.index0 + 1].role != 'tool') -%}\n"
+        "            {{- '<|im_end|>\\n' -}}\n"
+        "        {%- endif -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "{%- if add_generation_prompt -%}\n"
+        "    {{- '<|im_start|>assistant\\n<think>\\n\\n</think>\\n' if (enable_thinking is defined and not enable_thinking) else '<|im_start|>assistant\\n<think>' -}}\n"
+        "{%- endif -%}\n"
+    )
+
+    def __init__(self, enable_thinking: bool = True, **kwargs):
+        """
+        Initializes the Step3-VL Handler.
+
+        Args:
+            enable_thinking (bool): If False, injects an empty <think> block to bypass reasoning.
+        """
+        self.enable_thinking = enable_thinking
+        super().__init__(**kwargs)
+
+    def __call__(self, **kwargs):
+        # Pass thinking toggle into Jinja
+        self.extra_template_arguments["enable_thinking"] = self.enable_thinking
+
+        # Step3 uses standard <|im_end|> ChatML stop formatting
+        kwargs['stop'] = [self.STEP3VL_PAD_TOKEN, self.STEP3VL_EOS_TOKEN]
+
+        if self.verbose:
+            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
+
+        return super().__call__(**kwargs)
+
+
 @register_chat_completion_handler("chatml-function-calling")
 def chatml_function_calling(
     llama: llama_core.Llama,
