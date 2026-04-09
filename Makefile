@@ -48,6 +48,9 @@ build.musa:
 build.openblas:
 	CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" python3 -m pip install --verbose -e .
 
+build.openvino:
+	CMAKE_ARGS="-DGGML_OPENVINO=ON" python3 -m pip install --verbose -e .
+
 build.rpc:
 	CMAKE_ARGS="-DGGML_RPC=on" python3 -m pip install --verbose -e .
 
@@ -62,6 +65,9 @@ build.webgpu:
 
 build.zdnn:
 	CMAKE_ARGS="-DGGML_ZDNN=ON" python3 -m pip install --verbose -e .
+
+build.zendnn :
+	CMAKE_ARGS="-DGGML_ZENDNN=ON" python3 -m pip install --verbose -e .
 
 build.sdist:
 	python3 -m build --sdist --verbose
