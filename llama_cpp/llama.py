@@ -71,7 +71,7 @@ class Llama:
         *,
         # Model Params
         n_gpu_layers: int = 0,
-        split_mode: int = llama_cpp.LLAMA_SPLIT_MODE_LAYER,
+        split_mode: int = llama_cpp.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
         vocab_only: bool = False,
