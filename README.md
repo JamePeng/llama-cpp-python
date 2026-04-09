@@ -132,6 +132,8 @@ Installing a CUDA-supported version requires the `CUDA Toolkit` environment to b
 
 See here: https://developer.nvidia.com/cuda-toolkit-archive
 
+More Information see: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#cuda
+
 Then, set the `GGML_CUDA=on` environment variable before installing:
 
 ```bash
@@ -170,12 +172,63 @@ CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" pip install "llama-cpp-p
 </details>
 
 <details>
-<summary>Metal</summary>
+<summary>OpenVINO</summary>
 
-To install with Metal (MPS), set the `GGML_METAL=on` environment variable before installing:
+### Install OpenVINO Runtime
+
+Follow the guide to install OpenVINO Runtime from an archive file: [Linux](https://docs.openvino.ai/2026/get-started/install-openvino/install-openvino-archive-linux.html) | [Windows](https://docs.openvino.ai/2026/get-started/install-openvino/install-openvino-archive-windows.html)
+
+- **Linux:**
+
+    <details>
+    <summary>📦 Click to expand OpenVINO installation from an archive file on Ubuntu</summary>
+    <br>
+
+    ```bash
+    wget https://raw.githubusercontent.com/ravi9/misc-scripts/main/openvino/ov-archive-install/install-openvino-from-archive.sh
+    chmod +x install-openvino-from-archive.sh
+    ./install-openvino-from-archive.sh
+    ```
+
+    Verify OpenVINO is initialized properly:
+    ```bash
+    echo $OpenVINO_DIR
+    ```
+    </details>
+
+### Supported Devices
+
+OpenVINO backend supports the following hardware:
+
+- Intel CPUs
+- Intel GPUs (integrated and discrete)
+- Intel NPUs
+
+Although OpenVINO supports a wide range of [Intel hardware](https://docs.openvino.ai/2026/about-openvino/release-notes-openvino/system-requirements.html), the llama.cpp OpenVINO backend has been validated specifically on AI PCs such as the Intel® Core™ Ultra Series 1 and Series 2.
+
+More Information see: https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/OPENVINO.md
+
+To install with OpenVINO, set the `GGML_OPENVINO=ON` environment variable before installing:
 
 ```bash
-CMAKE_ARGS="-DGGML_METAL=on -DGGML_METAL_USE_BF16=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+# Linux
+source /opt/intel/openvino/setupvars.sh
+# Windows
+"C:\Program Files (x86)\Intel\openvino_2026.0\setupvars.bat"
+# Build
+CMAKE_ARGS="-DGGML_OPENVINO=ON" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
+</details>
+
+<details>
+<summary>Metal</summary>
+
+On MacOS, Metal is enabled by default(`GGML_METAL=ON`). Using Metal makes the computation run on the GPU.
+
+To disable the Metal build at compile time use the `CMAKE_ARGS="-DGGML_METAL=OFF"` cmake option.
+
+```bash
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
 **Pre-built Wheel (New)**
@@ -213,7 +266,20 @@ More details see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/bu
 
 - For Windows User: Download and install the [`Vulkan SDK`](https://vulkan.lunarg.com/sdk/home#windows) with the default settings.
 
-- For Linux User: Follow the official LunarG instructions for the installation and setup of the Vulkan SDK in the [Getting Started with the Linux Tarball Vulkan SDK](https://vulkan.lunarg.com/doc/sdk/latest/linux/getting_started.html) guide.
+- For Linux User:
+    * First, follow the official LunarG instructions for the installation and setup of the Vulkan SDK in the [Getting Started with the Linux Tarball Vulkan SDK](https://vulkan.lunarg.com/doc/sdk/latest/linux/getting_started.html) guide.
+
+    * After completing the first step, ensure that you have used the `source` command on the `setup_env.sh` file inside of the Vulkan SDK in your current terminal session. Otherwise, the build won't work. Additionally, if you close out of your terminal, you must perform this step again if you intend to perform a build. However, there are ways to make this persistent. Refer to the Vulkan SDK guide linked in the first step for more information about any of this.
+
+- For Mac User:
+    * Generally, follow LunarG's [Getting Started with the MacOS Vulkan SDK](https://vulkan.lunarg.com/doc/sdk/latest/mac/getting_started.html) guide for installation and setup of the Vulkan SDK. There are two options of Vulkan drivers on macOS, both of which implement translation layers to map Vulkan to Metal. They can be hot-swapped by setting the `VK_ICD_FILENAMES` environment variable to point to the respective ICD JSON file. Check the box for "KosmicKrisp" during the LunarG Vulkan SDK installation.
+
+    * Set environment variable for the LunarG Vulkan SDK after installation (and optionally add to your shell profile for persistence):
+        ```bash
+        source /path/to/vulkan-sdk/setup-env.sh
+        ```
+
+More Information see: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#vulkan
 
 Then install with Vulkan support by set the `GGML_VULKAN=on` environment variable before installing:
 
@@ -226,11 +292,35 @@ CMAKE_ARGS="-DGGML_VULKAN=on" pip install "llama-cpp-python @ git+https://github
 <details>
 <summary>SYCL</summary>
 
+### Supported OS
+
+| OS      | Status  | Verified                                       |
+|---------|---------|------------------------------------------------|
+| Linux   | Support | Ubuntu 22.04, Fedora Silverblue 39, Arch Linux |
+| Windows | Support | Windows 11                                     |
+
+### Intel GPU
+
+SYCL backend supports Intel GPU Family:
+
+- Intel Data Center Max Series
+- Intel Flex Series, Arc Series
+- Intel Built-in Arc GPU
+- Intel iGPU in Core CPU (11th Generation Core CPU and newer, refer to [oneAPI supported GPU](https://www.intel.com/content/www/us/en/developer/articles/system-requirements/intel-oneapi-base-toolkit-system-requirements.html#inpage-nav-1-1)).
+
+On older Intel GPUs, you may try [OpenCL](/docs/backend/OPENCL.md) although the performance is not optimal, and some GPUs may not support OpenCL nor have any GPGPU capabilities.
+
+More Information see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md
+
 To install with SYCL support, set the `GGML_SYCL=on` environment variable before installing:
 
 ```bash
-source /opt/intel/oneapi/setvars.sh   
+# Export relevant ENV variables
+source /opt/intel/oneapi/setvars.sh
+# Option 1: Use FP32 (recommended for better performance in most cases)
 CMAKE_ARGS="-DGGML_SYCL=on -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+# Option 2: Use FP16
+CMAKE_ARGS="-DGGML_SYCL=on -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DGGML_SYCL_F16=ON" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 </details>
 
