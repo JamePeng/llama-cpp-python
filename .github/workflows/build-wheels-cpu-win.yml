@@ -1,0 +1,121 @@
+name: Build Wheels (CPU) for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_wheels:
+    name: Build Wheel ${{ matrix.os }} ${{ matrix.pyver }} CPU ${{ matrix.releasetag }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: ['windows-2022']
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        releasetag: ["Basic"]
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      AVXVER: ${{ matrix.releasetag }}
+      MAX_JOBS: 8
+
+    steps:
+      - name: Add MSBuild to PATH
+        if: runner.os == 'Windows'
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
+
+      - uses: actions/checkout@v6
+        with:
+          submodules: "recursive"
+
+      # from astral-sh/setup-uv
+      - name: Install the latest version of uv and set the python version
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
+
+      - name: Install Dependencies
+        run: |
+          git config --system core.longpaths true
+          uv pip install --upgrade build setuptools wheel packaging
+
+      - name: Build Wheel
+        run: |
+          $env:VERBOSE = '1'
+          $env:CMAKE_ARGS = '-DCMAKE_BUILD_PARALLEL_LEVEL=' + $env:MAX_JOBS
+          $env:CMAKE_ARGS = "-DENABLE_CCACHE=on -DLLAMA_CURL=off $env:CMAKE_ARGS"
+
+          if ($env:AVXVER -eq 'AVX') {
+            $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=off -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off'
+          }
+          if ($env:AVXVER -eq 'AVX2') {
+            $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX512=off'
+          }
+          if ($env:AVXVER -eq 'AVXVNNI') {
+            $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX_VNNI=on'
+          }
+          # if ($env:AVXVER -eq 'AVX512') {
+          #  $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_AVX512=on'
+          # }
+          # Basic options for compiling without AVX instructions
+          if ($env:AVXVER -eq 'Basic') {
+            $env:CMAKE_ARGS = $env:CMAKE_ARGS + ' -DGGML_NATIVE=off -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX_VNNI=off -DGGML_AVX512=off -DGGML_AVX512_VBMI=off -DGGML_AVX512_VNNI=off -DGGML_AVX512_BF16=off -DGGML_FMA=off -DGGML_F16C=off'
+          }
+          python -m build --wheel
+
+          # Check if wheel was built
+          if (!(Test-Path '.\dist\*.whl')) {
+            Write-Error "No wheel built in dist/ directory"
+            exit 1
+          }
+
+          $wheelFile = Get-Item '.\dist\*.whl' | Select-Object -First 1
+
+          # Split file name: name-ver-py-abi-plat.whl
+          $parts = $wheelFile.Name.Split('-')
+          $distName = $parts[0]
+          $version  = $parts[1]
+          $pyTag    = $parts[2]
+          $abiTag   = $parts[3]
+          $platTag  = $parts[4]
+
+          $newVersion = "$version+cpu.$($env:AVXVER.ToLower())"
+
+          $newName = "$distName-$newVersion-$pyTag-$abiTag-$platTag"
+
+          # Rename wheel file
+          Rename-Item -Path $wheelFile.FullName -NewName $newName
+          Write-Output "Renamed wheel to: $newName"
+
+          # write the build tag to the output
+          Write-Output "TAG_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Get Current Date
+        id: get-date
+        run: |
+          $currentDate = Get-Date -UFormat "%Y%m%d"
+          Write-Output "BUILD_DATE=$currentDate" >> $env:GITHUB_ENV
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag "v${{ env.TAG_VERSION }}-cpu-${{ env.AVXVER }}-win-${{ env.BUILD_DATE }}"
+          git push origin "v${{ env.TAG_VERSION }}-cpu-${{ env.AVXVER }}-win-${{ env.BUILD_DATE }}"
+
+      - name: Create Release
+        if: always() && env.TAG_VERSION != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          # Set tag_name to <tag>-cpu-<avxver>-win-<date>
+          tag_name: v${{ env.TAG_VERSION }}-cpu-${{ env.AVXVER }}-win-${{ env.BUILD_DATE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

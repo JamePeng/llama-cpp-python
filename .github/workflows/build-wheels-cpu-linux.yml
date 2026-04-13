@@ -1,0 +1,122 @@
+name: Build Wheels(CPU) for Linux
+
+on:
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  build_wheels:
+    name: Build Wheel ${{ matrix.os }} ${{ matrix.pyver }} CPU ${{ matrix.releasetag == 'wheels' && 'AVX2' || matrix.releasetag }}
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix: # Define the build matrix directly here
+        os: ["ubuntu-22.04"]
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"] # Python versions
+        releasetag: ["Basic"] # Controls CMAKE_ARGS for CPU features (even in CUDA build)
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      AVXVER: ${{ matrix.releasetag }}
+
+    steps:
+      - name: Install dependencies
+        run: |
+            sudo apt update
+            sudo apt install -y build-essential ccache cmake curl git libgomp1 libjpeg-dev libssl-dev libopenblas-dev
+
+      - uses: actions/checkout@v6 # Checkout code
+        with:
+          submodules: "recursive"
+
+      # from astral-sh/setup-uv
+      - name: Install the latest version of uv and set the python version
+        uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
+
+      - name: Build Wheel With Cmake # Main build step: configures and builds the wheel
+        env:
+          VERBOSE: 1 # Enable verbose build output
+        run: |
+          echo "VERBOSE=1" >> $GITHUB_ENV # Enable verbose build output for troubleshooting
+
+          # Add project-specific and feature flags
+          CMAKE_ARGS="-DGGML_BLAS=on -DGGML_BLAS_VENDOR=OpenBLAS"
+          CMAKE_ARGS="${CMAKE_ARGS} -DLLAMA_CURL=off -DLLAMA_OPENSSL=on"
+
+          if [ "${AVXVER}" = "AVX" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=off  -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off"
+          fi
+          if [ "${AVXVER}" = "AVX2" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX512=off"
+          fi
+          if [ "${AVXVER}" = "AVXVNNI" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX_VNNI=on"
+          fi
+          # if [ "${AVXVER}" = "AVX512" ]; then
+          #   CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX512=on"
+          # fi
+          # Basic options for compiling without AVX instructions
+          if [ "${AVXVER}" = "Basic" ]; then
+            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_NATIVE=off -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX_VNNI=off -DGGML_AVX512=off -DGGML_AVX512_VBMI=off -DGGML_AVX512_VNNI=off -DGGML_AVX512_BF16=off -DGGML_FMA=off -DGGML_F16C=off"
+          fi
+
+          # Export CMAKE_ARGS environment variable so the python -m build command can use it
+          echo ${CMAKE_ARGS}
+          echo "CMAKE_ARGS=${CMAKE_ARGS}" >> $GITHUB_ENV
+
+          # Run the Python build command to generate the wheel
+          uv pip install build setuptools wheel packaging
+          CMAKE_ARGS=${CMAKE_ARGS} uv build --wheel
+
+          # --- Post-build steps to get info for rename wheel file and release tag ---
+
+          avx_ver=$(echo "${AVXVER}" | tr '[:upper:]' '[:lower:]')
+
+          wheel_path=$(ls dist/*.whl | head -n 1)
+          filename=$(basename "$wheel_path")
+
+          # Split wheel filename
+          IFS='-' read -r dist_name version py_tag abi_tag plat_tag <<< "$filename"
+
+          new_version="${version}+cpu.${avx_ver}"
+          new_filename="${dist_name}-${new_version}-${py_tag}-${abi_tag}-${plat_tag}"
+
+          # Rename wheel file
+          mv "$wheel_path" "dist/$new_filename"
+          echo "Renamed wheel to: $new_filename"
+
+          echo "TAG_VERSION=$version" >> $GITHUB_ENV # Store version in env for release step
+
+      - name: Get Current Date # Step to get current date for the release tag
+        id: get-date
+        run: |
+          # Get date in YYYYMMDD format using bash date command
+          currentDate=$(date +%Y%m%d)
+          # Store the date in environment variable for the release step
+          echo "BUILD_DATE=$currentDate" >> $GITHUB_ENV
+
+      - name: Create Git Tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git tag "v${{ env.TAG_VERSION }}-cpu-${{ env.AVXVER }}-linux-${{ env.BUILD_DATE }}"
+          git push origin "v${{ env.TAG_VERSION }}-cpu-${{ env.AVXVER }}-linux-${{ env.BUILD_DATE }}"
+
+      - uses: softprops/action-gh-release@v2.2.2 # Action to create a GitHub Release
+        with:
+          files: dist/* # Upload the generated wheel files from the dist directory
+          # Define the release tag name using the collected environment variables
+          # Format: v<package_version>-cpu-<avx_tag>-linux-<build_date>
+          tag_name: v${{ env.TAG_VERSION }}-cpu-${{ env.AVXVER }}-linux-${{ env.BUILD_DATE }} # Release tag format for Linux
+          # Note: This action will create a new release tag if it doesn't exist,
+          # or upload assets to an existing tag. Be mindful of potential tag name conflicts.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Use the secret provided by GitHub Actions for authentication
