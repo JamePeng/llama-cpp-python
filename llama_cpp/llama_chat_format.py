@@ -4342,6 +4342,11 @@ class Gemma4ChatHandler(MTMDChatHandler):
     Note on `enable_thinking`:
         The `enable_thinking` toggle is currently ONLY supported by Gemma4 31B and 26BA4B models.
         It is NOT supported by Gemma4 E2B and E4B models.
+
+    [Important Note for Audio Processing!]
+        It is recommended to use BF16 mmproj for Gemma4 E2B and E4B models.
+        Other quantizations are known to have degraded performance;
+        ref comment: https://github.com/ggml-org/llama.cpp/pull/21421#issuecomment-4230306463
     """
 
     # The special token in Gemma 4
