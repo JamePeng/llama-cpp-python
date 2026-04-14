@@ -900,9 +900,13 @@ print(response["choices"][0]["text"])
 
 **Note**: Multi-modal models also support tool calling and JSON mode.
 
+
 ## Loading a Local Image With Qwen3VL(Thinking/Instruct)
 
-This script demonstrates how to load a local image, encode it as a base64 Data URI, and pass it to a local Qwen3-VL model (with the 'force_reasoning' parameter enabled for thinking model, disabled for instruct model) for processing using the llama-cpp-python library.
+<summary>This script demonstrates how to load a local image, encode it as a base64 Data URI, and pass it to a local Qwen3-VL model (with the 'force_reasoning' parameter enabled for thinking model, disabled for instruct model) for processing using the llama-cpp-python library.</summary><br>
+
+
+**Example Code**: <details>
 
 ```python
 # Import necessary libraries
@@ -1051,6 +1055,165 @@ res = llm.create_chat_completion(
 print(res["choices"][0]["message"]["content"])
 
 ```
+
+</details>
+
+## Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)
+
+Below is a complete, production-ready example demonstrating how to dynamically route and process both image and audio files. It includes a universal media processor that automatically converts local files into the correct payload structure (Data URIs for images, and `input_audio` for audio files).
+
+> **⚠️ IMPORTANT: GEMMA-4 MODEL CAPABILITIES & LIMITATIONS**
+> * **Gemma4 E2B / E4B:** Supports Full Multimodal (Vision + Audio + Text). `enable_thinking` **MUST** be `True`(default).
+> * **Gemma4 31B / 26BA4B:** Supports Vision + Text ONLY (Audio is NOT supported). `enable_thinking` can be toggled (`True` or `False`).
+
+```python
+from llama_cpp import Llama
+from llama_cpp.llama_chat_format import Gemma4ChatHandler
+import base64
+import os
+
+# Model and multimodal projection paths
+MODEL_PATH = r"/path/to/Gemma-4-E4B-It-BF16.gguf"
+# BF16 mmproj is required for audio. Other quantizations are known to have degraded performance.
+MMPROJ_PATH = r"/path/to/mmproj-Gemma-4-E4B-It-BF16.gguf"
+
+# Initialize the Llama model with multimodal support
+# Note: Since we are using E4B here, enable_thinking MUST be True, and audio is supported.
+llm = Llama(
+    model_path=MODEL_PATH,
+    chat_handler=Gemma4ChatHandler(
+        clip_model_path=MMPROJ_PATH,
+        enable_thinking=True,  # MUST be True for E2B/E4B models
+        verbose=True,          # Enable Debug Info
+    ),
+    n_gpu_layers=-1,
+    n_ctx=10240,
+    verbose=True,              # Enable Debug Info
+)
+
+# 1. Extend the MIME dictionary to support audio formats
+_MEDIA_MIME_TYPES = {
+    # ------ Image formats ------
+    '.png':  ('image', 'image/png'),
+    '.jpg':  ('image', 'image/jpeg'),
+    '.jpeg': ('image', 'image/jpeg'),
+    '.gif':  ('image', 'image/gif'),
+    '.webp': ('image', 'image/webp'),
+    '.bmp':  ('image', 'image/bmp'),
+
+    # ------ Audio formats ------
+    '.wav':  ('audio', 'wav'),    # OpenAI standard usually uses raw format names for audio
+    '.mp3':  ('audio', 'mp3'),
+    # '.flac': ('audio', 'flac'),
+}
+
+def build_media_payload(file_path: str) -> dict:
+    """
+    Read a local media file (image or audio) and convert it into a valid input payload for the LLM.
+    """
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Media file not found: {file_path}")
+
+    extension = os.path.splitext(file_path)[1].lower()
+    media_category, mime_or_format = _MEDIA_MIME_TYPES.get(extension, ('unknown', 'application/octet-stream'))
+
+    if media_category == 'unknown':
+        print(f"Warning: Unknown extension '{extension}'. It might not be processed correctly.")
+
+    # Read and Base64 encode the file
+    with open(file_path, "rb") as f:
+        encoded_data = base64.b64encode(f.read()).decode("utf-8")
+
+    # 2. Return the appropriate dictionary structure based on the media type
+    if media_category == 'image':
+        # Image format: Data URI (OpenAI compatible)
+        data_uri = f"data:{mime_or_format};base64,{encoded_data}"
+        return {
+            "type": "image_url",
+            "image_url": {"url": data_uri}
+        }
+
+    elif media_category == 'audio':
+        # Audio format: input_audio (OpenAI compatible)
+        return {
+            "type": "input_audio",
+            "input_audio": {
+                "data": encoded_data,
+                "format": mime_or_format
+            }
+        }
+    else:
+        # Fallback for unsupported formats
+        return {"type": "text", "text": f"[Attached unsupported file: {file_path}]"}
+
+
+def run_inference(media_paths: list, text_prompt: str):
+    """
+    Helper function to dynamically build the payload and run inference.
+    """
+    # 3. Build the user_content list
+    user_content = []
+
+    # Automatically parse each file and append to the payload
+    for path in media_paths:
+        payload = build_media_payload(path)
+        user_content.append(payload)
+
+    # Append the final text instruction
+    user_content.append({
+        "type": "text",
+        "text": text_prompt
+    })
+
+    print(f"\n--- Running Inference with {len(media_paths)} media file(s) ---")
+
+    # 4. Send to the model for inference
+    response = llm.create_chat_completion(
+        messages=[
+            {"role": "system", "content": """
+            You are a highly capable multimodal assistant that can process both text, vision and audio.
+
+            """}, # Note: Supported ONLY by Gemma4 E2B / E4B.
+            {"role": "user", "content": user_content}
+        ],
+        temperature=1.0,
+        top_p=0.95,
+        top_k=64,
+        max_tokens=8192,
+    )
+
+    print("\n[Model Response]:")
+    print(response["choices"][0]["message"]["content"])
+    print("-" * 60)
+
+
+# ==============================================================================
+# Main Inference Examples
+# Uncomment the example block you wish to execute.
+# ==============================================================================
+
+# --- Example A: Image + Audio (Full Multimodal) ---
+# Note: Supported ONLY by Gemma4 E2B / E4B.
+run_inference(
+    media_paths=[r"/path/to/test.png", r"/path/to/test.wav"],
+    text_prompt="Introduce the content by combining the images and converting the audio to text."
+)
+
+# --- Example B: Image Only (Vision + Text) ---
+# Note: Supported by all Gemma4 variants (E2B, E4B, 31B, 26BA4B).
+# run_inference(
+#     media_paths=[r"/path/to/test.png"],
+#     text_prompt="Describe the contents of this image in detail."
+# )
+
+# --- Example C: Audio Only (Audio + Text) ---
+# Note: Supported ONLY by Gemma4 E2B / E4B.
+# run_inference(
+#     media_paths=[r"/path/to/test.wav"],
+#     text_prompt="Transcribe this audio and summarize the main points."
+# )
+```
+
 
 ---
 
