@@ -82,15 +82,59 @@ class mtmd_input_chunk_type(enum.IntEnum):
 mtmd_context_p = NewType("mtmd_context_p", int)
 mtmd_context_p_ctypes = c_void_p
 
-# struct mtmd_bitmap;
+# // represents raw image data, layout is RGBRGBRGB...
+# // length of data must be nx * ny * 3
+# struct mtmd_bitmap {
+#     uint32_t nx;
+#     uint32_t ny;
+#     std::vector<unsigned char> data;
+#     std::string id; // optional user-defined id, for ex: can be set to image hash, useful for KV cache tracking
+#     bool is_audio = false; // true if the bitmap is audio
+# };
 mtmd_bitmap_p = NewType("mtmd_bitmap_p", int)
 mtmd_bitmap_p_ctypes = c_void_p
 
-# struct mtmd_image_tokens;
+# struct mtmd_image_tokens {
+#     uint32_t nx; // number of tokens in x direction
+#     uint32_t ny; // number of tokens in y direction
+#     bool use_mrope_pos = false; // use M-RoPE position counting (the whole image is 1 temporal position)
+#     uint32_t n_tokens() const { return nx * ny; }
+#     clip_image_f32_batch batch_f32; // preprocessed image patches
+#     std::string id; // optional user-defined ID, useful for KV cache tracking
+#     mtmd_image_tokens clone() {
+#         return mtmd_image_tokens{
+#             nx,
+#             ny,
+#             use_mrope_pos,
+#             batch_f32.clone(),
+#             id
+#         };
+#     }
+# };
 mtmd_image_tokens_p = NewType("mtmd_image_tokens_p", int)
 mtmd_image_tokens_p_ctypes = c_void_p
 
-# struct mtmd_input_chunk;
+# struct mtmd_audio_tokens {
+#     uint32_t n_tokens; // number of tokens
+#     clip_image_f32_batch batch_f32; // preprocessed image patches
+#     std::string id; // optional user-defined ID, useful for KV cache tracking
+#     mtmd_audio_tokens clone() {
+#         return mtmd_audio_tokens{
+#             n_tokens,
+#             batch_f32.clone(),
+#             id
+#         };
+#     }
+# };
+mtmd_audio_tokens_p = NewType("mtmd_audio_tokens_p", int)
+mtmd_audio_tokens_p_ctypes = c_void_p
+
+# struct mtmd_input_chunk {
+#     mtmd_input_chunk_type type;
+#     std::vector<llama_token> tokens_text;
+#     mtmd_image_tokens_ptr tokens_image;
+#     mtmd_audio_tokens_ptr tokens_audio;
+# };
 mtmd_input_chunk_p = NewType("mtmd_input_chunk_p", int)
 mtmd_input_chunk_p_ctypes = c_void_p
 
@@ -487,18 +531,6 @@ def mtmd_input_chunk_free(chunk: mtmd_input_chunk_p):
 def mtmd_image_tokens_get_n_tokens(image_tokens: mtmd_image_tokens_p) -> c_size_t:
     ...
 
-# MTMD_API size_t       mtmd_image_tokens_get_nx      (const mtmd_image_tokens * image_tokens);
-@ctypes_function_mtmd(
-    "mtmd_image_tokens_get_nx", [mtmd_image_tokens_p_ctypes], c_size_t)
-def mtmd_image_tokens_get_nx(image_tokens: mtmd_image_tokens_p) -> c_size_t:
-    ...
-
-# MTMD_API size_t       mtmd_image_tokens_get_ny      (const mtmd_image_tokens * image_tokens);
-@ctypes_function_mtmd(
-    "mtmd_image_tokens_get_ny", [mtmd_image_tokens_p_ctypes], c_size_t)
-def mtmd_image_tokens_get_ny(image_tokens: mtmd_image_tokens_p) -> c_size_t:
-    ...
-
 # MTMD_API const char * mtmd_image_tokens_get_id      (const mtmd_image_tokens * image_tokens); // TODO: deprecate
 @ctypes_function_mtmd(
     "mtmd_image_tokens_get_id", [mtmd_image_tokens_p_ctypes], c_char_p)
@@ -511,6 +543,59 @@ def mtmd_image_tokens_get_id(image_tokens: mtmd_image_tokens_p) -> c_char_p:
     "mtmd_image_tokens_get_n_pos", [mtmd_image_tokens_p_ctypes], c_int32)
 def mtmd_image_tokens_get_n_pos(image_tokens: mtmd_image_tokens_p) -> c_int32:
     """number of temporal positions (equals to max(t,h,w) for M-RoPE; equals to n_tokens otherwise)"""
+    ...
+
+# DEPRECATED(MTMD_API size_t mtmd_image_tokens_get_nx(const mtmd_image_tokens * image_tokens),
+#            "use mtmd_image_tokens_get_decoder_pos() instead");
+@ctypes_function_mtmd(
+    "mtmd_image_tokens_get_nx", [mtmd_image_tokens_p_ctypes], c_size_t)
+def mtmd_image_tokens_get_nx(image_tokens: mtmd_image_tokens_p) -> c_size_t:
+    """
+    use mtmd_image_tokens_get_decoder_pos() instead
+    """
+    ...
+
+# DEPRECATED(MTMD_API size_t mtmd_image_tokens_get_ny(const mtmd_image_tokens * image_tokens),
+#            "use mtmd_image_tokens_get_decoder_pos() instead");
+@ctypes_function_mtmd(
+    "mtmd_image_tokens_get_ny", [mtmd_image_tokens_p_ctypes], c_size_t)
+def mtmd_image_tokens_get_ny(image_tokens: mtmd_image_tokens_p) -> c_size_t:
+    """
+    use mtmd_image_tokens_get_decoder_pos() instead
+    """
+    ...
+
+# struct mtmd_decoder_pos {
+#     uint32_t t;
+#     uint32_t x;
+#     uint32_t y;
+# };
+class mtmd_decoder_pos(Structure):
+    _fields_ = [
+        ("t", c_uint32),
+        ("x", c_uint32),
+        ("y", c_uint32),
+    ]
+
+    if TYPE_CHECKING:
+        t: c_uint32
+        x: c_uint32
+        y: c_uint32
+
+# // get position for decoder attention, to be used by M-RoPE models
+# // i is the index of the embedding token, ranging from 0 to mtmd_image_tokens_get_n_tokens() - 1
+# // return relative position (for example, embedding 0 will have position (0, 0, 0);
+# // remember to adjust it to the current absolute position)
+# MTMD_API struct mtmd_decoder_pos mtmd_image_tokens_get_decoder_pos(const mtmd_image_tokens * image_tokens, size_t i);
+@ctypes_function_mtmd(
+    "mtmd_image_tokens_get_decoder_pos", [mtmd_image_tokens_p_ctypes, c_size_t], mtmd_decoder_pos)
+def mtmd_image_tokens_get_decoder_pos(image_tokens: mtmd_image_tokens_p, i: c_size_t) -> mtmd_decoder_pos:
+    """
+    get position for decoder attention, to be used by M-RoPE models
+    i is the index of the embedding token, ranging from 0 to mtmd_image_tokens_get_n_tokens() - 1
+    return relative position (for example, embedding 0 will have position (0, 0, 0);
+    remember to adjust it to the current absolute position)
+    """
     ...
 
 # // tokenize an input text prompt and a list of bitmaps (images/audio)
