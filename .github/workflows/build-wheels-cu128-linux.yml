@@ -120,7 +120,7 @@ jobs:
           # Store the date in environment variable for the release step
           echo "BUILD_DATE=$currentDate" >> $GITHUB_ENV
 
-      - uses: softprops/action-gh-release@v2.2.2 # Action to create a GitHub Release
+      - uses: softprops/action-gh-release@v3 # Action to create a GitHub Release
         with:
           files: dist/* # Upload the generated wheel files from the dist directory
           # Define the release tag name using the collected environment variables

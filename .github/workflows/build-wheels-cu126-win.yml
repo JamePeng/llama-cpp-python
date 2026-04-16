@@ -125,7 +125,7 @@ jobs:
 
       - name: Create Release
         if: always() && env.TAG_VERSION != ''
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           # Set tag_name to <tag>-cu<cuda_version>-<avxver>-win-<date>
