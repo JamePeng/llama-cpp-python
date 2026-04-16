@@ -834,6 +834,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [qwen2.5-vl](https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
 | [qwen3-vl](https://huggingface.co/unsloth/Qwen3-VL-8B-Thinking-GGUF) | `Qwen3VLChatHandler` | `qwen3-vl` |
 | [qwen3.5](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF) | `Qwen35ChatHandler` | `qwen3.5` |
+| [qwen3.6](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | `Qwen35ChatHandler` | `qwen3.6` |
 | [step3-vl](https://huggingface.co/JamePeng2023/Step3-VL-10B-GGUF) | `Step3VLChatHandler` | `step3-vl` |
 
 Then you'll need to use a custom chat handler to load the clip model and process the chat messages and images.

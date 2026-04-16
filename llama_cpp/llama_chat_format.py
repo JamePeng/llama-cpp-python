@@ -5387,6 +5387,9 @@ class Qwen3VLChatHandler(MTMDChatHandler):
         return super().__call__(**kwargs)
 
 class Qwen35ChatHandler(MTMDChatHandler):
+    """
+    Handler for Qwen3.5/Qwen3.6 models.
+    """
     CHAT_FORMAT = (
         "{%- set image_count = namespace(value=0) -%}"
         "{%- set video_count = namespace(value=0) -%}"
@@ -5494,7 +5497,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
         "            {%- set content = content.split('</think>')[-1].lstrip('\n') -%}"
         "        {%- endif -%}"
         "        {%- set reasoning_content = reasoning_content | trim -%}"
-        "        {%- if loop.index0 > ns.last_query_index -%}"
+        "        {%- if (preserve_thinking is defined and preserve_thinking is true) or (loop.index0 > ns.last_query_index) -%}"
         "            {{- '<|im_start|>' + message.role + '\n<think>\n' + reasoning_content + '\n</think>\n\n' + content -}}"
         "        {%- else -%}"
         "            {{- '<|im_start|>' + message.role + '\n' + content -}}"
@@ -5516,7 +5519,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
         "                {%- if tool_call.arguments is defined -%}"
         "                    {%- for (args_name, args_value) in tool_call.arguments | items -%}"
         "                        {{- '<parameter=' + args_name + '>\n' -}}"
-        "                        {%- set args_value = args_value | tojson | safe if args_value is mapping or args_value is sequence and args_value is not string else args_value | string -%}"
+        "                        {%- set args_value = args_value | string if args_value is string else args_value | tojson | safe %}"
         "                        {{- args_value -}}"
         "                        {{- '\n</parameter>' -}}"
         "                    {%- endfor -%}"
@@ -5543,7 +5546,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
         "{%- endfor -%}"
         "{%- if add_generation_prompt -%}"
         "    {{- '<|im_start|>assistant\n' -}}"
-        "    {%- if enable_thinking is false -%}"
+        "    {%- if enable_thinking is defined and enable_thinking is false -%}"
         "        {{- '<think>\n\n</think>\n\n' -}}"
         "    {%- else -%}"
         "        {{- '<think>\n' -}}"
@@ -5553,23 +5556,29 @@ class Qwen35ChatHandler(MTMDChatHandler):
 
     def __init__(
         self,
-        enable_thinking: bool = True,
         add_vision_id: bool = True,
+        enable_thinking: bool = True,
+        preserve_thinking: bool = False,
         **kwargs,
     ):
         """
         Parameters:
-        - enable_thinking (bool):
-            - True (default): Enables reasoning for better results.
-            - False: Disables reasoning for faster results.
         - add_vision_id (bool):
             - True (default): Count all the images. Recommended for multi-image.
             - False: Doesn't count the images. Can save tokens with single-image.
+        - enable_thinking (bool):
+            - True (default): Enables reasoning for better results.
+            - False: Disables reasoning for faster results.
+        - preserve_thinking (bool):
+            - True: Keeps <think> reasoning process for ALL historical conversational turns.
+            - False (default): Only keeps <think> for the latest assistant reply to save tokens.
         """
         super().__init__(**kwargs)
         self.enable_thinking = enable_thinking
-        self.extra_template_arguments["enable_thinking"] = enable_thinking
+        self.preserve_thinking = preserve_thinking
         self.extra_template_arguments["add_vision_id"] = add_vision_id
+        self.extra_template_arguments["enable_thinking"] = enable_thinking
+        self.extra_template_arguments["preserve_thinking"] = preserve_thinking
 
     def __call__(self, **kwargs):
         llama = kwargs['llama']
@@ -5578,7 +5587,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
             llama.input_ids.fill(0)
 
         if self.verbose:
-            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
+            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}, preserve_thinking={self.preserve_thinking}) - Start processing")
 
         # Use parent implementation
         return super().__call__(**kwargs)
