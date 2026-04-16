@@ -7,6 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.36] Gemma-4 Omni-Multimodal and ToolCall Improved, Qwen3.6 / Step3-VL Support, Compilation workflow optimization
+
+- feat: enhance `Qwen35ChatHandler` with preserve_thinking and `Qwen3.6` Support
+    - Add `preserve_thinking` parameter to optionally retain `<think>` reasoning
+    blocks across all historical conversational turns (defaults to False to save tokens).
+    - Improve template robustness by adding an `is defined` safety check for `enable_thinking`.
+    - Simplify JSON serialization logic for tool call arguments in the Jinja template.
+    - Update class docstring to explicitly indicate support for `Qwen 3.5` and `Qwen 3.6` models.
+    - Include `preserve_thinking` state in verbose processing logs.
+
+- docs: add comprehensive omni multimodal example for Gemma-4 (See here: [Gemma 4 Omni Example](https://github.com/JamePeng/llama-cpp-python?tab=readme-ov-file#comprehensive-omni-multimodal-example-gemma-4-vision--audio--text))
+    - Wrapped the existing Qwen3-VL image loading example in a `<details>` block to improve README readability and save vertical space.
+    - Introduced a complete, production-ready "Omni MultiModal" example demonstrating simultaneous Vision and Audio processing using the `Gemma4ChatHandler`.
+    - Added a universal `build_media_payload` helper function to dynamically route and encode local files into OpenAI-compatible `image_url` and `input_audio` payload structures.
+    - Added crucial documentation clarifying multimodal capability differences across Gemma-4 variants (E2B/E4B supporting full audio/vision vs. 31B/26BA4B supporting vision only).
+
+
+- docs: add audio processing recommendation to Gemma4ChatHandler
+    - Recommend BF16 mmproj for Gemma4 E2B and E4B models.
+    - Note known degraded audio performance with other quantizations.
+    - Add reference link to the relevant llama.cpp PR/issue comment.
+
+- refactor: update Gemma4ChatHandler with latest google/gemma-4-31B-it chat template from huggingface
+    - Sync `Gemma4ChatHandler` logic with the upstream chat template, incorporating the new `format_tool_response_block` and OpenAI-compatible forward-scan tool resolution.
+
+- Update README.md for OpenVINO/Metal/Vulkan/SYCL
+
+- Implement `Step3VLChatHandler` for `Step3-VL-10B`
+
+- feat(types): align with latest OpenAI API spec and fix type issues
+    - Expand `CompletionUsage` with `PromptTokensDetails` and `CompletionTokensDetails` for granular token tracking.
+    - Add `usage` to `CreateChatCompletionStreamResponse` to support usage reporting in streaming mode.
+    - Fix duplicate `object` field in `CreateCompletionResponse`.
+    - Update `ChatCompletionRequestAssistantMessage` to accept `None` for `content` and introduce the new `refusal` field.
+    - Clean up `ChatCompletionRequestMessage` Union by removing the duplicate user message type.
+    - Broaden `ChatCompletionToolChoiceOption` to fully support `allowed_tools` and `custom` tool choice behaviors.
+
+- feat(ci): Optimizing the GitHub build workflow for CUDA and METAL
+    - Update CI Action runner version
+        - microsoft/setup-msbuild@v2 -> v3
+        - actions/checkout@v5 -> v6
+        - actions/upload-artifact@v4 -> v6
+        - actions/download-artifact@v4 -> v6
+        - softprops/action-gh-release@v2 -> v3
+    - ci: restrict cudaarch to Volta-Hopper to fix GitHub Actions timeout
+        - Using the `all` option for `cudaarch` on CUDA 12.4-12.6 causes the compilation process to exceed the 6-hour maximum execution limit on GitHub Actions, leading to cancelled jobs.
+
+        - To resolve this and reduce build times, the target architectures are now restricted to explicitly support compute capabilities 7.0 through 9.0 (`70-real` to `90-real`). This maintains support for all modern NVIDIA GPUs equipped with Tensor Cores (from Volta up to Hopper architectures) while keeping the build time safely within CI constraints.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/9db77a020c97ac3b13b7c1bf4e0c5787001533e7](https://github.com/ggml-org/llama.cpp/commit/9db77a020c97ac3b13b7c1bf4e0c5787001533e7)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260415
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/e1ade17c6330e3cc46a2b08f9b48b1540521b231...7820677e65827b6f3356f651da9be8d510ba10e5
+
 ## [0.3.35] Gemma 4 series & LFM 2.5-VL Support, OpenAI OpenAPI Alignment and Logging Architecture Migration
 
 - fix: expand stop sequences for `Gemma4ChatHandler`
