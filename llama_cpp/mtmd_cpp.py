@@ -345,7 +345,7 @@ def mtmd_bitmap_init(
 )
 def mtmd_bitmap_init_from_audio(
     n_samples: c_uint,
-    data: POINTER(c_float),
+    data: POINTER(c_float), # type: ignore
     /,
 ) -> mtmd_bitmap_p:
     ...
@@ -582,6 +582,9 @@ class mtmd_decoder_pos(Structure):
         x: c_uint32
         y: c_uint32
 
+mtmd_decoder_pos_p = POINTER(mtmd_decoder_pos)
+mtmd_decoder_pos_p_ctypes = c_void_p
+
 # // get position for decoder attention, to be used by M-RoPE models
 # // i is the index of the embedding token, ranging from 0 to mtmd_image_tokens_get_n_tokens() - 1
 # // return relative position (for example, embedding 0 will have position (0, 0, 0);
@@ -633,7 +636,7 @@ def mtmd_tokenize(
     ctx: mtmd_context_p,
     output: mtmd_input_chunks_p,
     text: mtmd_input_text_p,
-    bitmaps: POINTER(mtmd_bitmap_p),
+    bitmaps: POINTER(mtmd_bitmap_p), # type: ignore
     n_bitmaps: c_uint,
     /,
 ) -> c_int32:
@@ -691,7 +694,7 @@ def mtmd_encode_chunk(
 # MTMD_API float * mtmd_get_output_embd(mtmd_context * ctx);
 @ctypes_function_mtmd(
     "mtmd_get_output_embd", [mtmd_context_p_ctypes], POINTER(c_float))
-def mtmd_get_output_embd(ctx: mtmd_context_p) -> POINTER(c_float):
+def mtmd_get_output_embd(ctx: mtmd_context_p) -> POINTER(c_float): # type: ignore
     """
     get output embeddings from the last encode pass
     """
@@ -703,7 +706,7 @@ def mtmd_get_output_embd(ctx: mtmd_context_p) -> POINTER(c_float):
 # MTMD_API void mtmd_log_set(ggml_log_callback log_callback, void * user_data);
 @ctypes_function_mtmd(
     "mtmd_log_set", [ggml_log_callback, c_void_p], None)
-def mtmd_log_set(log_callback: ggml_log_callback, user_data: c_void_p):
+def mtmd_log_set(log_callback: ggml_log_callback, user_data: c_void_p): # type: ignore
     """
     Set callback for all future logging events.
     """
@@ -735,7 +738,7 @@ def mtmd_test_create_input_chunks() -> mtmd_input_chunk_p:
 # MTMD_API void mtmd_helper_log_set(ggml_log_callback log_callback, void * user_data);
 @ctypes_function_mtmd(
     "mtmd_helper_log_set", [ggml_log_callback, c_void_p], None)
-def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p):
+def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p): # type: ignore
     """
     Set callback for all future logging events.
     """
@@ -810,6 +813,25 @@ def mtmd_helper_get_n_pos(chunks: mtmd_input_chunk_p) -> c_int32:
     ...
 
 
+# // helper to get the list of relative positions corresponding to the embedding tokens, to be used by M-RoPE
+# // out_pos must have length == mtmd_helper_get_n_tokens(image)
+# MTMD_API void mtmd_helper_image_get_decoder_pos(const mtmd_image_tokens * image, struct mtmd_decoder_pos * out_pos);
+@ctypes_function_mtmd("mtmd_helper_image_get_decoder_pos", [
+                        mtmd_image_tokens_p_ctypes,
+                        mtmd_decoder_pos_p_ctypes
+                    ],
+                    None)
+def mtmd_helper_image_get_decoder_pos(
+    image: mtmd_image_tokens_p,
+    out_pos: mtmd_decoder_pos_p # type: ignore
+) -> c_int32:
+    """
+    helper to get the list of relative positions corresponding to the embedding tokens, to be used by M-RoPE
+    out_pos must have length == mtmd_helper_get_n_tokens(image)
+    """
+    ...
+
+
 # // helper function that automatically:
 # // 1. run llama_decode() on text chunks
 # // 2. run mtmd_encode() on image chunks, then mtmd_get_output_embd() and then llama_decode()
@@ -844,7 +866,7 @@ def mtmd_helper_eval_chunks(
     seq_id: c_int32,
     n_batch: c_int32,
     logits_last: c_bool,
-    new_n_past: POINTER(c_int32),
+    new_n_past: POINTER(c_int32), # type: ignore
     /,
 ) -> c_int32:
     """
@@ -887,7 +909,7 @@ def mtmd_helper_eval_chunk_single(
     seq_id: c_int32,
     n_batch: c_int32,
     logits_last: c_bool,
-    new_n_past: POINTER(c_int32),
+    new_n_past: POINTER(c_int32), # type: ignore
     /,
 ) -> c_int32:
     """
@@ -923,7 +945,7 @@ def mtmd_helper_decode_image_chunk(
     ctx: mtmd_context_p,
     lctx: llama_cpp.llama_context_p,
     chunks: mtmd_input_chunk_p,
-    encoded_embd: POINTER(c_float),
+    encoded_embd: POINTER(c_float), # type: ignore
     n_past: c_int32,
     seq_id: c_int32,
     n_batch: c_int32,

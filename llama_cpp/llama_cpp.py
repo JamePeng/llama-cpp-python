@@ -1014,7 +1014,7 @@ class llama_model_imatrix_data(ctypes.Structure):
 
     if TYPE_CHECKING:
         name: ctypes.c_char_p
-        data: ctypes.POINTER(ctypes.c_float)
+        data: ctypes.POINTER(ctypes.c_float) # type: ignore
         size: ctypes.c_size_t
 
 llama_model_imatrix_data_p = ctypes.POINTER(llama_model_imatrix_data)
@@ -1068,10 +1068,10 @@ class llama_model_quantize_params(ctypes.Structure):
         pure: bool
         keep_split: bool
         dry_run: bool
-        imatrix: ctypes.POINTER(llama_model_imatrix_data)
-        kv_overrides: ctypes.POINTER(llama_model_kv_override)
-        tensor_types: ctypes.POINTER(llama_model_tensor_override)
-        prune_layers: ctypes.POINTER(ctypes.c_int32)
+        imatrix: ctypes.POINTER(llama_model_imatrix_data) # type: ignore
+        kv_overrides: ctypes.POINTER(llama_model_kv_override) # type: ignore
+        tensor_types: ctypes.POINTER(llama_model_tensor_override) # type: ignore
+        prune_layers: ctypes.POINTER(ctypes.c_int32) # type: ignore
 
     _fields_ = [
         ("nthread", ctypes.c_int32),
@@ -1345,7 +1345,7 @@ llama_model_set_tensor_data_t = ctypes.CFUNCTYPE(
 )
 def llama_model_init_from_user(
     metadata: ctypes.c_void_p,
-    set_tensor_data: llama_model_set_tensor_data_t,
+    set_tensor_data: llama_model_set_tensor_data_t, # type: ignore
     set_tensor_data_ud: ctypes.c_void_p,
     params: llama_model_params,
     /
@@ -4548,7 +4548,7 @@ def llama_sampler_init_grammar_lazy_patterns(
     vocab: llama_vocab_p,
     grammar_str: bytes,
     grammar_root: bytes,
-    trigger_patterns: CtypesArray[bytes],
+    trigger_patterns: CtypesArray[bytes], # type: ignore
     num_trigger_patterns: int,
     trigger_tokens: CtypesArray[llama_token],
     num_trigger_tokens: int,
@@ -4803,8 +4803,8 @@ def llama_print_system_info() -> bytes:
     None,
 )
 def llama_log_get(
-    log_callback: Optional[ctypes.pointer(ggml_log_callback)],
-    user_data: ctypes.pointer(ctypes.c_void_p),
+    log_callback: Optional[ctypes.pointer(ggml_log_callback)], # type: ignore
+    user_data: ctypes.pointer(ctypes.c_void_p), # type: ignore
     /,
 ):
     """Get callback for all future logging events.
@@ -4819,7 +4819,7 @@ def llama_log_get(
     None,
 )
 def llama_log_set(
-    log_callback: Optional[ggml_log_callback],
+    log_callback: Optional[ggml_log_callback], # type: ignore
     user_data: ctypes.c_void_p,
     /,
 ):
