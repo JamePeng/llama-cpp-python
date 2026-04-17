@@ -42,7 +42,7 @@ jobs:
 
       # from kingbri1/flash-attention build-wheels.yml
       - name: Install CUDA ${{ matrix.cuda }}
-        uses: N-Storm/cuda-toolkit@v0.2.28
+        uses: Jimver/cuda-toolkit@v0.2.35
         id: cuda-toolkit
         with:
           cuda: "${{ matrix.cuda }}"
@@ -50,7 +50,7 @@ jobs:
 
       # from astral-sh/setup-uv
       - name: Install the latest version of uv and set the python version
-        uses: astral-sh/setup-uv@v6
+        uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.pyver }}
           activate-environment: true
