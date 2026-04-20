@@ -587,17 +587,17 @@ mtmd_decoder_pos_p_ctypes = c_void_p
 
 # // get position for decoder attention, to be used by M-RoPE models
 # // i is the index of the embedding token, ranging from 0 to mtmd_image_tokens_get_n_tokens() - 1
-# // return relative position (for example, embedding 0 will have position (0, 0, 0);
-# // remember to adjust it to the current absolute position)
-# MTMD_API struct mtmd_decoder_pos mtmd_image_tokens_get_decoder_pos(const mtmd_image_tokens * image_tokens, size_t i);
+# // pos_0 is the absolute position of the first token
+# // return relative position (for example, embedding 0 will have position (0, 0, 0); remember to adjust it to the current absolute position)
+# MTMD_API struct mtmd_decoder_pos mtmd_image_tokens_get_decoder_pos(const mtmd_image_tokens * image_tokens, llama_pos pos_0, size_t i);
 @ctypes_function_mtmd(
-    "mtmd_image_tokens_get_decoder_pos", [mtmd_image_tokens_p_ctypes, c_size_t], mtmd_decoder_pos)
-def mtmd_image_tokens_get_decoder_pos(image_tokens: mtmd_image_tokens_p, i: c_size_t) -> mtmd_decoder_pos:
+    "mtmd_image_tokens_get_decoder_pos", [mtmd_image_tokens_p_ctypes, c_int32, c_size_t], mtmd_decoder_pos)
+def mtmd_image_tokens_get_decoder_pos(image_tokens: mtmd_image_tokens_p, pos_0: c_int32, i: c_size_t) -> mtmd_decoder_pos:
     """
     get position for decoder attention, to be used by M-RoPE models
     i is the index of the embedding token, ranging from 0 to mtmd_image_tokens_get_n_tokens() - 1
-    return relative position (for example, embedding 0 will have position (0, 0, 0);
-    remember to adjust it to the current absolute position)
+    pos_0 is the absolute position of the first token
+    return relative position (for example, embedding 0 will have position (0, 0, 0); remember to adjust it to the current absolute position)
     """
     ...
 
@@ -815,14 +815,16 @@ def mtmd_helper_get_n_pos(chunks: mtmd_input_chunk_p) -> c_int32:
 
 # // helper to get the list of relative positions corresponding to the embedding tokens, to be used by M-RoPE
 # // out_pos must have length == mtmd_helper_get_n_tokens(image)
-# MTMD_API void mtmd_helper_image_get_decoder_pos(const mtmd_image_tokens * image, struct mtmd_decoder_pos * out_pos);
+# MTMD_API void mtmd_helper_image_get_decoder_pos(const mtmd_image_tokens * image, llama_pos pos_0, struct mtmd_decoder_pos * out_pos);
 @ctypes_function_mtmd("mtmd_helper_image_get_decoder_pos", [
                         mtmd_image_tokens_p_ctypes,
+                        c_int32,
                         mtmd_decoder_pos_p_ctypes
                     ],
                     None)
 def mtmd_helper_image_get_decoder_pos(
     image: mtmd_image_tokens_p,
+    pos_0: c_int32,
     out_pos: mtmd_decoder_pos_p # type: ignore
 ) -> c_int32:
     """
