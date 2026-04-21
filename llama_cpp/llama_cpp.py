@@ -1519,53 +1519,6 @@ class llama_params_fit_status(enum.IntEnum):
     LLAMA_PARAMS_FIT_STATUS_ERROR   = 2
 
 
-# // fits mparams and cparams to free device memory (assumes system memory is unlimited)
-# //   - returns true if the parameters could be successfully modified to fit device memory
-# //   - this function is NOT thread safe because it modifies the global llama logger state
-# //   - only parameters that have the same value as in llama_default_model_params are modified
-# //     with the exception of the context size which is modified if and only if equal to 0
-# LLAMA_API enum llama_params_fit_status llama_params_fit(
-#                                 const char   * path_model,
-#                 struct llama_model_params   * mparams,
-#                 struct llama_context_params * cparams,
-#                                         float * tensor_split,          // writable buffer for tensor split, needs at least llama_max_devices elements
-#     struct llama_model_tensor_buft_override * tensor_buft_overrides, // writable buffer for overrides, needs at least llama_max_tensor_buft_overrides elements
-#                                         size_t   margin,                // margin of memory to leave per device in bytes
-#                                     uint32_t   n_ctx_min,             // minimum context size to set when trying to reduce memory use
-#                         enum ggml_log_level   log_level);            // minimum log level to print during fitting, lower levels go to debug log
-@ctypes_function(
-    "llama_params_fit",
-    [
-        ctypes.c_char_p,
-        llama_model_params_p,
-        llama_context_params_p,
-        ctypes.POINTER(ctypes.c_float),
-        ctypes.POINTER(llama_model_tensor_buft_override),
-        ctypes.c_size_t,
-        ctypes.c_uint32,
-        ctypes.c_int,
-    ],
-    ctypes.c_int,
-)
-def llama_params_fit(
-    path_model: ctypes.c_char_p,
-    mparams: CtypesPointer[llama_model_params],
-    cparams: CtypesPointer[llama_context_params],
-    tensor_split: CtypesPointer[ctypes.c_float],
-    tensor_buft_overrides: CtypesPointer[llama_model_tensor_buft_override],
-    margin: ctypes.c_size_t,
-    n_ctx_min: ctypes.c_uint32,
-    log_level: int,
-    /,
-) -> int:
-    """
-    fits mparams and cparams to free device memory (assumes system memory is unlimited)
-    returns true if the parameters could be successfully modified to fit device memory
-    this function is NOT thread safe because it modifies the global llama logger state
-    """
-    ...
-
-
 # LLAMA_API int64_t llama_time_us(void);
 @ctypes_function(
     "llama_time_us",
@@ -4927,17 +4880,6 @@ def llama_perf_sampler_print(chain: llama_sampler_p, /):
     None,
 )
 def llama_perf_sampler_reset(chain: llama_sampler_p, /):
-    ...
-
-
-# // print a breakdown of per-device memory use via LLAMA_LOG:
-# LLAMA_API void llama_memory_breakdown_print(const struct llama_context * ctx);
-@ctypes_function(
-    "llama_memory_breakdown_print",
-    [llama_context_p_ctypes],
-    None,
-)
-def llama_memory_breakdown_print(ctx: llama_context_p, /):
     ...
 
 

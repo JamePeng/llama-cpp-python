@@ -758,10 +758,6 @@ class LlamaContext:
     def print_timings(self):
         llama_cpp.llama_perf_context_print(self.ctx)
 
-    def print_memory_breakdown(self):
-        """print a breakdown of per-device memory use via LLAMA_LOG"""
-        llama_cpp.llama_memory_breakdown_print(self.ctx)
-
     # LoRA / ALoRA Dynamic Routing Methods
 
     def clear_loras(self):
