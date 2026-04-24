@@ -136,16 +136,25 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 3. **Speculative Decoding**:
 
     Accelerates generation by using a small "draft" model to predict tokens, which the larger model then validates in parallel.
+    The fastest way to use speculative decoding is through the `LlamaNGramMapDecoding`(**Recommend**) or `LlamaPromptLookupDecoding` class.
     ```python
     from llama_cpp import Llama
-    from llama_cpp.llama_speculative import LlamaDraftModel
+    from llama_cpp.llama_speculative import LlamaNGramMapDecoding
 
-    draft = LlamaDraftModel.from_model(Llama(model_path="tiny_draft.gguf", n_gpu_layers=-1))
-    main_llm = Llama(model_path="large_model.gguf", n_gpu_layers=-1, draft_model=draft)
+    llama = Llama(
+        model_path="path/to/qwen-3.6-27b.gguf",
+        n_ctx=4096,
+        n_gpu_layers=-1,
+        draft_model=LlamaNGramMapDecoding(
+            ngram_size=3,
+            num_pred_tokens=10
+        )
+    )
 
     for chunk in main_llm.create_completion("Explain quantum physics", stream=True):
         print(chunk["choices"][0]["text"], end="")
     ```
+    Note: `LlamaPromptLookupDecoding.num_pred_tokens` is the number of tokens to predict 10 is the default and generally good for gpu, 2 performs better for cpu-only machines. Now, `LlamaNGramMapDecoding` with the new Hash Map algorithm, draft generation becomes instantaneous $O(1)$, and the time consumption is almost 0 regardless of whether you set the prediction to 2 or 10 words.
 
 4. **Dynamic LoRA Routing**:
 

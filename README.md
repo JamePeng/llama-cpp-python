@@ -1370,19 +1370,29 @@ emb = llm.create_embedding("text")
 
 `llama-cpp-python` supports speculative decoding which allows the model to generate completions based on a draft model.
 
-The fastest way to use speculative decoding is through the `LlamaPromptLookupDecoding` class.
+The fastest way to use speculative decoding is through the `LlamaNGramMapDecoding`(**Recommend**) or `LlamaPromptLookupDecoding` class.
 
 Just pass this as a draft model to the `Llama` class during initialization.
 
 ```python
 from llama_cpp import Llama
-from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+from llama_cpp.llama_speculative import LlamaNGramMapDecoding
 
 llama = Llama(
-    model_path="path/to/model.gguf",
-    draft_model=LlamaPromptLookupDecoding(num_pred_tokens=10) # num_pred_tokens is the number of tokens to predict 10 is the default and generally good for gpu, 2 performs better for cpu-only machines.
+    model_path="path/to/qwen-3.6-27b.gguf",
+    n_ctx=4096,
+    n_gpu_layers=-1,
+    draft_model=LlamaNGramMapDecoding(
+        ngram_size=3,
+        num_pred_tokens=10
+    )
+)
+
+response = llama.create_chat_completion(
+    messages=[{"role": "user", "content": "Write a python script..."}]
 )
 ```
+Note: `LlamaPromptLookupDecoding.num_pred_tokens` is the number of tokens to predict 10 is the default and generally good for gpu, 2 performs better for cpu-only machines. Now, `LlamaNGramMapDecoding` with the new Hash Map algorithm, draft generation becomes instantaneous $O(1)$, and the time consumption is almost 0 regardless of whether you set the prediction to 2 or 10 words.
 
 ### Adjusting the Context Window
 
