@@ -4,28 +4,38 @@
 
 #  Python Bindings for [`llama.cpp`](https://github.com/ggml-org/llama.cpp)
 
-[![Documentation Status](https://readthedocs.org/projects/llama-cpp-python/badge/?version=latest)](https://llama-cpp-python.readthedocs.io/en/latest/?badge=latest)
 [![Tests](https://github.com/JamePeng/llama-cpp-python/actions/workflows/test.yaml/badge.svg?branch=main)](https://github.com/JamePeng/llama-cpp-python/actions/workflows/test.yaml)
 ![GitHub Tag](https://img.shields.io/github/v/tag/JamePeng/llama-cpp-python)
 [![PyPI - License](https://img.shields.io/pypi/l/llama-cpp-python)](https://pypi.org/project/llama-cpp-python/)
 [![PyPI - Downloads](https://static.pepy.tech/badge/llama-cpp-python/month)](https://pepy.tech/projects/llama-cpp-python)
 [![Github All Releases](https://img.shields.io/github/downloads/abetlen/llama-cpp-python/total.svg?label=Github%20Downloads)]()
 
-Simple Python bindings for **@ggerganov's** [`llama.cpp`](https://github.com/ggml-org/llama.cpp) library.
+Efficiency Python bindings for **ggml-org's** [`llama.cpp`](https://github.com/ggml-org/llama.cpp) library.
 This package provides:
 
 - Low-level access to C API via `ctypes` interface.
+    - [llama_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/llama_cpp.py)
+    - [mtmd_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/mtmd_cpp.py)
 - High-level Python API for text completion
-    - OpenAI-like API
-    - [LangChain compatibility](https://python.langchain.com/docs/integrations/llms/llamacpp)
-    - [LlamaIndex compatibility](https://docs.llamaindex.ai/en/stable/examples/llm/llama_2_llama_cpp.html)
-- OpenAI compatible web server
-    - [Local Copilot replacement](https://llama-cpp-python.readthedocs.io/en/latest/server/#code-completion)
-    - [Function Calling support](https://llama-cpp-python.readthedocs.io/en/latest/server/#function-calling)
-    - [Vision API support](https://llama-cpp-python.readthedocs.io/en/latest/server/#multimodal-models)
-    - [Multiple Models](https://llama-cpp-python.readthedocs.io/en/latest/server/#configuration-and-multi-model-support)
+    - OpenAI-like API and Type([llama_types.py](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/llama_types.py))
+    - [High-level API](https://github.com/JamePeng/llama-cpp-python#high-level-api)
+    - [Continuing Assistant Responses (Prefill)](https://github.com/JamePeng/llama-cpp-python#continuing-assistant-responses-prefill)
+    - [Dynamic LoRA Routing & Control Vectors (Multi-Tenant Serving)](https://github.com/JamePeng/llama-cpp-python#dynamic-lora-routing--control-vectors-multi-tenant-serving)
+        - [Dynamic LoRA Example](https://github.com/JamePeng/llama-cpp-python#dynamic-lora-example)
+        - [Control Vector Injection (Representation Engineering)](https://github.com/JamePeng/llama-cpp-python#control-vector-injection-representation-engineering)
+    - [Sampling Configuration & Usage (LlamaSamplingParams)](https://github.com/JamePeng/llama-cpp-python#sampling-configuration--usage-llamasamplingparams)
+    - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
+        - Support Models Lists
+        - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
+        - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--text)
+    - [Embeddings & Reranking (GGUF)](https://github.com/JamePeng/llama-cpp-python#embeddings--reranking-gguf)
+        - [1. Text Embeddings (Vector Search)](https://github.com/JamePeng/llama-cpp-python#1-text-embeddings-vector-search)
+        - [2. Reranking (Cross-Encoder Scoring)](https://github.com/JamePeng/llama-cpp-python#2-reranking-cross-encoder-scoring)
+        - [3. Normalization](https://github.com/JamePeng/llama-cpp-python#3-normalization)
+    - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
+- [FAQ](https://github.com/JamePeng/llama-cpp-python#faq)
 
-Documentation is available at [https://llama-cpp-python.readthedocs.io/en/latest](https://llama-cpp-python.readthedocs.io/en/latest).
+The new documentation will be maintained in the [docs/wiki](https://github.com/JamePeng/llama-cpp-python/tree/main/docs/wiki) directory based on the LLM Wiki approach. Interested volunteers are welcome to participate in its maintenance and updates :)
 
 
 ## Discussions
