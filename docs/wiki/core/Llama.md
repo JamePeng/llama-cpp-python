@@ -2,7 +2,7 @@
 ---
 title: Llama Class
 class_name: Llama
-last_updated: 2026-04-23
+last_updated: 2026-04-26
 version_target: "latest"
 ---
 ```
@@ -103,6 +103,10 @@ Low-level method to ingest and evaluate a sequence of tokens. Used internally to
 model.eval(tokens=[1, 453, 234, 987], active_loras=[{"name": "coding_adapter", "scale": 1.0}])
 ```
 
+### `abort`
+Immediately halts an active generation loop safely.
+* **Usage**: Typically called from a separate monitoring thread (like a timer). When triggered, the running stream will exit and the final chunk will contain `"finish_reason": "abort"`.
+
 ### Dynamic LoRA Management
 The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dynamically per-generation or per-eval.
 * `load_lora(name: str, path: str)`: Loads an adapter into VRAM (does not apply it yet).
@@ -193,6 +197,102 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
             ctx_checkpoints=0  # <-- SET THIS TO 0 TO ENABLE ZERO-LATENCY FAST PATH
         )
         ```
+6.  **Assistant Prefill**:
+
+    `llama-cpp-python` supports native **Assistant Prefill** for seamless message continuation. You can now simply use the `assistant_prefill=True` parameter in the `create_chat_completion` function.
+
+    This safely renders the `N-1` conversation history using standard Jinja templates (preserving exact control tokens) and flawlessly appends your partial text directly to the prompt.
+
+    ```python
+    from llama_cpp import Llama
+
+    llm = Llama(model_path="path/to/model.gguf")
+
+    # An interrupted/partial conversation
+    messages = [
+        {"role": "user", "content": "What are the first 5 planets in the solar system?"},
+        {"role": "assistant", "content": "The first 5 planets in our solar system are:\n1. Mercury\n2."}
+    ]
+
+    # Seamlessly continue the generation
+    response = llm.create_chat_completion(
+        messages=messages,
+        max_tokens=50,
+        assistant_prefill=True # <--- Enables seamless continuation
+    )
+
+    prefilled_text = messages[-1]["content"]
+    # The model will flawlessly continue from " Venus\n3. Earth..."
+    generated_text = response["choices"][0]["message"]["content"]
+
+    print(prefilled_text + generated_text)
+    ```
+
+7. **Interrupting Reasoning & Assistant Prefill (Time-boxing)**:
+
+    Use the `abort()` method alongside `assistant_prefill=True` to forcefully stop a reasoning model (like Qwen or DeepSeek) if it thinks for too long, inject a bridge text, and force it to output the final answer.
+    ```python
+    import threading
+    from llama_cpp import Llama
+
+    llm = Llama(model_path="Qwen3.6-27B.gguf", n_ctx=4096, n_gpu_layers=-1)
+
+    def run_controlled_generation(prompt: str, timeout_seconds: int = 10):
+        messages = [{"role": "user", "content": prompt}]
+
+        # 1. Set a time bomb to interrupt long <think> phases
+        def timeout_handler():
+            llm.abort()
+
+        timer = threading.Timer(timeout_seconds, timeout_handler)
+        timer.start()
+
+        stream = llm.create_chat_completion(
+            messages=messages, max_tokens=2048, stream=True
+        )
+
+        partial_response = ""
+        finish_reason = None
+
+        for chunk in stream:
+            finish_reason = chunk["choices"][0].get("finish_reason")
+
+            if finish_reason is not None and finish_reason != "abort":
+                timer.cancel()
+                break
+
+            if finish_reason == "abort":
+                break
+
+            delta = chunk["choices"][0]["delta"].get("content", "")
+            if delta:
+                partial_response += delta
+                print(delta, end="", flush=True)
+
+        # 2. Forced Intervention and Prefill Continuation
+        if finish_reason == "abort":
+            # Inject bridge text to forcefully close the reasoning tag
+            bridge_text = "\n...Wait, I have thought long enough, let's start answering the user.\n</think>\n\n"
+            print(bridge_text, end="", flush=True)
+
+            prefilled_content = partial_response + bridge_text
+            messages.append({"role": "assistant", "content": prefilled_content})
+
+            # Use assistant_prefill=True to seamlessly continue the text block
+            stream_part2 = llm.create_chat_completion(
+                messages=messages,
+                max_tokens=2048,
+                stream=True,
+                assistant_prefill=True
+            )
+
+            for chunk in stream_part2:
+                delta = chunk["choices"][0]["delta"].get("content", "")
+                if delta:
+                    print(delta, end="", flush=True)
+
+    run_controlled_generation("Explain quantum mechanics in a way that relates to bugs in code.", timeout_seconds=8)
+    ```
 
 ---
 
