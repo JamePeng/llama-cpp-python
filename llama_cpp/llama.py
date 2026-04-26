@@ -1,17 +1,20 @@
 from __future__ import annotations
 
+import contextlib
+import ctypes
+import fnmatch
+import json
+import multiprocessing
 import os
 import sys
-import uuid
 import time
-import json
-import ctypes
+import threading
 import typing
-import random
-import fnmatch
+import uuid
 import warnings
-import contextlib
-import multiprocessing
+
+import numpy as np
+import numpy.typing as npt
 
 from typing import (
     Any,
@@ -29,7 +32,6 @@ from typing import (
 from collections import deque
 from pathlib import Path
 
-
 from .llama_types import *
 from .llama_grammar import LlamaGrammar
 from .llama_cache import (
@@ -46,9 +48,6 @@ import llama_cpp.llama_chat_format as llama_chat_format
 
 from llama_cpp.llama_speculative import LlamaDraftModel
 
-import numpy as np
-import numpy.typing as npt
-
 import llama_cpp._internals as internals
 from ._internals import (
     LlamaSamplingContext,
@@ -58,6 +57,19 @@ from ._internals import (
 )
 from ._logger import set_verbose
 from ._utils import suppress_stdout_stderr
+
+
+class AbortCriteria:
+    """
+    Listen for external interruption signals to trigger a stop condition.
+    When an external thread calls `llama.abort()`, a loop interrupt is generated.
+    """
+    def __init__(self, abort_event: threading.Event):
+        self.abort_event = abort_event
+
+    def __call__(self, _input_ids: npt.NDArray[np.intc], _logits: npt.NDArray[np.single]) -> bool:
+        # Note: _input_ids and _logits are required by the signature but unused here.
+        return self.abort_event.is_set()
 
 
 class Llama:
@@ -623,6 +635,9 @@ class Llama:
 
         self._sampling_ctx: Optional[LlamaSamplingContext] = None
 
+        # Create a thread-safe interrupt event
+        self._abort_event = threading.Event()
+
     def close(self) -> None:
         """Explicitly free the model from memory."""
         if getattr(self, "_sampling_ctx", None) is not None:
@@ -768,6 +783,15 @@ class Llama:
     def reset(self):
         """Reset the model state."""
         self.n_tokens = 0
+
+    def abort(self) -> None:
+        """
+        Safely aborts any ongoing text generation.
+        Useful for async API environments or UI interruption buttons.
+        """
+        if self.verbose:
+            print(f"Llama.abort: Abort signal received. Terminating generation...", file=sys.stderr)
+        self._abort_event.set()
 
     def eval(
             self,
@@ -1442,26 +1466,18 @@ class Llama:
 
                 # Sample loop
                 while sample_idx < self.n_tokens:
+                    if self._abort_event.is_set():
+                        return
+
                     token = self._sampling_ctx.sample(self._ctx, idx=-1)
                     self._sampling_ctx.accept(token, False if grammar is None else True)
 
                     sample_idx += 1
 
-                    # Halt generation if custom stopping criteria are met
                     if stopping_criteria is not None:
-                        if self._logits_all:
-                            logits_idx = sample_idx - self.n_tokens
-                            check_stopping = True
-                        else:
-                            if sample_idx == self.n_tokens:
-                                logits_idx = 0
-                                check_stopping = True
-                            else:
-                                check_stopping = False
-
-                        if check_stopping and stopping_criteria(
+                        if stopping_criteria(
                             self._input_ids[: sample_idx],
-                            self._scores[logits_idx, :]
+                            self._scores[0 if not self._logits_all else sample_idx - self.n_tokens, :]
                         ):
                             return
 
@@ -1746,6 +1762,8 @@ class Llama:
         Iterator[CreateCompletionResponse], Iterator[CreateCompletionStreamResponse]
     ]:
         assert suffix is None or suffix.__class__ is str
+        # Each time a new request is initiated, the previous abort state must be cleared.
+        self._abort_event.clear()
 
         completion_id: str = f"cmpl-{str(uuid.uuid4())}"
         created: int = int(time.time())
@@ -1885,6 +1903,11 @@ class Llama:
                 if self.verbose:
                     print("Llama._create_completion: cache miss", file=sys.stderr)
 
+        if stopping_criteria is None:
+            stopping_criteria = StoppingCriteriaList([AbortCriteria(self._abort_event)])
+        else:
+            stopping_criteria.append(AbortCriteria(self._abort_event))
+
         finish_reason = "length"
         multibyte_fix = 0
         for token in self.generate(
@@ -1927,6 +1950,11 @@ class Llama:
             if llama_cpp.llama_token_is_eog(self._model.vocab, token):
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
                 finish_reason = "stop"
+                break
+
+            if self._abort_event.is_set():
+                text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
+                finish_reason = "abort"
                 break
 
             completion_tokens.append(token)
@@ -2107,6 +2135,11 @@ class Llama:
         ):
             text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
             finish_reason = "stop"
+
+        # If the abort is triggered externally, force the `finish_reason` to be changed to "abort".
+        if self._abort_event.is_set():
+            text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
+            finish_reason = "abort"
 
         if self.verbose:
             self._ctx.print_timings()
