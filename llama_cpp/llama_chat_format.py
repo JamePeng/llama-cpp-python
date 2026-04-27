@@ -3079,6 +3079,7 @@ while also answering every question accurately, clearly, and step-by-step when a
         function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+        add_generation_prompt: bool = True,
     ) -> Tuple[List[int], List[tuple], Any, List[Any]]:
         """
         Core multimodal preprocessing pipeline.
@@ -3106,7 +3107,7 @@ while also answering every question accurately, clearly, and step-by-step when a
         # 2. Render the chat template and replace actual URLs with C++ media markers
         text = self.chat_template.render(
             messages=messages,
-            add_generation_prompt=True,
+            add_generation_prompt=add_generation_prompt,
             eos_token=self.mtmd_eos_token,
             bos_token=self.mtmd_bos_token,
             functions=functions,
@@ -3306,6 +3307,7 @@ while also answering every question accurately, clearly, and step-by-step when a
         logit_bias: Optional[Dict[str, float]] = None,
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
+        add_generation_prompt: bool = True,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
@@ -3322,7 +3324,8 @@ while also answering every question accurately, clearly, and step-by-step when a
             functions=functions,
             function_call=function_call,
             tools=tools,
-            tool_choice=tool_choice
+            tool_choice=tool_choice,
+            add_generation_prompt=add_generation_prompt,
         )
 
         if self.verbose:

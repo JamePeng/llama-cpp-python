@@ -2717,6 +2717,7 @@ prompt: The prompt to generate text from.
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
+        add_generation_prompt: bool = True,
     ) -> Union[
         CreateChatCompletionResponse, Iterator[CreateChatCompletionStreamResponse]
     ]:
@@ -2829,6 +2830,7 @@ prompt: The prompt to generate text from.
             active_loras=active_loras,
             control_vector=control_vector,
             assistant_prefill=assistant_prefill,
+            add_generation_prompt=add_generation_prompt,
         )
 
     def create_chat_completion_openai_v1(
