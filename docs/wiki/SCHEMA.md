@@ -3,7 +3,7 @@
 **Purpose**: Maintain a living, always-up-to-date, structured documentation wiki for the llama-cpp-python library using LLMs as the primary maintainer.
 
 **Core Principles**:
-- The source of truth is the latest code in `llama_cpp/` (especially `llama.py`, `llama_chat_format.py`, `llama_cpp.py`, `llama_types.py`, `mtmd_cpp.py`, `_internals.py`, `_ggml.py`).
+- The source of truth is the latest code in `llama_cpp/` (especially `llama.py`, `llama_chat_format.py`, `llama_cpp.py`, `llama_types.py`, `llama_embedding.py`, `mtmd_cpp.py`, `_internals.py`, `_ggml.py`).
 - Never invent parameters or behavior. Always read the current source code before writing/updating a page.
 - All examples must be complete, runnable with the latest API, and include necessary imports.
 - Clearly mark any deprecated/old usage with a warning and show the modern replacement.
