@@ -43,7 +43,7 @@ from .llama_cache import (
     HybridCheckpointCache, # type: ignore
 )
 from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
-import llama_cpp.llama_cpp as llama_cpp
+import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_chat_format as llama_chat_format
 
 from llama_cpp.llama_speculative import LlamaDraftModel
@@ -54,6 +54,9 @@ from ._internals import (
     LlamaSamplingParams,
     CommonSamplerType,
     CustomSampler,
+)
+from ._ggml import (
+    ggml_backend_cpu_buffer_type,
 )
 from ._logger import set_verbose
 from ._utils import suppress_stdout_stderr
@@ -77,13 +80,17 @@ class Llama:
 
     __backend_initialized = False
 
+    LLM_FFN_EXPS_REGEX = rb"\.ffn_(up|down|gate|gate_up)_(ch|)exps"
+
     def __init__(
         self,
         model_path: str,
         *,
         # Model Params
-        n_gpu_layers: int = 0,
-        split_mode: int = llama_cpp.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
+        n_gpu_layers: Union[int, Literal["auto", "all"]] = "auto",
+        cpu_moe: bool = False,
+        n_cpu_moe: int = 0,
+        split_mode: int = llama_cpp_lib.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
         vocab_only: bool = False,
@@ -95,7 +102,7 @@ class Llama:
         no_host: bool = False,
         kv_overrides: Optional[Dict[str, Union[bool, int, float, str]]] = None,
         # Context Params
-        seed: int = llama_cpp.LLAMA_DEFAULT_SEED,
+        seed: int = llama_cpp_lib.LLAMA_DEFAULT_SEED,
         n_ctx: int = 512,
         n_keep: int = 256,
         n_batch: int = 2048,
@@ -105,10 +112,10 @@ class Llama:
         n_threads_batch: Optional[int] = None,
         rope_scaling_type: Optional[
             int
-        ] = llama_cpp.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
-        pooling_type: int = llama_cpp.LLAMA_POOLING_TYPE_UNSPECIFIED,
-        attention_type: Optional[int] = llama_cpp.llama_attention_type.LLAMA_ATTENTION_TYPE_UNSPECIFIED,
-        flash_attn_type: Optional[int] = llama_cpp.llama_flash_attn_type.LLAMA_FLASH_ATTN_TYPE_AUTO,
+        ] = llama_cpp_lib.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
+        pooling_type: int = llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED,
+        attention_type: Optional[int] = llama_cpp_lib.llama_attention_type.LLAMA_ATTENTION_TYPE_UNSPECIFIED,
+        flash_attn_type: Optional[int] = llama_cpp_lib.llama_flash_attn_type.LLAMA_FLASH_ATTN_TYPE_AUTO,
         rope_freq_base: float = 0.0,
         rope_freq_scale: float = 0.0,
         yarn_ext_factor: float = -1.0,
@@ -174,7 +181,14 @@ class Llama:
 
         Args:
             model_path: Path to the model.
-            n_gpu_layers: Number of layers to offload to GPU (-ngl). If -1, all layers are offloaded.
+            n_gpu_layers: Max number of model layers to store in VRAM (-ngl).
+                Accepts an exact integer, "auto", or "all".
+                "auto" / -1 lets llama.cpp choose automatically.
+                "all" / -2 stores all possible layers in VRAM.
+                0 disables model layer offload.
+            cpu_moe: Keep all Mixture of Experts (MoE) weights in the CPU
+            n_cpu_moe: Keep the MoE expert weights of the first N layers on CPU.
+                Useful when VRAM is insufficient for MoE models.
             split_mode: How to split the model across GPUs. See llama_cpp.LLAMA_SPLIT_* for options.
             main_gpu: main_gpu interpretation depends on split_mode: LLAMA_SPLIT_MODE_NONE: the GPU that is used for the entire model. LLAMA_SPLIT_MODE_ROW: the GPU that is used for small tensors and intermediate results. LLAMA_SPLIT_MODE_LAYER: ignored
             tensor_split: How split tensors should be distributed across GPUs. If None, the model is not split.
@@ -237,40 +251,38 @@ class Llama:
 
         if not Llama.__backend_initialized:
             with suppress_stdout_stderr(disable=verbose):
-                llama_cpp.llama_backend_init()
+                llama_cpp_lib.llama_backend_init()
             Llama.__backend_initialized = True
 
         if isinstance(numa, bool):
             self.numa = (
-                llama_cpp.GGML_NUMA_STRATEGY_DISTRIBUTE
+                llama_cpp_lib.GGML_NUMA_STRATEGY_DISTRIBUTE
                 if numa
-                else llama_cpp.GGML_NUMA_STRATEGY_DISABLED
+                else llama_cpp_lib.GGML_NUMA_STRATEGY_DISABLED
             )
         else:
             self.numa = numa
 
-        if self.numa != llama_cpp.GGML_NUMA_STRATEGY_DISABLED:
+        if self.numa != llama_cpp_lib.GGML_NUMA_STRATEGY_DISABLED:
             with suppress_stdout_stderr(disable=verbose):
-                llama_cpp.llama_numa_init(self.numa)
+                llama_cpp_lib.llama_numa_init(self.numa)
 
         self.model_path = model_path
 
         # Model Params
-        self.model_params = llama_cpp.llama_model_default_params()
-        self.model_params.n_gpu_layers = (
-            0x7FFFFFFF if n_gpu_layers == -1 else n_gpu_layers
-        )  # 0x7FFFFFFF is INT32 max, will be auto set to all layers
+        self.model_params = llama_cpp_lib.llama_model_default_params()
+        self.model_params.n_gpu_layers = self._parse_n_gpu_layers(n_gpu_layers)
         self.model_params.split_mode = split_mode
         self.model_params.main_gpu = main_gpu
         self.tensor_split = tensor_split
         self._c_tensor_split = None
         if self.tensor_split is not None:
-            if len(self.tensor_split) > llama_cpp.LLAMA_MAX_DEVICES:
+            if len(self.tensor_split) > llama_cpp_lib.LLAMA_MAX_DEVICES:
                 raise ValueError(
-                    f"Attempt to split tensors that exceed maximum supported devices. Current LLAMA_MAX_DEVICES={llama_cpp.LLAMA_MAX_DEVICES}"
+                    f"Attempt to split tensors that exceed maximum supported devices. Current LLAMA_MAX_DEVICES={llama_cpp_lib.LLAMA_MAX_DEVICES}"
                 )
             # Type conversion and expand the list to the length of LLAMA_MAX_DEVICES
-            FloatArray = ctypes.c_float * llama_cpp.LLAMA_MAX_DEVICES
+            FloatArray = ctypes.c_float * llama_cpp_lib.LLAMA_MAX_DEVICES
             self._c_tensor_split = FloatArray(
                 *tensor_split  # type: ignore
             )  # keep a reference to the array so it is not gc'd
@@ -283,13 +295,61 @@ class Llama:
         self.model_params.use_extra_bufts = use_extra_bufts
         self.model_params.no_host = no_host
 
+        # Logic of cpu_moe, n_cpu_moe
+        # Reference from llama.cpp/tools/llama-bench/llama-bench.cpp
+        self.cpu_moe = cpu_moe
+        self.n_cpu_moe = n_cpu_moe
+        self._cpu_moe_patterns = None
+        self._cpu_moe_tensor_buft_overrides = None
+
+        if self.n_cpu_moe < 0:
+            raise ValueError("n_cpu_moe must be >= 0")
+
+        if self.cpu_moe and self.n_cpu_moe != 0 and self.verbose:
+            print(
+                "Llama.__init__: cpu_moe=True already keeps all MoE expert weights on CPU; "
+                "n_cpu_moe is redundant.",
+                file=sys.stderr,
+            )
+
+        if self.cpu_moe or self.n_cpu_moe > 0:
+            cpu_buft = ggml_backend_cpu_buffer_type()
+
+            if self.cpu_moe:
+                patterns = [self.LLM_FFN_EXPS_REGEX]
+            else:
+                patterns = [
+                    self._make_cpu_moe_pattern(i)
+                    for i in range(self.n_cpu_moe)
+                ]
+
+            # keep pattern bytes alive
+            self._cpu_moe_patterns = patterns
+
+            TensorBuftOverrideArray = (
+                llama_cpp_lib.llama_model_tensor_buft_override
+                * (len(patterns) + 1)
+            )
+            self._cpu_moe_tensor_buft_overrides = TensorBuftOverrideArray()
+
+            for i, pattern in enumerate(self._cpu_moe_patterns):
+                self._cpu_moe_tensor_buft_overrides[i].pattern = pattern
+                self._cpu_moe_tensor_buft_overrides[i].buft = cpu_buft
+
+            self._cpu_moe_tensor_buft_overrides[len(patterns)].pattern = None
+            self._cpu_moe_tensor_buft_overrides[len(patterns)].buft = None
+
+            self.model_params.tensor_buft_overrides = (
+                self._cpu_moe_tensor_buft_overrides
+            )
+
         # kv_overrides is the original python dict
         self.kv_overrides = kv_overrides
         if kv_overrides is not None:
             # _kv_overrides_array is a ctypes.Array of llama_model_kv_override Structs
             kvo_array_len = len(kv_overrides) + 1  # for sentinel element
             self._kv_overrides_array = (
-                llama_cpp.llama_model_kv_override * kvo_array_len
+                llama_cpp_lib.llama_model_kv_override * kvo_array_len
             )()
 
             for i, (k, v) in enumerate(kv_overrides.items()):
@@ -297,17 +357,17 @@ class Llama:
                 if isinstance(v, bool):
                     self._kv_overrides_array[
                         i
-                    ].tag = llama_cpp.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_BOOL.value
+                    ].tag = llama_cpp_lib.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_BOOL.value
                     self._kv_overrides_array[i].value.val_bool = v
                 elif isinstance(v, int):
                     self._kv_overrides_array[
                         i
-                    ].tag = llama_cpp.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_INT.value
+                    ].tag = llama_cpp_lib.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_INT.value
                     self._kv_overrides_array[i].value.val_i64 = v
                 elif isinstance(v, float):
                     self._kv_overrides_array[
                         i
-                    ].tag = llama_cpp.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_FLOAT.value
+                    ].tag = llama_cpp_lib.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_FLOAT.value
                     self._kv_overrides_array[i].value.val_f64 = v
                 elif isinstance(v, str):  # type: ignore
                     v_bytes = v.encode("utf-8")
@@ -316,12 +376,12 @@ class Llama:
                     v_bytes = v_bytes.ljust(128, b"\0")
                     self._kv_overrides_array[
                         i
-                    ].tag = llama_cpp.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_STR.value
+                    ].tag = llama_cpp_lib.LlamaModelKVOverrideType.LLAMA_KV_OVERRIDE_TYPE_STR.value
                     # copy min(v_bytes, 128) to str_value
                     address = typing.cast(
                         int,
                         ctypes.addressof(self._kv_overrides_array[i].value)
-                        + llama_cpp.llama_model_kv_override_value.val_str.offset,
+                        + llama_cpp_lib.llama_model_kv_override_value.val_str.offset,
                     )
                     buffer_start = ctypes.cast(address, ctypes.POINTER(ctypes.c_char))
                     ctypes.memmove(
@@ -344,10 +404,10 @@ class Llama:
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
         # Used by the sampler
-        self._seed = seed or llama_cpp.LLAMA_DEFAULT_SEED
+        self._seed = seed or llama_cpp_lib.LLAMA_DEFAULT_SEED
 
         # Context Params
-        self.context_params = llama_cpp.llama_context_default_params()
+        self.context_params = llama_cpp_lib.llama_context_default_params()
         self.context_params.n_ctx = n_ctx
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
@@ -357,22 +417,22 @@ class Llama:
         self.context_params.rope_scaling_type = (
             rope_scaling_type
             if rope_scaling_type is not None
-            else llama_cpp.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED
+            else llama_cpp_lib.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED
         )
         self.context_params.pooling_type = (
             pooling_type
             if pooling_type is not None
-            else llama_cpp.LLAMA_POOLING_TYPE_UNSPECIFIED
+            else llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
         )
         self.context_params.attention_type = (
             attention_type
             if attention_type is not None
-            else llama_cpp.llama_attention_type.LLAMA_ATTENTION_TYPE_UNSPECIFIED
+            else llama_cpp_lib.llama_attention_type.LLAMA_ATTENTION_TYPE_UNSPECIFIED
         )
         self.context_params.flash_attn_type = (
             flash_attn_type
             if flash_attn_type is not None
-            else llama_cpp.llama_flash_attn_type.LLAMA_FLASH_ATTN_TYPE_AUTO
+            else llama_cpp_lib.llama_flash_attn_type.LLAMA_FLASH_ATTN_TYPE_AUTO
         )
         self.context_params.rope_freq_base = (
             rope_freq_base if rope_freq_base != 0.0 else 0
@@ -517,7 +577,7 @@ class Llama:
         )
 
         if self.verbose:
-            print(llama_cpp.llama_print_system_info().decode("utf-8"), file=sys.stderr)
+            print(llama_cpp_lib.llama_print_system_info().decode("utf-8"), file=sys.stderr)
 
         self.chat_format = chat_format
         self.chat_handler = chat_handler
@@ -538,11 +598,6 @@ class Llama:
         self.n_tokens = 0
         self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
         self.scores: npt.NDArray[np.single] = np.ndarray((n_ctx if self._logits_all else 1, self._n_vocab), dtype=np.single)
-
-
-        self._mirostat_mu = ctypes.c_float(
-            2.0 * 5.0
-        )  # TODO: Move this to sampling context
 
         try:
             self.metadata = self._model.metadata()
@@ -673,12 +728,34 @@ class Llama:
     def __del__(self) -> None:
         self.close()
 
+    @staticmethod
+    def _parse_n_gpu_layers(n_gpu_layers: Union[int, str]) -> int:
+        if isinstance(n_gpu_layers, str):
+            value = n_gpu_layers.strip().lower()
+            if value == "auto":
+                return -1
+            if value == "all":
+                return -2
+            try:
+                return int(value)
+            except ValueError as exc:
+                raise ValueError("n_gpu_layers must be an int, 'auto', or 'all'") from exc
+
+        if isinstance(n_gpu_layers, int):
+            return n_gpu_layers
+
+        raise TypeError("n_gpu_layers must be an int, 'auto', or 'all'")
+
+    @staticmethod
+    def _make_cpu_moe_pattern(i: int) -> bytes:
+        return f"blk\\.{i}".encode("utf-8") + Llama.LLM_FFN_EXPS_REGEX
+
     @property
-    def ctx(self) -> llama_cpp.llama_context_p:
+    def ctx(self) -> llama_cpp_lib.llama_context_p:
         return self._ctx.ctx
 
     @property
-    def model(self) -> llama_cpp.llama_model_p:
+    def model(self) -> llama_cpp_lib.llama_model_p:
         return self._model.model
 
     @property
@@ -1016,12 +1093,12 @@ class Llama:
             self.scores[0, :] = logits_view
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
-    def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp.llama_logit_bias]:
+    def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp_lib.llama_logit_bias]:
         if not logit_bias:
             return []
         bias_list = []
         for token, bias in logit_bias.items():
-            lb = llama_cpp.llama_logit_bias()
+            lb = llama_cpp_lib.llama_logit_bias()
             lb.token = token
             lb.bias = bias
             bias_list.append(lb)
@@ -1133,7 +1210,7 @@ class Llama:
 
             # LogitsProcessor Adapter
             if logits_processor:
-                def adapter(token_data_array: llama_cpp.llama_token_data_array):
+                def adapter(token_data_array: llama_cpp_lib.llama_token_data_array):
                     if self._logits_all:
                         current_scores = self._scores[self.n_tokens - 1, :]
                     else:
@@ -1402,7 +1479,7 @@ class Llama:
 
         # Register custom python-level logits processors if provided
         if logits_processor:
-            def adapter(token_data_array: llama_cpp.llama_token_data_array):
+            def adapter(token_data_array: llama_cpp_lib.llama_token_data_array):
                 if self._logits_all:
                     current_scores = self._scores[self.n_tokens - 1, :]
                 else:
@@ -1613,7 +1690,7 @@ class Llama:
 
         # get pooling information
         pooling_type = self.pooling_type()
-        logits_all = pooling_type == llama_cpp.LLAMA_POOLING_TYPE_NONE
+        logits_all = pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_NONE
 
         if self.context_params.embeddings is False:
             raise RuntimeError(
@@ -1621,7 +1698,7 @@ class Llama:
             )
 
         if self.verbose:
-            llama_cpp.llama_perf_context_reset(self._ctx.ctx)
+            llama_cpp_lib.llama_perf_context_reset(self._ctx.ctx)
 
         if isinstance(input, str):
             inputs = [input]
@@ -1635,15 +1712,15 @@ class Llama:
         data: Union[List[List[float]], List[List[List[float]]]] = []
 
         def decode_batch(seq_sizes: List[int]):
-            llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(self._ctx.ctx), True)
+            llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(self._ctx.ctx), True)
             self._ctx.decode(self._batch)
             self._batch.reset()
 
             # store embeddings
-            if pooling_type == llama_cpp.LLAMA_POOLING_TYPE_NONE:
+            if pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_NONE:
                 pos: int = 0
                 for i, size in enumerate(seq_sizes):
-                    ptr = llama_cpp.llama_get_embeddings(self._ctx.ctx)
+                    ptr = llama_cpp_lib.llama_get_embeddings(self._ctx.ctx)
                     embedding: List[List[float]] = [
                         ptr[pos + j * n_embd : pos + (j + 1) * n_embd]
                         for j in range(size)
@@ -1656,7 +1733,7 @@ class Llama:
                     pos += size
             else:
                 for i in range(len(seq_sizes)):
-                    ptr = llama_cpp.llama_get_embeddings_seq(self._ctx.ctx, i)
+                    ptr = llama_cpp_lib.llama_get_embeddings_seq(self._ctx.ctx, i)
                     embedding: List[float] = ptr[:n_embd]
                     if normalize:
                         embedding = internals.normalize_embedding(embedding)
@@ -1702,11 +1779,11 @@ class Llama:
         decode_batch(s_batch)
 
         if self.verbose:
-            llama_cpp.llama_perf_context_print(self._ctx.ctx)
+            llama_cpp_lib.llama_perf_context_print(self._ctx.ctx)
 
         output = data[0] if isinstance(input, str) else data
 
-        llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(self._ctx.ctx), True)
+        llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(self._ctx.ctx), True)
         self.reset()
 
         if return_count:
@@ -1862,7 +1939,7 @@ class Llama:
 
         if len(prompt_tokens) >= self._n_ctx:
             raise ValueError(
-                f"Requested tokens ({len(prompt_tokens)}) exceed context window of {llama_cpp.llama_n_ctx(self.ctx)}"
+                f"Requested tokens ({len(prompt_tokens)}) exceed context window of {llama_cpp_lib.llama_n_ctx(self.ctx)}"
             )
 
         if max_tokens is None or max_tokens <= 0:
@@ -1947,7 +2024,7 @@ class Llama:
             active_loras=active_loras,
             control_vector=control_vector,
         ):
-            if llama_cpp.llama_token_is_eog(self._model.vocab, token):
+            if llama_cpp_lib.llama_token_is_eog(self._model.vocab, token):
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
                 finish_reason = "stop"
                 break
@@ -2871,6 +2948,8 @@ prompt: The prompt to generate text from.
             model_path=self.model_path,
             # Model Params
             n_gpu_layers=self.model_params.n_gpu_layers,
+            cpu_moe=self.cpu_moe,
+            n_cpu_moe=self.n_cpu_moe,
             split_mode=self.model_params.split_mode,
             main_gpu=self.model_params.main_gpu,
             tensor_split=self.tensor_split,
@@ -2932,7 +3011,7 @@ prompt: The prompt to generate text from.
             print("Llama.save_state: saving llama state", file=sys.stderr)
 
         # Query the backend for the required buffer size to store the current state.
-        state_size = llama_cpp.llama_state_get_size(self._ctx.ctx)
+        state_size = llama_cpp_lib.llama_state_get_size(self._ctx.ctx)
         if self.verbose:
             print(f"Llama.save_state: got state size: {state_size}", file=sys.stderr)
 
@@ -2943,7 +3022,7 @@ prompt: The prompt to generate text from.
 
         # Copy the raw state data from the internal C context into our Python-managed buffer.
         # Returns the actual number of bytes written (n_bytes).
-        n_bytes = llama_cpp.llama_state_get_data(self._ctx.ctx, llama_state, state_size)
+        n_bytes = llama_cpp_lib.llama_state_get_data(self._ctx.ctx, llama_state, state_size)
         if self.verbose:
             print(f"Llama.save_state: copied llama state: {n_bytes}", file=sys.stderr)
 
@@ -2995,7 +3074,7 @@ prompt: The prompt to generate text from.
         # Copy the raw bytes from the Python object into a C-compatible buffer.
         llama_state = LLamaStateArrayType.from_buffer_copy(state.llama_state)
 
-        if llama_cpp.llama_state_set_data(self._ctx.ctx, llama_state, state_size) != state_size:
+        if llama_cpp_lib.llama_state_set_data(self._ctx.ctx, llama_state, state_size) != state_size:
             raise RuntimeError("Failed to set llama state data")
 
     def n_ctx(self) -> int:
