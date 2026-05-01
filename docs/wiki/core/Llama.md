@@ -2,7 +2,7 @@
 ---
 title: Llama Class
 class_name: Llama
-last_updated: 2026-04-26
+last_updated: 2026-05-01
 version_target: "latest"
 ---
 ```
@@ -17,9 +17,11 @@ Initialize the model and context. Note that model loading will immediately alloc
 ### Core Model & Hardware Parameters
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `model_path` | `str` | **Required** | Path to the `.gguf` model file. |
-| `n_gpu_layers` | `int` | `0` | Number of layers to offload to GPU. Set to `-1` for all layers. |
-| `split_mode` | `int` | `LLAMA_SPLIT_MODE_LAYER` | How to split the model across GPUs (e.g., `LLAMA_SPLIT_MODE_ROW`). |
+| `model_path` | `str` | **Required** | Model file path (GGUF format) |
+| `n_gpu_layers` | `Union[int, Literal["auto", "all"]]` | `"auto"` | Number of model layers stored in VRAM:<br>• `auto`/`-1`: auto-selected by llama.cpp<br>• `all`/`-2`: all layers<br>• integer N: first N layers<br>• `0`: disable layer offload |
+| `cpu_moe` | `bool` | `False` | Whether to keep all MoE weights on CPU |
+| `n_cpu_moe` | `int` | `0` | Number of first N MoE layers to keep on CPU (compatible with `cpu_moe`) |
+| `split_mode` | `int` | `LLAMA_SPLIT_MODE_LAYER` | Model GPU split mode:<br>• `LLAMA_SPLIT_MODE_NONE`: single GPU<br>• `LLAMA_SPLIT_MODE_ROW`: row-level split<br>• `LLAMA_SPLIT_MODE_LAYER`: layer-level split |
 | `main_gpu` | `int` | `0` | The primary GPU to use for intermediate results or the entire model. |
 | `tensor_split` | `List[float]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
 | `use_mmap` | `bool` | `True` | Whether to use memory mapping (mmap) if possible. |
@@ -309,6 +311,6 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 ---
 
 ## Related Links
-* [[LlamaEmbedding]] - Dedicated class for text embeddings and reranking.
+* [[LlamaEmbedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).
 * [[LlamaCache]] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).

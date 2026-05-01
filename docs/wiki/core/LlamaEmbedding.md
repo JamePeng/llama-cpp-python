@@ -1,7 +1,7 @@
 ---
 title: LlamaEmbedding
 class_name: LlamaEmbedding
-last_updated: 2026-04-27
+last_updated: 2026-05-01
 version_target: "latest"
 ---
 
@@ -261,3 +261,7 @@ embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MOD
 - This class is in development; some features may be unstable, especially reranking model support.
 - Performance issues can be addressed by adjusting `n_batch`, `n_ubatch`, and `n_gpu_layers`.
 - For custom models, manual `pooling_type` configuration may be required to match model behavior.
+
+## Related Links
+
+* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
