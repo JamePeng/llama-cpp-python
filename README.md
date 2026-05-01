@@ -16,6 +16,8 @@ This package provides:
 - Low-level access to C API via `ctypes` interface.
     - [llama_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/llama_cpp.py)
     - [mtmd_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/mtmd_cpp.py)
+    - [ggml_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/_ggml.py)
+        - *Note: Synchronize ggml's ctypes calls as needed, but won't fully implement it, because most of it is called at the lower level in the upstream llama.cpp.*
 - High-level Python API for text completion
     - OpenAI-like API and Type([llama_types.py](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/llama_types.py))
     - [High-level API](https://github.com/JamePeng/llama-cpp-python#high-level-api)
