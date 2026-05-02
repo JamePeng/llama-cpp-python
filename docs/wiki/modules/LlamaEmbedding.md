@@ -1,11 +1,13 @@
 ---
-title: LlamaEmbedding
+title: Llama Embedding
+module_name: llama_cpp.llama_embedding
+source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
 last_updated: 2026-05-01
 version_target: "latest"
 ---
 
-# LlamaEmbedding
+# Llama Embedding
 
 ## Overview
 

@@ -1,6 +1,8 @@
 ```yaml
 ---
 title: Llama Class
+module_name: llama_cpp.llama
+source_file: llama_cpp/llama.py
 class_name: Llama
 last_updated: 2026-05-01
 version_target: "latest"
@@ -311,6 +313,6 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 ---
 
 ## Related Links
-* [[LlamaEmbedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
+* [[LlamaEmbedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
+* [[LlamaCache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).
-* [[LlamaCache]] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
