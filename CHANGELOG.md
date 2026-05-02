@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.37] MoE CPU Offloading, O(1) Speculative Decoding, Thread-Safe Abort & New LLM Wiki
+
+- docs: A basic new documentation system for the LLM-Wiki has been initially established.
+    - Based on the continuously optimized `SCHEMA.md`, I am attempting to enable AI to automatically learn code files and write and update corresponding Markdown documents. 
+    - Currently, the documentation under the path `/docs/wiki/` is complete:
+        - `core/Llama.md`
+        - `modules/LlamaCache.md`
+        - `modules/LlamaEmbedding.md`
+        - `modules/LlamaSpeculative.md`
+        - `SCHEMA.md`
+        - `contributing-to-wiki.md`
+        - `index.md`
+    - The Github Wiki is now also synchronized with `/docs/wiki/index.md`
+    - Note: The LLM-wiki is still being expanded.
+
+- docs: update LLM wiki schema to v0.3
+    - Add schema metadata, documentation language rules, expanded page templates, attribute/state documentation guidance, and clearer update rules for LLM-maintained llama-cpp-python wiki pages.
+
+- feat(llama): add fine-grained MoE CPU offloading controls
+    - Introduce `cpu_moe` (bool) and `n_cpu_moe` (int) parameters to `Llama.__init__` for precise Mixture of Experts (MoE) weight offloading.
+    - `cpu_moe=True` forces all MoE expert weights to the CPU memory, regardless of `n_gpu_layers`.
+    - `n_cpu_moe=N` offloads the expert weights of the first N layers to the CPU, while keeping attention and router weights on the GPU.
+    - Enhance `n_gpu_layers` to accept string literals "auto" (equivalent to -1) and "all" (equivalent to -2) alongside exact integers, improving configuration readability.
+    - Update internal module aliases (e.g., `llama_cpp` to `llama_cpp_lib`) to avoid naming conflicts with the underlying C library.
+    - Integrate `ggml_backend_cpu_buffer_type` to map specific tensor overrides (via regex) directly to CPU buffers during model load.
+
+- feat(_ggml): implement ggml-backend API bindings and fix type hints
+    - Introduces extensive ctypes bindings for `ggml-backend.h` (devices, buffers, registries, and CPU buffer types) to support advanced memory routing like MoE CPU offloading. Also fixes various static typing warnings by adding `# type: ignore` to pointer annotations.
+    - *Note: Synchronize ggml's ctypes calls as needed, but won't fully implement it, because most of it is called at the lower level in the upstream llama.cpp.*
+
+- feat(handler): Support `add_generation_prompt` parameter pass to `MTMDChatHandler`
+    - supports disabling assistant part injection, used to support the multimodal `assistant_prefill` functionality.
+
+- feat(core): implement thread-safe generation abort mechanism
+    - Add `AbortCriteria` class and a thread-safe `Llama.abort()` method to allow graceful interruption of ongoing text generation from external threads (e.g., UI or async environments).
+    - Automatically inject `AbortCriteria` into the stopping criteria sequence at the start of `_create_completion`.
+    - Ensure that when an abort is triggered, the partially generated `completion_tokens` are correctly detokenized and preserved.
+    - Set `finish_reason` to `"abort"` when generation is interrupted, allowing downstream streaming clients to correctly identify manual cancellations.
+    - Simplify and optimize the stopping criteria evaluation logic within the core `generate` loop.
+    - Reorganize and sort module imports for better readability.
+    - Update /docs/wiki/core/Llama.md for `abort()` and example code
+
+- feat(speculative): introduce O(1) hash-based N-Gram speculative decoding
+    - Add `LlamaNGramMapDecoding` to `llama_speculative.py`, implementing an ultra-fast speculative decoder based on a hash inverted index and incremental updates.
+    - Achieve O(1) time complexity for draft token generation, completely eliminating the CPU bottleneck present in the legacy Numpy sliding window approach.
+    - Update `README.md` and `docs/wiki/core/Llama.md` to recommend `LlamaNGramMapDecoding` as the default and fastest speculative decoding method, along with updated initialization examples.
+    - Add docs comment to the speculative decoding classes for better developer experience.
+    - Add warnings to the legacy `LlamaPromptLookupDecoding` class regarding its high computational overhead for long contexts.
+
+- docs: Update README.md
+
+- feat(types): introduce MCP definitions and align with latest OpenAI spec
+    - Add comprehensive Model Context Protocol (MCP) type definitions, including `MCPTool`, `MCPToolCall`, `MCPListTools`, connector IDs, and approval filters to support remote server tool calling.
+    - Add `ServiceTier` literal ("auto", "default", etc.) and include the `service_tier` field in `CreateChatCompletionResponse`.
+    - Restrict `finish_reason` in completion responses to strict standard literals (`stop`, `length`, `tool_calls`, `content_filter`, `function_call`).
+    - Introduce `ChatCompletionMessageCustomToolCall` to support custom tool calls generated by the model.
+    - Update `ChatCompletionRequestAssistantMessage` to include the `name` field and add descriptive docstrings to message types.
+
+- docs: initialize LLM Wiki structure for better documentation maintenance
+    - Create docs/wiki/ directory with full folder structure
+    - Add SCHEMA.md, index.md and contributing guidelines
+    - Set up core/, features/, modules/, examples/, types/ and subdirectories
+    - Prepare for LLM-powered living documentation (Llama class, multi-modal chat handlers, vision/audio examples, etc.)
+    - Include .gitkeep files to preserve empty directories
+
+    This lays the foundation for a modern, maintainable wiki that will replace outdated static docs.
+    Future commits will populate pages with up-to-date content generated from latest source code.
+
+- chore(ci): upgrade astral-sh/setup-uv@v7 and Jimver/cuda-toolkit@v0.2.35 (Node 24 runtime)
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/63d93d17336e41e4cc73a64451e5b1d2477abdb1](https://github.com/ggml-org/llama.cpp/commit/63d93d17336e41e4cc73a64451e5b1d2477abdb1)
+
+- feat: Sync llama.cpp llama/mtmd API Binding 20260421
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/b97cb637cd6124fc47f569721b1716014bd856a8...374c0d00aab924f03c18a2a53ab65c2fa20ce66c
+
 ## [0.3.36] Gemma-4 Omni-Multimodal and ToolCall Improved, Qwen3.6 / Step3-VL Support, Compilation workflow optimization
 
 - feat: enhance `Qwen35ChatHandler` with preserve_thinking and `Qwen3.6` Support
