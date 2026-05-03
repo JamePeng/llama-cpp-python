@@ -28,6 +28,7 @@ These pages document major source modules and related classes.
 |---|---|
 | [modules/LlamaCache\|Llama Cache] | Cache interfaces and implementations for reusing model state across repeated prompts. |
 | [modules/LlamaEmbedding\|Llama Embedding] | Embedding-related APIs and usage patterns. |
+| [modules/LlamaGrammar\|Llama Grammar] |  Provides grammar utilities for constrained generation. |
 | [modules/LlamaSpeculative\|Llama Speculative Decoding] | Draft model interfaces and prompt-based speculative decoding helpers. |
 
 ---
@@ -48,9 +49,10 @@ These pages define how the wiki should be written, updated, and reviewed.
 If you are new to this wiki, read the pages in this order:
 
 1. [[core/Llama|Llama](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
-2. [[modules/LlamaEmbedding|Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)]
-3. [[modules/LlamaCache|Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)]
-4. [[modules/LlamaSpeculative|Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)]
+2. [[modules/LlamaCache|Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)]
+3. [[modules/LlamaEmbedding|Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)]
+4. [[modules/LlamaGrammar|Llama Grammar](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaGrammar.md)]
+5. [[modules/LlamaSpeculative|Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)]
 
 If you are contributing documentation, start with:
 
@@ -68,6 +70,7 @@ Currently available pages:
 - `core/Llama.md`
 - `modules/LlamaCache.md`
 - `modules/LlamaEmbedding.md`
+- `modules/LlamaGrammar.md`
 - `modules/LlamaSpeculative.md`
 - `SCHEMA.md`
 - `contributing-to-wiki.md`
