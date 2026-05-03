@@ -266,4 +266,5 @@ embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MOD
 
 ## Related Links
 
+* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]

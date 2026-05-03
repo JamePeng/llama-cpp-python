@@ -1389,4 +1389,5 @@ from llama_cpp.llama_cache import HybridCheckpointCache
 
 # Related Links
 
+* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]

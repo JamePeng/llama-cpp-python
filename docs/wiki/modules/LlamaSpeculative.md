@@ -233,5 +233,6 @@ Each class MUST have exactly the same internal structure and method names (creat
 
 ## Related Links
 
+* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
 
