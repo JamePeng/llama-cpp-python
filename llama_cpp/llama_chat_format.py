@@ -3125,7 +3125,7 @@ while also answering every question accurately, clearly, and step-by-step when a
             if tag not in text:
                 continue
 
-            text = text[:text.index(tag)] + media_marker + text[text.index(tag) + len(tag):]
+            text = text.replace(tag, media_marker)
 
         # Replace image_url by media_marker in text
         for item in media_items:
