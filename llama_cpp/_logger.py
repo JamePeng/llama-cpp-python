@@ -32,6 +32,12 @@ def ggml_log_callback(
     text: bytes,
     user_data: ctypes.c_void_p,
 ):
+    # Note(JamePeng): A temporary patch is used to filter out garbage debug information
+    # output from the underlying C++ `CUDA Graph id %zu reused`.
+    # The logger is planned to be refactored to meet control requirements.
+    if text:
+        if b"CUDA Graph" in text or b"CUDA graph" in text:
+            return
     # TODO: Correctly implement continue previous log
     global _last_log_level
     log_level = GGML_LOG_LEVEL_TO_LOGGING_LEVEL[level] if level != 5 else _last_log_level
