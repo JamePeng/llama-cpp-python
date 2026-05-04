@@ -298,7 +298,11 @@ class LlamaModel:
         tokens_array = (llama_cpp.llama_token * n_tokens)(*tokens)
 
         # Initial buffer size estimation
-        buffer_size = max(n_tokens, 64)
+        # Note(JamePeng):
+        # Observed CJK heavy outputs are about 4.0x - 5.04x,
+        # with extreme values ​​even reaching 6.0x, so this avoids most retry cases.
+        # In CJK use cases, the call overhead will be reduced by 50% compared to the previous detokenize method.
+        buffer_size = max(64, n_tokens * 5 + 32)
         buffer = (ctypes.c_char * buffer_size)()
 
         n_chars = llama_cpp.llama_detokenize(
