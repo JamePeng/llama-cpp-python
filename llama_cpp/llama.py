@@ -152,6 +152,7 @@ class Llama:
         spm_infill: bool = False,
         verbose: bool = True,
         # Extra Params
+        chat_handler_kwargs: Dict[str, Any] = {},
         **kwargs,  # type: ignore
     ):
         """Load a llama.cpp model from `model_path`.
@@ -618,7 +619,8 @@ class Llama:
                 gguf_metadata = self.metadata,
                 clip_model_path = clip_model_path,
                 model_arch = None,
-                verbose = self.verbose
+                verbose = self.verbose,
+                **chat_handler_kwargs
             )
 
         eos_token_id = self.token_eos()
