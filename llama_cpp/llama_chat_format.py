@@ -3874,6 +3874,18 @@ class GenericMTMDChatHandler(MTMDChatHandler):
             self._chat_format_parser_tags += ["[IMG]"]
         elif verbose:
             print("Warning: Could not determine chat format parser tags.", flush = True)
+    
+    def __call__(self, **kwargs):
+        llama = kwargs['llama']
+
+        if hasattr(llama, 'input_ids'):
+            llama.input_ids.fill(0)
+
+        if self.verbose:
+            print(f"{self.log_prefix} - Start processing")
+
+        # Use parent implementation
+        return super().__call__(**kwargs)
 
 class Llava15ChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (
