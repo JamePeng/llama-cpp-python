@@ -131,8 +131,9 @@ class Llama:
         swa_full: Optional[bool] = None,
         kv_unified: Optional[bool] = None,
         # HybridCheckpointCache Params
-        ctx_checkpoints: int = 32,
+        ctx_checkpoints: int = 16,
         checkpoint_interval: int = 4096,
+        checkpoint_on_device: bool = False,
         # Sampling Params
         last_n_tokens_size: int = 64,
         # Backend Params
@@ -227,6 +228,7 @@ class Llama:
             kv_unified: use single unified KV buffer for the KV cache of all sequences
             ctx_checkpoints: max number of context checkpoints to create per slot (default: 16)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
             checkpoint_interval: Hybrid model checkpoint token intervals, and archiving of text with interval sizes along the way.
+            checkpoint_on_device: Store hybrid/recurrent checkpoint tensor payloads in llama_context-owned device buffers via LLAMA_STATE_SEQ_FLAGS_ON_DEVICE.
             last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
             numa: numa policy
             chat_format: String specifying the chat format to use when calling create_chat_completion.
@@ -541,6 +543,7 @@ class Llama:
         _is_recurrent = self._model.is_recurrent()
         _is_hybrid = self._model.is_hybrid()
         _n_swa = self._model.n_swa()
+
         # Sync llama.cpp upstream (#20291): warn swa-full is not supported for non-SWA models.
         if _n_swa == 0:
             if (self.context_params.swa_full):
@@ -555,13 +558,25 @@ class Llama:
 
         if self.is_hybrid:
             if self.verbose:
-                print(f"Llama.__init__: Hybrid/Recurrent model detected."
-                      f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, n_swa: {_n_swa}, swa_full: {self.context_params.swa_full}). "
-                      f" Enabling HybridCheckpointCache(ctx_checkpoints={ctx_checkpoints}, checkpoint_interval={checkpoint_interval}).",
-                      file=sys.stderr)
+                print(
+                    f"Llama.__init__: Hybrid/Recurrent model detected. "
+                    f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, "
+                    f"n_swa: {_n_swa}, swa_full: {self.context_params.swa_full}). "
+                    f"Enabling HybridCheckpointCache("
+                    f"ctx_checkpoints={ctx_checkpoints}, "
+                    f"checkpoint_interval={checkpoint_interval}, "
+                    f"on_device={checkpoint_on_device}).",
+                    file=sys.stderr,
+                )
             self.ctx_checkpoints = ctx_checkpoints
             self.checkpoint_interval = checkpoint_interval
-            self._hybrid_cache_mgr = HybridCheckpointCache(self._ctx.ctx, max_checkpoints=self.ctx_checkpoints, verbose=self.verbose)
+            self.checkpoint_on_device = checkpoint_on_device
+            self._hybrid_cache_mgr = HybridCheckpointCache(
+                self._ctx.ctx,
+                max_checkpoints=self.ctx_checkpoints,
+                on_device=self.checkpoint_on_device,
+                verbose=self.verbose,
+            )
         else:
             self._hybrid_cache_mgr = None
 
