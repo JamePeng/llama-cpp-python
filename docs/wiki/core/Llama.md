@@ -4,13 +4,13 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-05-01
+last_updated: 2026-05-06
 version_target: "latest"
 ---
 ```
 
 ## Overview
-The `Llama` class is the core, high-level Python wrapper for a `llama.cpp` model. It handles model loading, memory management (KV cache), tokenization, and generation (both base text completion and chat formatting). It includes advanced features like dynamic LoRA routing, hybrid model checkpointing, speculative decoding, and context shifting.
+The `Llama` class is the core, high-level Python wrapper for a `llama.cpp` model. It handles model loading, memory management (KV cache), tokenization, and generation (both base text completion and chat formatting). It includes advanced features like dynamic LoRA routing, dual-mode hybrid/recurrent checkpointing, speculative decoding, and context shifting.
 
 ## Constructor (`__init__`)
 
@@ -51,8 +51,9 @@ Initialize the model and context. Note that model loading will immediately alloc
 | `chat_format` | `str` | `None` | String specifying the chat template (e.g., `"llama-2"`, `"chatml"`). Guessed from GGUF if None. |
 | `chat_handler` | `LlamaChatCompletionHandler` | `None` | Optional custom handler. See [[ChatHandlers]]. |
 | `draft_model` | `LlamaDraftModel` | `None` | Optional draft model for speculative decoding. |
-| `ctx_checkpoints` | `int` | `32` | Max context checkpoints per slot (Hybrid/SWA models). |
-| `checkpoint_interval`| `int`| `4096` | Token interval for saving Hybrid model checkpoints. |
+| `ctx_checkpoints` | `int` | `16` | Max hybrid/recurrent context checkpoints to keep. Set to `0` to disable checkpointing for single-turn fast paths. |
+| `checkpoint_interval` | `int` | `4096` | Token interval for saving periodic Hybrid/Recurrent checkpoints during long prompt evaluation. |
+| `checkpoint_on_device` | `bool` | `False` | Store Hybrid/Recurrent checkpoint tensor payloads in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Reduces device-to-host copy overhead, but only one active checkpoint per `seq_id` is safe. |
 
 *(Note: There are numerous additional RoPE/YaRN scaling parameters available for specialized context extension. Refer to the source code for the full list).*
 
@@ -189,18 +190,41 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
 5. **Hybrid & Recurrent Architectures**:
 
-   The class natively detects Hybrid/Recurrent models (like LFM2VL/LFM2.5VL, Qwen3.5/3.6, Mamba or specialized SWA models(Gemma3/4)) and automatically enables the `HybridCheckpointCache`. This creates periodic save-states during large context pre-filling, allowing the model to roll back seamlessly if a generation is rejected (e.g., speculative decoding mismatches) without corrupting the recurrent state.
+   The class natively detects Hybrid/Recurrent models (for example LFM2VL/LFM2.5VL, Qwen3.5/3.6, Mamba, RWKV, or specialized SWA models such as Gemma3/4) and automatically enables the `HybridCheckpointCache`.
 
-   * Tips: If you are using hybrid multimodal model for building ComfyUI nodes or running single-turn API wrappers where you do not need multi-turn state rollbacks, simply initialize your Llama instance with `ctx_checkpoints=0`:
+   Unlike regular Transformer KV caches, Hybrid/Recurrent model memory cannot always be safely truncated token-by-token. The wrapper therefore saves periodic sequence-state checkpoints during long context prefill, allowing rollback to a verified prefix without corrupting recurrent state.
 
-        ```python
-        llm = Llama(
-            model_path="./Qwen3.5-VL-9B.gguf",
-            chat_handler=MTMDChatHandler(clip_model_path="./mmproj.gguf"),
-            n_ctx=4096,
-            ctx_checkpoints=0  # <-- SET THIS TO 0 TO ENABLE ZERO-LATENCY FAST PATH
-        )
-        ```
+   `HybridCheckpointCache` supports two checkpoint storage modes:
+
+   - **Host checkpoint mode** (`checkpoint_on_device=False`, default): checkpoint payloads are serialized into Python-owned bytes. This supports multiple historical checkpoints per `seq_id`, which is useful for multi-turn reuse and deeper rollback history.
+   - **Device checkpoint mode** (`checkpoint_on_device=True`): checkpoint tensor payloads are stored in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Python only keeps the host-visible serialized portion. This reduces device-to-host tensor copy overhead, but only one active checkpoint per `seq_id` is safe because device payloads are keyed by `seq_id`.
+
+   *Tips*: If you are using a hybrid multimodal model for ComfyUI nodes or single-turn API wrappers where you do not need multi-turn state rollback, initialize your `Llama` instance with `ctx_checkpoints=0`:
+
+   ```python
+   llm = Llama(
+       model_path="./Qwen3.5-VL-9B.gguf",
+       chat_handler=MTMDChatHandler(clip_model_path="./mmproj.gguf"),
+       n_ctx=4096,
+       ctx_checkpoints=0  # Disable checkpoints for zero-latency single-turn fast paths
+   )
+   ```
+
+    For long prompts on GPU-backed Hybrid/Recurrent models, you can enable device-backed checkpoints to reduce device-to-host copy overhead:
+
+    ```python
+    llm = Llama(
+        model_path="./Qwen3.6-27B.gguf",
+        n_ctx=32768,
+        n_gpu_layers=-1,
+        ctx_checkpoints=16,
+        checkpoint_interval=4096,
+        checkpoint_on_device=True
+    )
+    ```
+
+    Use `checkpoint_on_device=False` if you need multiple historical checkpoints for the same `seq_id`. Use `checkpoint_on_device=True` when fast rollback/checkpointing is more important than keeping many historical checkpoint payloads.
+
 6.  **Assistant Prefill**:
 
     `llama-cpp-python` supports native **Assistant Prefill** for seamless message continuation. You can now simply use the `assistant_prefill=True` parameter in the `create_chat_completion` function.
