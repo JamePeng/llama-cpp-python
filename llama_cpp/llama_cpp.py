@@ -2770,6 +2770,9 @@ LLAMA_STATE_SEQ_FLAGS_SWA_ONLY = 1
 # // work only with partial states, such as SWA KV cache or recurrent cache (e.g. Mamba)
 LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY = 1
 
+# // keeps the tensor data on device buffers (i.e. not accessible in host memory, but faster save/load)
+LLAMA_STATE_SEQ_FLAGS_ON_DEVICE = 2
+
 llama_state_seq_flags = ctypes.c_uint32
 
 # LLAMA_API size_t llama_state_seq_get_size_ext(
