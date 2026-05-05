@@ -2887,10 +2887,14 @@ while also answering every question accurately, clearly, and step-by-step when a
             raise ValueError(f"{self.log_prefix}(__init__): Clip model path does not exist: {clip_model_path}")
 
         # Pre-compile Jinja template
+        if not hasattr(self, "chat_format") or self.chat_format is None:
+            self.chat_format = self.CHAT_FORMAT
+
+        self._chat_format_parser_tags = []
         self.chat_template = ImmutableSandboxedEnvironment(
             trim_blocks=True,
             lstrip_blocks=True,
-        ).from_string(self.CHAT_FORMAT)
+        ).from_string(self.chat_format)
 
         self._exit_stack = ExitStack()
 
@@ -3116,6 +3120,13 @@ while also answering every question accurately, clearly, and step-by-step when a
             tool_choice=tool_choice,
             **getattr(self, 'extra_template_arguments', {})
         )
+        
+        for tag in self._chat_format_parser_tags:
+            if tag not in text:
+                continue
+
+            text = text.replace(tag, media_marker)
+
         # Replace image_url by media_marker in text
         for item in media_items:
             text = text.replace(item["url"], media_marker)
@@ -3827,6 +3838,54 @@ while also answering every question accurately, clearly, and step-by-step when a
             **kwargs,
         )
 
+class GenericMTMDChatHandler(MTMDChatHandler):
+    def __init__(
+        self,
+        gguf_metadata: Dict[str, Any],
+        clip_model_path: str,
+        model_arch: Optional[str] = None,
+        verbose: bool = True,
+        **kwargs
+    ) -> None:
+        self.model_metadata = gguf_metadata
+
+        self.chat_format = self.model_metadata.get("tokenizer.chat_template", None)
+        self.arch = self.model_metadata.get("general.architecture", None) if model_arch is None else model_arch
+
+        if verbose:
+            print(f"Got chat template from model:\n```jinja\n{self.chat_format}\n```", flush = True)
+        
+        if self.arch is None:
+            if verbose:
+                print("Unknown model architecture. Will use general/most-common tags.")
+            
+            self.arch = "unknown"
+
+        if self.chat_format is None:
+            raise ValueError("Failed to get model chat template automatically.")
+        
+        super().__init__(clip_model_path = clip_model_path, verbose = verbose, **kwargs)
+        
+        if self.arch in ["unknown", "qwen3vl", "qwen35moe", "qwen35"]:
+            self._chat_format_parser_tags += ["<|image_pad|>", "<|audio_pad|>", "<|video_pad|>"]
+        elif self.arch in ["gemma4"]:
+            self._chat_format_parser_tags += ["<|image|>", "<|audio|>", "<|video|>"]
+        elif self.arch in ["mistral3", "mistral4", "deepseek2"]:
+            self._chat_format_parser_tags += ["[IMG]"]
+        elif verbose:
+            print("Warning: Could not determine chat format parser tags.", flush = True)
+    
+    def __call__(self, **kwargs):
+        llama = kwargs['llama']
+
+        if hasattr(llama, 'input_ids'):
+            llama.input_ids.fill(0)
+
+        if self.verbose:
+            print(f"{self.log_prefix} - Start processing")
+
+        # Use parent implementation
+        return super().__call__(**kwargs)
 
 class Llava15ChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (

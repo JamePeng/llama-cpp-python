@@ -85,6 +85,7 @@ class Llama:
     def __init__(
         self,
         model_path: str,
+        clip_model_path: Optional[str] = None,
         *,
         # Model Params
         n_gpu_layers: Union[int, Literal["auto", "all"]] = "auto",
@@ -151,6 +152,7 @@ class Llama:
         spm_infill: bool = False,
         verbose: bool = True,
         # Extra Params
+        chat_handler_kwargs: Dict[str, Any] = {},
         **kwargs,  # type: ignore
     ):
         """Load a llama.cpp model from `model_path`.
@@ -608,6 +610,18 @@ class Llama:
 
         if self.verbose:
             print(f"Model metadata: {self.metadata}", file=sys.stderr)
+        
+        if clip_model_path is not None:
+            if self.chat_handler is not None and self.verbose:
+                print("Warning: Both `chat_handler` and `clip_model_path` are not null. Chat handler will be overwritten.", flush = True)
+
+            self.chat_handler = llama_chat_format.GenericMTMDChatHandler(
+                gguf_metadata = self.metadata,
+                clip_model_path = clip_model_path,
+                model_arch = None,
+                verbose = self.verbose,
+                **chat_handler_kwargs
+            )
 
         eos_token_id = self.token_eos()
         bos_token_id = self.token_bos()
