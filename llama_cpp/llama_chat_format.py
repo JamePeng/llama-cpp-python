@@ -2997,11 +2997,12 @@ while also answering every question accurately, clearly, and step-by-step when a
                             raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support audio inputs.")
 
                         # Case A: Handle custom/forward-compatible audio_url format
-                        if content == "audio_url":
-                            url = content["audio_url"] if isinstance(content["audio_url"], str) else content["audio_url"]["url"]
+                        if content_type == "audio_url":
+                            audio_url = content["audio_url"]
+                            url = audio_url if isinstance(audio_url, str) else audio_url["url"]
                             media_items.append({"url": url, "type": "audio"})
                         # Case B: Handle OpenAI standard input_audio format
-                        else:
+                        elif content_type == "input_audio":
                             input_audio = content.get("input_audio", {})
                             if isinstance(input_audio, dict) and "data" in input_audio:
                                 # It might just be raw base64 data, we can format it as a data URI to reuse load_audio logic
