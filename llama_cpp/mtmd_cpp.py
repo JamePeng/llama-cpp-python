@@ -723,6 +723,34 @@ def mtmd_log_set(log_callback: ggml_log_callback, user_data: c_void_p): # type: 
     ...
 
 
+# // EXPERIMENTAL API to get mmproj's capabilities without initializing the full context
+# // This is only intended to be used by llama-server, breaking changes is expected
+# struct mtmd_caps {
+#     bool inp_vision;
+#     bool inp_audio;
+# };
+class mtmd_caps(Structure):
+    _fields_ = [
+        ("inp_vision", c_bool),
+        ("inp_audio", c_bool),
+    ]
+
+    if TYPE_CHECKING:
+        inp_vision: c_bool
+        inp_audio: c_bool
+
+
+# MTMD_API struct mtmd_caps mtmd_get_cap_from_file(const char * mmproj_fname);
+@ctypes_function_mtmd(
+    "mtmd_get_cap_from_file", [c_char_p], mtmd_caps)
+def mtmd_get_cap_from_file(mmproj_fname: c_char_p) -> mtmd_caps:
+    """
+    EXPERIMENTAL API to get mmproj's capabilities without initializing the full context.
+    This is only intended to be used by llama-server, breaking changes is expected
+    """
+    ...
+
+
 # // test function, to be used in test-mtmd-c-api.c
 # MTMD_API mtmd_input_chunks * mtmd_test_create_input_chunks(void);
 @ctypes_function_mtmd(

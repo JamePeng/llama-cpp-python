@@ -2763,6 +2763,8 @@ def llama_state_seq_load_file(
 ) -> int:
     ...
 
+# define LLAMA_STATE_SEQ_FLAGS_NONE 0
+LLAMA_STATE_SEQ_FLAGS_NONE = 0
 
 # // for backwards-compat
 LLAMA_STATE_SEQ_FLAGS_SWA_ONLY = 1
