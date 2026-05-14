@@ -58,7 +58,16 @@ from ._internals import (
 from ._ggml import (
     ggml_backend_cpu_buffer_type,
 )
-from ._logger import set_verbose
+from ._logger import (
+    configure_logging,
+    get_verbosity,
+    set_verbosity,
+    get_log_filters,
+    set_log_filters,
+    add_log_filters,
+    clear_log_filters,
+    reset_log_filters,
+)
 from ._utils import suppress_stdout_stderr
 
 
@@ -150,7 +159,11 @@ class Llama:
         type_v: Optional[int] = None,
         # Misc
         spm_infill: bool = False,
+        # Log
         verbose: bool = True,
+        verbosity: Optional[Union[int, str, bool]] = None,
+        log_filters: Optional[Sequence[str]] = None,
+        log_filters_case_sensitive: bool = True,
         # Extra Params
         **kwargs,  # type: ignore
     ):
@@ -235,11 +248,31 @@ class Llama:
             chat_handler: Optional chat handler to use when calling create_chat_completion.
             draft_model: Optional draft model to use for speculative decoding.
             tokenizer: Optional tokenizer to override the default tokenizer from llama.cpp.
-            verbose: Print verbose output to stderr.
             type_k: KV cache data type for K (default: f16)
             type_v: KV cache data type for V (default: f16)
             spm_infill: Use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this.
-
+            verbose: Backward-compatible boolean switch for native llama.cpp / ggml runtime logs.
+                False keeps only error-level native logs; True enables debug-level native logs.
+                If `verbosity` is provided, `verbosity` takes precedence over `verbose`.
+            verbosity: Fine-grained llama.cpp-style native runtime log verbosity.
+                Accepts 0-5, bool, or string aliases.
+                Numeric levels:
+                    0 = output only
+                    1 = error
+                    2 = warning
+                    3 = info
+                    4 = trace
+                    5 = debug
+                Use `verbosity=3` for llama.cpp-style default info logs.
+                `verbose=False` remains equivalent to error-only logging, while
+                `verbose=True` remains equivalent to debug logging.
+            log_filters: Optional substring filters for native runtime logs.
+                If any provided substring appears in a decoded backend log message,
+                that message is suppressed. By default, the logger may include built-in
+                filters for noisy low-level logs such as CUDA Graph reuse spam messages.
+                Pass an empty list to disable all substring filtering for this instance.
+            log_filters_case_sensitive: Whether `log_filters` should match case-sensitively.
+                Defaults to True for predictable low-level backend log filtering.
         Raises:
             ValueError: If the model path does not exist.
 
@@ -247,9 +280,15 @@ class Llama:
             A Llama instance.
         """
         self.verbose = verbose
+        self.verbosity = verbosity
         self._stack = contextlib.ExitStack()
 
-        set_verbose(verbose)
+        configure_logging(
+            verbose=verbose,
+            verbosity=verbosity,
+            log_filters=log_filters,
+            log_filters_case_sensitive=log_filters_case_sensitive,
+        )
 
         if not Llama.__backend_initialized:
             with suppress_stdout_stderr(disable=verbose):
@@ -794,6 +833,71 @@ class Llama:
             self.scores[: self.n_tokens, :].tolist(),
             maxlen=self._n_ctx if self._logits_all else 1,
         )
+
+    # Logger API
+
+    def set_verbosity(self, verbosity: Union[int, str, bool, None]) -> None:
+        """Set native llama.cpp / ggml runtime log verbosity for this process.
+
+        Levels:
+            0 = output only
+            1 = error
+            2 = warning
+            3 = info
+            4 = trace
+            5 = debug
+
+        Note:
+            Native backend logging is process-global because llama.cpp / ggml use
+            a global log callback. Changing this affects all Llama instances in
+            the current Python process.
+        """
+        set_verbosity(verbosity)
+        self.verbosity = get_verbosity()
+        self.verbose = self.verbosity >= 5
+
+
+    def get_verbosity(self) -> int:
+        """Return the current native runtime log verbosity."""
+        return get_verbosity()
+
+
+    def set_log_filters(
+        self,
+        filters: Sequence[str],
+        *,
+        case_sensitive: bool = True,
+    ) -> None:
+        """Replace substring filters for native runtime logs.
+
+        Any backend log message containing one of these substrings will be
+        suppressed. Pass an empty list to disable all substring filtering.
+
+        Note:
+            Native backend logging is process-global, so this affects all Llama
+            instances in the current Python process.
+        """
+        set_log_filters(filters, case_sensitive=case_sensitive)
+
+
+    def add_log_filters(self, filters: Sequence[str]) -> None:
+        """Append substring filters for native runtime logs."""
+        add_log_filters(filters)
+
+
+    def get_log_filters(self) -> List[str]:
+        """Return the current substring filters for native runtime logs."""
+        return get_log_filters()
+
+
+    def clear_log_filters(self) -> None:
+        """Clear all substring filters, including default filters."""
+        clear_log_filters()
+
+
+    def reset_log_filters(self) -> None:
+        """Restore default substring filters for native runtime logs."""
+        reset_log_filters()
 
     # LoRA / Adapter Management API
 
