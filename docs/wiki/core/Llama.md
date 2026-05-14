@@ -4,7 +4,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-05-06
+last_updated: 2026-05-15
 version_target: "latest"
 ---
 ```
@@ -54,6 +54,15 @@ Initialize the model and context. Note that model loading will immediately alloc
 | `ctx_checkpoints` | `int` | `16` | Max hybrid/recurrent context checkpoints to keep. Set to `0` to disable checkpointing for single-turn fast paths. |
 | `checkpoint_interval` | `int` | `4096` | Token interval for saving periodic Hybrid/Recurrent checkpoints during long prompt evaluation. |
 | `checkpoint_on_device` | `bool` | `False` | Store Hybrid/Recurrent checkpoint tensor payloads in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Reduces device-to-host copy overhead, but only one active checkpoint per `seq_id` is safe. |
+
+### Runtime Logging Parameters
+
+| Parameter | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `verbose` | `bool` | `True` | Backward-compatible boolean native logging switch. `False` keeps only error-level llama.cpp / ggml logs; `True` enables debug-level native logs. If `verbosity` is provided, `verbosity` takes precedence over `verbose`. |
+| `verbosity` | `Optional[Union[int, str, bool]]` | `None` | Fine-grained llama.cpp-style native runtime log verbosity. Numeric levels: `0=output`, `1=error`, `2=warning`, `3=info`, `4=trace`, `5=debug`. Use `verbosity=3` for llama.cpp-style default info logs. String aliases such as `"silent"`, `"quiet"`, `"info"`, `"trace"`, and `"debug"` are also accepted. |
+| `log_filters` | `Optional[Sequence[str]]` | `None` | Optional substring filters for native runtime logs. If any provided substring appears in a decoded backend log message, that message is suppressed. The default logger may include built-in filters for noisy low-level logs such as `CUDA Graph id %d reuse` messages. Pass an empty list `[]` to disable default substring filtering. |
+| `log_filters_case_sensitive` | `bool` | `True` | Whether `log_filters` should match case-sensitively. Defaults to `True` for predictable low-level backend log filtering. |
 
 *(Note: There are numerous additional RoPE/YaRN scaling parameters available for specialized context extension. Refer to the source code for the full list).*
 
@@ -111,6 +120,42 @@ model.eval(tokens=[1, 453, 234, 987], active_loras=[{"name": "coding_adapter", "
 ### `abort`
 Immediately halts an active generation loop safely.
 * **Usage**: Typically called from a separate monitoring thread (like a timer). When triggered, the running stream will exit and the final chunk will contain `"finish_reason": "abort"`.
+
+### Runtime Logging Control
+
+The `Llama` class exposes lightweight runtime helpers for adjusting native llama.cpp / ggml logging after initialization.
+
+> **Note:** Native backend logging is process-global because llama.cpp / ggml use a global log callback. Changing verbosity or log filters affects all `Llama` instances in the current Python process.
+
+* `set_verbosity(verbosity: Union[int, str, bool, None])`: Set native runtime log verbosity.
+* `get_verbosity() -> int`: Return the current native runtime log verbosity.
+* `set_log_filters(filters: Sequence[str], case_sensitive: bool = True)`: Replace substring filters for native runtime logs.
+* `add_log_filters(filters: Sequence[str])`: Append substring filters.
+* `get_log_filters() -> List[str]`: Return the current substring filters.
+* `clear_log_filters()`: Clear all substring filters, including default filters.
+* `reset_log_filters()`: Restore default substring filters.
+
+```python
+from llama_cpp import Llama
+
+llm = Llama(
+    model_path="models/qwen3.gguf",
+    verbosity=3,  # llama.cpp-style info logs
+)
+
+# Temporarily enable debug-level native logs.
+llm.set_verbosity(5)
+
+# Suppress noisy backend messages by substring.
+llm.add_log_filters([
+    "CUDA Graph",
+    "CUDA graph",
+    "clip_model_loader: tensor",
+])
+
+# Return to quiet error-only logging.
+llm.set_verbosity(1)
+```
 
 ### Dynamic LoRA Management
 The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dynamically per-generation or per-eval.
@@ -185,7 +230,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     llm.create_completion("Once upon a time", active_loras=[{"name": "story", "scale": 0.9}])
 
     # Use sql adapter
-    llm.create_completion("SELECT *", active_loras=[{"name": "sql_expert", "scale": 0.8}])v
+    llm.create_completion("SELECT *", active_loras=[{"name": "sql_expert", "scale": 0.8}])
     ```
 
 5. **Hybrid & Recurrent Architectures**:
@@ -321,6 +366,63 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
     run_controlled_generation("Explain quantum mechanics in a way that relates to bugs in code.", timeout_seconds=8)
     ```
+8. **Runtime Logging & Backend Noise Filtering**:
+
+   `Llama` supports fine-grained native llama.cpp / ggml logging through `verbosity`. This is more precise than the legacy `verbose` boolean flag.
+
+   ```python
+   from llama_cpp import Llama
+
+   # Legacy behavior:
+   # verbose=False -> error-only logs
+   llm_quiet = Llama(
+       model_path="models/qwen3.gguf",
+       verbose=False,
+   )
+
+   # Recommended precise logging:
+   # 0 = output, 1 = error, 2 = warning, 3 = info, 4 = trace, 5 = debug
+   llm = Llama(
+       model_path="models/qwen3.gguf",
+       verbosity=3,  # llama.cpp-style default info logs
+   )
+    ```
+
+    For low-level debugging, use `verbosity=5`. By default, the logger may suppress known noisy backend messages such as CUDA Graph reuse logs. Pass `log_filters=[]` to disable all substring filtering.
+
+    ```python
+    llm = Llama(
+        model_path="models/qwen3.gguf",
+        verbosity=5,
+        log_filters=[],  # show all debug logs, including normally filtered ones
+    )
+    ```
+
+    To suppress additional noisy messages, pass substring filters:
+
+    ```python
+    llm = Llama(
+        model_path="models/qwen3.gguf",
+        verbosity=5,
+        log_filters=[
+            "CUDA Graph id",
+            "clip_model_loader: tensor",
+            "ggml_cuda_graph_update_required",
+        ],
+    )
+    ```
+
+    You can also adjust logging at runtime:
+
+    ```python
+    llm.set_verbosity(5)
+    llm.add_log_filters(["llama_perf_context_print"])
+
+    # Later, return to warning-level logs.
+    llm.set_verbosity(2)
+    ```
+
+    **Important:** native backend logging is process-global. Runtime changes affect all `Llama` instances in the same Python process.
 
 ---
 
