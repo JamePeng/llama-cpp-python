@@ -72,16 +72,23 @@ if (LLAMA_BUILD)
     set(CMAKE_SKIP_RPATH FALSE)
 
     # Enable building of the common library
-    set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama.cpp: build common utils library" FORCE)
+    set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama: build common utils library" FORCE)
 
     # Enable build and link OpenSSL
-    set(LLAMA_OPENSSL ON CACHE BOOL "llama.cpp: build and link OpenSSL" FORCE)
+    set(LLAMA_OPENSSL ON CACHE BOOL "llama: use openssl to support HTTPS" FORCE)
 
     # Disable building of examples
-    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "llama.cpp: build examples" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "llama: build examples" FORCE)
 
     # Disable building of tests
-    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "llama.cpp: build tests" FORCE)
+    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "llama: build tests" FORCE)
+
+    # Disable building of server
+    set(LLAMA_BUILD_SERVER OFF CACHE BOOL "llama: build server example" FORCE)
+
+    # Disable build the embedded Web UI for server
+    set(LLAMA_BUILD_UI OFF CACHE BOOL "llama: build the embedded Web UI for server" FORCE)
+    set(LLAMA_USE_PREBUILT_UI OFF CACHE BOOL "llama: use prebuilt UI from HF Bucket when available (requires LLAMA_BUILD_UI=ON)" FORCE)
 
     # Disable building curl support
     set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: use libcurl to download model from an URL" FORCE)
