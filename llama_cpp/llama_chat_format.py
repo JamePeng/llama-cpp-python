@@ -5473,6 +5473,84 @@ class Qwen25VLChatHandler(MTMDChatHandler):
         # Use parent implementation
         return super().__call__(**kwargs)
 
+class Qwen3ASRChatHandler(MTMDChatHandler):
+    """
+    Handler for Qwen 3 ASR (Automatic Speech Recognition) models.
+
+    Features:
+    - Highly specialized for Speech-to-Text tasks.
+    - Aggregates all system text into a single cohesive system block.
+    - Drops user text entirely, extracting ONLY audio data into a unified user turn.
+    - Wraps audio with <|audio_start|><|audio_pad|>[DATA]<|audio_end|>.
+    - Integrated MTMD-style URL and Base64 injection for input_audio and audio_url.
+    """
+
+    DEFAULT_SYSTEM_MESSAGE = """
+    You are an advanced multilingual Speech-to-Text model. Accurately transcribe the audio into text in its original spoken language.
+    You should ignore background noise, filler words, and stutters where possible, and format the final output with correct grammar and capitalization.
+    """
+
+    QWEN3_ASR_BOS_TOKEN = "<|im_start|>"
+    QWEN3_ASR_PAD_TOKEN = "<|endoftext|>"
+    QWEN3_ASR_EOS_TOKEN = "<|im_end|>"
+
+
+    QWEN3_ASR_AUDIO_BOS_TOKEN = "<|audio_start|>"
+    QWEN3_ASR_AUDIO_PAD_TOKEN = "<|audio_pad|>"
+    QWEN3_ASR_AUDIO_EOS_TOKEN = "<|audio_end|>"
+
+    CHAT_FORMAT = (
+        "{%- set ns = namespace(system_text='') -%}\n"
+        "{%- for m in messages -%}\n"
+        "    {%- if m.role == 'system' -%}\n"
+        "        {%- if m.content is string -%}\n"
+        "            {%- set ns.system_text = ns.system_text + m.content -%}\n"
+        "        {%- else -%}\n"
+        "            {%- for c in m.content -%}\n"
+        "                {%- if c.type == 'text' and (c.text is defined) -%}\n"
+        "                    {%- set ns.system_text = ns.system_text + c.text -%}\n"
+        "                {%- endif -%}\n"
+        "            {%- endfor -%}\n"
+        "        {%- endif -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "\n"
+        "{%- set ns2 = namespace(audio_tokens='') -%}\n"
+        "{%- for m in messages -%}\n"
+        "    {%- if m.content is not string -%}\n"
+        "        {%- for c in m.content -%}\n"
+        "            {%- if c.type == 'audio' or ('audio' in c) or ('audio_url' in c) or c.type == 'input_audio' -%}\n"
+        "                {#- MTMD Audio Injection -#}\n"
+        "                {%- set audio_val = '' -%}\n"
+        "                {%- if c.type == 'audio_url' or 'audio_url' in c -%}\n"
+        "                    {%- set audio_val = c.audio_url if c.audio_url is string else c.audio_url.url -%}\n"
+        "                {%- elif c.type == 'input_audio' or 'input_audio' in c -%}\n"
+        "                    {%- set audio_val = c.input_audio if c.input_audio is string else ('data:audio/' + c.input_audio.format + ';base64,' + c.input_audio.data) -%}\n"
+        "                {%- endif -%}\n"
+        "                {%- set ns2.audio_tokens = ns2.audio_tokens + '<|audio_start|><|audio_pad|>' + audio_val + '<|audio_end|>' -%}\n"
+        "            {%- endif -%}\n"
+        "        {%- endfor -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "\n"
+        "{{- '<|im_start|>system\\n' + (ns.system_text if ns.system_text is string else '') + '<|im_end|>\\n' -}}\n"
+        "{{- '<|im_start|>user\\n' + ns2.audio_tokens + '<|im_end|>\\n' -}}\n"
+        "{%- if add_generation_prompt -%}\n"
+        "    {{- '<|im_start|>assistant\\n' -}}\n"
+        "{%- endif -%}\n"
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def __call__(self, **kwargs):
+        # Qwen3 models universally use `<|endoftext|>` and `<|im_end|>` as the stop token
+        kwargs['stop'] = [self.QWEN3_ASR_AUDIO_PAD_TOKEN, self.QWEN3_ASR_AUDIO_EOS_TOKEN]
+
+        if self.verbose:
+            print(f"{self.log_prefix} - Start processing Qwen3-ASR (Audio Only)")
+
+        return super().__call__(**kwargs)
 
 class Qwen3VLChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (
