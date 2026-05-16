@@ -4,7 +4,7 @@
 - **Author**: JamePeng
 - **Maintainer**: LLM-assisted documentation workflow
 - **Project**: [llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) wiki
-- **Last Modified**: 2026-05-02
+- **Last Modified**: 2026-05-16
 - **Version Target**: latest source code
 - **Schema Version**: 0.3
 
@@ -24,6 +24,7 @@
   - `llama_cpp.py`
   - `mtmd_cpp.py`
   - `_ggml.py`
+  - `_logger.py`
 - Never invent parameters or behavior. Always read the current source code before writing/updating a page.
 - Prefer documenting public and user-facing APIs first. Internal implementation details may be documented only when they help users understand behavior, extension points, debugging, or advanced usage.
 - All examples must be complete, runnable with the latest API, and include necessary imports.
