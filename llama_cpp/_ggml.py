@@ -1295,8 +1295,8 @@ def ggml_backend_load(path: ctypes.c_char_p) -> ggml_backend_reg_t:
 
 # // Unload a backend if loaded dynamically and unregister it
 # GGML_API void               ggml_backend_unload(ggml_backend_reg_t reg);
-@ggml_function("ggml_backend_load_all", [ctypes.c_void_p], None)
-def ggml_backend_load_all(reg: ggml_backend_reg_t):
+@ggml_function("ggml_backend_unload", [ctypes.c_void_p], None)
+def ggml_backend_unload(reg: ggml_backend_reg_t):
     """
     Unload a backend if loaded dynamically and unregister it
     """
