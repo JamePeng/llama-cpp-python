@@ -117,14 +117,38 @@ if (LLAMA_BUILD)
         set_target_properties(llama PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     endif()
 
-    # Define list of GGML targets to install
-    set(GGML_TARGETS
+    # Define list of LLAMA_CPP/GGML targets to install
+    set(LLAMA_CPP_TARGETS
         llama
+        llama-common
+    )
+    set(GGML_CORE_TARGETS
         ggml
         ggml-base
         ggml-blas
-        ggml-cann
         ggml-cpu
+        ggml-rpc
+    )
+
+    set(GGML_CPU_VARIANT_TARGETS
+        ggml-cpu-x64
+        ggml-cpu-sse42
+        ggml-cpu-sandybridge
+        ggml-cpu-ivybridge
+        ggml-cpu-piledriver
+        ggml-cpu-haswell
+        ggml-cpu-skylakex
+        ggml-cpu-cannonlake
+        ggml-cpu-cascadelake
+        ggml-cpu-cooperlake
+        ggml-cpu-icelake
+        ggml-cpu-alderlake
+        ggml-cpu-sapphirerapids
+        ggml-cpu-zen4
+    )
+
+    set(GGML_BACKEND_TARGETS
+        ggml-cann
         ggml-cuda
         ggml-hexagon
         ggml-hip
@@ -132,7 +156,6 @@ if (LLAMA_BUILD)
         ggml-musa
         ggml-opencl
         ggml-openvino
-        ggml-rpc
         ggml-sycl
         ggml-virtgpu
         ggml-vulkan
@@ -141,8 +164,12 @@ if (LLAMA_BUILD)
         ggml-zendnn
     )
 
-    # Loop through targets to avoid repetitive function calls
-    foreach(TARGET_NAME ${GGML_TARGETS})
+    foreach(TARGET_NAME
+        ${LLAMA_CPP_TARGETS}
+        ${GGML_CORE_TARGETS}
+        ${GGML_CPU_VARIANT_TARGETS}
+        ${GGML_BACKEND_TARGETS}
+    )
         llama_cpp_python_install_target(${TARGET_NAME})
     endforeach()
 
