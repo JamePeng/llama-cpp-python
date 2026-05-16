@@ -3839,47 +3839,36 @@ while also answering every question accurately, clearly, and step-by-step when a
         )
 
 class GenericMTMDChatHandler(MTMDChatHandler):
+    KNOWN_MEDIA_TAGS = [
+        "<|image_pad|>",
+        "<|audio_pad|>",
+        "<|video_pad|>",
+        "<|image|>",
+        "<|audio|>",
+        "<|video|>",
+        "[IMG]"
+    ]
+
     def __init__(
         self,
         gguf_metadata: Dict[str, Any],
         clip_model_path: str,
-        model_arch: Optional[str] = None,
         verbose: bool = True,
         **kwargs
     ) -> None:
         self.model_metadata = gguf_metadata
-
         self.chat_format = self.model_metadata.get("tokenizer.chat_template", None)
-        self.arch = self.model_metadata.get("general.architecture", None) if model_arch is None else model_arch
 
         if verbose:
             print(f"Got chat template from model:\n```jinja\n{self.chat_format}\n```", flush = True)
-        
-        if self.arch is None:
-            if verbose:
-                print("Unknown model architecture. Will use general/most-common tags.")
-            
-            self.arch = "unknown"
 
         if self.chat_format is None:
             raise ValueError("Failed to get model chat template automatically.")
         
         super().__init__(clip_model_path = clip_model_path, verbose = verbose, **kwargs)
-        
-        if self.arch in ["unknown", "qwen3vl", "qwen35moe", "qwen35"]:
-            self._chat_format_parser_tags += ["<|image_pad|>", "<|audio_pad|>", "<|video_pad|>"]
-        elif self.arch in ["gemma4"]:
-            self._chat_format_parser_tags += ["<|image|>", "<|audio|>", "<|video|>"]
-        elif self.arch in ["mistral3", "mistral4", "deepseek2"]:
-            self._chat_format_parser_tags += ["[IMG]"]
-        elif verbose:
-            print("Warning: Could not determine chat format parser tags.", flush = True)
     
     def __call__(self, **kwargs):
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
+        self._chat_format_parser_tags = [tag for tag in self.KNOWN_MEDIA_TAGS if tag in self.chat_format]
 
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")

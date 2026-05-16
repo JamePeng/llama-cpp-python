@@ -618,7 +618,6 @@ class Llama:
             self.chat_handler = llama_chat_format.GenericMTMDChatHandler(
                 gguf_metadata = self.metadata,
                 clip_model_path = clip_model_path,
-                model_arch = None,
                 verbose = self.verbose,
                 **chat_handler_kwargs
             )
