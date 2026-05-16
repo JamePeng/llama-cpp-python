@@ -57,6 +57,8 @@ from ._internals import (
 )
 from ._ggml import (
     ggml_backend_cpu_buffer_type,
+    ggml_backend_load_all_from_path,
+    ggml_backend_reg_count
 )
 from ._logger import (
     configure_logging,
@@ -290,9 +292,40 @@ class Llama:
             log_filters_case_sensitive=log_filters_case_sensitive,
         )
 
+        # llama.cpp / ggml backend initialization is process-global.
+        # Run it once before loading any model.
         if not Llama.__backend_initialized:
             with suppress_stdout_stderr(disable=verbose):
                 llama_cpp_lib.llama_backend_init()
+
+                # Wheels built with `GGML_BACKEND_DL` ship ggml backends as separate
+                # dynamic libraries under llama_cpp/lib, for example:
+                #
+                #   ggml-cpu-x64.dll
+                #   ggml-cpu-haswell.dll
+                #   ggml-cpu-alderlake.dll
+                #   ggml-cuda.dll
+                #
+                # With the dynamic backend layout, llama_backend_init() initializes
+                # the global backend system but does not necessarily register every
+                # packaged backend. Loading the package lib directory ensures ggml can
+                # discover CPU variants and optional accelerator backends before model
+                # loading.
+                lib_dir = Path(llama_cpp_lib.__file__).resolve().parent / "lib"
+
+                if not lib_dir.exists():
+                    raise FileNotFoundError(f"Llama.__init__: llama_cpp lib directory not found: {lib_dir}")
+
+                # Load all dynamic ggml backend plugins from the packaged lib directory.
+                ggml_backend_load_all_from_path(
+                    ctypes.c_char_p(str(lib_dir).encode("utf-8"))
+                )
+
+                # Print the number of backend registrations to confirm whether the DLL is loaded.
+                if self.verbose:
+                    count = ggml_backend_reg_count()
+                    print(f"Llama.__init__: Loaded ggml backend registry count: {count}", file=sys.stderr)
+
             Llama.__backend_initialized = True
 
         if isinstance(numa, bool):
