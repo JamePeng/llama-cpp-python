@@ -1,0 +1,191 @@
+name: Build Wheels (CU131) for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_wheels:
+    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu131
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["windows-2022"]
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        cuda: ["13.1.1"]
+        cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real"]
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      CUDAVER: ${{ matrix.cuda }}
+      CUDAARCHVER: ${{ matrix.cudaarch }}
+      MAX_JOBS: 12
+
+    steps:
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install CUDA ${{ matrix.cuda }}
+        uses: Jimver/cuda-toolkit@v0.2.35
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda }}
+          use-github-cache: false
+
+      - name: Install uv and Python ${{ matrix.pyver }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          git config --system core.longpaths true
+          uv pip install --upgrade build setuptools wheel packaging
+
+      - name: Setup MSVC environment for nvcc
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          echo PATH=%PATH%>>%GITHUB_ENV%
+          echo INCLUDE=%INCLUDE%>>%GITHUB_ENV%
+          echo LIB=%LIB%>>%GITHUB_ENV%
+          echo LIBPATH=%LIBPATH%>>%GITHUB_ENV%
+
+      - name: Build wheel
+        run: |
+          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.', '')
+
+          $env:CUDA_HOME = $env:CUDA_PATH
+          $env:CUDA_TOOLKIT_ROOT_DIR = $env:CUDA_PATH
+          $env:VERBOSE = '1'
+
+          # Force CMake to use Ninja + LLVM/Clang instead of the default
+          # Visual Studio generator. MSVC skips several GGML CPU all-variant
+          # backends, such as ivybridge, piledriver, cooperlake, zen4, and
+          # sapphirerapids.
+          $env:CMAKE_GENERATOR = 'Ninja Multi-Config'
+
+          $toolchainCandidates = @(
+            (Join-Path $env:GITHUB_WORKSPACE "vendor\llama.cpp\cmake\x64-windows-llvm.cmake"),
+            (Join-Path $env:GITHUB_WORKSPACE "cmake\x64-windows-llvm.cmake")
+          )
+
+          $toolchainFile = $toolchainCandidates |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (!$toolchainFile) {
+            Write-Error "Toolchain file not found. Checked: $($toolchainCandidates -join ', ')"
+            exit 1
+          }
+
+          $toolchainFile = $toolchainFile.Replace('\', '/')
+          Write-Output "Using toolchain file: $toolchainFile"
+
+          # Build one CUDA wheel with dynamic GGML backends:
+          # - GGML_BACKEND_DL enables runtime-loadable backend DLLs.
+          # - GGML_CPU_ALL_VARIANTS builds CPU variant DLLs such as ggml-cpu-x64,
+          #   ggml-cpu-haswell, ggml-cpu-alderlake, etc.
+          # - GGML_NATIVE=OFF avoids binding the wheel to the runner CPU.
+
+          # Suppress CUDA compiler warnings
+          $cudaDiagSuppress = '--diag-suppress=177,221,550'
+
+          $cmakeArgs = @(
+            # Windows toolchain / common runtime
+            '-DCMAKE_TOOLCHAIN_FILE=vendor/llama.cpp/cmake/x64-windows-llvm.cmake'
+            '-DLLAMA_BUILD_BORINGSSL=ON'
+
+            # Disable non-wheel targets
+            '-DLLAMA_BUILD_EXAMPLES=OFF'
+            '-DLLAMA_BUILD_TESTS=OFF'
+            '-DLLAMA_BUILD_TOOLS=OFF'
+            '-DLLAMA_BUILD_SERVER=OFF'
+            '-DLLAMA_BUILD_UI=OFF'
+            '-DLLAMA_USE_PREBUILT_UI=OFF'
+            '-DLLAMA_CURL=OFF'
+
+            # GGML dynamic backend layout
+            '-DGGML_CPU=ON'
+            '-DGGML_CUDA=ON'
+            '-DGGML_NATIVE=OFF'
+            '-DGGML_BACKEND_DL=ON'
+            '-DGGML_CPU_ALL_VARIANTS=ON'
+            '-DGGML_OPENMP=ON'
+
+            # CUDA backend
+            "-DCMAKE_CUDA_ARCHITECTURES=$env:CUDAARCHVER"
+            '-DGGML_CUDA_FORCE_MMQ=ON'
+            '-DCUDA_SEPARABLE_COMPILATION=ON'
+            "-DCMAKE_CUDA_FLAGS=$cudaDiagSuppress"
+
+            # Build behavior
+            "-DCMAKE_BUILD_PARALLEL_LEVEL=$env:MAX_JOBS"
+            '-DENABLE_CCACHE=ON'
+          )
+
+          $env:CMAKE_ARGS = $cmakeArgs -join ' '
+          Write-Output "CMAKE_ARGS=$env:CMAKE_ARGS"
+
+          python -m build --wheel
+
+          # Check if wheel was built
+          if (!(Test-Path '.\dist\*.whl')) {
+            Write-Error "No wheel built in dist/ directory"
+            exit 1
+          }
+
+          $wheelFile = Get-Item '.\dist\*.whl' | Select-Object -First 1
+
+          # Wheel filename format:
+          #   name-version-python_tag-abi_tag-platform_tag.whl
+          $parts = $wheelFile.Name.Split('-')
+          $distName = $parts[0]
+          $version  = $parts[1]
+          $pyTag    = $parts[2]
+          $abiTag   = $parts[3]
+          $platTag  = $parts[4]
+
+          # CPU all-variants is now an internal runtime layout detail.
+          $newVersion = "$version+cu$cudaVersion"
+          $newName = "$distName-$newVersion-$pyTag-$abiTag-$platTag"
+
+          # Rename wheel file
+          Rename-Item -Path $wheelFile.FullName -NewName $newName
+          Write-Output "Renamed wheel to: $newName"
+
+          # Write the build tag to the output
+          Write-Output "CUDA_VERSION=$cudaVersion" >> $env:GITHUB_ENV
+          Write-Output "TAG_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Get current date
+        id: get-date
+        run: |
+          $currentDate = Get-Date -UFormat "%Y%m%d"
+          Write-Output "BUILD_DATE=$currentDate" >> $env:GITHUB_ENV
+
+      - name: Create release
+        if: always() && env.TAG_VERSION != ''
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*
+          # Set tag_name to v<tag>-cu<cuda_version>-win-<date>
+          tag_name: v${{ env.TAG_VERSION }}-cu${{ env.CUDA_VERSION }}-win-${{ env.BUILD_DATE }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
