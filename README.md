@@ -845,6 +845,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [lfm2.5-vl](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF) | `LFM25VLChatHandler` | `lfm2.5-vl` |
 | [paddleocr-vl-1.5](https://huggingface.co/JamePeng2023/PaddleOCR-VL-1.5-GGUF) | `PaddleOCRChatHandler` | `paddleocr` |
 | [qwen2.5-vl](https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
+| [qwen3-asr](https://huggingface.co/JamePeng2023/Qwen3-ASR-1.7B-GGUF) | `Qwen3ASRChatHandler` | `qwen3-asr` |
 | [qwen3-vl](https://huggingface.co/unsloth/Qwen3-VL-8B-Thinking-GGUF) | `Qwen3VLChatHandler` | `qwen3-vl` |
 | [qwen3.5](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF) | `Qwen35ChatHandler` | `qwen3.5` |
 | [qwen3.6](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | `Qwen35ChatHandler` | `qwen3.6` |
@@ -1069,6 +1070,111 @@ res = llm.create_chat_completion(
 print(res["choices"][0]["message"]["content"])
 
 ```
+
+</details>
+
+## Speech Recognition With Qwen3-ASR (Speech-to-Text)
+
+The `Qwen3ASRChatHandler` is specifically designed for the Qwen3 Automatic Speech Recognition (ASR) models. Unlike standard multimodal models, this handler aggregates system prompts for instructions and automatically extracts audio data from the user's message, ignoring any user text.
+
+> **⚠️ Important Note on Quantization:** > For Qwen3-ASR models, it is highly recommended to use the **BF16** version of the multimodal projector (`mmproj`). Other quantizations are known to cause severe audio degradation.
+
+**Example Code**: <details>
+
+```python
+from llama_cpp import Llama
+from llama_cpp.llama_chat_format import Qwen3ASRChatHandler
+import base64
+import os
+
+# 1. Define paths to the model and the BF16 multimodal projector
+MODEL_PATH = r"./Qwen3-ASR-1.7B-BF16.gguf"
+MMPROJ_PATH = r"./mmproj-Qwen3-ASR-1.7b-BF16.gguf"
+
+# 2. Initialize the Llama model with the dedicated ASR handler
+llm = Llama(
+    model_path=MODEL_PATH,
+    chat_handler=Qwen3ASRChatHandler(
+        clip_model_path=MMPROJ_PATH,
+        verbose=False,
+    ),
+    n_gpu_layers=-1,
+    n_ctx=10240,
+    verbose=False,
+    verbosity=0
+)
+
+# 3. Helper function to encode audio files into OpenAI-compatible payloads
+_MEDIA_MIME_TYPES = {
+    '.wav':  ('audio', 'wav'),
+    '.mp3':  ('audio', 'mp3'),
+}
+
+def build_media_payload(file_path: str) -> dict:
+    """Reads a local audio file and converts it into the LLM input structure."""
+    if not os.path.isfile(file_path):
+        raise FileNotFoundError(f"Media file not found: {file_path}")
+
+    extension = os.path.splitext(file_path)[1].lower()
+    media_category, mime_or_format = _MEDIA_MIME_TYPES.get(extension, ('unknown', 'application/octet-stream'))
+
+    if media_category == 'unknown':
+        print(f"Warning: Unknown extension '{extension}'.")
+
+    # Read and Base64 encode the file
+    with open(file_path, "rb") as f:
+        encoded_data = base64.b64encode(f.read()).decode("utf-8")
+
+    if media_category == 'audio':
+        return {
+            "type": "input_audio",
+            "input_audio": {
+                "data": encoded_data,
+                "format": mime_or_format
+            }
+        }
+    else:
+        return {"type": "text", "text": f"[Attached unsupported file: {file_path}]"}
+
+
+# ========================
+# Main Inference Section
+# ========================
+
+media_paths = ["./audio/test.wav"]
+user_content = [build_media_payload(path) for path in media_paths]
+
+# 4. Generate the transcription
+response = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "system",
+            "content": (
+                "You are an advanced multilingual Speech-to-Text model. "
+                "Accurately transcribe the audio into text in its original spoken language. "
+                "You should ignore background noise, filler words, and stutters where possible, "
+                "and format the final output with correct grammar and capitalization."
+            )
+        },
+        {
+            "role": "user",
+            "content": user_content
+        }
+    ],
+    temperature=1.0,
+    top_p=0.95,
+    top_k=64,
+    max_tokens=10240,
+)
+
+print(f"Transcribe: {response['choices'][0]['message']['content']}")
+
+```
+
+#### How it works:
+
+* **`input_audio` Schema:** The script reads the local `.wav` or `.mp3` file, encodes it in Base64, and wraps it in an OpenAI-compatible `"type": "input_audio"` dictionary.
+* **System Prompt:** Because the Qwen3-ASR template strips out user text, all instructions (like translation requests or formatting rules) **must** be placed in the `"system"` role.
 
 </details>
 
