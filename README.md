@@ -29,6 +29,7 @@ This package provides:
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
+        - [Speech Recognition With Qwen3-ASR (Speech-to-Text)](https://github.com/JamePeng/llama-cpp-python#speech-recognition-with-qwen3-asr-speech-to-text)
         - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--text)
     - [Embeddings & Reranking (GGUF)](https://github.com/JamePeng/llama-cpp-python#embeddings--reranking-gguf)
         - [1. Text Embeddings (Vector Search)](https://github.com/JamePeng/llama-cpp-python#1-text-embeddings-vector-search)
