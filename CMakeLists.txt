@@ -11,13 +11,12 @@ set(CMAKE_INSTALL_LIBDIR llama_cpp/lib CACHE PATH "" FORCE)
 set(CMAKE_INSTALL_INCLUDEDIR llama_cpp/include CACHE PATH "" FORCE)
 
 
-# Helper function to install targets to Python package directories
+# Install a built target into the Python package runtime directory.
 function(llama_cpp_python_install_target target)
     if(NOT TARGET ${target})
         return()
     endif()
 
-    # Define install destinations to avoid code duplication
     set(INSTALL_DIRS
         "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
         "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
@@ -33,6 +32,9 @@ function(llama_cpp_python_install_target target)
             RESOURCE DESTINATION ${DIR}
         )
 
+        # Copy runtime DLL dependencies of this target when available.
+        # This does not replace explicit installation of dynamic backend
+        # targets such as ggml-cpu-*; those are installed as targets below.
         # Automatically handle Windows DLL installation for each target
         if (WIN32)
             install(
@@ -56,6 +58,40 @@ function(llama_cpp_python_install_target target)
         )
     endif()
 endfunction()
+
+
+# Remove development-only artifacts from Python wheel runtime directories.
+#
+# Upstream install rules may place CMake package files, pkg-config files, and
+# Windows import libraries under llama_cpp/lib because CMAKE_INSTALL_LIBDIR is
+# redirected there for wheel builds. They are not needed at runtime.
+function(llama_cpp_python_cleanup_dev_files)
+    if(NOT WIN32)
+        return()
+    endif()
+
+    set(INSTALL_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
+        "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
+    )
+
+    foreach(DIR ${INSTALL_DIRS})
+        install(CODE "
+            if(EXISTS \"${DIR}\")
+                file(GLOB LLAMA_CPP_IMPORT_LIBS \"${DIR}/*.lib\")
+                if(LLAMA_CPP_IMPORT_LIBS)
+                    file(REMOVE \${LLAMA_CPP_IMPORT_LIBS})
+                endif()
+
+                file(REMOVE_RECURSE
+                    \"${DIR}/cmake\"
+                    \"${DIR}/pkgconfig\"
+                )
+            endif()
+        ")
+    endforeach()
+endfunction()
+
 
 if (LLAMA_BUILD)
     set(BUILD_SHARED_LIBS "On")
@@ -204,4 +240,8 @@ if (LLAMA_BUILD)
 
         llama_cpp_python_install_target(mtmd)
     endif()
+
+    # Run after all runtime targets are installed, including mtmd.
+    llama_cpp_python_cleanup_dev_files()
+
 endif()
