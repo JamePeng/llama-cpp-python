@@ -4,7 +4,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-05-15
+last_updated: 2026-05-16
 version_target: "latest"
 ---
 ```
@@ -423,6 +423,10 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     ```
 
     **Important:** native backend logging is process-global. Runtime changes affect all `Llama` instances in the same Python process.
+
+    **verbose=False** vs. **verbosity=0**: These have distinct behaviors.
+    - `verbose=False` silences Python wrapper prints but not backend diagnostics; like `if self.verbose: print()`
+    - `verbosity=0` silences all backend non-error output.
 
 ---
 
