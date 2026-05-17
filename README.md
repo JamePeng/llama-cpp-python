@@ -162,12 +162,41 @@ pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python
 
 **Pre-built Wheel (New)**
 
-It is also possible to install a pre-built wheel with CUDA support. As long as your system meets some requirements:
+It is also possible to install a pre-built wheel with CUDA support. Make sure your system meets the following requirements:
 
-- CUDA Version is 12.4, 12.6, 12.8 or 13.0
-- Python Version is 3.10, 3.11, 3.12, 3.13 or 3.14
-- Basic version(Default): A version compiled without using AVX instructions (for compatibility with CPU platforms lacking AVX instructions or with AVX instruction compatibility issues).
-- AVX2 version: A version compiled using AVX2 instructions.
+- CUDA version: 12.4, 12.6, 12.8, or 13.1
+- Python version: 3.10, 3.11, 3.12, 3.13, or 3.14
+- Starting with `0.3.39-preview`, Windows and Linux x64 wheels are built with `GGML_BACKEND_DL` and `GGML_CPU_ALL_VARIANTS`.
+
+This means CPU backends are shipped as dynamically loaded runtime libraries under:
+
+```text
+site-packages/llama_cpp/lib
+````
+
+Supported CPU backend variants may include:
+
+* `ggml-cpu-x64`
+* `ggml-cpu-sse42`
+* `ggml-cpu-sandybridge`
+* `ggml-cpu-ivybridge`
+* `ggml-cpu-piledriver`
+* `ggml-cpu-haswell`
+* `ggml-cpu-skylakex`
+* `ggml-cpu-cannonlake`
+* `ggml-cpu-cascadelake`
+* `ggml-cpu-cooperlake`
+* `ggml-cpu-icelake`
+* `ggml-cpu-alderlake`
+* `ggml-cpu-sapphirerapids`
+* `ggml-cpu-zen4`
+
+The old `Basic` and `AVX2` wheel variants are no longer required for the new dynamic-backend wheels. GGML can load the compatible CPU backend at runtime, which improves CPU instruction-set compatibility across different x64 machines.
+
+Before `0.3.39-preview`:
+
+* `Basic`: compiled without AVX instructions for maximum compatibility.
+* `AVX2`: compiled with AVX2 instructions for newer CPUs.
 
 Check the releases page:
 https://github.com/JamePeng/llama-cpp-python/releases
@@ -1695,17 +1724,20 @@ This error is primarily caused by the following reasons:
 
 3. **CUDA Version Mismatch:** Regarding `ggml-cuda.dll`, the CUDA version of the pre-compiled library does not match your local CUDA Toolkit version (e.g., a mismatch between CUDA 12.X and CUDA 13.X). It is recommended to fully configure your local CUDA Toolkit environment (ensuring the PATH for dynamic libraries is set and the nvcc compiler is recognized). Then, clone the code and compile it locally.
 
-### Why are libraries compiled by other authors only around 100MB, while your pre-compiled versions range from 300MB to 900MB?
+### Why are libraries compiled by other authors only around 100MB, while your pre-compiled versions are 300MB or larger?
 
-My GitHub Actions script is configured to compile against **all supported CUDA compute architectures** for each specific CUDA version I maintain.
+My GitHub Actions workflow is configured to compile against multiple supported CUDA compute architectures for each CUDA version I maintain.
 
 For example:
 
-* **CUDA 13.0.2:** Currently supports architectures from SM75 (Turing) up to SM120a (Blackwell).
-* **CUDA 12.4.1 and 12.6.3:** Support older architectures as well, such as SM70.
-* *(Note: The Windows versions are built to support every architecture compatible with the respective CUDA version).*
+- **CUDA 13.1 and CUDA 12.8:** currently target architectures from SM75 (Turing) up to SM120a / SM121a (Blackwell generation, depending on CUDA support).
+- **CUDA 12.4 and CUDA 12.6:** currently target architectures from SM70 (Volta) up to SM90 (Hopper).
 
-The reason libraries from other authors are smaller is that they often **only compile for a single architecture** (e.g., targeting only the RTX 30 series [SM86] or the RTX 40 series [SM89]). To maximize convenience, I provide an **integrated compilation** covering a wide range of hardware; you simply need to select the CUDA version that matches your environment to load and run it.
+Libraries from other authors are often smaller because they may only compile for a single architecture, such as RTX 30 series (`SM86`) or RTX 40 series (`SM89`). To maximize compatibility, these wheels include CUDA kernels for a wider range of GPUs. You only need to choose the wheel that matches your installed CUDA version.
+
+ - **Updated 2026-05-16 / 2026-05-17:** Starting with `0.3.39-preview`, Windows wheels support the `GGML_BACKEND_DL` + `GGML_CPU_ALL_VARIANTS` runtime layout. CPU backend libraries such as `ggml-cpu-*.dll` are packaged under `site-packages/llama_cpp/lib` and loaded dynamically at runtime. This allows GGML to select a compatible CPU backend automatically, reducing the need for separate `Basic` / `AVX2` wheel variants.
+
+ - Note: for full x64 CPU variant coverage on Windows, LLVM/Clang builds are preferred. MSVC may skip some variants such as `zen4`, `cooperlake`, or `sapphirerapids` due to compiler intrinsic support limitations.
 
 ### Quick tips for develop/user (continuously updated):
 
