@@ -1,23 +1,24 @@
-name: Build Wheels(CU126) for Linux # Workflow name
+name: Build Wheels (CU126) for Linux
 
 on:
-  workflow_dispatch: # Manual trigger
+  workflow_dispatch:
 
 permissions:
   contents: write
 
 jobs:
   build_wheels:
-    name: Build Wheel ${{ matrix.os }} ${{ matrix.pyver }} ${{ matrix.cuda }} ${{ matrix.releasetag == 'wheels' && 'AVX2' || matrix.releasetag }}
+    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu126
     runs-on: ubuntu-22.04
     container: nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+
     strategy:
-      matrix: # Define the build matrix directly here
+      fail-fast: false
+      matrix:
         os: ["ubuntu-22.04"]
         pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"] # Python versions
         cuda: ["12.6.3"]
-        releasetag: ["Basic"] # Controls CMAKE_ARGS for CPU features (even in CUDA build)
-        cudaarch: ["all"] # Controls target CUDA architectures for nvcc
+        cudaarch: ["70-real;75-real;80-real;86-real;87-real;89-real"]
 
     defaults:
       run:
@@ -25,108 +26,131 @@ jobs:
 
     env:
       CUDAVER: ${{ matrix.cuda }}
-      AVXVER: ${{ matrix.releasetag }}
       CUDAARCHVER: ${{ matrix.cudaarch }}
+      MAX_JOBS: 12
 
     steps:
       - name: Install dependencies
         run: |
-            apt update
-            apt install -y build-essential ccache cmake curl git libgomp1 libjpeg-dev libssl-dev
+          apt update
+          apt install -y \
+            build-essential \
+            ccache \
+            cmake \
+            curl \
+            git \
+            libgomp1 \
+            libjpeg-dev \
+            libssl-dev \
+            ninja-build
 
-      - uses: actions/checkout@v6 # Checkout code
+      - name: Checkout
+        uses: actions/checkout@v6
         with:
-          submodules: "recursive"
+          submodules: recursive
 
-      # from astral-sh/setup-uv
-      - name: Install the latest version of uv and set the python version
+      - name: Install uv and Python ${{ matrix.pyver }}
         uses: astral-sh/setup-uv@v7
         with:
           python-version: ${{ matrix.pyver }}
           activate-environment: true
           enable-cache: true
 
-      - run: nvcc -V
+      - name: Show CUDA version
+        run: nvcc -V
 
-      - name: Build Wheel With Cmake # Main build step: configures and builds the wheel
+      - name: Build wheel
         env:
           LD_LIBRARY_PATH: "/usr/local/cuda/lib64:/usr/local/cuda/compat:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
-          VERBOSE: 1 # Enable verbose build output
-          CUDA_HOME: "/usr/local/cuda/" # Set CUDA_HOME
-          CUDA_PATH: "${PATH}"
-          CUDA_TOOLKIT_ROOT_DIR: "/usr/local/cuda/" # Set CUDA_TOOLKIT_ROOT_DIR
+          VERBOSE: "1"
+          CUDA_HOME: "/usr/local/cuda"
+          CUDA_PATH: "/usr/local/cuda"
+          CUDA_TOOLKIT_ROOT_DIR: "/usr/local/cuda"
         run: |
-          echo "VERBOSE=1" >> $GITHUB_ENV # Enable verbose build output for troubleshooting
-          find /usr/ -name 'libcuda.so.*'
-          find /usr/ -name 'libcudart.so.*'
-          echo $LD_LIBRARY_PATH
+          set -euo pipefail
 
-          # Add project-specific and feature flags
-          CMAKE_ARGS="-DGGML_CUDA=on -DCMAKE_CUDA_ARCHITECTURES='70-real;75-real;80-real;86-real;87-real;89-real'"
-          CMAKE_ARGS="-DGGML_CUDA_FORCE_MMQ=on ${CMAKE_ARGS}"
-          CMAKE_ARGS="${CMAKE_ARGS} -DLLAMA_CURL=off -DLLAMA_OPENSSL=on"
-
-          if [ "${AVXVER}" = "AVX" ]; then
-            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=off -DGGML_AVX512=off -DGGML_FMA=off -DGGML_F16C=off"
-          fi
-          if [ "${AVXVER}" = "AVX2" ]; then
-            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX512=off"
-          fi
-          if [ "${AVXVER}" = "AVXVNNI" ]; then
-            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX=on -DGGML_AVX2=on -DGGML_AVX_VNNI=on"
-          fi
-          # if [ "${AVXVER}" = "AVX512" ]; then
-          #   CMAKE_ARGS="${CMAKE_ARGS} -DGGML_AVX512=on"
-          # fi
-          # Basic options for compiling without AVX instructions
-          if [ "${AVXVER}" = "Basic" ]; then
-            CMAKE_ARGS="${CMAKE_ARGS} -DGGML_NATIVE=off -DGGML_AVX=off -DGGML_AVX2=off -DGGML_AVX_VNNI=off -DGGML_AVX512=off -DGGML_AVX512_VBMI=off -DGGML_AVX512_VNNI=off -DGGML_AVX512_BF16=off -DGGML_FMA=off -DGGML_F16C=off"
-          fi
-
-          # Export CMAKE_ARGS environment variable so the python -m build command can use it
-          echo ${CMAKE_ARGS}
-          echo "CMAKE_ARGS=${CMAKE_ARGS}" >> $GITHUB_ENV
-
-          # Run the Python build command to generate the wheel
-          uv pip install build setuptools wheel packaging
-          CMAKE_ARGS=${CMAKE_ARGS} uv build --wheel
-
-          # --- Post-build steps to get info for rename wheel file and release tag ---
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+          find /usr/ -name 'libcuda.so.*' || true
+          find /usr/ -name 'libcudart.so.*' || true
 
           cuda_ver_short=$(echo "${CUDAVER}" | cut -d'.' -f 1,2 | sed 's/\.//g')
-          avx_ver=$(echo "${AVXVER}" | tr '[:upper:]' '[:lower:]')
+
+          # Build one CUDA wheel with dynamic GGML backends:
+          # - GGML_BACKEND_DL enables runtime-loadable backend shared libraries.
+          # - GGML_CPU_ALL_VARIANTS builds CPU variant backends when supported.
+          # - GGML_NATIVE=OFF avoids binding the wheel to the CI runner CPU.
+          CMAKE_ARGS_ARRAY=(
+            "-G Ninja"
+
+            # Disable non-wheel targets.
+            "-DLLAMA_BUILD_EXAMPLES=OFF"
+            "-DLLAMA_BUILD_TESTS=OFF"
+            "-DLLAMA_BUILD_TOOLS=OFF"
+            "-DLLAMA_BUILD_SERVER=OFF"
+            "-DLLAMA_BUILD_UI=OFF"
+            "-DLLAMA_USE_PREBUILT_UI=OFF"
+            "-DLLAMA_CURL=OFF"
+            "-DLLAMA_OPENSSL=ON"
+
+            # GGML dynamic backend layout.
+            "-DGGML_CPU=ON"
+            "-DGGML_CUDA=ON"
+            "-DGGML_NATIVE=OFF"
+            "-DGGML_BACKEND_DL=ON"
+            "-DGGML_CPU_ALL_VARIANTS=ON"
+            "-DGGML_OPENMP=ON"
+
+            # CUDA backend.
+            "-DCMAKE_CUDA_ARCHITECTURES=${CUDAARCHVER}"
+            "-DGGML_CUDA_FORCE_MMQ=ON"
+            "-DCUDA_SEPARABLE_COMPILATION=ON"
+            "-DCMAKE_CUDA_FLAGS=--diag-suppress=177,221,550"
+
+            # Build behavior.
+            "-DCMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}"
+            "-DGGML_CCACHE=ON"
+            "-DENABLE_CCACHE=ON"
+          )
+
+          CMAKE_ARGS="${CMAKE_ARGS_ARRAY[*]}"
+          echo "CMAKE_ARGS=${CMAKE_ARGS}"
+
+          uv pip install --upgrade build setuptools wheel packaging
+          CMAKE_ARGS="${CMAKE_ARGS}" uv build --wheel
+
+          if ! ls dist/*.whl >/dev/null 2>&1; then
+            echo "No wheel built in dist/ directory"
+            exit 1
+          fi
 
           wheel_path=$(ls dist/*.whl | head -n 1)
           filename=$(basename "$wheel_path")
 
-          # Split wheel filename
+          # Wheel filename format:
+          #   name-version-python_tag-abi_tag-platform_tag.whl
           IFS='-' read -r dist_name version py_tag abi_tag plat_tag <<< "$filename"
 
-          new_version="${version}+cu${cuda_ver_short}.${avx_ver}"
+          # CPU all-variants is now an internal runtime layout detail.
+          new_version="${version}+cu${cuda_ver_short}"
           new_filename="${dist_name}-${new_version}-${py_tag}-${abi_tag}-${plat_tag}"
 
-          # Rename wheel file
           mv "$wheel_path" "dist/$new_filename"
           echo "Renamed wheel to: $new_filename"
 
-          echo "CUDA_VERSION=$cuda_ver_short" >> $GITHUB_ENV # Store short CUDA version in env
-          echo "TAG_VERSION=$version" >> $GITHUB_ENV # Store version in env for release step
+          echo "CUDA_VERSION=$cuda_ver_short" >> "$GITHUB_ENV"
+          echo "TAG_VERSION=$version" >> "$GITHUB_ENV"
 
-      - name: Get Current Date # Step to get current date for the release tag
+      - name: Get current date
         id: get-date
         run: |
-          # Get date in YYYYMMDD format using bash date command
           currentDate=$(date +%Y%m%d)
-          # Store the date in environment variable for the release step
-          echo "BUILD_DATE=$currentDate" >> $GITHUB_ENV
+          echo "BUILD_DATE=$currentDate" >> "$GITHUB_ENV"
 
-      - uses: softprops/action-gh-release@v3 # Action to create a GitHub Release
+      - name: Create release
+        if: always() && env.TAG_VERSION != ''
+        uses: softprops/action-gh-release@v3
         with:
-          files: dist/* # Upload the generated wheel files from the dist directory
-          # Define the release tag name using the collected environment variables
-          # Format: v<package_version>-cu<short_cuda_version>-<avx_tag>-linux-<build_date>
-          tag_name: v${{ env.TAG_VERSION }}-cu${{ env.CUDA_VERSION }}-${{ env.AVXVER }}-linux-${{ env.BUILD_DATE }} # Release tag format for Linux
-          # Note: This action will create a new release tag if it doesn't exist,
-          # or upload assets to an existing tag. Be mindful of potential tag name conflicts.
+          files: dist/*
+          tag_name: v${{ env.TAG_VERSION }}-cu${{ env.CUDA_VERSION }}-linux-${{ env.BUILD_DATE }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # Use the secret provided by GitHub Actions for authentication
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
