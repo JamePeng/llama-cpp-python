@@ -533,6 +533,9 @@ class LlamaContext:
     def n_seq_max(self) -> int:
         return llama_cpp.llama_n_seq_max(self.ctx)
 
+    def n_rs_seq(self) -> int:
+        return llama_cpp.llama_n_rs_seq(self.ctx)
+
     def pooling_type(self) -> int:
         return llama_cpp.llama_pooling_type(self.ctx)
 

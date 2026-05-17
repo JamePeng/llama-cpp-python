@@ -471,6 +471,14 @@ class llama_split_mode(enum.IntEnum):
     LLAMA_SPLIT_MODE_ROW    = 2
     LLAMA_SPLIT_MODE_TENSOR = 3
 
+# enum llama_context_type {
+#     LLAMA_CONTEXT_TYPE_DEFAULT = 0,
+#     LLAMA_CONTEXT_TYPE_MTP     = 1,
+# };
+class llama_context_type(enum.IntEnum):
+    LLAMA_CONTEXT_TYPE_DEFAULT = 0
+    LLAMA_CONTEXT_TYPE_MTP     = 1
+
 # typedef struct llama_token_data {
 #     llama_token id; // token id
 #     float logit;    // log-odds of the token
@@ -827,9 +835,11 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     uint32_t n_batch;           // logical maximum batch size that can be submitted to llama_decode
 #     uint32_t n_ubatch;          // physical maximum batch size
 #     uint32_t n_seq_max;         // max number of sequences (i.e. distinct states for recurrent models)
+#     uint32_t n_rs_seq;          // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
 #     int32_t  n_threads;         // number of threads to use for generation
 #     int32_t  n_threads_batch;   // number of threads to use for batch processing
 
+#     enum llama_context_type      ctx_type;          // set the context type (e.g. MTP)
 #     enum llama_rope_scaling_type rope_scaling_type; // RoPE scaling type, from `enum llama_rope_scaling_type`
 #     enum llama_pooling_type      pooling_type;      // whether to pool (sum) embedding results by sequence id
 #     enum llama_attention_type    attention_type;    // attention type to use for embeddings
@@ -843,13 +853,14 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     float    yarn_beta_fast;   // YaRN low correction dim
 #     float    yarn_beta_slow;   // YaRN high correction dim
 #     uint32_t yarn_orig_ctx;    // YaRN original context size
-#     float    defrag_thold;     // [DEPRECATED] defragment the KV cache if holes/size > thold, < 0 disabled (default)
+#     float    defrag_thold;     // [DEPRECATED] defragment the KV cache if holes/size > thold, <= 0 disabled (default)
 
 #     ggml_backend_sched_eval_callback cb_eval;
 #     void * cb_eval_user_data;
 
 #     enum ggml_type type_k; // data type for K cache [EXPERIMENTAL]
 #     enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
+
 #     // Abort callback
 #     // if it returns true, execution of llama_decode() will be aborted
 #     // currently works only with CPU execution
@@ -862,11 +873,12 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     bool no_perf;     // measure performance timings
 #     bool op_offload;  // offload host tensor operations to device
 #     bool swa_full;    // use full-size SWA cache (https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055)
-#                       // NOTE: setting to false when n_seq_max > 1 can cause bad performance in some casesAdd commentMore actions
-#                       //       ref: https://github.com/ggml-org/llama.cpp/pull/13845#issuecomment-2924800573
+#                         // NOTE: setting to false when n_seq_max > 1 can cause bad performance in some cases
+#                         //       ref: https://github.com/ggml-org/llama.cpp/pull/13845#issuecomment-2924800573
 #     bool kv_unified;  // use a unified buffer across the input sequences when computing the attention
-#                       // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
-#                       // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+#                         // try to disable when n_seq_max > 1 for improved performance when the sequences do not share a large prefix
+#                         // ref: https://github.com/ggml-org/llama.cpp/pull/14363
+
 #     // [EXPERIMENTAL]
 #     // backend sampler chain configuration (make sure the caller keeps the sampler chains alive)
 #     // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
@@ -881,12 +893,16 @@ class llama_context_params(ctypes.Structure):
         n_batch (int): logical maximum batch size that can be submitted to llama_decode
         n_ubatch (int): physical maximum batch size
         n_seq_max (int): max number of sequences (i.e. distinct states for recurrent models)
+        n_rs_seq (int): number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
         n_threads (int): number of threads to use for generation
         n_threads_batch (int): number of threads to use for batch processing
+
+        ctx_type (int): set the context type (e.g. MTP)
         rope_scaling_type (int): RoPE scaling type, from `enum llama_rope_scaling_type`
         pooling_type (int): whether to pool (sum) embedding results by sequence id (ignored if no pooling layer)
         attention_type (int): attention type to use for embeddings
         flash_attn_type (int): when to enable Flash Attention
+
         rope_freq_base (float): RoPE base frequency, 0 = from model
         rope_freq_scale (float): RoPE frequency scaling factor, 0 = from model
         yarn_ext_factor (float): YaRN extrapolation mix factor, negative = from model
@@ -895,18 +911,23 @@ class llama_context_params(ctypes.Structure):
         yarn_beta_slow (float): YaRN high correction dim
         yarn_orig_ctx (int): YaRN original context size
         defrag_thold (float): [DEPRECATED] defragment the KV cache if holes/size > thold, <= 0 disabled (default)
+
         cb_eval (ggml_backend_sched_eval_callback): callback for scheduling eval
         cb_eval_user_data (ctypes.ctypes.c_void_p): user data for cb_eval
+
         type_k (int): data type for K cache
         type_v (int): data type for V cache
+
         abort_callback (ggml_abort_callback): abort callback if it returns true, execution of llama_decode() will be aborted
         abort_callback_data (ctypes.ctypes.c_void_p): data for abort_callback
+
         embeddings (bool): if true, extract embeddings (together with logits)
         offload_kqv (bool): whether to offload the KQV ops (including the KV cache) to GPU
         no_perf (bool): whether to measure performance timings
         op_offload(bool): whether to offload host tensor operations to device
         swa_full(bool): whether to use full-size SWA cache
         kv_unified(bool): use a unified buffer across the input sequences when computing the attention
+
         samplers(llama_sampler_seq_config *): the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
         n_samplers(size_t): numbers of sampler chains
     """
@@ -916,8 +937,10 @@ class llama_context_params(ctypes.Structure):
         n_batch: int
         n_ubatch: int
         n_seq_max: int
+        n_rs_seq: int
         n_threads: int
         n_threads_batch: int
+        ctx_type: int
         rope_scaling_type: int
         pooling_type: int
         attention_type: int
@@ -950,8 +973,10 @@ class llama_context_params(ctypes.Structure):
         ("n_batch", ctypes.c_uint32),
         ("n_ubatch", ctypes.c_uint32),
         ("n_seq_max", ctypes.c_uint32),
+        ("n_rs_seq", ctypes.c_uint32),
         ("n_threads", ctypes.c_int32),
         ("n_threads_batch", ctypes.c_int32),
+        ("ctx_type", ctypes.c_int),
         ("rope_scaling_type", ctypes.c_int),
         ("pooling_type", ctypes.c_int),
         ("attention_type", ctypes.c_int),
@@ -1599,6 +1624,12 @@ def llama_n_ubatch(ctx: llama_context_p, /) -> int:
 # LLAMA_API uint32_t llama_n_seq_max  (const struct llama_context * ctx);
 @ctypes_function("llama_n_seq_max", [llama_context_p_ctypes], ctypes.c_uint32)
 def llama_n_seq_max(ctx: llama_context_p, /) -> int:
+    ...
+
+
+# LLAMA_API uint32_t llama_n_rs_seq   (const struct llama_context * ctx);
+@ctypes_function("llama_n_rs_seq", [llama_context_p_ctypes], ctypes.c_uint32)
+def llama_n_rs_seq(ctx: llama_context_p, /) -> int:
     ...
 
 

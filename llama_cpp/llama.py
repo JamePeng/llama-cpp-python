@@ -119,8 +119,12 @@ class Llama:
         n_batch: int = 2048,
         n_ubatch: int = 512,
         n_seq_max: int = 1,
+        n_rs_seq: int = 0,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
+        ctx_type: Optional[
+            int
+        ] = llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_DEFAULT,
         rope_scaling_type: Optional[
             int
         ] = llama_cpp_lib.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
@@ -474,6 +478,7 @@ class Llama:
         self.n_batch = min(n_ctx, n_batch)  # ???
         self.n_keep = n_keep if n_keep > 0 else 256
         self.n_seq_max = n_seq_max
+        self.n_rs_seq  = n_rs_seq
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
@@ -486,8 +491,11 @@ class Llama:
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
         self.context_params.n_seq_max = self.n_seq_max
+        self.context_params.n_rs_seq = self.n_rs_seq
         self.context_params.n_threads = self.n_threads
         self.context_params.n_threads_batch = self.n_threads_batch
+
+        self.context_params.ctx_type = ctx_type
         self.context_params.rope_scaling_type = (
             rope_scaling_type
             if rope_scaling_type is not None
