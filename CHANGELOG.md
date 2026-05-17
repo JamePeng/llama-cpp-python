@@ -7,6 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.39] Dynamic GGML Backends, Qwen3-ASR/MiniCPM-V-4.6, On-Device Hybrid Checkpoint, and Granular Logging
+
+-  **ci(cu131/128/126/124): build wheels with GGML dynamic backends for windows/Linux**
+    - Replace the old CPU/AVX release tag matrix with a single backend
+    wheel layout.
+    - Enable `GGML_BACKEND_DL` and `GGML_CPU_ALL_VARIANTS` so Windows wheels ship
+    runtime-loadable GGML backend DLLs and CPU variant backends.
+    - Use the Windows LLVM toolchain and disable non-wheel targets such as examples,
+    tests, tools, server, embedded UI, and curl.
+    - Remove the `.basic` style local version suffix and publish wheels
+    as `+cu131`.
+    - Update CUDA architectures to CUDA 13.1 and simplify CMake argument handling.
+    - Note: for full x64 CPU variant coverage on Windows, LLVM/Clang builds are preferred. MSVC may skip some variants such as zen4, cooperlake, or sapphirerapids due to compiler intrinsic support limitations.
+
+- **feat(core): support loading GGML_BACKEND_DL dynamic backend libraries from wheel lib**
+    - Import `ggml_backend_load_all_from_path` and `ggml_backend_reg_count`
+    from `_ggml`.
+    - Load dynamic ggml backend libraries from the packaged `llama_cpp/lib`
+    directory after `llama_backend_init()`.
+    - Support wheels built with `GGML_BACKEND_DL`, where CPU variants and
+    accelerator backends such as `ggml-cpu-*` and `ggml-cuda` are shipped as
+    separate runtime libraries.
+    - Print the registered backend count in verbose mode to help diagnose backend
+    discovery issues.
+
+- **build(cmake): refactor install target lists for new GGML backend layout**
+    - Categorize build targets into logical groups (`LLAMA_CPP_TARGETS`,
+    `GGML_CORE_TARGETS`, `GGML_CPU_VARIANT_TARGETS`, and `GGML_BACKEND_TARGETS`)
+    to improve maintainability and keep the Python package installation in sync
+    with the updated upstream GGML backend layout.
+    - Add missing targets such as `llama-common` and the separated
+    `ggml-cpu-*` CPU variant backends.
+    - Ensure all grouped targets are passed through `llama_cpp_python_install_target`.
+    - Update llama build option descriptions to match the current upstream naming style.
+    - Explicitly disable `LLAMA_BUILD_SERVER` to avoid building the server target for Python package wheels.
+    - Explicitly disable `LLAMA_BUILD_UI` and `LLAMA_USE_PREBUILT_UI` because the
+    embedded server Web UI is not needed for wheel builds.
+    - Keep examples, tests, and curl support disabled for minimal wheel artifacts.
+    - Add a cleanup function to strip `cmake`, `pkgconfig`, and import libraries from the python wheel runtime directories.
+    - Ensures Windows builds only package the required runtime DLLs.
+
+- **Implement Qwen3ASRChatHandler for Qwen3-ASR models.**
+    - Integrate MTMD multimodal logic to extract and inject `audio_url` and base64 `input_audio` data directly into the `<|audio_start|><|audio_pad|>[DATA]<|audio_end|>` sequence.
+    - Define a default multilingual transcription system prompt and configure model-specific stop tokens.
+    - docs(README.md): add Qwen3-ASR documentation and usage example
+        - Update the supported multi-modal models table to include `qwen3-asr` and the `Qwen3ASRChatHandler`.
+        - Add a new dedicated section for Speech-to-Text inference with a complete, collapsible Python script.
+        - Provide a `build_media_payload` helper function to demonstrate proper Base64 encoding of local `.wav` and `.mp3` files into OpenAI-compatible `input_audio` schemas.
+        - Include a critical warning advising users to use BF16 quantization for the multimodal projector (`mmproj`) to prevent audio degradation.
+        - Clarify usage mechanics, specifically that all instructions must be placed in the `system` role due to the ASR template's text-dropping behavior.
+
+- **Implement MiniCPMV46ChatHandler for MiniCPM-V-4.6**
+
+- **feat(core): integrate fine-grained logging API into Llama class**
+    - This commit exposes the newly refactored `_logger` configuration system directly through the `Llama` class, providing users with robust, programmatic control over native `llama.cpp` backend logs.
+    - docs(wiki): document runtime verbosity and log filters for Llama
+        - docs(Llama.md):  update verbose=False vs. verbosity=0 note
+    - Key changes:
+        - Expand `Llama.__init__` with `verbosity`, `log_filters`, and `log_filters_case_sensitive` parameters.
+        - Add instance methods for runtime log management (`set_verbosity`, `get_verbosity`, `set_log_filters`, `add_log_filters`, `clear_log_filters`, etc.).
+        - Add comprehensive docstrings explaining the 0-5 verbosity scale and explicitly noting the process-global nature of the native backend logger.
+    - Advantages over the legacy implementation:
+        - Granular Control: Replaces the restrictive binary `verbose=True/False` flag (which only toggled between ERROR and DEBUG) with a granular 6-tier scale (output, error, warn, info, trace, debug).
+        - Dynamic Filtering: Empowers users to actively suppress specific noisy C++ logs using custom substring filters, removing the need for hardcoded internal patches.
+        - Better Discoverability: Attaches logging controls directly to the `Llama` object, making log management much more accessible and intuitive without requiring users to import internal logger modules.
+
+- **feat(logger): refactor and enhance ggml logging configuration system**
+    - Introduce a `LoggerConfig` dataclass to provide fine-grained control over native ggml/llama.cpp runtime logging.
+    - Align `verbosity` levels (0 to 5) with upstream `llama.cpp` conventions (`common/log.h`).
+    - Implement a dynamic, configurable substring filtering system, replacing the hardcoded "CUDA Graph" patch with `DEFAULT_LOG_FILTERS`.
+    - Add comprehensive public APIs for log management: `configure_logging`, `set_verbosity`, `set_quiet`, `set_silent`, `set_log_filters`, and `add_log_filters`.
+    - Maintain backwards compatibility for the existing `set_verbose(bool)` function.
+    - Improve the `ggml_log_callback` to correctly handle `GGML_LOG_LEVEL_CONT` by inheriting the verbosity of the preceding log message.
+    - Route `GGML_LOG_LEVEL_NONE` to `stdout` and all other diagnostic logs to `stderr` by default.
+    - docs(Logger.md): Upload Logger documentation
+
+- fix(MTMDChatHandler): correct audio_url content type check and improve variable handling
+    - Changed condition from `content == "audio_url"` to `content_type == "audio_url"` for proper type-based dispatching.
+    - Extracted `audio_url` variable for better readability.
+    - Converted `else` to `elif content_type == "input_audio"` to make the control flow explicit and safer.
+
+- fix(_internals): Remove unnecessary free operations; models should not be released within the context.
+
+- **feat(cache): add on-device hybrid checkpoint support**
+    - Introduce `HybridCheckpointCache` with dual-mode behavior (Host/On-Device).
+    - Device mode utilizes `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE` to keep tensor
+    payloads in `llama_context` VRAM, reducing host-device copy overhead.
+    - Host mode remains the default, preserving full Python-owned rollback history.
+    - Implement safety guards against stale on-device checkpoint restores and
+    enforce one active device checkpoint per `seq_id`.
+    - Unify checkpoint management with shared FIFO eviction.
+    - Expose `checkpoint_on_device` in `Llama.__init__` and reduce default
+    `ctx_checkpoints` from 32 to 16.
+    - Enhance verbose logging and docs to clarify host vs. VRAM ownership
+    semantics and track memory usage accurately.
+    - Rename internal `_flag_partial` to `_flags` to support multiple state flags.
+    - Update /docs/wiki/core/Llama.md for on_device option
+    - Update /docs/wiki/modules/LlamaCache.md for on_device option
+
+- docs: Update /docs/wiki and README.md file and remove outdated mkdocs workflow
+    - docs(readme): update wheel requirements and dynamic CPU backend info
+        - Update supported CUDA versions to include 12.8 and 13.1, while outlining
+        the supported compute architectures (SM70 up to SM120a).
+        - Document the transition to `GGML_BACKEND_DL` and `GGML_CPU_ALL_VARIANTS`
+        starting in `0.3.39-preview`.
+        - Clarify that dynamic CPU backend loading eliminates the need for separate
+        `Basic` and `AVX2` wheel distributions.
+        - Add a technical note in the FAQ recommending LLVM/Clang over MSVC for
+        achieving full x64 CPU variant coverage on Windows.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/39cf5d61915769124b7efbbfa69c46f19a6363ee](https://github.com/ggml-org/llama.cpp/commit/39cf5d61915769124b7efbbfa69c46f19a6363ee)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260517
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/ef27f333f367fdc53dc1a729ad8bb6c3c9362514...e87041e4ee6a89798abe9f36315f60f3fb06c5cb
+
 ## [0.3.38] Optimized CJK Detokenization, Sync Grammar Parser, and Patched CUDA Graph Logs
 
 - perf: Optimize detokenize buffer sizing for CJK-heavy outputs
