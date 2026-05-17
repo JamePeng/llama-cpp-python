@@ -493,8 +493,13 @@ class LlamaContext:
 
         ctx = llama_cpp.llama_init_from_model(self.model.model, self.params)
 
-        if ctx is None:
-            raise ValueError("Failed to create context with model")
+        if not ctx:
+            raise RuntimeError(
+                "Failed to create llama context with model. "
+                "This may indicate that llama_context_params is out of sync with "
+                "the bundled llama.cpp version, or that required context parameters "
+                "were not initialized correctly."
+            )
 
         self.ctx = ctx
 
@@ -517,6 +522,13 @@ class LlamaContext:
 
     def __del__(self):
         self.close()
+
+    def _assert_ctx(self):
+        if not getattr(self, "ctx", None):
+            raise RuntimeError(
+                "LlamaContext is not initialized or has already been closed. "
+                "Context-dependent llama.cpp operations cannot continue."
+            )
 
     def n_ctx(self) -> int:
         return llama_cpp.llama_n_ctx(self.ctx)
@@ -654,6 +666,7 @@ class LlamaContext:
     # // Decoding API
 
     def encode(self, batch: LlamaBatch):
+        self._assert_ctx()
         return_code = llama_cpp.llama_encode(
             self.ctx,
             batch.batch,
@@ -678,6 +691,7 @@ class LlamaContext:
             RuntimeError: If a fatal, non-recoverable error occurs during decoding
                           (e.g., negative error codes or invalid batch structures).
         """
+        self._assert_ctx()
         return_code = llama_cpp.llama_decode(self.ctx, batch.batch)
 
         if return_code == 0:
@@ -741,21 +755,27 @@ class LlamaContext:
         llama_cpp.llama_synchronize(self.ctx)
 
     def get_logits(self):
+        self._assert_ctx()
         return llama_cpp.llama_get_logits(self.ctx)
 
     def get_logits_ith(self, i: int):
+        self._assert_ctx()
         return llama_cpp.llama_get_logits_ith(self.ctx, i)
 
     def set_embeddings(self, embeddings: bool):
+        self._assert_ctx()
         llama_cpp.llama_set_embeddings(self.ctx, embeddings)
 
     def get_embeddings(self):
+        self._assert_ctx()
         return llama_cpp.llama_get_embeddings(self.ctx)
 
     def get_embeddings_ith(self, i: int):
+        self._assert_ctx()
         return llama_cpp.llama_get_embeddings_ith(self.ctx, i)
 
     def get_embeddings_seq(self, seq_id: int):
+        self._assert_ctx()
         return llama_cpp.llama_get_embeddings_seq(self.ctx, seq_id)
 
     def reset_timings(self):
