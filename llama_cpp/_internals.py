@@ -494,7 +494,6 @@ class LlamaContext:
         ctx = llama_cpp.llama_init_from_model(self.model.model, self.params)
 
         if ctx is None:
-            llama_cpp.llama_model_free(self.model.model)
             raise ValueError("Failed to create context with model")
 
         self.ctx = ctx
