@@ -49,17 +49,9 @@ test = [
     "pydantic-settings>=2.0.1",
     "huggingface-hub>=0.23.0"
 ]
-dev = [
-    "black>=23.3.0",
-    "twine>=4.0.2",
-    "mkdocs>=1.4.3",
-    "mkdocstrings[python]>=0.22.0",
-    "mkdocs-material>=9.1.18",
-    "pytest>=7.4.0",
-    "httpx>=0.24.1",
-]
+
 all = [
-    "llama_cpp_python[server,test,dev]",
+    "llama_cpp_python[server,test]",
 ]
 
 [tool.scikit-build]
@@ -76,7 +68,7 @@ input = "llama_cpp/__init__.py"
 [project.urls]
 Homepage = "https://github.com/JamePeng/llama-cpp-python"
 Issues = "https://github.com/JamePeng/llama-cpp-python/issues"
-Documentation = "https://llama-cpp-python.readthedocs.io/en/latest/"
+Documentation = "https://github.com/JamePeng/llama-cpp-python/wiki"
 Changelog = "https://github.com/JamePeng/llama-cpp-python/blob/main/CHANGELOG.md"
 FAQ = "https://github.com/JamePeng/llama-cpp-python?tab=readme-ov-file#faq"
 
