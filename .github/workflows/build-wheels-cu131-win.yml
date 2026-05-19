@@ -1,4 +1,4 @@
-name: Build Wheels (CU128) for Windows
+name: Build Wheels (CU131) for Windows
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   build_wheels:
-    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu128
+    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu131
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -16,7 +16,7 @@ jobs:
       matrix:
         os: ["windows-2022"]
         pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        cuda: ["12.8.1"]
+        cuda: ["13.1.1"]
         cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real"]
 
     defaults:
@@ -66,6 +66,31 @@ jobs:
           echo INCLUDE=%INCLUDE%>>%GITHUB_ENV%
           echo LIB=%LIB%>>%GITHUB_ENV%
           echo LIBPATH=%LIBPATH%>>%GITHUB_ENV%
+
+      - name: Copy LLVM OpenMP runtime
+        shell: pwsh
+        run: |
+          # GGML CPU all-variant backends are built with LLVM OpenMP on Windows.
+          # The dynamically loaded ggml-cpu-*.dll files depend on this runtime.
+          # If it is missing from the wheel, ggml_backend_load_all_from_path()
+          # may fail to load CPU backend DLLs at runtime.
+          $packageLibDir = Join-Path $env:GITHUB_WORKSPACE "llama_cpp\lib"
+          New-Item -ItemType Directory -Force $packageLibDir | Out-Null
+
+          $omp = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" `
+            -Recurse `
+            -Filter "libomp140.x86_64.dll" `
+            -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match "OpenMP\.LLVM" } |
+            Select-Object -First 1
+
+          if (!$omp) {
+            Write-Error "Could not find libomp140.x86_64.dll in Visual Studio LLVM OpenMP redistributables."
+            exit 1
+          }
+
+          Copy-Item $omp.FullName (Join-Path $packageLibDir "libomp140.x86_64.dll") -Force
+          Write-Output "Copied LLVM OpenMP runtime: $($omp.FullName)"
 
       - name: Build wheel
         run: |

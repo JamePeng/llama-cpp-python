@@ -11,13 +11,12 @@ set(CMAKE_INSTALL_LIBDIR llama_cpp/lib CACHE PATH "" FORCE)
 set(CMAKE_INSTALL_INCLUDEDIR llama_cpp/include CACHE PATH "" FORCE)
 
 
-# Helper function to install targets to Python package directories
+# Install a built target into the Python package runtime directory.
 function(llama_cpp_python_install_target target)
     if(NOT TARGET ${target})
         return()
     endif()
 
-    # Define install destinations to avoid code duplication
     set(INSTALL_DIRS
         "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
         "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
@@ -33,6 +32,9 @@ function(llama_cpp_python_install_target target)
             RESOURCE DESTINATION ${DIR}
         )
 
+        # Copy runtime DLL dependencies of this target when available.
+        # This does not replace explicit installation of dynamic backend
+        # targets such as ggml-cpu-*; those are installed as targets below.
         # Automatically handle Windows DLL installation for each target
         if (WIN32)
             install(
@@ -57,6 +59,40 @@ function(llama_cpp_python_install_target target)
     endif()
 endfunction()
 
+
+# Remove development-only artifacts from Python wheel runtime directories.
+#
+# Upstream install rules may place CMake package files, pkg-config files, and
+# Windows import libraries under llama_cpp/lib because CMAKE_INSTALL_LIBDIR is
+# redirected there for wheel builds. They are not needed at runtime.
+function(llama_cpp_python_cleanup_dev_files)
+    if(NOT WIN32)
+        return()
+    endif()
+
+    set(INSTALL_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
+        "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
+    )
+
+    foreach(DIR ${INSTALL_DIRS})
+        install(CODE "
+            if(EXISTS \"${DIR}\")
+                file(GLOB LLAMA_CPP_IMPORT_LIBS \"${DIR}/*.lib\")
+                if(LLAMA_CPP_IMPORT_LIBS)
+                    file(REMOVE \${LLAMA_CPP_IMPORT_LIBS})
+                endif()
+
+                file(REMOVE_RECURSE
+                    \"${DIR}/cmake\"
+                    \"${DIR}/pkgconfig\"
+                )
+            endif()
+        ")
+    endforeach()
+endfunction()
+
+
 if (LLAMA_BUILD)
     set(BUILD_SHARED_LIBS "On")
 
@@ -72,16 +108,23 @@ if (LLAMA_BUILD)
     set(CMAKE_SKIP_RPATH FALSE)
 
     # Enable building of the common library
-    set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama.cpp: build common utils library" FORCE)
+    set(LLAMA_BUILD_COMMON ON CACHE BOOL "llama: build common utils library" FORCE)
 
     # Enable build and link OpenSSL
-    set(LLAMA_OPENSSL ON CACHE BOOL "llama.cpp: build and link OpenSSL" FORCE)
+    set(LLAMA_OPENSSL ON CACHE BOOL "llama: use openssl to support HTTPS" FORCE)
 
     # Disable building of examples
-    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "llama.cpp: build examples" FORCE)
+    set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "llama: build examples" FORCE)
 
     # Disable building of tests
-    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "llama.cpp: build tests" FORCE)
+    set(LLAMA_BUILD_TESTS OFF CACHE BOOL "llama: build tests" FORCE)
+
+    # Disable building of server
+    set(LLAMA_BUILD_SERVER OFF CACHE BOOL "llama: build server example" FORCE)
+
+    # Disable build the embedded Web UI for server
+    set(LLAMA_BUILD_UI OFF CACHE BOOL "llama: build the embedded Web UI for server" FORCE)
+    set(LLAMA_USE_PREBUILT_UI OFF CACHE BOOL "llama: use prebuilt UI from HF Bucket when available (requires LLAMA_BUILD_UI=ON)" FORCE)
 
     # Disable building curl support
     set(LLAMA_CURL OFF CACHE BOOL "llama.cpp: use libcurl to download model from an URL" FORCE)
@@ -117,14 +160,38 @@ if (LLAMA_BUILD)
         set_target_properties(llama PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
     endif()
 
-    # Define list of GGML targets to install
-    set(GGML_TARGETS
+    # Define list of LLAMA_CPP/GGML targets to install
+    set(LLAMA_CPP_TARGETS
         llama
+        llama-common
+    )
+    set(GGML_CORE_TARGETS
         ggml
         ggml-base
         ggml-blas
-        ggml-cann
         ggml-cpu
+        ggml-rpc
+    )
+
+    set(GGML_CPU_VARIANT_TARGETS
+        ggml-cpu-x64
+        ggml-cpu-sse42
+        ggml-cpu-sandybridge
+        ggml-cpu-ivybridge
+        ggml-cpu-piledriver
+        ggml-cpu-haswell
+        ggml-cpu-skylakex
+        ggml-cpu-cannonlake
+        ggml-cpu-cascadelake
+        ggml-cpu-cooperlake
+        ggml-cpu-icelake
+        ggml-cpu-alderlake
+        ggml-cpu-sapphirerapids
+        ggml-cpu-zen4
+    )
+
+    set(GGML_BACKEND_TARGETS
+        ggml-cann
         ggml-cuda
         ggml-hexagon
         ggml-hip
@@ -132,7 +199,6 @@ if (LLAMA_BUILD)
         ggml-musa
         ggml-opencl
         ggml-openvino
-        ggml-rpc
         ggml-sycl
         ggml-virtgpu
         ggml-vulkan
@@ -141,8 +207,12 @@ if (LLAMA_BUILD)
         ggml-zendnn
     )
 
-    # Loop through targets to avoid repetitive function calls
-    foreach(TARGET_NAME ${GGML_TARGETS})
+    foreach(TARGET_NAME
+        ${LLAMA_CPP_TARGETS}
+        ${GGML_CORE_TARGETS}
+        ${GGML_CPU_VARIANT_TARGETS}
+        ${GGML_BACKEND_TARGETS}
+    )
         llama_cpp_python_install_target(${TARGET_NAME})
     endforeach()
 
@@ -170,4 +240,8 @@ if (LLAMA_BUILD)
 
         llama_cpp_python_install_target(mtmd)
     endif()
+
+    # Run after all runtime targets are installed, including mtmd.
+    llama_cpp_python_cleanup_dev_files()
+
 endif()

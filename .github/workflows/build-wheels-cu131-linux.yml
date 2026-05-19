@@ -1,4 +1,4 @@
-name: Build Wheels (CU126) for Linux
+name: Build Wheels (CU131) for Linux
 
 on:
   workflow_dispatch:
@@ -8,17 +8,17 @@ permissions:
 
 jobs:
   build_wheels:
-    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu126
+    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu131
     runs-on: ubuntu-22.04
-    container: nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+    container: nvidia/cuda:13.1.2-cudnn-devel-ubuntu22.04
 
     strategy:
       fail-fast: false
       matrix:
         os: ["ubuntu-22.04"]
         pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"] # Python versions
-        cuda: ["12.6.3"]
-        cudaarch: ["70-real;75-real;80-real;86-real;87-real;89-real"]
+        cuda: ["13.1.2"]
+        cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real;121-real"]
 
     defaults:
       run:

@@ -352,58 +352,169 @@ LlamaCache = LlamaTrieCache
 
 @dataclass
 class HybridCheckpoint:
-    """Represents a single snapshot of the RNN/Hybrid model's hidden state."""
-    pos: int        # The token position (cursor) where this snapshot was taken
-    data: bytes     # The raw binary RNN state data
-    hash_val: str   # SHA-256 hash of the token prefix to ensure exact sequence matching
-    size: int       # Size of the state data in bytes
-    seq_id: int     # Sequence ID this checkpoint belongs to
+    """
+    Represents a single snapshot of the Hybrid/Recurrent model state.
+
+    Notes:
+        - When on_device=False, `data` contains the full host-side serialized state.
+        - When on_device=True, `data` contains only the host-visible portion of the
+          serialized state. The tensor payload is stored in llama_context-owned
+          device buffers by llama.cpp, keyed by seq_id.
+    """
+    pos: int        # The token position (cursor) where this snapshot was taken.
+    data: bytes     # The raw binary RNN state data.
+    hash_val: str   # SHA-256 hash of the token prefix to ensure exact sequence matching.
+    size: int       # Number of bytes written by llama_state_seq_get_data_ext().
+    seq_id: int     # Sequence id used by llama.cpp state APIs.
 
 class HybridCheckpointCache(BaseLlamaCache):
     """
-    Manager for RNN state snapshots (Checkpoints) tailored for Hybrid/Recurrent models.
-    Provides rollback capabilities for models that cannot physically truncate KV cache.
+    Checkpoint manager for Hybrid/Recurrent model states.
+
+    This cache is designed for models whose memory cannot be safely truncated like
+    a regular Transformer KV cache. For recurrent/hybrid architectures, rollback is
+    implemented by saving and restoring sequence state snapshots.
+
+    Two operating modes are supported:
+
+    1. Host mode: on_device=False
+        - Full checkpoint payload is materialized as Python bytes.
+        - Multiple checkpoints per seq_id are safe.
+        - This mode is suitable for multi-turn rollback and longer conversation reuse.
+
+    2. Device mode: on_device=True
+        - LLAMA_STATE_SEQ_FLAGS_ON_DEVICE is forwarded to llama.cpp.
+        - Tensor payloads are stored in llama_context-owned device buffers.
+        - The device buffers are created per seq_id in llama.cpp.
+        - Therefore only one active checkpoint per seq_id is safe.
+        - This mode is suitable for fast speculative / branch rollback where avoiding
+          device-to-host tensor copies is more important than keeping many historical
+          checkpoints.
+
+    Important:
+        Do not treat on_device=True as "Python owns a VRAM checkpoint". Python only
+        owns the host-visible serialized portion. The tensor payload lives inside the
+        llama_context and is keyed by seq_id.
     """
-    def __init__(self, ctx: llama_cpp_lib.llama_context_p, max_checkpoints: int = 16, verbose: bool = False):
+    def __init__(
+            self,
+            ctx: llama_cpp_lib.llama_context_p,
+            max_checkpoints: int = 16,
+            on_device: bool = False,
+            verbose: bool = False
+        ):
+        """
+        Args:
+            ctx (llama_context_p):
+                Borrowed llama.cpp context pointer used by the state sequence APIs.
+                This cache does not own the context and must not free it.
+
+            max_checkpoints(int): Maximum number of Python-side checkpoint entries to keep.
+                - Host mode: This is the maximum number of historical checkpoints across all seq_ids.
+                - Device mode: This is still a global upper bound for Python-side metadata entries,
+                               but this class also enforces at most one active checkpoint per seq_id,
+                               because llama.cpp stores device tensor payloads per seq_id.
+
+            on_device(bool): Whether to request llama.cpp to keep tensor checkpoint payloads in
+                             context-owned device buffers via LLAMA_STATE_SEQ_FLAGS_ON_DEVICE.
+
+            verbose(bool): Enables diagnostic logging to stderr for checkpoint save/restore/eviction.
+        """
         if ctx is None:
-            raise ValueError("HybridCheckpointCache(__init__): Failed to create HybridCheckpointCache with model context")
+            raise ValueError("HybridCheckpointCache(__init__): Failed to create HybridCheckpointCache with a null model context")
         self._ctx = ctx
+        self.on_device = on_device
+        self.verbose = verbose
+
+        # In host mode, max_checkpoints means "maximum number of Python-owned
+        # checkpoints across all seq_ids".
+        #
+        # In device mode, llama.cpp stores tensor payloads in device buffers keyed
+        # by seq_id. Multiple Python checkpoint metadata entries for the same seq_id
+        # would point to the same mutable device-side slot, so only one checkpoint
+        # per seq_id is safe.
         self.max_checkpoints = max_checkpoints
+
+        # Python-side checkpoint registry.
+        #
+        # Host mode:
+        #   Each HybridCheckpoint owns a full serialized checkpoint payload.
+        #
+        # Device mode:
+        #   Each HybridCheckpoint owns only the host-visible serialized portion.
+        #   The corresponding tensor payload is owned by llama_context.
         self.checkpoints: list[HybridCheckpoint] = []
+
+        # Total Python-tracked checkpoint size in bytes.
+        #
+        # Host mode:
+        #   Roughly equals the total serialized checkpoint payload size.
+        #
+        # Device mode:
+        #   Tracks only the host-visible part returned by llama.cpp, not the
+        #   context-owned device tensor storage.
         self._current_size = 0
 
-        # Cache C-type API function pointers for performance
+        # Cache C API function pointers for faster repeated calls.
         self._get_size_ext = llama_cpp_lib.llama_state_seq_get_size_ext
         self._get_data_ext = llama_cpp_lib.llama_state_seq_get_data_ext
         self._set_data_ext = llama_cpp_lib.llama_state_seq_set_data_ext
-        self._flag_partial = llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
 
-        self.verbose = verbose
+        # State serialization flags forwarded to llama.cpp.
+        #
+        # LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY:
+        #   Save only the sequence-specific / partial state needed for recurrent
+        #   rollback instead of a full context state.
+        #
+        # LLAMA_STATE_SEQ_FLAGS_ON_DEVICE:
+        #   Ask llama.cpp to store tensor payloads in context-owned device buffers.
+        self._flags = llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
+        if on_device:
+            self._flags |= llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
 
-        if self.max_checkpoints <= 0:
-            if self.verbose:
-                import sys
-                print("HybridCheckpointCache(__init__): Cache is DISABLED (max_checkpoints <= 0). "
-                      "Rollback capabilities are turned off. This is optimal for single-turn workflows.",
-                      file=sys.stderr)
+        if self.max_checkpoints <= 0 and self.verbose:
+            print("HybridCheckpointCache(__init__): Cache is DISABLED (max_checkpoints <= 0). "
+                    "Rollback capabilities are turned off. This is optimal for single-turn workflows.",
+                    file=sys.stderr)
+
+        if self.on_device and self.max_checkpoints > 1 and self.verbose:
+            print(
+                "HybridCheckpointCache(__init__): on_device=True stores tensor payloads "
+                "in llama_context-owned device buffers keyed by seq_id. Multiple "
+                "historical checkpoints for the same seq_id are unsafe, so this cache "
+                "will keep only one checkpoint per seq_id.",
+                file=sys.stderr,
+            )
 
     @property
     def cache_size(self) -> int:
-        """Returns the total memory used by all stored checkpoints in bytes."""
+        """
+        Returns the host-visible checkpoint size tracked by Python.
+
+        In host mode, this is close to the full serialized checkpoint payload size.
+        In device mode, this is only the host-visible metadata/payload size returned
+        by llama.cpp. Device-side tensor storage is owned by llama_context and is not
+        fully represented by this number.
+        """
         return self._current_size
 
     def clear(self):
-        """Clears all stored checkpoints and resets memory tracking."""
+        """
+        Clears Python-side checkpoint metadata.
+
+        This does not explicitly release llama_context-owned device buffers. The
+        device buffers are managed by llama.cpp and are associated with the context.
+        """
         if not self.checkpoints:
             # Empty Checkpoint: Return immediately, no need to clear.
             return
         self.checkpoints.clear()
         self._current_size = 0
         if self.verbose:
-            print("HybridCheckpointCache: cleared")
+            print("HybridCheckpointCache(clear): cleared", file=sys.stderr)
 
     def close(self):
-        self.checkpoints = None
+        self.clear()
         self._ctx = None
         self._get_size_ext = None
         self._get_data_ext = None
@@ -421,23 +532,72 @@ class HybridCheckpointCache(BaseLlamaCache):
         """
         if length <= 0:
             return "empty"
-        tokens_size = len(tokens)
-        if length > tokens_size:
-            length = tokens_size
+        length = min(length, len(tokens))
         data = array.array('i', tokens[:length]).tobytes()
         return hashlib.sha256(data).hexdigest()[:32]
+
+    def _replace_checkpoint_for_seq_id(self, seq_id: int) -> None:
+        """
+        Removes all Python-side checkpoints for one seq_id.
+
+        Required for on_device=True because llama.cpp stores the device tensor
+        payload per seq_id, not per Python checkpoint object.
+        """
+        kept: list[HybridCheckpoint] = []
+        removed_size = 0
+
+        for cp in self.checkpoints:
+            if cp.seq_id == seq_id:
+                removed_size += cp.size
+            else:
+                kept.append(cp)
+
+        self.checkpoints = kept
+        self._current_size -= removed_size
+        if self._current_size < 0:
+            self._current_size = 0
+
+    def _evict_checkpoints_if_needed(self) -> None:
+        """
+        Evicts old checkpoints if needed
+
+        Host mode:
+            This evicts full Python-owned checkpoint payloads, so FIFO historical
+            checkpoints are safe and useful.
+
+        Device mode:
+            This evicts Python-side metadata only. The device tensor payload is owned
+            by llama_context and is keyed by seq_id.
+        """
+        while len(self.checkpoints) > self.max_checkpoints:
+            old_cp = self.checkpoints.pop(0)
+            self._current_size -= old_cp.size
+            if self._current_size < 0:
+                self._current_size = 0
+
+            if self.verbose:
+                print(
+                    f"HybridCheckpointCache: evicted checkpoint "
+                    f"seq_id={old_cp.seq_id}, pos={old_cp.pos}",
+                    file=sys.stderr,
+                )
 
     def find_best_checkpoint(self, tokens: List[int], seq_id: int = 0) -> Optional[HybridCheckpoint]:
         """
         Finds the longest valid checkpoint that perfectly matches the provided token prefix.
+
+        The hash check prevents restoring a checkpoint that has the same length but
+        belongs to a different prompt/history.
+
         Returns None if no matching checkpoint is found.
         """
         # Empty Checkpoint: Instant return, no hash calculation needed.
         if self.max_checkpoints <= 0 or len(self.checkpoints) == 0:
             return None
 
-        best_cp = None
+        best_cp: Optional[HybridCheckpoint] = None
         best_pos = -1
+
         for cp in self.checkpoints:
             if cp.seq_id != seq_id or cp.pos > len(tokens):
                 # Skip if sequence ID mismatches or checkpoint is longer than the current prompt
@@ -475,9 +635,17 @@ class HybridCheckpointCache(BaseLlamaCache):
                       file=sys.stderr)
             return False
 
-        flags = self._flag_partial
+        # In on-device mode, remove old Python metadata for this seq_id before saving
+        # the new checkpoint. The underlying llama.cpp device buffer for this seq_id
+        # will be overwritten by the get_data_ext() call.
+        if self.on_device:
+            self._replace_checkpoint_for_seq_id(seq_id)
 
-        # 1. Query the required buffer size from the underlying C++ context
+        flags = self._flags
+
+        # 1. Query the required host-visible buffer size.
+        # In on_device mode this may exclude the large tensor payload
+        # that stays in device memory.
         size = self._get_size_ext(self._ctx, seq_id, flags)
         if size == 0:
             if self.verbose:
@@ -487,9 +655,14 @@ class HybridCheckpointCache(BaseLlamaCache):
         # 2. Allocate buffer and extract raw state data
         buffer = (ctypes.c_uint8 * size)()
         n_written = self._get_data_ext(self._ctx, buffer, size, seq_id, flags)
+
         if n_written != size:
             if self.verbose:
-                print(f"HybridCheckpointCache(save_checkpoint): get failed {n_written}/{size}")
+                print(
+                    f"HybridCheckpointCache(save_checkpoint): get_data_ext failed "
+                    f"({n_written}/{size})",
+                    file=sys.stderr,
+                )
             return False
 
         # Note: This deep copy isolates the state from subsequent C++ backend mutations
@@ -506,19 +679,18 @@ class HybridCheckpointCache(BaseLlamaCache):
         )
         self._current_size += n_written
 
-        # 4. Enforce capacity limits (FIFO eviction)
-        while len(self.checkpoints) > self.max_checkpoints:
-            if not self.checkpoints:
-                break
-            old_cp = self.checkpoints.pop(0)
-            self._current_size -= old_cp.size
-            if self.verbose:
-                print(f"HybridCheckpointCache(save_checkpoint): evicted pos={old_cp.pos}")
+        # 4. Evicts old checkpoints if needed
+        self._evict_checkpoints_if_needed()
 
         if self.verbose:
-            print(f"HybridCheckpointCache(save_checkpoint): Saved checkpoint at pos {current_pos} ({size / 1024 / 1024:.2f} MiB)  "
-                  f"total={len(self.checkpoints)}  used={self._current_size / 1024 / 1024:.2f} MiB",
-                  file=sys.stderr)
+            mode = "device" if self.on_device else "host"
+            print(
+                f"HybridCheckpointCache(save_checkpoint): saved {mode} checkpoint "
+                f"seq_id={seq_id}, pos={current_pos}, size={size / 1024 / 1024:.2f} MiB, "
+                f"hcc_count={len(self.checkpoints)}, "
+                f"hcc_mem_used={self._current_size / 1024 / 1024:.2f} MiB",
+                file=sys.stderr,
+            )
 
         return True
 
@@ -531,17 +703,38 @@ class HybridCheckpointCache(BaseLlamaCache):
             if self.verbose:
                 print(f"HybridCheckpointCache(restore_checkpoint): [Error] Sequence ID mismatch: checkpoint has {cp.seq_id}, requested {seq_id}", file=sys.stderr)
             return False
-        flags = self._flag_partial
 
-        # 2. Verify the underlying C++ context still expects the exact same state size.
+        # 2. Guard against stale on-device checkpoint objects.
+        #
+        # In on_device mode, Python does not own the full checkpoint tensor payload.
+        # llama.cpp keeps the large tensor payload in llama_context-owned device
+        # buffers keyed by seq_id. Saving a newer checkpoint for the same seq_id may
+        # overwrite that device-side payload while an old HybridCheckpoint object can
+        # still exist outside this cache.
+        #
+        # Only checkpoint objects still tracked by this cache are considered valid.
+        # This avoids restoring old Python metadata together with newer device tensors.
+        if self.on_device and cp not in self.checkpoints:
+            if self.verbose:
+                print(
+                    "HybridCheckpointCache(restore_checkpoint): stale on-device checkpoint; "
+                    "refusing restore because device payload may have been overwritten.",
+                    file=sys.stderr,
+                )
+            return False
+
+        flags = self._flags
+
+        # 3. Verify the underlying C++ context still expects the exact same state size.
         # This prevents buffer overflows if the backend context was unexpectedly altered or reallocated.
         current_size = self._get_size_ext(self._ctx, seq_id, flags)
         if current_size != cp.size:
             if self.verbose:
-                print(f"HybridCheckpointCache(restore_checkpoint): [Warning] State size mismatch before restore: expected {cp.size}, got {current_size} -> possible invalidation")
+                print(f"HybridCheckpointCache(restore_checkpoint): [Warning] State size mismatch before restore: "
+                      f"expected checkpoint size={cp.size}, got current size={current_size} -> possible invalidation")
             return False
 
-        # 3. Copy data back to a ctypes buffer and push to the C++ backend
+        # 4. Copy data back to a ctypes buffer and push to the C++ backend
         buffer = (ctypes.c_uint8 * cp.size).from_buffer_copy(cp.data)
         ret = self._set_data_ext(
             self._ctx, buffer, cp.size, seq_id, flags
@@ -549,7 +742,13 @@ class HybridCheckpointCache(BaseLlamaCache):
         success = (ret == cp.size)
 
         if self.verbose:
-            print(f"HybridCheckpointCache(restore_checkpoint): restore {'OK' if success else 'FAIL'} pos={cp.pos}")
+            mode = "device" if self.on_device else "host"
+            print(
+                f"HybridCheckpointCache(restore_checkpoint): restore "
+                f"{'OK' if success else 'FAIL'} "
+                f"mode={mode}, seq_id={seq_id}, pos={cp.pos}",
+                file=sys.stderr,
+            )
         return success
 
     # Disable BaseLlamaCache Dictionary Interfaces

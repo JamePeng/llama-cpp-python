@@ -3001,11 +3001,12 @@ while also answering every question accurately, clearly, and step-by-step when a
                             raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support audio inputs.")
 
                         # Case A: Handle custom/forward-compatible audio_url format
-                        if content == "audio_url":
-                            url = content["audio_url"] if isinstance(content["audio_url"], str) else content["audio_url"]["url"]
+                        if content_type == "audio_url":
+                            audio_url = content["audio_url"]
+                            url = audio_url if isinstance(audio_url, str) else audio_url["url"]
                             media_items.append({"url": url, "type": "audio"})
                         # Case B: Handle OpenAI standard input_audio format
-                        else:
+                        elif content_type == "input_audio":
                             input_audio = content.get("input_audio", {})
                             if isinstance(input_audio, dict) and "data" in input_audio:
                                 # It might just be raw base64 data, we can format it as a data URI to reuse load_audio logic
@@ -4328,6 +4329,210 @@ class MiniCPMv45ChatHandler(MTMDChatHandler):
         return super().__call__(**kwargs)
 
 
+class MiniCPMV46ChatHandler(MTMDChatHandler):
+    """
+    Handler for MiniCPM-V-4.6 models.
+
+    Features:
+    - Aligned with official tokenizer_config.json special tokens.
+    - Custom `<|image_pad|>` and `<|video_pad|>` multimodal tokens.
+    - Integrated MTMD-style URL and Base64 injection for visual content.
+    - Specialized `<tool_call>` and `<tool_response>` block generation.
+    - Autonomously folds previous reasoning paths using `last_query_index`.
+    - Toggles `<think>` block generation via `enable_thinking` (Defaults to False).
+    """
+
+    # Core tokens
+    MINICPM_BOS_TOKEN = "<|im_start|>"
+    MINICPM_EOS_TOKEN = "<|im_end|>"
+    MINICPM_PAD_TOKEN = "<|endoftext|>"
+
+    # Vision tokens
+    MINICPM_VISION_BOS_TOKEN = "<|vision_start|>"
+    MINICPM_VISION_EOS_TOKEN = "<|vision_end|>"
+    MINICPM_IMAGE_TOKEN = "<|image_pad|>"
+    MINICPM_VIDEO_TOKEN = "<|video_pad|>"
+
+    CHAT_FORMAT = (
+        "{%- if enable_thinking is not defined -%}\n"
+        "    {%- set enable_thinking = false -%}\n"
+        "{%- endif -%}\n"
+        "{%- macro render_content(content, is_system_content=false) -%}\n"
+        "    {%- if content is string -%}\n"
+        "        {{- content -}}\n"
+        "    {%- elif content is iterable and content is not mapping -%}\n"
+        "        {%- set ns = namespace(parts=[]) -%}\n"
+        "        {%- for item in content -%}\n"
+        "            {%- if 'image' in item or 'image_url' in item or item.type == 'image' -%}\n"
+        "                {%- if is_system_content -%}\n"
+        "                    {{- raise_exception('System message cannot contain images.') -}}\n"
+        "                {%- endif -%}\n"
+        "                {%- set url_val = '' -%}\n"
+        "                {%- if item.type == 'image_url' -%}\n"
+        "                    {%- set url_val = item.image_url if item.image_url is string else item.image_url.url -%}\n"
+        "                {%- endif -%}\n"
+        "                {%- set ns.parts = ns.parts + ['<|image_pad|>' + url_val] -%}\n"
+        # "            {%- elif 'video' in item or 'video_url' in item or item.type == 'video' -%}\n"
+        # "                {%- if is_system_content -%}\n"
+        # "                    {{- raise_exception('System message cannot contain videos.') -}}\n"
+        # "                {%- endif -%}\n"
+        # "                {%- set url_val = '' -%}\n"
+        # "                {%- if item.type == 'video_url' -%}\n"
+        # "                    {%- set url_val = item.video_url if item.video_url is string else item.video_url.url -%}\n"
+        # "                {%- endif -%}\n"
+        # "                {%- set ns.parts = ns.parts + ['<|video_pad|>' + url_val] -%}\n"
+        "            {%- elif 'text' in item -%}\n"
+        "                {%- set ns.parts = ns.parts + [item.text] -%}\n"
+        "            {%- else -%}\n"
+        "                {{- raise_exception('Unexpected item type in content.') -}}\n"
+        "            {%- endif -%}\n"
+        "        {%- endfor -%}\n"
+        "        {{- ns.parts | join('\\n') -}}\n"
+        "    {%- elif content is none or content is undefined -%}\n"
+        "        {{- '' -}}\n"
+        "    {%- else -%}\n"
+        "        {{- raise_exception('Unexpected content type.') -}}\n"
+        "    {%- endif -%}\n"
+        "{%- endmacro -%}\n"
+        "{%- if not messages %}\n"
+        "    {{- raise_exception('No messages provided.') }}\n"
+        "{%- endif %}\n"
+        "{%- if tools and tools is iterable and tools is not mapping %}\n"
+        "    {{- '<|im_start|>system\\n' }}\n"
+        "    {{- '# Tools\\n\\nYou have access to the following functions:\\n\\n<tools>' }}\n"
+        "    {%- for tool in tools %}\n"
+        "        {{- '\\n' }}\n"
+        "        {{- tool | tojson }}\n"
+        "    {%- endfor %}\n"
+        "    {{- '\\n</tools>' }}\n"
+        "    {{- '\\n\\nIf you choose to call a function ONLY reply in the following format with NO suffix:\\n\\n<tool_call>\\n<function=example_function_name>\\n<parameter=example_parameter_1>\\nvalue_1\\n</parameter>\\n<parameter=example_parameter_2>\\nThis is the value for the second parameter\\nthat can span\\nmultiple lines\\n</parameter>\\n</function>\\n</tool_call>\\n\\n<IMPORTANT>\\nReminder:\\n- Function calls MUST follow the specified format: an inner <function=...></function> block must be nested within <tool_call></tool_call> XML tags\\n- Required parameters MUST be specified\\n- You may provide optional reasoning for your function call in natural language BEFORE the function call, but NOT after\\n- If there is no function call available, answer the question like normal with your current knowledge and do not tell the user about function calls\\n</IMPORTANT>' }}\n"
+        "    {%- if messages[0].role == 'system' %}\n"
+        "        {%- set content = render_content(messages[0].content, true)|trim %}\n"
+        "        {%- if content %}\n"
+        "            {{- '\\n\\n' + content }}\n"
+        "        {%- endif %}\n"
+        "    {%- endif %}\n"
+        "    {{- '<|im_end|>\\n' }}\n"
+        "{%- else %}\n"
+        "    {%- if messages[0].role == 'system' %}\n"
+        "        {%- set content = render_content(messages[0].content, true)|trim %}\n"
+        "        {{- '<|im_start|>system\\n' + content + '<|im_end|>\\n' }}\n"
+        "    {%- endif %}\n"
+        "{%- endif %}\n"
+        "{%- set ns = namespace(multi_step_tool=true, last_query_index=messages|length - 1) %}\n"
+        "{%- for message in messages[::-1] %}\n"
+        "    {%- set index = (messages|length - 1) - loop.index0 %}\n"
+        "    {%- if ns.multi_step_tool and message.role == 'user' %}\n"
+        "        {%- set content = render_content(message.content)|trim %}\n"
+        "        {%- if not(content.startswith('<tool_response>') and content.endswith('</tool_response>')) %}\n"
+        "            {%- set ns.multi_step_tool = false %}\n"
+        "            {%- set ns.last_query_index = index %}\n"
+        "        {%- endif %}\n"
+        "    {%- endif %}\n"
+        "{%- endfor %}\n"
+        "{%- if ns.multi_step_tool %}\n"
+        "    {{- raise_exception('No user query found in messages.') }}\n"
+        "{%- endif %}\n"
+        "{%- for message in messages %}\n"
+        "    {%- set content = render_content(message.content)|trim %}\n"
+        "    {%- if message.role == 'system' %}\n"
+        "        {%- if not loop.first %}\n"
+        "            {{- raise_exception('System message must be at the beginning.') }}\n"
+        "        {%- endif %}\n"
+        "    {%- elif message.role == 'user' %}\n"
+        "        {{- '<|im_start|>' + message.role + '\\n' + content + '<|im_end|>' + '\\n' }}\n"
+        "    {%- elif message.role == 'assistant' %}\n"
+        "        {%- set reasoning_content = '' %}\n"
+        "        {%- if message.reasoning_content is string %}\n"
+        "            {%- set reasoning_content = message.reasoning_content %}\n"
+        "        {%- else %}\n"
+        "            {%- if '</think>' in content %}\n"
+        "                {%- set reasoning_content = content.split('</think>')[0].rstrip('\\n').split('<think>')[-1].lstrip('\\n') %}\n"
+        "                {%- set content = content.split('</think>')[-1].lstrip('\\n') %}\n"
+        "            {%- endif %}\n"
+        "        {%- endif %}\n"
+        "        {%- set reasoning_content = reasoning_content|trim %}\n"
+        "        {%- if loop.index0 > ns.last_query_index %}\n"
+        "            {{- '<|im_start|>' + message.role + '\\n<think>\\n' + reasoning_content + '\\n</think>\\n\\n' + content }}\n"
+        "        {%- else %}\n"
+        "            {{- '<|im_start|>' + message.role + '\\n' + content }}\n"
+        "        {%- endif %}\n"
+        "        {%- if message.tool_calls and message.tool_calls is iterable and message.tool_calls is not mapping %}\n"
+        "            {%- for tool_call in message.tool_calls %}\n"
+        "                {%- if tool_call.function is defined %}\n"
+        "                    {%- set tool_call = tool_call.function %}\n"
+        "                {%- endif %}\n"
+        "                {%- if loop.first %}\n"
+        "                    {%- if content|trim %}\n"
+        "                        {{- '\\n\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n"
+        "                    {%- else %}\n"
+        "                        {{- '<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n"
+        "                    {%- endif %}\n"
+        "                {%- else %}\n"
+        "                    {{- '\\n<tool_call>\\n<function=' + tool_call.name + '>\\n' }}\n"
+        "                {%- endif %}\n"
+        "                {%- if tool_call.arguments is defined %}\n"
+        "                    {%- for args_name, args_value in tool_call.arguments|items %}\n"
+        "                        {{- '<parameter=' + args_name + '>\\n' }}\n"
+        "                        {%- set args_value = args_value | tojson | safe if args_value is mapping or (args_value is sequence and args_value is not string) else args_value | string %}\n"
+        "                        {{- args_value }}\n"
+        "                        {{- '\\n</parameter>\\n' }}\n"
+        "                    {%- endfor %}\n"
+        "                {%- endif %}\n"
+        "                {{- '</function>\\n</tool_call>' }}\n"
+        "            {%- endfor %}\n"
+        "        {%- endif %}\n"
+        "        {{- '<|im_end|>\\n' }}\n"
+        "    {%- elif message.role == 'tool' %}\n"
+        "        {%- if loop.previtem and loop.previtem.role != 'tool' %}\n"
+        "            {{- '<|im_start|>user' }}\n"
+        "        {%- endif %}\n"
+        "        {{- '\\n<tool_response>\\n' }}\n"
+        "        {{- content }}\n"
+        "        {{- '\\n</tool_response>' }}\n"
+        "        {%- if not loop.last and loop.nextitem.role != 'tool' %}\n"
+        "            {{- '<|im_end|>\\n' }}\n"
+        "        {%- elif loop.last %}\n"
+        "            {{- '<|im_end|>\\n' }}\n"
+        "        {%- endif %}\n"
+        "    {%- else %}\n"
+        "        {{- raise_exception('Unexpected message role.') }}\n"
+        "    {%- endif %}\n"
+        "{%- endfor %}\n"
+        "{%- if add_generation_prompt %}\n"
+        "    {{- '<|im_start|>assistant\\n' }}\n"
+        "    {%- if enable_thinking is defined and enable_thinking is false %}\n"
+        "        {{- '<think>\\n\\n</think>\\n\\n' }}\n"
+        "    {%- else %}\n"
+        "        {{- '<think>\\n' }}\n"
+        "    {%- endif %}\n"
+        "{%- endif %}\n"
+    )
+
+    def __init__(self, enable_thinking: bool = True, **kwargs):
+        """
+        Initializes the MiniCPM-V-4.6 Handler.
+
+        Args:
+            enable_thinking (bool): Controls whether to open a `<think>` block for reasoning.
+                                    Defaults to False as per the standard template logic.
+        """
+        self.enable_thinking = enable_thinking
+        super().__init__(**kwargs)
+
+    def __call__(self, **kwargs):
+        # Inject the thinking variable into the Jinja environment
+        self.extra_template_arguments["enable_thinking"] = self.enable_thinking
+
+        # MiniCPM uses standard <|im_end|> ChatML stop formatting
+        kwargs['stop'] = [self.MINICPM_PAD_TOKEN, self.MINICPM_EOS_TOKEN]
+
+        if self.verbose:
+            print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
+
+        return super().__call__(**kwargs)
+
+
 class Gemma3ChatHandler(MTMDChatHandler):
 
     GEMMA3_BOI_TOKEN  = "<start_of_image>"
@@ -5316,6 +5521,84 @@ class Qwen25VLChatHandler(MTMDChatHandler):
         # Use parent implementation
         return super().__call__(**kwargs)
 
+class Qwen3ASRChatHandler(MTMDChatHandler):
+    """
+    Handler for Qwen 3 ASR (Automatic Speech Recognition) models.
+
+    Features:
+    - Highly specialized for Speech-to-Text tasks.
+    - Aggregates all system text into a single cohesive system block.
+    - Drops user text entirely, extracting ONLY audio data into a unified user turn.
+    - Wraps audio with <|audio_start|><|audio_pad|>[DATA]<|audio_end|>.
+    - Integrated MTMD-style URL and Base64 injection for input_audio and audio_url.
+    """
+
+    DEFAULT_SYSTEM_MESSAGE = """
+    You are an advanced multilingual Speech-to-Text model. Accurately transcribe the audio into text in its original spoken language.
+    You should ignore background noise, filler words, and stutters where possible, and format the final output with correct grammar and capitalization.
+    """
+
+    QWEN3_ASR_BOS_TOKEN = "<|im_start|>"
+    QWEN3_ASR_PAD_TOKEN = "<|endoftext|>"
+    QWEN3_ASR_EOS_TOKEN = "<|im_end|>"
+
+
+    QWEN3_ASR_AUDIO_BOS_TOKEN = "<|audio_start|>"
+    QWEN3_ASR_AUDIO_PAD_TOKEN = "<|audio_pad|>"
+    QWEN3_ASR_AUDIO_EOS_TOKEN = "<|audio_end|>"
+
+    CHAT_FORMAT = (
+        "{%- set ns = namespace(system_text='') -%}\n"
+        "{%- for m in messages -%}\n"
+        "    {%- if m.role == 'system' -%}\n"
+        "        {%- if m.content is string -%}\n"
+        "            {%- set ns.system_text = ns.system_text + m.content -%}\n"
+        "        {%- else -%}\n"
+        "            {%- for c in m.content -%}\n"
+        "                {%- if c.type == 'text' and (c.text is defined) -%}\n"
+        "                    {%- set ns.system_text = ns.system_text + c.text -%}\n"
+        "                {%- endif -%}\n"
+        "            {%- endfor -%}\n"
+        "        {%- endif -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "\n"
+        "{%- set ns2 = namespace(audio_tokens='') -%}\n"
+        "{%- for m in messages -%}\n"
+        "    {%- if m.content is not string -%}\n"
+        "        {%- for c in m.content -%}\n"
+        "            {%- if c.type == 'audio' or ('audio' in c) or ('audio_url' in c) or c.type == 'input_audio' -%}\n"
+        "                {#- MTMD Audio Injection -#}\n"
+        "                {%- set audio_val = '' -%}\n"
+        "                {%- if c.type == 'audio_url' or 'audio_url' in c -%}\n"
+        "                    {%- set audio_val = c.audio_url if c.audio_url is string else c.audio_url.url -%}\n"
+        "                {%- elif c.type == 'input_audio' or 'input_audio' in c -%}\n"
+        "                    {%- set audio_val = c.input_audio if c.input_audio is string else ('data:audio/' + c.input_audio.format + ';base64,' + c.input_audio.data) -%}\n"
+        "                {%- endif -%}\n"
+        "                {%- set ns2.audio_tokens = ns2.audio_tokens + '<|audio_start|><|audio_pad|>' + audio_val + '<|audio_end|>' -%}\n"
+        "            {%- endif -%}\n"
+        "        {%- endfor -%}\n"
+        "    {%- endif -%}\n"
+        "{%- endfor -%}\n"
+        "\n"
+        "{{- '<|im_start|>system\\n' + (ns.system_text if ns.system_text is string else '') + '<|im_end|>\\n' -}}\n"
+        "{{- '<|im_start|>user\\n' + ns2.audio_tokens + '<|im_end|>\\n' -}}\n"
+        "{%- if add_generation_prompt -%}\n"
+        "    {{- '<|im_start|>assistant\\n' -}}\n"
+        "{%- endif -%}\n"
+    )
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+
+    def __call__(self, **kwargs):
+        # Qwen3 models universally use `<|endoftext|>` and `<|im_end|>` as the stop token
+        kwargs['stop'] = [self.QWEN3_ASR_AUDIO_PAD_TOKEN, self.QWEN3_ASR_AUDIO_EOS_TOKEN]
+
+        if self.verbose:
+            print(f"{self.log_prefix} - Start processing Qwen3-ASR (Audio Only)")
+
+        return super().__call__(**kwargs)
 
 class Qwen3VLChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (

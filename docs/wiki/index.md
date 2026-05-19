@@ -30,6 +30,7 @@ These pages document major source modules and related classes.
 | [modules/LlamaEmbedding\|Llama Embedding] | Embedding-related APIs and usage patterns. |
 | [modules/LlamaGrammar\|Llama Grammar] |  Provides grammar utilities for constrained generation. |
 | [modules/LlamaSpeculative\|Llama Speculative Decoding] | Draft model interfaces and prompt-based speculative decoding helpers. |
+| [modules/Logger\|Logger] |  provides configuration for runtime logging in `llama-cpp-python`, wrapping the native `ggml`/`llama.cpp` logging infrastructure. It controls verbosity levels, output streams, substring filtering, and callback integration, allowing fine-grained control over diagnostic and informational output from the underlying bindings. |
 
 ---
 
@@ -53,6 +54,7 @@ If you are new to this wiki, read the pages in this order:
 3. [[modules/LlamaEmbedding|Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)]
 4. [[modules/LlamaGrammar|Llama Grammar](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaGrammar.md)]
 5. [[modules/LlamaSpeculative|Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)]
+6. [[modules/Logger\|Logger](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/Logger.md)]
 
 If you are contributing documentation, start with:
 
@@ -72,6 +74,7 @@ Currently available pages:
 - `modules/LlamaEmbedding.md`
 - `modules/LlamaGrammar.md`
 - `modules/LlamaSpeculative.md`
+- `modules/Logger.md`
 - `SCHEMA.md`
 - `contributing-to-wiki.md`
 

@@ -57,8 +57,19 @@ from ._internals import (
 )
 from ._ggml import (
     ggml_backend_cpu_buffer_type,
+    ggml_backend_load_all_from_path,
+    ggml_backend_reg_count
 )
-from ._logger import set_verbose
+from ._logger import (
+    configure_logging,
+    get_verbosity,
+    set_verbosity,
+    get_log_filters,
+    set_log_filters,
+    add_log_filters,
+    clear_log_filters,
+    reset_log_filters,
+)
 from ._utils import suppress_stdout_stderr
 
 
@@ -109,8 +120,12 @@ class Llama:
         n_batch: int = 2048,
         n_ubatch: int = 512,
         n_seq_max: int = 1,
+        n_rs_seq: int = 0,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
+        ctx_type: Optional[
+            int
+        ] = llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_DEFAULT,
         rope_scaling_type: Optional[
             int
         ] = llama_cpp_lib.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
@@ -132,8 +147,9 @@ class Llama:
         swa_full: Optional[bool] = None,
         kv_unified: Optional[bool] = None,
         # HybridCheckpointCache Params
-        ctx_checkpoints: int = 32,
+        ctx_checkpoints: int = 16,
         checkpoint_interval: int = 4096,
+        checkpoint_on_device: bool = False,
         # Sampling Params
         last_n_tokens_size: int = 64,
         # Backend Params
@@ -150,7 +166,11 @@ class Llama:
         type_v: Optional[int] = None,
         # Misc
         spm_infill: bool = False,
+        # Log
         verbose: bool = True,
+        verbosity: Optional[Union[int, str, bool]] = None,
+        log_filters: Optional[Sequence[str]] = None,
+        log_filters_case_sensitive: bool = True,
         # Extra Params
         chat_handler_kwargs: Dict[str, Any] = {},
         **kwargs,  # type: ignore
@@ -229,17 +249,38 @@ class Llama:
             kv_unified: use single unified KV buffer for the KV cache of all sequences
             ctx_checkpoints: max number of context checkpoints to create per slot (default: 16)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
             checkpoint_interval: Hybrid model checkpoint token intervals, and archiving of text with interval sizes along the way.
+            checkpoint_on_device: Store hybrid/recurrent checkpoint tensor payloads in llama_context-owned device buffers via LLAMA_STATE_SEQ_FLAGS_ON_DEVICE.
             last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
             numa: numa policy
             chat_format: String specifying the chat format to use when calling create_chat_completion.
             chat_handler: Optional chat handler to use when calling create_chat_completion.
             draft_model: Optional draft model to use for speculative decoding.
             tokenizer: Optional tokenizer to override the default tokenizer from llama.cpp.
-            verbose: Print verbose output to stderr.
             type_k: KV cache data type for K (default: f16)
             type_v: KV cache data type for V (default: f16)
             spm_infill: Use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this.
-
+            verbose: Backward-compatible boolean switch for native llama.cpp / ggml runtime logs.
+                False keeps only error-level native logs; True enables debug-level native logs.
+                If `verbosity` is provided, `verbosity` takes precedence over `verbose`.
+            verbosity: Fine-grained llama.cpp-style native runtime log verbosity.
+                Accepts 0-5, bool, or string aliases.
+                Numeric levels:
+                    0 = output only
+                    1 = error
+                    2 = warning
+                    3 = info
+                    4 = trace
+                    5 = debug
+                Use `verbosity=3` for llama.cpp-style default info logs.
+                `verbose=False` remains equivalent to error-only logging, while
+                `verbose=True` remains equivalent to debug logging.
+            log_filters: Optional substring filters for native runtime logs.
+                If any provided substring appears in a decoded backend log message,
+                that message is suppressed. By default, the logger may include built-in
+                filters for noisy low-level logs such as CUDA Graph reuse spam messages.
+                Pass an empty list to disable all substring filtering for this instance.
+            log_filters_case_sensitive: Whether `log_filters` should match case-sensitively.
+                Defaults to True for predictable low-level backend log filtering.
         Raises:
             ValueError: If the model path does not exist.
 
@@ -247,13 +288,50 @@ class Llama:
             A Llama instance.
         """
         self.verbose = verbose
+        self.verbosity = verbosity
         self._stack = contextlib.ExitStack()
 
-        set_verbose(verbose)
+        configure_logging(
+            verbose=verbose,
+            verbosity=verbosity,
+            log_filters=log_filters,
+            log_filters_case_sensitive=log_filters_case_sensitive,
+        )
 
+        # llama.cpp / ggml backend initialization is process-global.
+        # Run it once before loading any model.
         if not Llama.__backend_initialized:
             with suppress_stdout_stderr(disable=verbose):
                 llama_cpp_lib.llama_backend_init()
+
+                # Wheels built with `GGML_BACKEND_DL` ship ggml backends as separate
+                # dynamic libraries under llama_cpp/lib, for example:
+                #
+                #   ggml-cpu-x64.dll
+                #   ggml-cpu-haswell.dll
+                #   ggml-cpu-alderlake.dll
+                #   ggml-cuda.dll
+                #
+                # With the dynamic backend layout, llama_backend_init() initializes
+                # the global backend system but does not necessarily register every
+                # packaged backend. Loading the package lib directory ensures ggml can
+                # discover CPU variants and optional accelerator backends before model
+                # loading.
+                lib_dir = Path(llama_cpp_lib.__file__).resolve().parent / "lib"
+
+                if not lib_dir.exists():
+                    raise FileNotFoundError(f"Llama.__init__: llama_cpp lib directory not found: {lib_dir}")
+
+                # Load all dynamic ggml backend plugins from the packaged lib directory.
+                ggml_backend_load_all_from_path(
+                    ctypes.c_char_p(str(lib_dir).encode("utf-8"))
+                )
+
+                # Print the number of backend registrations to confirm whether the DLL is loaded.
+                if self.verbose:
+                    count = ggml_backend_reg_count()
+                    print(f"Llama.__init__: Loaded ggml backend registry count: {count}", file=sys.stderr)
+
             Llama.__backend_initialized = True
 
         if isinstance(numa, bool):
@@ -402,6 +480,7 @@ class Llama:
         self.n_batch = min(n_ctx, n_batch)  # ???
         self.n_keep = n_keep if n_keep > 0 else 256
         self.n_seq_max = n_seq_max
+        self.n_rs_seq  = n_rs_seq
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
@@ -414,8 +493,11 @@ class Llama:
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
         self.context_params.n_seq_max = self.n_seq_max
+        self.context_params.n_rs_seq = self.n_rs_seq
         self.context_params.n_threads = self.n_threads
         self.context_params.n_threads_batch = self.n_threads_batch
+
+        self.context_params.ctx_type = ctx_type
         self.context_params.rope_scaling_type = (
             rope_scaling_type
             if rope_scaling_type is not None
@@ -543,6 +625,7 @@ class Llama:
         _is_recurrent = self._model.is_recurrent()
         _is_hybrid = self._model.is_hybrid()
         _n_swa = self._model.n_swa()
+
         # Sync llama.cpp upstream (#20291): warn swa-full is not supported for non-SWA models.
         if _n_swa == 0:
             if (self.context_params.swa_full):
@@ -557,13 +640,25 @@ class Llama:
 
         if self.is_hybrid:
             if self.verbose:
-                print(f"Llama.__init__: Hybrid/Recurrent model detected."
-                      f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, n_swa: {_n_swa}, swa_full: {self.context_params.swa_full}). "
-                      f" Enabling HybridCheckpointCache(ctx_checkpoints={ctx_checkpoints}, checkpoint_interval={checkpoint_interval}).",
-                      file=sys.stderr)
+                print(
+                    f"Llama.__init__: Hybrid/Recurrent model detected. "
+                    f"(is_recurrent: {_is_recurrent}, is_hybrid: {_is_hybrid}, "
+                    f"n_swa: {_n_swa}, swa_full: {self.context_params.swa_full}). "
+                    f"Enabling HybridCheckpointCache("
+                    f"ctx_checkpoints={ctx_checkpoints}, "
+                    f"checkpoint_interval={checkpoint_interval}, "
+                    f"on_device={checkpoint_on_device}).",
+                    file=sys.stderr,
+                )
             self.ctx_checkpoints = ctx_checkpoints
             self.checkpoint_interval = checkpoint_interval
-            self._hybrid_cache_mgr = HybridCheckpointCache(self._ctx.ctx, max_checkpoints=self.ctx_checkpoints, verbose=self.verbose)
+            self.checkpoint_on_device = checkpoint_on_device
+            self._hybrid_cache_mgr = HybridCheckpointCache(
+                self._ctx.ctx,
+                max_checkpoints=self.ctx_checkpoints,
+                on_device=self.checkpoint_on_device,
+                verbose=self.verbose,
+            )
         else:
             self._hybrid_cache_mgr = None
 
@@ -792,6 +887,71 @@ class Llama:
             self.scores[: self.n_tokens, :].tolist(),
             maxlen=self._n_ctx if self._logits_all else 1,
         )
+
+    # Logger API
+
+    def set_verbosity(self, verbosity: Union[int, str, bool, None]) -> None:
+        """Set native llama.cpp / ggml runtime log verbosity for this process.
+
+        Levels:
+            0 = output only
+            1 = error
+            2 = warning
+            3 = info
+            4 = trace
+            5 = debug
+
+        Note:
+            Native backend logging is process-global because llama.cpp / ggml use
+            a global log callback. Changing this affects all Llama instances in
+            the current Python process.
+        """
+        set_verbosity(verbosity)
+        self.verbosity = get_verbosity()
+        self.verbose = self.verbosity >= 5
+
+
+    def get_verbosity(self) -> int:
+        """Return the current native runtime log verbosity."""
+        return get_verbosity()
+
+
+    def set_log_filters(
+        self,
+        filters: Sequence[str],
+        *,
+        case_sensitive: bool = True,
+    ) -> None:
+        """Replace substring filters for native runtime logs.
+
+        Any backend log message containing one of these substrings will be
+        suppressed. Pass an empty list to disable all substring filtering.
+
+        Note:
+            Native backend logging is process-global, so this affects all Llama
+            instances in the current Python process.
+        """
+        set_log_filters(filters, case_sensitive=case_sensitive)
+
+
+    def add_log_filters(self, filters: Sequence[str]) -> None:
+        """Append substring filters for native runtime logs."""
+        add_log_filters(filters)
+
+
+    def get_log_filters(self) -> List[str]:
+        """Return the current substring filters for native runtime logs."""
+        return get_log_filters()
+
+
+    def clear_log_filters(self) -> None:
+        """Clear all substring filters, including default filters."""
+        clear_log_filters()
+
+
+    def reset_log_filters(self) -> None:
+        """Restore default substring filters for native runtime logs."""
+        reset_log_filters()
 
     # LoRA / Adapter Management API
 
