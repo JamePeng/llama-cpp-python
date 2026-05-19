@@ -117,7 +117,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
         - Add a technical note in the FAQ recommending LLVM/Clang over MSVC for
         achieving full x64 CPU variant coverage on Windows.
 
-- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/39cf5d61915769124b7efbbfa69c46f19a6363ee](https://github.com/ggml-org/llama.cpp/commit/39cf5d61915769124b7efbbfa69c46f19a6363ee)
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/d14ce3dab4de197adec5166faa54ac5db8262f26](https://github.com/ggml-org/llama.cpp/commit/d14ce3dab4de197adec5166faa54ac5db8262f26)
 
 - feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260517
 
