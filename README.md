@@ -288,6 +288,9 @@ https://github.com/JamePeng/llama-cpp-python/releases
 <details>
 <summary>HIP (ROCm)</summary>
 
+<details>
+<summary>Linux ROCm</summary>
+
 This provides GPU acceleration on HIP-supported AMD GPUs. Make sure to have ROCm installed.
 
 You can download it from your Linux distro's package manager or from here: [ROCm Quick Start (Linux)](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tutorial/quick-start.html#rocm-install-quick).
@@ -300,6 +303,40 @@ CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1030" pip install "llama-cpp-python @
 Note: `GPU_TARGETS` is optional, omitting it will build the code for all GPUs in the current system.
 
 More details see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#hip
+
+</details>
+
+<details>
+<summary>Windows ROCm</summary>
+
+> **Note:** Install TheRock ROCm, activate your venv, then run in PowerShell. Replace `gfx1200` with your GPU architecture.
+
+```powershell
+cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1 && set' | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } }
+
+rocm-sdk init
+
+$ROCM_DEVEL = "$env:VIRTUAL_ENV\Lib\site-packages\_rocm_sdk_devel"
+$ROCM_CORE  = "$env:VIRTUAL_ENV\Lib\site-packages\_rocm_sdk_core"
+$ROCM_GFX   = (Get-Item "$env:VIRTUAL_ENV\Lib\site-packages\_rocm_sdk_libraries_gfx*").FullName
+
+$env:HIP_PATH          = $ROCM_DEVEL
+$env:ROCM_PATH         = $ROCM_DEVEL
+$env:HIP_DEVICE_LIB_PATH = "$ROCM_CORE\lib\llvm\amdgcn\bitcode"
+$env:PATH              = "$ROCM_DEVEL\bin;$ROCM_DEVEL\lib\llvm\bin;$ROCM_GFX\bin;$env:PATH"
+$env:CMAKE_GENERATOR   = "Ninja"
+$env:HIP_PLATFORM      = "amd"
+$env:CC                = "$ROCM_DEVEL\lib\llvm\bin\clang.exe"
+$env:CXX               = "$ROCM_DEVEL\lib\llvm\bin\clang++.exe"
+$env:HIP_CLANG_PATH    = "$ROCM_DEVEL\lib\llvm\bin"
+
+$R = $ROCM_DEVEL -replace '\\', '/'
+$env:CMAKE_ARGS = "-DGGML_HIP=ON -DGGML_HIPBLAS=on -DGPU_TARGETS=gfx1200 -DCMAKE_HIP_ARCHITECTURES=gfx1200 -DCMAKE_C_COMPILER=`"$R/lib/llvm/bin/clang.exe`" -DCMAKE_CXX_COMPILER=`"$R/lib/llvm/bin/clang++.exe`" -DHIP_LIBRARIES=`"$R/lib/amdhip64.lib`" -DCMAKE_PREFIX_PATH=`"$R`""
+
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git" --no-cache-dir
+```
+
+</details>
 
 </details>
 
@@ -1743,7 +1780,7 @@ Libraries from other authors are often smaller because they may only compile for
 
 * 1. I've determined that `llama_cpp.server` is currently in a semi-deprecated state (meaning it won't be maintained unless absolutely necessary, and I might even consider deleting or separating it to reduce the library size). I highly recommend using the `llama-server` program maintained by the upstream `llama.cpp` project, which offers a lower-level implementation, more frequent maintenance and optimization, and more reliable API calls.
 
-* 2. Regarding AMD and Intel graphics cards, AMD can certainly use ROCm as the primary backend (but the drawback is that it's basically only stable on Linux platforms), and Intel's Sycl will also encounter some compilation difficulties. I consistently recommend using the Vulkan backend for these two types of graphics cards for greater efficiency and stability, because the upstream `llama.cpp` Vulkan backend is actively maintained by many developers, generally allowing you to enjoy new feature optimizations and bug fixes earlier and faster.
+* 2. Regarding AMD and Intel graphics cards, AMD can use ROCm as the primary backend, while Intel's Sycl will encounter some compilation difficulties. I consistently recommend using the Vulkan backend for these two types of graphics cards for greater efficiency and stability, because the upstream `llama.cpp` Vulkan backend is actively maintained by many developers, generally allowing you to enjoy new feature optimizations and bug fixes earlier and faster.
 
 * 3. If you are using hybrid multimodal model for building ComfyUI nodes or running single-turn API wrappers where you do not need multi-turn state rollbacks, simply initialize your Llama instance with `ctx_checkpoints=0`:
 
