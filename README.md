@@ -269,6 +269,8 @@ On MacOS, Metal is enabled by default(`GGML_METAL=ON`). Using Metal makes the co
 
 To disable the Metal build at compile time use the `CMAKE_ARGS="-DGGML_METAL=OFF"` cmake option.
 
+When built with Metal support, you can explicitly disable GPU inference with the `n-gpu-layers=0` parameter.
+
 ```bash
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
@@ -277,6 +279,7 @@ pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python
 
 It is also possible to install a pre-built wheel with Metal support. As long as your system meets some requirements:
 
+- CPU Arch: arm64
 - MacOS Version is 11.0 or later
 - Python Version is 3.10, 3.11, 3.12, 3.13 or 3.14
 
@@ -415,46 +418,83 @@ CMAKE_ARGS="-DGGML_RPC=on" pip install "llama-cpp-python @ git+https://github.co
 </details>
 
 
-### Windows Notes
-
+### Install Notes
 <details>
-<summary>Error: Can't find 'nmake' or 'CMAKE_C_COMPILER'</summary>
+<summary> Optimization Options (Optional)</summary>
 
-If you run into issues where it complains it can't find `'nmake'` `'?'` or CMAKE_C_COMPILER, you can extract w64devkit as [mentioned in llama.cpp repo](https://github.com/ggerganov/llama.cpp#openblas) and add those manually to CMAKE_ARGS before running `pip` install:
-
-```ps
-$env:CMAKE_GENERATOR = "MinGW Makefiles"
-$env:CMAKE_ARGS = "-DGGML_OPENBLAS=on -DCMAKE_C_COMPILER=C:/w64devkit/bin/gcc.exe -DCMAKE_CXX_COMPILER=C:/w64devkit/bin/g++.exe"
-```
-
-See the above instructions and set `CMAKE_ARGS` to the BLAS backend you want to use.
-</details>
-
-### MacOS Notes
-
-Detailed MacOS Metal GPU install documentation is available at [docs/install/macos.md](https://llama-cpp-python.readthedocs.io/en/latest/install/macos/)
-
-<details>
-<summary>M1 Mac Performance Issue</summary>
-
-Note: If you are using Apple Silicon (M1) Mac, make sure you have installed a version of Python that supports arm64 architecture. For example:
+> **💡 Tip:** If you want to save compilation time, you can skip building of llama.cpp with the standalone examples, tools, tests, and server by adding the following flags, as they are not required for Python bindings:
 
 ```bash
-wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-arm64.sh
-bash Miniforge3-MacOSX-arm64.sh
+-DLLAMA_BUILD_EXAMPLES=OFF \
+-DLLAMA_BUILD_TOOLS=OFF \
+-DLLAMA_BUILD_TESTS=OFF \
+-DLLAMA_BUILD_SERVER=OFF
 ```
-
-Otherwise, while installing it will build the llama.cpp x86 version which will be 10x slower on Apple Silicon (M1) Mac.
 </details>
 
 <details>
-<summary>M Series Mac Error: `(mach-o file, but is an incompatible architecture (have 'x86_64', need 'arm64'))`</summary>
-
-Try installing with
+<summary> CUDA compiler warning suppression is optional</summary>
+CUDA nvcc compiler may print many template-related warnings from ggml-cuda, such as:
 
 ```bash
-CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DGGML_METAL=on" pip install --upgrade --verbose --force-reinstall --no-cache-dir "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+warning #177-D
+warning #221-D
+warning #550-D
 ```
+
+These usually generate a huge amount of noisy diagnostics rather than build blockers. They constantly flood logs and consume CPU printing performance.
+
+For cleaner CI/local logs, you can pass:
+
+```bash
+-DCMAKE_CUDA_FLAGS="--diag-suppress=177 --diag-suppress=221 --diag-suppress=550"
+```
+</details>
+
+<details>
+<summary> Notes for `GGML_BACKEND_DL` + `GGML_CPU_ALL_VARIANTS` builds</summary>
+When building wheels with `GGML_BACKEND_DL=ON` and `GGML_CPU_ALL_VARIANTS=ON`,
+GGML CPU backends are built as separate dynamic libraries, such as:
+
+```text
+ggml-cpu-x64.dll
+ggml-cpu-haswell.dll
+ggml-cpu-alderlake.dll
+ggml-cpu-zen4.dll
+```
+These backend libraries must be packaged together under:
+
+```text
+site-packages/llama_cpp/lib
+```
+
+The runtime must also explicitly load them with:
+
+```text
+ggml_backend_load_all_from_path()
+```
+
+### Windows notes
+
+For full x64 CPU variant coverage, `LLVM/Clang` is recommended. `MSVC` may skip some variants such as `zen4`, `cooperlake`, or `sapphirerapids`.
+
+If `GGML_OPENMP=ON` is used, the LLVM OpenMP runtime must also be packaged next to the backend DLLs:
+
+```text
+libomp140.x86_64.dll
+```
+
+Without this file, `ggml-cpu-*.dll` may fail to load dynamically at runtime.
+
+### Wheel packaging checklist
+
+* Enable `GGML_BACKEND_DL=ON`
+* Enable `GGML_CPU_ALL_VARIANTS=ON`
+* Use `GGML_NATIVE=OFF` for portable wheels
+* Install all `ggml-cpu-*` backend libraries into `llama_cpp/lib`
+* Package required runtime dependencies such as `libomp140.x86_64.dll`
+* Remove development-only files such as `.lib`, `cmake/`, and `pkgconfig/`
+
 </details>
 
 ### Upgrading and Reinstalling
