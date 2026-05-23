@@ -222,6 +222,9 @@ if (LLAMA_BUILD)
     # Disable building of server
     set(LLAMA_BUILD_SERVER OFF CACHE BOOL "llama: build server example" FORCE)
 
+    # Disable building of unified binary
+    set(LLAMA_BUILD_APP OFF CACHE BOOL "llama: build the unified binary" FORCE)
+
     # Disable build the embedded Web UI for server
     set(LLAMA_BUILD_UI OFF CACHE BOOL "llama: build the embedded Web UI for server" FORCE)
     set(LLAMA_USE_PREBUILT_UI OFF CACHE BOOL "llama: use prebuilt UI from HF Bucket when available (requires LLAMA_BUILD_UI=ON)" FORCE)
