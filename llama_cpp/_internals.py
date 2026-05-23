@@ -755,12 +755,36 @@ class LlamaContext:
         llama_cpp.llama_synchronize(self.ctx)
 
     def get_logits(self):
+        """
+        Token logits obtained from the last call to llama_decode()
+        The logits for which llama_batch.logits[i] != 0 are stored contiguously
+        in the order they have appeared in the batch.
+        Rows: number of tokens for which llama_batch.logits[i] != 0
+        Cols: n_vocab
+
+        Returns:
+            Pointer to the logits buffer of shape (n_tokens, n_vocab)
+        """
         self._assert_ctx()
-        return llama_cpp.llama_get_logits(self.ctx)
+        logits = llama_cpp.llama_get_logits(self.ctx)
+        if not logits:
+            raise RuntimeError(f"LlamaContext.get_logits: failed to get logits")
+        return logits
 
     def get_logits_ith(self, i: int):
+        """
+        Return logits for the ith output row from the last llama_decode call.
+
+        Note:
+            This calls llama_get_logits_ith(), which may reorder/synchronize
+            the output buffer internally. Avoid calling it on the hot path unless
+            Python-side logits are required.
+        """
         self._assert_ctx()
-        return llama_cpp.llama_get_logits_ith(self.ctx, i)
+        logits = llama_cpp.llama_get_logits_ith(self.ctx, i)
+        if not logits:
+            raise RuntimeError(f"LlamaContext.get_logits_ith: invalid logits index {i}")
+        return logits
 
     def set_embeddings(self, embeddings: bool):
         self._assert_ctx()
