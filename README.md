@@ -160,6 +160,9 @@ $env:CMAKE_ARGS = "-DGGML_CUDA=on"
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
+Note: **Programmatic Dependent Launch (PDL)** is a CUDA optimization for newer NVIDIA GPUs (CC >= 90; does not include Ada).
+It enables stream-level dependency-driven concurrent execution of CUDA kernels within the same stream, achieving similar kernel launch overhead reduction as CUDA Graphs. If you have a newer NVIDIA GPU (e.g. `Hoppper`, `Blackwell` and above), you can achieve significant speedups and latency reduction in token generation across nearly all models when compiling with ` -DGGML_CUDA_PDL=ON`.
+
 **Pre-built Wheel (New)**
 
 It is also possible to install a pre-built wheel with CUDA support. Make sure your system meets the following requirements:
