@@ -1,7 +1,7 @@
 import abc
 import collections
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, DefaultDict, Dict, List, Literal, Optional, Tuple
 
 import numpy as np
 import numpy.typing as npt
@@ -17,102 +17,293 @@ class LlamaDraftModel(abc.ABC):
 
 class LlamaNGramMapDecoding(LlamaDraftModel):
     """
-    Ultra-fast speculative decoder based on hash inverted index and incremental updates.
-    O(1) time complexity, aligned with llama.cpp's underlying ngram-map algorithm.
+    Fast model-free speculative decoder based on prompt n-gram lookup.
+
+    It supports two modes:
+
+    - "k":
+        Key-only mode. Stores n-gram key -> history positions.
+        This is memory-efficient and similar to llama.cpp's ngram-map-k behavior.
+
+    - "k4v":
+        Key-to-value mode. Stores n-gram key -> continuation tokens.
+        This uses more memory, but can return cached continuations directly.
+
+    This class does not use a draft model. It only speculates from already verified
+    token history. Therefore, rejected tokens are handled naturally when the next
+    `input_ids` is passed in.
+
+    Aligned with llama.cpp's underlying ngram-map k/k4v algorithm.
     """
 
-    def __init__(self, ngram_size: int = 3, num_pred_tokens: int = 10):
+    def __init__(
+        self,
+        ngram_size: int = 3,
+        num_pred_tokens: int = 10,
+        mode: Literal["k", "k4v"] = "k",
+        min_hits: int = 2,
+        max_entries_per_key: Optional[int] = None,
+        sync_check_tokens: int = 16,
+    ) -> None:
         """
-        Initializes the N-Gram Map speculative decoder.
-
         Args:
-            ngram_size (int): The length of the token sequence used as the search key.
-                Larger values provide strictly accurate context matching but may result
-                in fewer cache hits. Defaults to 3.
-            num_pred_tokens (int): The maximum number of future tokens to draft (predict)
-                and return once a match is found in the history. Defaults to 10.
-        """
-        self.ngram_size = ngram_size
-        self.num_pred_tokens = num_pred_tokens
+            ngram_size:
+                Number of tokens used as the lookup key.
 
-        # Core state cache
-        # Mapping format: (token_1, ..., token_N) -> [index_1, index_2, ...]
-        self._ngram_map: Dict[Tuple[int, ...], List[int]] = collections.defaultdict(list)
+            num_pred_tokens:
+                Maximum number of draft tokens to return.
+
+            mode:
+                "k" stores only matched positions.
+                "k4v" stores matched continuation values directly.
+
+            min_hits:
+                Minimum number of historical matches required before returning a draft.
+                Use 1 for maximum recall. Use >1 to reduce low-confidence drafts.
+
+            max_entries_per_key:
+                Optional memory cap per n-gram key.
+                When set, only the most recent entries are kept.
+                For k4v mode, setting max_entries_per_key is strongly recommended.
+
+            sync_check_tokens:
+                Number of trailing tokens used to verify whether the new input is an
+                incremental append of the previous input. This avoids expensive full
+                prefix comparison while still detecting most rollback/prompt-switch cases.
+        """
+        if ngram_size <= 0:
+            raise ValueError("ngram_size must be greater than 0")
+        if num_pred_tokens <= 0:
+            raise ValueError("num_pred_tokens must be greater than 0")
+        if min_hits <= 0:
+            raise ValueError("min_hits must be greater than 0")
+        if max_entries_per_key is not None and max_entries_per_key <= 0:
+            raise ValueError("max_entries_per_key must be None or greater than 0")
+        if sync_check_tokens <= 0:
+            raise ValueError("sync_check_tokens must be greater than 0")
+
+        mode = mode.lower()
+        if mode not in ("k", "k4v"):
+            raise ValueError("mode must be either 'k' or 'k4v'")
+
+        self.ngram_size = int(ngram_size)
+        self.num_pred_tokens = int(num_pred_tokens)
+        self.mode = mode
+        self.min_hits = int(min_hits)
+        self.sync_check_tokens = int(sync_check_tokens)
+
+        if mode == "k4v" and max_entries_per_key is None:
+            max_entries_per_key = 8
+        self.max_entries_per_key = max_entries_per_key
+
         self._history: List[int] = []
 
-    def _update_cache(self, input_ids: npt.NDArray[np.intc]) -> None:
-        """
-        Smart state synchronization and incremental build (Extreme O(1) optimization).
+        # In "k" mode:
+        #   key -> [position, position, ...]
+        self._map_k: DefaultDict[Tuple[int, ...], List[int]] = collections.defaultdict(list)
 
-        Args:
-            input_ids (npt.NDArray[np.intc]): The complete sequence of current token IDs
-                generated or processed so far.
+        # In "k4v" mode:
+        #   key -> {position: continuation}
+        #
+        # A dict is used so that recent entries can be refreshed when more continuation
+        # tokens become available.
+        self._map_k4v: DefaultDict[
+            Tuple[int, ...], Dict[int, Tuple[int, ...]]
+        ] = collections.defaultdict(dict)
+
+        self._closed = False
+        self._last_draft_len = 0
+
+    def clear(self) -> None:
         """
-        new_len = len(input_ids)
+        Clear token history and indexes.
+
+        Use this when starting a completely unrelated generation while keeping the
+        decoder instance reusable.
+        """
+        self._history.clear()
+        self._map_k.clear()
+        self._map_k4v.clear()
+        self._last_draft_len = 0
+
+    def close(self) -> None:
+        """
+        Release internal memory.
+
+        This class does not own native memory, but clearing large Python containers
+        explicitly is still useful for long-running applications.
+        """
+        self.clear()
+        self._closed = True
+
+    def __del__(self) -> None:
+        # Best-effort cleanup. Program correctness must not depend on __del__.
+        try:
+            self.close()
+        except Exception:
+            pass
+
+    def accept(self, n_accepted: int) -> None:
+        """
+        Notify how many draft tokens were accepted by the target model.
+
+        This implementation does not need to update internal state here, because the
+        next call receives the verified token history through `input_ids`.
+
+        The method is kept for API symmetry and future extensions, such as acceptance
+        statistics, adaptive reset, or low-acceptance fallback.
+        """
+        return
+
+    def _sync_and_index(self, input_ids: npt.NDArray[np.intc]) -> None:
+        """
+        Synchronize internal history with input_ids and update the n-gram index.
+
+        The index intentionally stores only n-grams that have at least one continuation
+        token. This prevents the current tail n-gram from matching itself and returning
+        an empty draft.
+        """
+        if self._closed:
+            raise RuntimeError("LlamaNGramMapDecoding is closed")
+
+        tokens = np.asarray(input_ids, dtype=np.intc).reshape(-1).tolist()
+
         old_len = len(self._history)
+        new_len = len(tokens)
 
-        # Check if it's a perfect incremental append (verify if the previous token matches)
-        is_incremental = False
-        if new_len > old_len and old_len > 0:
-            if self._history[-1] == input_ids[old_len - 1]:
-                is_incremental = True
+        if new_len == 0:
+            self.clear()
+            return
 
-        if is_incremental:
-            # Only extract, convert, and append new tokens.
-            # Never copy or touch the entire historical array!
-            new_tokens = input_ids[old_len:].tolist()
-            self._history.extend(new_tokens)
-            start_idx = max(0, old_len - self.ngram_size)
+        # Fast path: identical input, no update needed.
+        if new_len == old_len:
+            if self._history == tokens:
+                return
+
+        # Incremental append path.
+        is_append = False
+        if old_len > 0 and new_len > old_len:
+            check_len = min(old_len, max(self.ngram_size, self.sync_check_tokens))
+            is_append = self._history[old_len - check_len : old_len] == tokens[
+                old_len - check_len : old_len
+            ]
+
+        if is_append:
+            # Append only new tokens.
+            self._history.extend(tokens[old_len:])
+
+            if self.mode == "k":
+                # Only newly-valid keys need to be added.
+                start = max(0, old_len - self.ngram_size)
+            else:
+                # K4V must also refresh recent keys because their continuation values
+                # can grow as new tokens are appended.
+                start = max(0, old_len - self.ngram_size - self.num_pred_tokens + 1)
         else:
-            # Rollback occurred (wrong prediction) or a completely new Prompt. Trigger full rebuild.
-            self._ngram_map.clear()
-            self._history = input_ids.tolist()
-            start_idx = 0
+            # Rollback, prompt switch, truncation, or unsafe mutation.
+            self.clear()
+            self._history.extend(tokens)
+            start = 0
 
-        # Build/update the hash inverted index
-        for i in range(start_idx, new_len - self.ngram_size):
-            key = tuple(self._history[i : i + self.ngram_size])
-            self._ngram_map[key].append(i)
+        # Only index keys that have at least one token after the key.
+        # Valid pos satisfies:
+        #   pos + ngram_size < len(history)
+        end = max(0, len(self._history) - self.ngram_size)
+
+        if start >= end:
+            return
+
+        if self.mode == "k":
+            for pos in range(start, end):
+                key = tuple(self._history[pos : pos + self.ngram_size])
+                bucket = self._map_k[key]
+
+                if not bucket or bucket[-1] != pos:
+                    bucket.append(pos)
+
+                if (
+                    self.max_entries_per_key is not None
+                    and len(bucket) > self.max_entries_per_key
+                ):
+                    del bucket[: len(bucket) - self.max_entries_per_key]
+
+        else:
+            for pos in range(start, end):
+                key_start = pos
+                value_start = pos + self.ngram_size
+                value_end = min(value_start + self.num_pred_tokens, len(self._history))
+
+                if value_start >= value_end:
+                    continue
+
+                key = tuple(self._history[key_start:value_start])
+                value = tuple(self._history[value_start:value_end])
+
+                bucket = self._map_k4v[key]
+                bucket[pos] = value
+
+                if (
+                    self.max_entries_per_key is not None
+                    and len(bucket) > self.max_entries_per_key
+                ):
+                    # Keep the most recent positions.
+                    for old_pos in sorted(bucket)[: len(bucket) - self.max_entries_per_key]:
+                        del bucket[old_pos]
 
     def __call__(
         self, input_ids: npt.NDArray[np.intc], /, **kwargs: Any
     ) -> npt.NDArray[np.intc]:
         """
-        Generates draft tokens based on historical N-Gram frequency.
+        Generate draft tokens from verified token history.
 
         Args:
-            input_ids (npt.NDArray[np.intc]): The current sequence of token IDs.
-            **kwargs: Additional generation arguments (ignored in this implementation).
+            input_ids:
+                Complete verified token sequence so far.
 
         Returns:
-            npt.NDArray[np.intc]: An array of predicted draft tokens. Returns an empty
-            array if no matching context is found.
+            np.ndarray[np.intc]:
+                Predicted draft tokens. Empty array means no reliable match was found.
         """
-        # 1. Ultra-fast state synchronization
-        self._update_cache(input_ids)
+        _ = kwargs
 
-        # 2. Cannot speculate if the history is too short
+        self._sync_and_index(input_ids)
+        self._last_draft_len = 0
+
         if len(self._history) < self.ngram_size:
             return np.array([], dtype=np.intc)
 
-        # 3. Extract the Search Key (the last N tokens)
-        search_key = tuple(self._history[-self.ngram_size:])
+        search_key = tuple(self._history[-self.ngram_size :])
 
-        # 4. O(1) instant lookup
-        match_indices = self._ngram_map.get(search_key)
+        if self.mode == "k":
+            positions = self._map_k.get(search_key)
+            if not positions or len(positions) < self.min_hits:
+                return np.array([], dtype=np.intc)
 
-        if not match_indices:
-            return np.array([], dtype=np.intc)
+            # Use the latest valid match with an available continuation.
+            draft: List[int] = []
+            for pos in reversed(positions):
+                start = pos + self.ngram_size
+                if start < len(self._history):
+                    end = min(start + self.num_pred_tokens, len(self._history))
+                    draft = self._history[start:end]
+                    break
 
-        # 5. Get the context of the last match and extract draft tokens
-        best_match_idx = match_indices[-1]
-        draft_start = best_match_idx + self.ngram_size
-        draft_end = min(draft_start + self.num_pred_tokens, len(self._history))
+        else:
+            values = self._map_k4v.get(search_key)
+            if not values or len(values) < self.min_hits:
+                return np.array([], dtype=np.intc)
 
-        return np.array(self._history[draft_start:draft_end], dtype=np.intc)
+            # Use the continuation from the latest historical position.
+            latest_pos = max(values)
+            draft = list(values[latest_pos])
+
+        self._last_draft_len = len(draft)
+        return np.asarray(draft, dtype=np.intc)
 
 
 # Legacy Numpy sliding window implementation
+# Fast in some cases, but may degrade output quality.
+# Not recommended for production.
 class LlamaPromptLookupDecoding(LlamaDraftModel):
     """
     Stateless speculative decoding based on Numpy sliding window
