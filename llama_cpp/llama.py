@@ -1035,11 +1035,20 @@ class Llama:
             tokens: Sequence[int],
             active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
             control_vector: Optional[Dict[str, Any]] = None,
+            copy_logits: bool = True,
     ):
         """Evaluate a list of tokens.
 
         Args:
-            tokens: The list of tokens to evaluate.
+            tokens: The token ids to evaluate.
+            active_loras: Optional LoRA adapters to apply for this evaluation.
+                Each item should contain a ``name`` and an optional ``scale``.
+            control_vector: Optional control vector configuration to apply during
+                this evaluation.
+            copy_logits: Whether to copy the final logits into ``self.scores`` when
+                ``logits_all`` is disabled. Set to ``False`` for native sampler paths
+                that sample directly from the llama context and do not need
+                Python-side logits.
         """
         n_eval = len(tokens)
         if n_eval == 0:
@@ -1246,9 +1255,11 @@ class Llama:
                         if self.verbose:
                             print(f"Llama.eval: [Periodic Checkpoint] HybridCheckpoint save failed at pos {current_pos}, skipping update", file=sys.stderr)
 
-        # Save the final logit if not in _logits_all mode
-        if not self._logits_all:
-            logits_ptr = self._ctx.get_logits()
+        # Save the final logits only when Python-side logits are required.
+        # Native sampler can sample directly from ctx, so normal generation does not
+        # need to copy n_vocab floats into self.scores on every token.
+        if not self._logits_all and copy_logits:
+            logits_ptr = self._ctx.get_logits_ith(-1)
             logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
             self.scores[0, :] = logits_view
 
@@ -1666,6 +1677,14 @@ class Llama:
 
         self._sampling_ctx = LlamaSamplingContext(params, self._model)
 
+        # Native sampler samples directly from ctx. Python-side logits are only needed
+        # for compatibility hooks that explicitly consume self._scores.
+        copy_logits = (
+            self._logits_all
+            or logits_processor is not None
+            or stopping_criteria is not None
+        )
+
         sample_idx = self.n_tokens + len(tokens) - 1
         tokens = list(tokens)
 
@@ -1685,8 +1704,13 @@ class Llama:
                         body_tokens = tokens[:-1]
                         last_token = [tokens[-1]]
 
-                        # 1. Evaluate up to N-1
-                        self.eval(body_tokens, active_loras=active_loras, control_vector=control_vector)
+                        # 1. Evaluate up to N-1 without copying logits.
+                        self.eval(
+                            body_tokens,
+                            active_loras=active_loras,
+                            control_vector=control_vector,
+                            copy_logits=False,
+                        )
 
                         # 2. Save the N-1 state snapshot
                         current_history = self._input_ids[:self.n_tokens].tolist()
@@ -1695,11 +1719,21 @@ class Llama:
                             tokens=current_history,
                             seq_id=0
                         )
-                        # 3. Evaluate the final token to refresh logits
-                        self.eval(last_token, active_loras=active_loras, control_vector=control_vector)
+                        # 3. Evaluate final token. Copy logits only if Python-side hooks need them.
+                        self.eval(
+                            last_token,
+                            active_loras=active_loras,
+                            control_vector=control_vector,
+                            copy_logits=copy_logits,
+                        )
                     else:
                         # Standard evaluation or single-token generation step
-                        self.eval(tokens, active_loras=active_loras, control_vector=control_vector)
+                        self.eval(
+                            tokens,
+                            active_loras=active_loras,
+                            control_vector=control_vector,
+                            copy_logits=copy_logits,
+                        )
 
                 # Sample loop
                 while sample_idx < self.n_tokens:
