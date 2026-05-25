@@ -2804,6 +2804,7 @@ LLAMA_STATE_SEQ_FLAGS_SWA_ONLY = 1
 LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY = 1
 
 # // keeps the tensor data on device buffers (i.e. not accessible in host memory, but faster save/load)
+# // Getting the state for a seq_id with this flag invalidates all prior states gotten for that seq_id with this flag.
 LLAMA_STATE_SEQ_FLAGS_ON_DEVICE = 2
 
 llama_state_seq_flags = ctypes.c_uint32
