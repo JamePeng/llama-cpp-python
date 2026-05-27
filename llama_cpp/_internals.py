@@ -102,7 +102,7 @@ class LlamaModel:
         return llama_cpp.llama_vocab_type(self.model)
 
     def n_vocab(self) -> int:
-        return llama_cpp.llama_n_vocab(self.vocab)
+        return llama_cpp.llama_vocab_n_tokens(self.vocab)
 
     def n_ctx_train(self) -> int:
         return llama_cpp.llama_model_n_ctx_train(self.model)
@@ -131,40 +131,75 @@ class LlamaModel:
     def n_swa(self) -> int:
         return llama_cpp.llama_model_n_swa(self.model)
 
+    def rope_freq_scale_train(self) -> float:
+        """
+        Get the model's RoPE frequency scaling factor
+        """
+        return llama_cpp.llama_model_rope_freq_scale_train(self.model)
+
+    def model_desc(self) -> str:
+        """
+        Get a string describing the model type
+        """
+        buf = ctypes.create_string_buffer(256)
+        llama_cpp.llama_model_desc(self.model, buf, 256)
+        return buf.value.decode("utf-8")
+
+    def model_size(self) -> int:
+        """
+        Returns the total size of all the tensors in the model in bytes
+        """
+        return llama_cpp.llama_model_size(self.model)
+
+    def model_chat_template(self, name: bytes) -> str:
+        """
+        Get the default chat template. Returns nullptr if not available
+        If name is NULL, returns the default chat template
+        """
+        return llama_cpp.llama_model_chat_template(self.model, name).decode("utf-8")
+
     def n_params(self) -> int:
+        """
+        Returns the total number of parameters in the model
+        """
         return llama_cpp.llama_model_n_params(self.model)
 
     def has_encoder(self) -> bool:
+        """
+        Returns true if the model contains an encoder that requires llama_encode() call
+        """
         return llama_cpp.llama_model_has_encoder(self.model)
 
     def has_decoder(self) -> bool:
+        """
+        Returns true if the model contains a decoder that requires llama_decode() call
+        """
         return llama_cpp.llama_model_has_decoder(self.model)
 
     def decoder_start_token(self) -> int:
+        """
+        For encoder-decoder models, this function returns id of the token that must be provided
+        to the decoder to start generating output sequence. For other models, it returns -1.
+        """
         return llama_cpp.llama_model_decoder_start_token(self.model)
 
     def is_recurrent(self) -> bool:
+        """
+        Returns true if the model is recurrent (like Mamba, RWKV, etc.)
+        """
         return llama_cpp.llama_model_is_recurrent(self.model)
 
     def is_hybrid(self) -> bool:
+        """
+        Returns true if the model is hybrid (like Jamba, Granite, etc.)
+        """
         return llama_cpp.llama_model_is_hybrid(self.model)
 
     def is_diffusion(self) -> bool:
+        """
+        Returns true if the model is diffusion-based (like LLaDA, Dream, etc.)
+        """
         return llama_cpp.llama_model_is_diffusion(self.model)
-
-    def rope_freq_scale_train(self) -> float:
-        return llama_cpp.llama_model_rope_freq_scale_train(self.model)
-
-    def desc(self) -> str:
-        buf = ctypes.create_string_buffer(1024)
-        llama_cpp.llama_model_desc(self.model, buf, 1024)
-        return buf.value.decode("utf-8")
-
-    def size(self) -> int:
-        return llama_cpp.llama_model_size(self.model)
-
-    def get_tensor(self, name: str) -> ctypes.c_void_p:
-        raise NotImplementedError("get_tensor is not implemented in llama.cpp")
 
     # Vocab
 

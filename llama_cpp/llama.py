@@ -696,13 +696,20 @@ class Llama:
 
         try:
             self.metadata = self._model.metadata()
+            self.model_desc = self._model.model_desc()
+            # The total size of all the tensors in the model in bytes
+            self.model_size = self._model.model_size()
+
         except Exception as e:
             self.metadata = {}
             if self.verbose:
                 print(f"Failed to load metadata: {e}", file=sys.stderr)
 
         if self.verbose:
-            print(f"Model metadata: {self.metadata}", file=sys.stderr)
+            print(f"Model desc: {self.model_desc}, "
+                  f"Model size: {self.model_size / (1024 * 1024):.2f} MB, "
+                  f"Model metadata: {self.metadata}",
+                  file=sys.stderr)
 
         eos_token_id = self.token_eos()
         bos_token_id = self.token_bos()
