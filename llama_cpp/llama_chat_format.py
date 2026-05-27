@@ -2996,13 +2996,13 @@ while also answering every question accurately, clearly, and step-by-step when a
                         media_items.append({"url": url, "type": "image"})
 
                     # 2. Audio Processing
-                    elif content_type in ["audio_url", "input_audio"]:
+                    elif content_type in ["audio", "audio_url", "input_audio"]:
                         if not self.is_support_audio:
                             raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support audio inputs.")
 
                         # Case A: Handle custom/forward-compatible audio_url format
-                        if content_type == "audio_url":
-                            audio_url = content["audio_url"]
+                        if content_type == "audio_url" or content_type == "audio":
+                            audio_url = content[content_type]
                             url = audio_url if isinstance(audio_url, str) else audio_url["url"]
                             media_items.append({"url": url, "type": "audio"})
                         # Case B: Handle OpenAI standard input_audio format
