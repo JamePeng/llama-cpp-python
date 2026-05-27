@@ -67,31 +67,6 @@ jobs:
           echo LIB=%LIB%>>%GITHUB_ENV%
           echo LIBPATH=%LIBPATH%>>%GITHUB_ENV%
 
-      - name: Copy LLVM OpenMP runtime
-        shell: pwsh
-        run: |
-          # GGML CPU all-variant backends are built with LLVM OpenMP on Windows.
-          # The dynamically loaded ggml-cpu-*.dll files depend on this runtime.
-          # If it is missing from the wheel, ggml_backend_load_all_from_path()
-          # may fail to load CPU backend DLLs at runtime.
-          $packageLibDir = Join-Path $env:GITHUB_WORKSPACE "llama_cpp\lib"
-          New-Item -ItemType Directory -Force $packageLibDir | Out-Null
-
-          $omp = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Redist\MSVC" `
-            -Recurse `
-            -Filter "libomp140.x86_64.dll" `
-            -ErrorAction SilentlyContinue |
-            Where-Object { $_.FullName -match "OpenMP\.LLVM" } |
-            Select-Object -First 1
-
-          if (!$omp) {
-            Write-Error "Could not find libomp140.x86_64.dll in Visual Studio LLVM OpenMP redistributables."
-            exit 1
-          }
-
-          Copy-Item $omp.FullName (Join-Path $packageLibDir "libomp140.x86_64.dll") -Force
-          Write-Output "Copied LLVM OpenMP runtime: $($omp.FullName)"
-
       - name: Build wheel
         run: |
           $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.', '')
