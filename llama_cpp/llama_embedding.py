@@ -303,9 +303,7 @@ class LlamaEmbedding(Llama):
 
         # 1. Attempt to retrieve the built-in 'rerank' chat template from model metadata.
         # Modern GGUF models often include a template for formatting query/document pairs.
-        rerank_template = llama_cpp.llama_model_chat_template(self._model.model, b"rerank")
-        if rerank_template:
-            rerank_template = rerank_template.decode("utf-8")
+        rerank_template = self._model.model_chat_template(b"rerank")
 
         batch_inputs: List[List[int]] = []
 

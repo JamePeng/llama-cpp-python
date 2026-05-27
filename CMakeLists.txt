@@ -60,6 +60,106 @@ function(llama_cpp_python_install_target target)
 endfunction()
 
 
+# Install an extra Windows runtime DLL into the Python package runtime directory.
+#
+# Some dynamically loaded backend libraries depend on runtime DLLs that are not
+# always discoverable through $<TARGET_RUNTIME_DLLS:...>. One important example
+# is libomp140.x86_64.dll, required by LLVM OpenMP CPU backend variants.
+function(llama_cpp_python_install_windows_runtime_file runtime_file)
+    if(NOT WIN32)
+        return()
+    endif()
+
+    if(NOT runtime_file)
+        return()
+    endif()
+
+    if(NOT EXISTS "${runtime_file}")
+        message(WARNING "Windows runtime file does not exist and will not be installed: ${runtime_file}")
+        return()
+    endif()
+
+    # Normalize Windows paths for generated cmake_install.cmake.
+    # Without this, paths like C:\Program Files (...) may produce invalid
+    # CMake escape sequences such as \P during install.
+    file(TO_CMAKE_PATH "${runtime_file}" runtime_file_cmake)
+
+    set(INSTALL_DIRS
+        "${CMAKE_CURRENT_SOURCE_DIR}/llama_cpp/lib"
+        "${SKBUILD_PLATLIB_DIR}/llama_cpp/lib"
+    )
+
+    foreach(DIR ${INSTALL_DIRS})
+        file(TO_CMAKE_PATH "${DIR}" DIR_CMAKE)
+
+        install(
+            FILES "${runtime_file_cmake}"
+            DESTINATION "${DIR_CMAKE}"
+        )
+    endforeach()
+endfunction()
+
+
+# Locate and install the Windows LLVM OpenMP runtime when available.
+#
+# GGML CPU all-variant backends built with LLVM/Clang + OpenMP depend on
+# libomp140.x86_64.dll. Since ggml-cpu-*.dll files are loaded dynamically via
+# ggml_backend_load_all_from_path(), the OpenMP runtime must be packaged next to
+# them under llama_cpp/lib.
+#
+# CI may pass LLAMA_CPP_OPENMP_RUNTIME_DLL explicitly. Local builds can rely on
+# fallback search paths for Visual Studio Enterprise / BuildTools.
+function(llama_cpp_python_install_windows_openmp_runtime)
+    if(NOT WIN32)
+        return()
+    endif()
+
+    set(OPENMP_RUNTIME_DLL "")
+
+    if(DEFINED LLAMA_CPP_OPENMP_RUNTIME_DLL AND EXISTS "${LLAMA_CPP_OPENMP_RUNTIME_DLL}")
+        set(OPENMP_RUNTIME_DLL "${LLAMA_CPP_OPENMP_RUNTIME_DLL}")
+    else()
+        file(TO_CMAKE_PATH "$ENV{ProgramFiles}" PROGRAMFILES_CMAKE)
+        file(TO_CMAKE_PATH "$ENV{ProgramFiles\(x86\)}" PROGRAMFILES_X86_CMAKE)
+
+        set(VS_OPENMP_SEARCH_ROOTS
+            "${PROGRAMFILES_CMAKE}/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC"
+            "${PROGRAMFILES_CMAKE}/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC"
+            "${PROGRAMFILES_X86_CMAKE}/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC"
+            "${PROGRAMFILES_X86_CMAKE}/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC"
+        )
+
+        foreach(ROOT ${VS_OPENMP_SEARCH_ROOTS})
+            if(EXISTS "${ROOT}")
+                file(
+                    GLOB_RECURSE FOUND_OPENMP_DLLS
+                    "${ROOT}/*/debug_nonredist/x64/Microsoft.VC*.OpenMP.LLVM/libomp140.x86_64.dll"
+                    "${ROOT}/**/libomp140.x86_64.dll"
+                )
+
+                if(FOUND_OPENMP_DLLS)
+                    list(GET FOUND_OPENMP_DLLS 0 OPENMP_RUNTIME_DLL)
+                    break()
+                endif()
+            endif()
+        endforeach()
+    endif()
+
+    if(OPENMP_RUNTIME_DLL)
+        message(STATUS "Installing Windows LLVM OpenMP runtime: ${OPENMP_RUNTIME_DLL}")
+        llama_cpp_python_install_windows_runtime_file("${OPENMP_RUNTIME_DLL}")
+    else()
+        message(WARNING
+            "Could not find libomp140.x86_64.dll. "
+            "If GGML_OPENMP=ON and GGML CPU backend DLLs are built with LLVM OpenMP, "
+            "the packaged ggml-cpu-*.dll files may fail to load at runtime. "
+            "Set LLAMA_CPP_OPENMP_RUNTIME_DLL to the full path of libomp140.x86_64.dll "
+            "to package it explicitly."
+        )
+    endif()
+endfunction()
+
+
 # Remove development-only artifacts from Python wheel runtime directories.
 #
 # Upstream install rules may place CMake package files, pkg-config files, and
@@ -121,6 +221,9 @@ if (LLAMA_BUILD)
 
     # Disable building of server
     set(LLAMA_BUILD_SERVER OFF CACHE BOOL "llama: build server example" FORCE)
+
+    # Disable building of unified binary
+    set(LLAMA_BUILD_APP OFF CACHE BOOL "llama: build the unified binary" FORCE)
 
     # Disable build the embedded Web UI for server
     set(LLAMA_BUILD_UI OFF CACHE BOOL "llama: build the embedded Web UI for server" FORCE)
@@ -240,6 +343,11 @@ if (LLAMA_BUILD)
 
         llama_cpp_python_install_target(mtmd)
     endif()
+
+    # Install Windows LLVM OpenMP runtime when available.
+    # This must run before cleanup so the final wheel keeps runtime DLLs but
+    # removes development-only files such as .lib, cmake/, and pkgconfig/.
+    llama_cpp_python_install_windows_openmp_runtime()
 
     # Run after all runtime targets are installed, including mtmd.
     llama_cpp_python_cleanup_dev_files()

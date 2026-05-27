@@ -34,6 +34,18 @@ These pages document major source modules and related classes.
 
 ---
 
+### Development
+
+This section contains maintainer-facing development notes, workflows, and LLM-assisted helper tools for working on `llama-cpp-python`.
+
+#### Pages
+
+| Page | Description |
+|---|---|
+| [[development/Git Commit Generation Agent]] | Helper workflow for generating clear, structured, and source-aware Git commit messages. |
+
+---
+
 ### Wiki Maintenance
 
 These pages define how the wiki should be written, updated, and reviewed.
@@ -55,9 +67,9 @@ If you are new to this wiki, read the pages in this order:
 4. [[modules/LlamaGrammar|Llama Grammar](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaGrammar.md)]
 5. [[modules/LlamaSpeculative|Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)]
 6. [[modules/Logger\|Logger](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/Logger.md)]
+7. [[development/Git Commit Generation Agent](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/development/git-commit-generation-agent.md)]
 
 If you are contributing documentation, start with:
-
 1. [[SCHEMA|Wiki Schema](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/SCHEMA.md)]
 2. [[contributing-to-wiki|Contributing to the Wiki](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/contributing-to-wiki.md)]
 
@@ -75,6 +87,7 @@ Currently available pages:
 - `modules/LlamaGrammar.md`
 - `modules/LlamaSpeculative.md`
 - `modules/Logger.md`
+- `development/git-commit-generation-agent.md`
 - `SCHEMA.md`
 - `contributing-to-wiki.md`
 

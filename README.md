@@ -160,6 +160,9 @@ $env:CMAKE_ARGS = "-DGGML_CUDA=on"
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
+Note: **Programmatic Dependent Launch (PDL)** is a CUDA optimization for newer NVIDIA GPUs (CC >= 90; does not include Ada).
+It enables stream-level dependency-driven concurrent execution of CUDA kernels within the same stream, achieving similar kernel launch overhead reduction as CUDA Graphs. If you have a newer NVIDIA GPU (e.g. `Hoppper`, `Blackwell` and above), you can achieve significant speedups and latency reduction in token generation across nearly all models when compiling with ` -DGGML_CUDA_PDL=ON`.
+
 **Pre-built Wheel (New)**
 
 It is also possible to install a pre-built wheel with CUDA support. Make sure your system meets the following requirements:
@@ -269,6 +272,8 @@ On MacOS, Metal is enabled by default(`GGML_METAL=ON`). Using Metal makes the co
 
 To disable the Metal build at compile time use the `CMAKE_ARGS="-DGGML_METAL=OFF"` cmake option.
 
+When built with Metal support, you can explicitly disable GPU inference with the `n-gpu-layers=0` parameter.
+
 ```bash
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
@@ -277,6 +282,7 @@ pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python
 
 It is also possible to install a pre-built wheel with Metal support. As long as your system meets some requirements:
 
+- CPU Arch: arm64
 - MacOS Version is 11.0 or later
 - Python Version is 3.10, 3.11, 3.12, 3.13 or 3.14
 
@@ -288,18 +294,55 @@ https://github.com/JamePeng/llama-cpp-python/releases
 <details>
 <summary>HIP (ROCm)</summary>
 
-This provides GPU acceleration on HIP-supported AMD GPUs. Make sure to have ROCm installed.
+  - <details>
+    <summary>Linux ROCm</summary>
 
-You can download it from your Linux distro's package manager or from here: [ROCm Quick Start (Linux)](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tutorial/quick-start.html#rocm-install-quick).
+    This provides GPU acceleration on HIP-supported AMD GPUs. Make sure to have ROCm installed.
 
-To install with HIP / ROCm support for AMD cards, set the `GGML_HIP=ON` environment variable before installing:
+    You can download it from your Linux distro's package manager or from here: [ROCm Quick Start (Linux)](https://rocm.docs.amd.com/projects/install-on-linux/en/latest/tutorial/quick-start.html#rocm-install-quick).
 
-```bash
-CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1030" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
-```
-Note: `GPU_TARGETS` is optional, omitting it will build the code for all GPUs in the current system.
+    To install with HIP / ROCm support for AMD cards, set the `GGML_HIP=ON` environment variable before installing:
 
-More details see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#hip
+    ```bash
+    CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1030" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+    ```
+    Note: `GPU_TARGETS` is optional, omitting it will build the code for all GPUs in the current system.
+
+    More details see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md#hip
+
+    </details>
+
+  - <details>
+    <summary>Windows ROCm</summary>
+
+    > **Note:** Install TheRock ROCm, activate your venv, then run in PowerShell. Replace `gfx1200` with your GPU architecture.
+
+    ```powershell
+    cmd /c '"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1 && set' | ForEach-Object { if ($_ -match '^([^=]+)=(.*)$') { [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process') } }
+
+    rocm-sdk init
+
+    $ROCM_DEVEL = "$env:VIRTUAL_ENV\Lib\site-packages\_rocm_sdk_devel"
+    $ROCM_CORE  = "$env:VIRTUAL_ENV\Lib\site-packages\_rocm_sdk_core"
+    $ROCM_GFX   = (Get-Item "$env:VIRTUAL_ENV\Lib\site-packages\_rocm_sdk_libraries_gfx*").FullName
+
+    $env:HIP_PATH          = $ROCM_DEVEL
+    $env:ROCM_PATH         = $ROCM_DEVEL
+    $env:HIP_DEVICE_LIB_PATH = "$ROCM_CORE\lib\llvm\amdgcn\bitcode"
+    $env:PATH              = "$ROCM_DEVEL\bin;$ROCM_DEVEL\lib\llvm\bin;$ROCM_GFX\bin;$env:PATH"
+    $env:CMAKE_GENERATOR   = "Ninja"
+    $env:HIP_PLATFORM      = "amd"
+    $env:CC                = "$ROCM_DEVEL\lib\llvm\bin\clang.exe"
+    $env:CXX               = "$ROCM_DEVEL\lib\llvm\bin\clang++.exe"
+    $env:HIP_CLANG_PATH    = "$ROCM_DEVEL\lib\llvm\bin"
+
+    $R = $ROCM_DEVEL -replace '\\', '/'
+    $env:CMAKE_ARGS = "-DGGML_HIP=ON -DGGML_HIPBLAS=on -DGPU_TARGETS=gfx1200 -DCMAKE_HIP_ARCHITECTURES=gfx1200 -DCMAKE_C_COMPILER=`"$R/lib/llvm/bin/clang.exe`" -DCMAKE_CXX_COMPILER=`"$R/lib/llvm/bin/clang++.exe`" -DHIP_LIBRARIES=`"$R/lib/amdhip64.lib`" -DCMAKE_PREFIX_PATH=`"$R`""
+
+    pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git" --no-cache-dir
+    ```
+
+    </details>
 
 </details>
 
@@ -378,46 +421,83 @@ CMAKE_ARGS="-DGGML_RPC=on" pip install "llama-cpp-python @ git+https://github.co
 </details>
 
 
-### Windows Notes
-
+### Install Notes
 <details>
-<summary>Error: Can't find 'nmake' or 'CMAKE_C_COMPILER'</summary>
+<summary> Optimization Options (Optional)</summary>
 
-If you run into issues where it complains it can't find `'nmake'` `'?'` or CMAKE_C_COMPILER, you can extract w64devkit as [mentioned in llama.cpp repo](https://github.com/ggerganov/llama.cpp#openblas) and add those manually to CMAKE_ARGS before running `pip` install:
-
-```ps
-$env:CMAKE_GENERATOR = "MinGW Makefiles"
-$env:CMAKE_ARGS = "-DGGML_OPENBLAS=on -DCMAKE_C_COMPILER=C:/w64devkit/bin/gcc.exe -DCMAKE_CXX_COMPILER=C:/w64devkit/bin/g++.exe"
-```
-
-See the above instructions and set `CMAKE_ARGS` to the BLAS backend you want to use.
-</details>
-
-### MacOS Notes
-
-Detailed MacOS Metal GPU install documentation is available at [docs/install/macos.md](https://llama-cpp-python.readthedocs.io/en/latest/install/macos/)
-
-<details>
-<summary>M1 Mac Performance Issue</summary>
-
-Note: If you are using Apple Silicon (M1) Mac, make sure you have installed a version of Python that supports arm64 architecture. For example:
+> **💡 Tip:** If you want to save compilation time, you can skip building of llama.cpp with the standalone examples, tools, tests, and server by adding the following flags, as they are not required for Python bindings:
 
 ```bash
-wget https://github.com/conda-forge/miniforge/releases/latest/download/Miniforge3-MacOSX-arm64.sh
-bash Miniforge3-MacOSX-arm64.sh
+-DLLAMA_BUILD_EXAMPLES=OFF \
+-DLLAMA_BUILD_TOOLS=OFF \
+-DLLAMA_BUILD_TESTS=OFF \
+-DLLAMA_BUILD_SERVER=OFF
 ```
-
-Otherwise, while installing it will build the llama.cpp x86 version which will be 10x slower on Apple Silicon (M1) Mac.
 </details>
 
 <details>
-<summary>M Series Mac Error: `(mach-o file, but is an incompatible architecture (have 'x86_64', need 'arm64'))`</summary>
-
-Try installing with
+<summary> CUDA compiler warning suppression is optional</summary>
+CUDA nvcc compiler may print many template-related warnings from ggml-cuda, such as:
 
 ```bash
-CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_APPLE_SILICON_PROCESSOR=arm64 -DGGML_METAL=on" pip install --upgrade --verbose --force-reinstall --no-cache-dir "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+warning #177-D
+warning #221-D
+warning #550-D
 ```
+
+These usually generate a huge amount of noisy diagnostics rather than build blockers. They constantly flood logs and consume CPU printing performance.
+
+For cleaner CI/local logs, you can pass:
+
+```bash
+-DCMAKE_CUDA_FLAGS="--diag-suppress=177 --diag-suppress=221 --diag-suppress=550"
+```
+</details>
+
+<details>
+<summary> Notes for `GGML_BACKEND_DL` + `GGML_CPU_ALL_VARIANTS` builds</summary>
+When building wheels with `GGML_BACKEND_DL=ON` and `GGML_CPU_ALL_VARIANTS=ON`,
+GGML CPU backends are built as separate dynamic libraries, such as:
+
+```text
+ggml-cpu-x64.dll
+ggml-cpu-haswell.dll
+ggml-cpu-alderlake.dll
+ggml-cpu-zen4.dll
+```
+These backend libraries must be packaged together under:
+
+```text
+site-packages/llama_cpp/lib
+```
+
+The runtime must also explicitly load them with:
+
+```text
+ggml_backend_load_all_from_path()
+```
+
+### Windows notes
+
+For full x64 CPU variant coverage, `LLVM/Clang` is recommended. `MSVC` may skip some variants such as `zen4`, `cooperlake`, or `sapphirerapids`.
+
+If `GGML_OPENMP=ON` is used, the LLVM OpenMP runtime must also be packaged next to the backend DLLs:
+
+```text
+libomp140.x86_64.dll
+```
+
+Without this file, `ggml-cpu-*.dll` may fail to load dynamically at runtime.
+
+### Wheel packaging checklist
+
+* Enable `GGML_BACKEND_DL=ON`
+* Enable `GGML_CPU_ALL_VARIANTS=ON`
+* Use `GGML_NATIVE=OFF` for portable wheels
+* Install all `ggml-cpu-*` backend libraries into `llama_cpp/lib`
+* Package required runtime dependencies such as `libomp140.x86_64.dll`
+* Remove development-only files such as `.lib`, `cmake/`, and `pkgconfig/`
+
 </details>
 
 ### Upgrading and Reinstalling
@@ -1515,43 +1595,115 @@ emb = llm.create_embedding("text")
 
 ---
 
-### Speculative Decoding
+## Speculative Decoding
 
-`llama-cpp-python` supports speculative decoding which allows the model to generate completions based on a draft model.
+`llama-cpp-python` supports speculative decoding through a `draft_model` passed to the `Llama` class.
 
-The fastest way to use speculative decoding is through the `LlamaNGramMapDecoding`(**Recommend**) or `LlamaPromptLookupDecoding` class.
+Speculative decoding lets a draft decoder propose candidate tokens before the main model verifies them. This can improve generation speed, especially for repetitive or structured outputs such as code, JSON, boilerplate text, templates, and long-form responses with repeated patterns.
 
-Just pass this as a draft model to the `Llama` class during initialization.
+The recommended built-in draft decoder is `LlamaNGramMapDecoding`.
+
+Unlike neural draft-model speculative decoding, `LlamaNGramMapDecoding` does not require a second GGUF model. It is a model-free prompt n-gram lookup decoder that predicts draft tokens from already verified token history.
 
 ```python
 from llama_cpp import Llama
 from llama_cpp.llama_speculative import LlamaNGramMapDecoding
 
 llama = Llama(
-    model_path="path/to/qwen-3.6-27b.gguf",
+    model_path="path/to/model.gguf",
     n_ctx=4096,
     n_gpu_layers=-1,
     draft_model=LlamaNGramMapDecoding(
         ngram_size=3,
-        num_pred_tokens=10
-    )
+        num_pred_tokens=10,
+    ),
 )
 
 response = llama.create_chat_completion(
-    messages=[{"role": "user", "content": "Write a python script..."}]
+    messages=[
+        {
+            "role": "user",
+            "content": "Write a Python script using sqlite3 with repeated CRUD classes.",
+        }
+    ]
 )
-```
-Note: `LlamaPromptLookupDecoding.num_pred_tokens` is the number of tokens to predict 10 is the default and generally good for gpu, 2 performs better for cpu-only machines. Now, `LlamaNGramMapDecoding` with the new Hash Map algorithm, draft generation becomes instantaneous $O(1)$, and the time consumption is almost 0 regardless of whether you set the prediction to 2 or 10 words.
+````
 
-### Adjusting the Context Window
+`LlamaNGramMapDecoding` maintains an internal n-gram index and can reuse repeated token patterns from the current prompt and generated context. Compared with the legacy sliding-window prompt lookup decoder, it avoids scanning the full token history on every call, making draft generation much cheaper for long contexts.
 
-The context window of the Llama models determines the maximum number of tokens that can be processed at once. By default, this is set to 512 tokens, but can be adjusted based on your requirements.
-
-For instance, if you want to work with larger contexts, you can expand the context window by setting the n_ctx parameter when initializing the Llama object:
+#### Advanced configuration
 
 ```python
-llm = Llama(model_path="./models/llama-model.gguf", n_ctx=2048)
+from llama_cpp.llama_speculative import LlamaNGramMapDecoding
+
+draft_model = LlamaNGramMapDecoding(
+    ngram_size=3,
+    num_pred_tokens=10,
+    mode="k",
+    min_hits=2,
+    max_entries_per_key=None,
+    sync_check_tokens=16,
+)
 ```
+
+| Parameter             |                                   Default | Description                                                                                                                                      |
+| --------------------- | ----------------------------------------: | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `ngram_size`          |                                       `3` | Number of tokens used as the lookup key. Larger values require stricter matches.                                                                 |
+| `num_pred_tokens`     |                                      `10` | Maximum number of draft tokens to propose.                                                                                                       |
+| `mode`                |                                     `"k"` | N-gram map mode. `"k"` stores key-to-position mappings. `"k4v"` stores key-to-continuation mappings.                                             |
+| `min_hits`            |                                       `2` | Minimum number of historical matches required before returning draft tokens. Use `1` for higher recall, or `2+` to reduce low-confidence drafts. |
+| `max_entries_per_key` | `None` in `"k"` mode, `8` in `"k4v"` mode | Optional memory cap per n-gram key. Strongly recommended for `"k4v"` mode.                                                                       |
+| `sync_check_tokens`   |                                      `16` | Number of trailing tokens used to detect whether the new input is an incremental append or requires rebuilding the internal index.               |
+
+#### Choosing a mode
+
+`LlamaNGramMapDecoding` supports two modes:
+
+* `mode="k"`: stores n-gram keys mapped to historical positions. This is the default and is usually the best starting point.
+* `mode="k4v"`: stores n-gram keys mapped directly to continuation tokens. This can make continuation lookup cheaper, but uses more memory. When using `"k4v"`, keeping `max_entries_per_key` enabled is recommended.
+
+For most users, the default configuration is enough:
+
+```python
+draft_model=LlamaNGramMapDecoding()
+```
+
+For higher recall, especially when the prompt has fewer repeated patterns, you can lower `min_hits`:
+
+```python
+draft_model=LlamaNGramMapDecoding(
+    ngram_size=3,
+    num_pred_tokens=10,
+    min_hits=1,
+)
+```
+
+For CPU-only machines, smaller draft lengths such as `num_pred_tokens=2` may still be a better tradeoff. For GPU inference, larger values such as `num_pred_tokens=10` are often reasonable, but the best value depends on model size, prompt structure, backend, and acceptance rate.
+
+#### Legacy prompt lookup decoder
+
+`LlamaPromptLookupDecoding` is still available for compatibility:
+
+```python
+from llama_cpp.llama_speculative import LlamaPromptLookupDecoding
+
+draft_model = LlamaPromptLookupDecoding(
+    max_ngram_size=3,
+    num_pred_tokens=10,
+)
+```
+
+However, it uses a legacy NumPy sliding-window lookup and may have higher overhead on long contexts. For new usage, prefer `LlamaNGramMapDecoding`.
+
+#### Notes
+
+* Speculative decoding still requires the main model to verify proposed draft tokens.
+* Speedup depends on how many draft tokens are accepted.
+* Prompt n-gram speculative decoding works best when the current context contains repeated patterns.
+* It is especially useful for code generation, structured text, repeated templates, and boilerplate-heavy completions.
+* `LlamaNGramMapDecoding` stores internal Python-side history and indexes. If you want to reuse the same decoder instance for an unrelated generation, call `draft_model.clear()`.
+
+---
 
 ## Docker image
 
@@ -1743,7 +1895,7 @@ Libraries from other authors are often smaller because they may only compile for
 
 * 1. I've determined that `llama_cpp.server` is currently in a semi-deprecated state (meaning it won't be maintained unless absolutely necessary, and I might even consider deleting or separating it to reduce the library size). I highly recommend using the `llama-server` program maintained by the upstream `llama.cpp` project, which offers a lower-level implementation, more frequent maintenance and optimization, and more reliable API calls.
 
-* 2. Regarding AMD and Intel graphics cards, AMD can certainly use ROCm as the primary backend (but the drawback is that it's basically only stable on Linux platforms), and Intel's Sycl will also encounter some compilation difficulties. I consistently recommend using the Vulkan backend for these two types of graphics cards for greater efficiency and stability, because the upstream `llama.cpp` Vulkan backend is actively maintained by many developers, generally allowing you to enjoy new feature optimizations and bug fixes earlier and faster.
+* 2. Regarding AMD and Intel graphics cards, AMD can use ROCm as the primary backend, while Intel's Sycl will encounter some compilation difficulties. I consistently recommend using the Vulkan backend for these two types of graphics cards for greater efficiency and stability, because the upstream `llama.cpp` Vulkan backend is actively maintained by many developers, generally allowing you to enjoy new feature optimizations and bug fixes earlier and faster.
 
 * 3. If you are using hybrid multimodal model for building ComfyUI nodes or running single-turn API wrappers where you do not need multi-turn state rollbacks, simply initialize your Llama instance with `ctx_checkpoints=0`:
 
