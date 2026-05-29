@@ -953,6 +953,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [granite-docling](https://huggingface.co/ibm-granite/granite-docling-258M-GGUF) | `GraniteDoclingChatHandler` | `granite-docling` |
 | [lfm2-vl](https://huggingface.co/LiquidAI/LFM2-VL-3B-GGUF) | `LFM2VLChatHandler` | `lfm2-vl` |
 | [lfm2.5-vl](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF) | `LFM25VLChatHandler` | `lfm2.5-vl` |
+| [deepseek-ocr](https://huggingface.co/JamePeng2023/DeepSeek-OCR-2-GGUF) | `MTMDChatHandler` | `None` |
 | [paddleocr-vl-1.5](https://huggingface.co/JamePeng2023/PaddleOCR-VL-1.5-GGUF) | `PaddleOCRChatHandler` | `paddleocr` |
 | [qwen2.5-vl](https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
 | [qwen3-asr](https://huggingface.co/JamePeng2023/Qwen3-ASR-1.7B-GGUF) | `Qwen3ASRChatHandler` | `qwen3-asr` |
