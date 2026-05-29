@@ -2811,21 +2811,20 @@ def functionary_v1_v2_chat_handler(
 
 class MTMDChatHandler:
     DEFAULT_SYSTEM_MESSAGE: Optional[str] = (
-"""You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels at deeply understanding and richly describing images, charts, diagrams, text in images, scenes, and any visual content,
-while also answering every question accurately, clearly, and step-by-step when appropriate — always responding in the same language as the user's question, remaining polite, professional, and maximally helpful."""
+"You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels at deeply understanding and richly describing images, charts, diagrams, text in images, scenes, and any visual content, "
+"while also answering every question accurately, clearly, and step-by-step when appropriate — always responding in the same language as the user's question, remaining polite, professional, and maximally helpful."
     )
 
     CHAT_FORMAT = (
+        "{{ bos_token if bos_token is defined else '' }}"
         "{% for message in messages %}"
             "{% if message.role == 'system' %}"
                 "{{ message.content }}"
-            "{% endif %}"
-
-            "{% if message.role == 'user' %}"
+            "{% elif message.role == 'user' %}"
+                "USER: "
                 "{% if message.content is string %}"
-                    "\nUSER: {{ message.content }}"
+                    "{{ message.content }}"
                 "{% elif message.content is iterable %}"
-                    "\nUSER: "
                     "{% for content in message.content %}"
                         "{% if content.type == 'image_url' %}"
                             "{{ content.image_url if content.image_url is string else content.image_url.url }}"
@@ -2842,15 +2841,19 @@ while also answering every question accurately, clearly, and step-by-step when a
                         "{% endif %}"
                     "{% endfor %}"
                 "{% endif %}"
-            "{% endif %}"
 
-            "{% if message.role == 'assistant' and message.content is not none %}"
-                "\nASSISTANT: {{ message.content }}"
+            "{% elif message.role == 'assistant' and message.content is not none %}"
+                "ASSISTANT: {{ message.content }}"
             "{% endif %}"
+            "{{ \"\n\" }}"
         "{% endfor %}"
 
+        "{% if eos_token is defined %}"
+            "{{ eos_token }}"
+        "{% endif %}"
+
         "{% if add_generation_prompt %}"
-            "\nASSISTANT: "
+            "ASSISTANT: "
         "{% endif %}"
     )
 
@@ -2906,7 +2909,7 @@ while also answering every question accurately, clearly, and step-by-step when a
         self.mctx_params.use_gpu = self.use_gpu
         self.mctx_params.print_timings = self.verbose
         self.mctx_params.n_threads = llama_model.n_threads
-        self.mctx_params.flash_attn_type  = self._mtmd_cpp.clip_flash_attn_type.CLIP_FLASH_ATTN_TYPE_AUTO
+        self.mctx_params.flash_attn_type = self._mtmd_cpp.clip_flash_attn_type.CLIP_FLASH_ATTN_TYPE_AUTO
         self.mctx_params.warmup = True
         if self.image_min_tokens > 0:
             self.mctx_params.image_min_tokens = self.image_min_tokens
