@@ -5324,7 +5324,7 @@ class LFM25VLChatHandler(MTMDChatHandler):
 
 class PaddleOCRChatHandler(MTMDChatHandler):
     """
-    Handler for PaddleOCR 1.5 multimodal models.
+    Handler for PaddleOCR 1.5/1.6 multimodal models.
     """
 
     PADDLEOCR_CLS_TOKEN = "<|begin_of_sentence|>"
@@ -5431,6 +5431,11 @@ class PaddleOCRChatHandler(MTMDChatHandler):
 
 
 class Qwen25VLChatHandler(MTMDChatHandler):
+
+    QWEN25_VL_BOS_TOKEN = "<|endoftext|>"
+    QWEN25_VL_PAD_TOKEN = "<|endoftext|>"
+    QWEN25_VL_EOS_TOKEN = "<|im_end|>"
+
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
         "{% for message in messages %}"
@@ -5462,6 +5467,8 @@ class Qwen25VLChatHandler(MTMDChatHandler):
     )
 
     def __call__(self, **kwargs):
+        kwargs['stop'] = [self.QWEN25_VL_EOS_TOKEN, self.QWEN25_VL_PAD_TOKEN]
+
         llama = kwargs['llama']
 
         if hasattr(llama, 'input_ids'):
@@ -5547,12 +5554,22 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
         # Qwen3 models universally use `<|endoftext|>` and `<|im_end|>` as the stop token
         kwargs['stop'] = [self.QWEN3_ASR_AUDIO_PAD_TOKEN, self.QWEN3_ASR_AUDIO_EOS_TOKEN]
 
+        llama = kwargs['llama']
+
+        if hasattr(llama, 'input_ids'):
+            llama.input_ids.fill(0)
+
         if self.verbose:
             print(f"{self.log_prefix} - Start processing Qwen3-ASR (Audio Only)")
 
         return super().__call__(**kwargs)
 
 class Qwen3VLChatHandler(MTMDChatHandler):
+
+    QWEN3_VL_BOS_TOKEN = "<|endoftext|>"
+    QWEN3_VL_PAD_TOKEN = "<|endoftext|>"
+    QWEN3_VL_EOS_TOKEN = "<|im_end|>"
+
     CHAT_FORMAT = (
         "{{- '<|im_start|>system\n' -}}"
         "{%- if messages[0].content is string and messages[0].role == 'system' -%}"
@@ -5661,6 +5678,8 @@ class Qwen3VLChatHandler(MTMDChatHandler):
         self.extra_template_arguments["add_vision_id"] = add_vision_id
 
     def __call__(self, **kwargs):
+        kwargs['stop'] = [self.QWEN3_VL_EOS_TOKEN, self.QWEN3_VL_PAD_TOKEN]
+
         llama = kwargs['llama']
 
         if hasattr(llama, 'input_ids'):
