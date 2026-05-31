@@ -1463,7 +1463,9 @@ run_inference(
 
 |  Model             |  Type     |  Link                                                  |  Status      |
 |--------------------|-----------|--------------------------------------------------------|--------------|
-|      `bge-m3`      | Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF)             |  Useful ✅  |
+|`bge-m3`| Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF) |  Useful ✅  |
+|`jina-embeddings-v2-base-zh`| Embedding |[jina-embeddings-v2-base-zh-GGUF](https://huggingface.co/gpustack/jina-embeddings-v2-base-zh-GGUF)  |  Useful ✅  |
+|`jina-embeddings-v3`| Embedding |[jina-embeddings-v3-GGUF](https://huggingface.co/second-state/jina-embeddings-v3-GGUF) |  Useful ✅  |
 |`bge-reranker-v2-m3`|   Rerank  |[bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |  Useful ✅  |
 |`qwen3-reranker`|   Rerank  |[Qwen3-Reranker-GGUF](https://huggingface.co/JamePeng2023/Qwen3-Reranker-GGUF) |  Useful ✅  |
 
