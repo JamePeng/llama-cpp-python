@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-05-01
+last_updated: 2026-05-31
 version_target: "latest"
 ---
 
@@ -18,7 +18,9 @@ version_target: "latest"
 
 |  Model             |  Type     |  Link                                                  |  Status      |
 |--------------------|-----------|--------------------------------------------------------|--------------|
-|      `bge-m3`      | Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF)             |  Useful ✅  |
+|`bge-m3`| Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF) |  Useful ✅  |
+|`jina-embeddings-v2-base-zh`| Embedding |[jina-embeddings-v2-base-zh-GGUF](https://huggingface.co/gpustack/jina-embeddings-v2-base-zh-GGUF)  |  Useful ✅  |
+|`jina-embeddings-v3`| Embedding |[jina-embeddings-v3-GGUF](https://huggingface.co/second-state/jina-embeddings-v3-GGUF) |  Useful ✅  |
 |`bge-reranker-v2-m3`|   Rerank  |[bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |  Useful ✅  |
 |`qwen3-reranker`|   Rerank  |[Qwen3-Reranker-GGUF](https://huggingface.co/JamePeng2023/Qwen3-Reranker-GGUF) |  Useful ✅  |
 
