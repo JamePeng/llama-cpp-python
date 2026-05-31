@@ -8,8 +8,8 @@ permissions:
 
 jobs:
   build_wheels:
-    name: Build wheels (Metal macos)
-    runs-on: macos-latest
+    name: Build wheels (Metal macos-26)
+    runs-on: macos-26
 
     outputs:
       version: ${{steps.get_version.outputs.version}}
@@ -53,8 +53,7 @@ jobs:
             -DCMAKE_CROSSCOMPILING=on
             -DGGML_METAL=on
             -DGGML_METAL_USE_BF16=on
-            -DGGML_METAL_EMBED_LIBRARY=off
-            -DGGML_METAL_SHADER_DEBUG=on"
+            -DGGML_METAL_EMBED_LIBRARY=on"
         with:
           package-dir: .
           output-dir: wheelhouse2
