@@ -1265,6 +1265,60 @@ class CommonSamplerType(enum.IntEnum):
 
     CUSTOM      = 99
 
+
+# common/reasssoning-budget.h
+#
+# enum common_reasoning_budget_state {
+#     REASONING_BUDGET_IDLE,         // waiting for start sequence
+#     REASONING_BUDGET_COUNTING,     // counting down tokens
+#     REASONING_BUDGET_FORCING,      // forcing budget message + end sequence
+#     REASONING_BUDGET_WAITING_UTF8, // budget exhausted, waiting for UTF-8 completion
+#     REASONING_BUDGET_DONE,         // passthrough forever
+# };
+class ReasoningBudgetState(enum.IntEnum):
+    """
+    State machine for the generic first-reasoning-block budget controller.
+
+    This sampler only controls the first reasoning block. Once the first block
+    naturally ends or is forcibly closed, the sampler enters DONE and becomes a
+    permanent passthrough.
+    """
+
+    IDLE = 0          # Waiting for the first reasoning_start sequence.
+    COUNTING = 1      # Counting generated tokens inside the first reasoning block.
+    FORCING = 2       # Forcing reasoning_budget_message + reasoning_end.
+    WAITING_UTF8 = 3  # Budget exhausted; waiting for a complete UTF-8 boundary.
+    DONE = 4          # Permanent passthrough; later reasoning tags are ignored.
+
+
+class TokenMatcher:
+    """
+    Incremental matcher for a multi-token sequence.
+    Accepts None as tokens to represent no matcher.
+    """
+    def __init__(self, tokens: Optional[Sequence[int]]):
+        # If None, matcher never matches anything
+        self.tokens = list(tokens) if tokens is not None else []
+        self.pos = 0
+
+    def advance(self, token: int) -> bool:
+        if not self.tokens:
+            return False
+        if token == self.tokens[self.pos]:
+            self.pos += 1
+            if self.pos >= len(self.tokens):
+                self.pos = 0
+                return True
+        else:
+            self.pos = 0
+            if token == self.tokens[0]:
+                self.pos = 1
+        return False
+
+    def reset(self) -> None:
+        self.pos = 0
+
+
 @dataclass
 class LlamaSamplingParams:
     seed: int = llama_cpp.LLAMA_DEFAULT_SEED  # the seed used to initialize llama_sampler
