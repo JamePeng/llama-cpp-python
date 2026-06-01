@@ -55,6 +55,8 @@ _lib.llama_max_devices.restype = ctypes.c_size_t
 
 LLAMA_MAX_DEVICES = _lib.llama_max_devices()
 
+LLAMA_MAX_SEQ = 256
+
 # define LLAMA_DEFAULT_SEED 0xFFFFFFFF
 LLAMA_DEFAULT_SEED = 0xFFFFFFFF
 
@@ -847,6 +849,7 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     uint32_t n_ubatch;          // physical maximum batch size
 #     uint32_t n_seq_max;         // max number of sequences (i.e. distinct states for recurrent models)
 #     uint32_t n_rs_seq;          // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
+#     uint32_t n_outputs_max;     // max outputs in a ubatch (0 = n_batch)
 #     int32_t  n_threads;         // number of threads to use for generation
 #     int32_t  n_threads_batch;   // number of threads to use for batch processing
 
@@ -905,6 +908,7 @@ class llama_context_params(ctypes.Structure):
         n_ubatch (int): physical maximum batch size
         n_seq_max (int): max number of sequences (i.e. distinct states for recurrent models)
         n_rs_seq (int): number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
+        n_outputs_max (int): max outputs in a ubatch (0 = n_batch)
         n_threads (int): number of threads to use for generation
         n_threads_batch (int): number of threads to use for batch processing
 
@@ -949,6 +953,7 @@ class llama_context_params(ctypes.Structure):
         n_ubatch: int
         n_seq_max: int
         n_rs_seq: int
+        n_outputs_max: int
         n_threads: int
         n_threads_batch: int
         ctx_type: int
@@ -985,6 +990,7 @@ class llama_context_params(ctypes.Structure):
         ("n_ubatch", ctypes.c_uint32),
         ("n_seq_max", ctypes.c_uint32),
         ("n_rs_seq", ctypes.c_uint32),
+        ("n_outputs_max", ctypes.c_uint32),
         ("n_threads", ctypes.c_int32),
         ("n_threads_batch", ctypes.c_int32),
         ("ctx_type", ctypes.c_int),

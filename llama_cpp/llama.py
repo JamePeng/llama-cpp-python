@@ -120,6 +120,7 @@ class Llama:
         n_ubatch: int = 512,
         n_seq_max: int = 1,
         n_rs_seq: int = 0,
+        n_outputs_max: int = 0,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
         ctx_type: Optional[
@@ -478,7 +479,8 @@ class Llama:
         self.n_batch = min(n_ctx, n_batch)  # ???
         self.n_keep = n_keep if n_keep > 0 else 256
         self.n_seq_max = n_seq_max
-        self.n_rs_seq  = n_rs_seq
+        self.n_rs_seq = n_rs_seq
+        self.n_outputs_max = n_outputs_max
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
@@ -490,8 +492,13 @@ class Llama:
         self.context_params.n_ctx = n_ctx
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
-        self.context_params.n_seq_max = self.n_seq_max
+
+        self.context_params.n_seq_max = max(1, self.n_seq_max)
+        if self.context_params.n_seq_max > llama_cpp_lib.LLAMA_MAX_SEQ:
+            raise RuntimeError(f"n_seq_max must be <= {llama_cpp_lib.LLAMA_MAX_SEQ}")
+
         self.context_params.n_rs_seq = self.n_rs_seq
+        self.context_params.n_outputs_max = self.n_batch if self.n_outputs_max == 0 else self.n_outputs_max
         self.context_params.n_threads = self.n_threads
         self.context_params.n_threads_batch = self.n_threads_batch
 
