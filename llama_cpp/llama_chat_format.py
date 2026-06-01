@@ -26,6 +26,7 @@ from typing import (
 )
 
 import jinja2
+from jinja2.ext import Extension
 from jinja2.sandbox import ImmutableSandboxedEnvironment
 
 import numpy as np
@@ -220,6 +221,46 @@ class ChatFormatter(Protocol):
 
 
 class Jinja2ChatFormatter(ChatFormatter):
+    class IgnoreGenerationTags(Extension):
+        """Render HuggingFace `{% generation %}` blocks without tracking.
+
+        HuggingFace chat templates may wrap assistant text with:
+
+            {% generation %}
+            ...
+            {% endgeneration %}
+
+        Transformers uses this tag to compute assistant-token masks. In
+        llama-cpp-python chat formatting we only need the final rendered prompt,
+        so this extension simply removes the tag pair and renders the inner
+        content as normal Jinja template content.
+
+        This keeps compatibility with HF templates while avoiding the overhead
+        of span tracking.
+
+        More information see:
+        https://github.com/huggingface/transformers/blob/39603d0e5cdb6f00e8d473d7fcbb01032d709181/src/transformers/utils/chat_template_utils.py#L425
+        """
+
+        tags = {"generation"}
+
+        def parse(self, parser: jinja2.parser.Parser):
+            # Consume the opening `{% generation %}` token.
+            lineno = next(parser.stream).lineno
+
+            # Parse and return the block body until `{% endgeneration %}`.
+            # Returning the body directly makes the tag a transparent wrapper.
+            body = parser.parse_statements(
+                ("name:endgeneration",),
+                drop_needle=True,
+            )
+
+            # Preserve line numbers for better template error messages.
+            for node in body:
+                node.set_lineno(lineno)
+
+            return body
+
     def __init__(
         self,
         template: str,
@@ -227,21 +268,118 @@ class Jinja2ChatFormatter(ChatFormatter):
         bos_token: str,
         add_generation_prompt: bool = True,
         stop_token_ids: Optional[List[int]] = None,
+        special_tokens_map: Optional[Dict[str, str]] = None,
     ):
-        """A chat formatter that uses jinja2 templates to format the prompt."""
+        """Format chat messages with a HuggingFace-style Jinja2 chat template.
+
+        Args:
+            template:
+                Raw HuggingFace chat template string.
+            eos_token:
+                Text form of the model EOS token.
+            bos_token:
+                Text form of the model BOS token.
+            add_generation_prompt:
+                Whether to ask the template to append the assistant generation
+                prefix. This mirrors Transformers' `add_generation_prompt`.
+            stop_token_ids:
+                Optional token ids that should stop generation when they appear
+                as the last generated token. This is llama-cpp-python specific.
+            special_tokens_map:
+                Optional tokenizer special-token map. Some HF templates may
+                reference extra variables such as `pad_token`, `unk_token`,
+                `sep_token`, or model-specific special tokens.
+        """
         self.template = template
         self.eos_token = eos_token
         self.bos_token = bos_token
         self.add_generation_prompt = add_generation_prompt
+        self.special_tokens_map = special_tokens_map or {}
+
         self.stop_token_ids = (
-            set(stop_token_ids) if stop_token_ids is not None else None
+            {int(token_id) for token_id in stop_token_ids}
+            if stop_token_ids is not None
+            else None
         )
 
-        self._environment = ImmutableSandboxedEnvironment(
+        environment = ImmutableSandboxedEnvironment(
             loader=jinja2.BaseLoader(),
             trim_blocks=True,
             lstrip_blocks=True,
-        ).from_string(self.template)
+            # Keep this aligned with Transformers' chat-template Jinja setup:
+            # - IgnoreGenerationTags supports `{% generation %}` blocks.
+            # - loopcontrols supports `{% break %}` and `{% continue %}`.
+            extensions=[
+                Jinja2ChatFormatter.IgnoreGenerationTags,
+                jinja2.ext.loopcontrols,
+            ],
+        )
+
+        # Match Transformers' chat-template JSON behavior.
+        # Jinja's default `tojson` escapes HTML characters, which is not what
+        # plain-text chat templates usually expect.
+        environment.filters["tojson"] = self.tojson
+
+        # Register these as globals once instead of passing them on every render.
+        environment.globals["raise_exception"] = self.raise_exception
+        environment.globals["strftime_now"] = self.strftime_now
+
+        self._environment = environment
+        self._template = environment.from_string(self.template)
+
+        # Precompute static stop fields once. This avoids rebuilding closures and
+        # StoppingCriteriaList objects for every chat completion request.
+        self._stop = [self.eos_token] if self.eos_token else []
+        self._stopping_criteria = self._build_stopping_criteria()
+
+    @staticmethod
+    def raise_exception(message: str):
+        """Raise a Jinja template error from inside a chat template."""
+        raise jinja2.exceptions.TemplateError(message)
+
+    @staticmethod
+    def strftime_now(format_string: str = "%Y-%m-%d %H:%M:%S") -> str:
+        """Return the current local time formatted with `datetime.strftime`."""
+        return datetime.datetime.now().strftime(format_string)
+
+    @staticmethod
+    def tojson(
+        x: Any,
+        ensure_ascii: bool = False,
+        indent: Optional[int] = None,
+        separators: Optional[Tuple[str, str]] = None,
+        sort_keys: bool = False,
+    ) -> str:
+        """Serialize an object to JSON for chat-template rendering.
+
+        This intentionally bypasses Jinja's built-in `tojson` filter because
+        the built-in filter escapes HTML-sensitive characters. HuggingFace chat
+        templates expect plain JSON text instead.
+        """
+        return json.dumps(
+            x,
+            ensure_ascii=ensure_ascii,
+            indent=indent,
+            separators=separators,
+            sort_keys=sort_keys,
+        )
+
+    def _build_stopping_criteria(self):
+        """Create stopping criteria once during initialization."""
+        if self.stop_token_ids is None:
+            return None
+
+        stop_token_ids = self.stop_token_ids
+
+        def stop_on_last_token(
+            tokens: npt.NDArray[np.intc],
+            logits: npt.NDArray[np.single],
+        ) -> bool:
+            # Defensive guard: generation normally calls this with at least one
+            # token, but the callback should never crash on empty input.
+            return len(tokens) > 0 and int(tokens[-1]) in stop_token_ids
+
+        return llama_core.StoppingCriteriaList([stop_on_last_token])
 
     def __call__(
         self,
@@ -251,44 +389,106 @@ class Jinja2ChatFormatter(ChatFormatter):
         function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+        documents: Optional[List[Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> ChatFormatterResponse:
-        def raise_exception(message: str):
-            raise ValueError(message)
+        """Render OpenAI-style chat messages into a model prompt.
 
-        def strftime_now(format_string="%Y-%m-%d %H:%M:%S") -> str:
-            """
-            Returns the current time formatted as a string.
-            """
-            return datetime.datetime.now().strftime(format_string)
+        The method builds the variable context expected by HuggingFace-style
+        Jinja chat templates and renders the final prompt string used by
+        llama-cpp-python.
 
-        prompt = self._environment.render(
-            messages=messages,
-            eos_token=self.eos_token,
-            bos_token=self.bos_token,
-            raise_exception=raise_exception,
-            strftime_now=strftime_now,
-            add_generation_prompt=self.add_generation_prompt,
-            functions=functions,
-            function_call=function_call,
-            tools=tools,
-            tool_choice=tool_choice,
+        Template variables provided by default:
+            messages:
+                The chat history to render. Each item is expected to be an
+                OpenAI-style message dictionary, usually containing at least
+                `role` and `content`.
+
+            eos_token:
+                The model's end-of-sequence token string.
+
+            bos_token:
+                The model's beginning-of-sequence token string.
+
+            add_generation_prompt:
+                Whether the template should append the assistant generation
+                prefix. This mirrors Transformers' `add_generation_prompt`.
+
+            functions:
+                Legacy OpenAI-compatible function definitions, if provided.
+
+            function_call:
+                Legacy OpenAI-compatible function-call selection, if provided.
+
+            tools:
+                OpenAI/HuggingFace-compatible tool definitions, if provided.
+                This formatter expects tools to already be normalized into
+                JSON-schema-like dictionaries. It does not auto-convert Python
+                callables into JSON schemas like Transformers can.
+
+            tool_choice:
+                Optional tool-choice instruction, such as `"auto"`, `"none"`,
+                or a specific tool/function selection object.
+
+            documents:
+                Optional RAG/document context. Some HF chat templates reference
+                this variable when rendering retrieval-augmented prompts.
+
+            **kwargs:
+                Extra model-specific or template-specific variables. These are
+                merged into the template context last, so they can intentionally
+                override the defaults above when needed.
+
+        Additional variables:
+            Values from `special_tokens_map` are also exposed to the template,
+            such as `pad_token`, `unk_token`, `sep_token`, or custom
+            model-specific special tokens. Core variables like `messages`,
+            `eos_token`, and `bos_token` override `special_tokens_map` entries
+            by default.
+
+        Returns:
+            ChatFormatterResponse:
+                Contains the rendered prompt, text stop sequences, optional
+                token-id stopping criteria, and `added_special=True` because the
+                chat template is responsible for adding model special tokens.
+
+        Raises:
+            jinja2.exceptions.TemplateError:
+                If the template calls `raise_exception(...)` or Jinja rendering
+                fails.
+        """
+        template_kwargs: Dict[str, Any] = {}
+
+        # Make extra tokenizer special tokens available to templates, e.g.
+        # `pad_token`, `unk_token`, `sep_token`, or model-specific tokens.
+        template_kwargs.update(self.special_tokens_map)
+
+        # Explicit core variables should override values from special_tokens_map.
+        template_kwargs.update(
+            {
+                "messages": messages,
+                "eos_token": self.eos_token,
+                "bos_token": self.bos_token,
+                "add_generation_prompt": self.add_generation_prompt,
+                "functions": functions,
+                "function_call": function_call,
+                "tools": tools,
+                "tool_choice": tool_choice,
+                "documents": documents,
+            }
         )
 
-        stopping_criteria = None
-        if self.stop_token_ids is not None:
+        # Let caller-provided kwargs extend the template context.
+        # If a caller intentionally passes a same-name key, it will override the
+        # defaults above. This is useful for model-specific template variables.
+        template_kwargs.update(kwargs)
 
-            def stop_on_last_token(
-                tokens: npt.NDArray[np.intc], logits: npt.NDArray[np.single]
-            ) -> bool:
-                return tokens[-1] in self.stop_token_ids
-
-            stopping_criteria = llama_core.StoppingCriteriaList([stop_on_last_token])
+        prompt = self._template.render(**template_kwargs)
 
         return ChatFormatterResponse(
             prompt=prompt,
-            stop=[self.eos_token],
-            stopping_criteria=stopping_criteria,
+            stop=self._stop,
+            stopping_criteria=self._stopping_criteria,
             added_special=True,
         )
 
