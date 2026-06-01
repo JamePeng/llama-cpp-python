@@ -1363,6 +1363,59 @@ class LlamaSamplingParams:
         default_factory=lambda: ["\n", ":", "\"", "*"]  # default sequence breakers for DRY
     )
 
+    # Reasoning Budget Params
+    #
+    # Generic first-reasoning-block budget control.
+    #
+    # This is intentionally model-agnostic:
+    # - It does not infer model families.
+    # - It does not guess reasoning tags from chat templates.
+    # - Downstream code should pass reasoning_start / reasoning_end explicitly
+    #   for models that do not use the default <think>...</think> tags.
+    #
+    # The sampler only controls the first visible reasoning block. After that
+    # block naturally ends or is forcibly closed, later reasoning tags are ignored.
+    # Matches llama.cpp CLI semantics:
+    #   --reasoning-budget N
+    reasoning_budget: int = -1       # -1 = unrestricted / disabled, 0 = immediate end, N > 0 = token budget
+
+    # Token/text sequence that marks the beginning of the first reasoning block.
+    # This sequence is tokenized with add_bos=False, special=True before building
+    # the ReasoningBudgetSampler.
+    reasoning_start: str = "<think>"
+
+    # Token/text sequence that marks the natural end of the reasoning block.
+    # When the budget is exhausted, the sampler forces:
+    #   reasoning_budget_message + reasoning_end
+    reasoning_end: str = "</think>"
+
+    # Optional message injected before reasoning_end when the budget is exhausted.
+    # Mirrors llama.cpp CLI semantics:
+    #   --reasoning-budget-message MESSAGE
+    #
+    # Example forced text:
+    #   "[reasoning budget exhausted]\n</think>"
+    reasoning_budget_message: Optional[str] = None
+
+    # True when the prompt/chat template has already inserted reasoning_start.
+    #
+    # In that case, the sampler will not see the start tag during generation, so
+    # it must start directly in COUNTING state from the first generated token.
+    reasoning_start_in_prompt: bool = False
+
+    # Safety window for non-reasoning models.
+    #
+    # If reasoning_start is not generated within this many output tokens, the
+    # sampler permanently switches to DONE and becomes a no-op. This prevents
+    # later literal mentions of "<think>" in normal answer text from accidentally
+    # activating the budget controller.
+    #
+    # Ignored when reasoning_start_in_prompt=True because counting starts from
+    # the first generated token.
+    #
+    # Set to None to keep waiting for reasoning_start indefinitely.
+    reasoning_start_max_tokens: Optional[int] = 32
+
     custom_samplers: List['CustomSampler'] = field(default_factory=list)
 
     samplers: List[CommonSamplerType] = field(
@@ -1402,11 +1455,18 @@ class LlamaSamplingParams:
 
             f"\ttop_k = {self.top_k}, top_p = {self.top_p:.3f}, min_p = {self.min_p:.3f}, "
             f"xtc_probability = {self.xtc_probability:.3f}, xtc_threshold = {self.xtc_threshold:.3f}, "
-            f"typical_p = {self.typ_p:.3f}, top_n_sigma = {self.top_n_sigma:.3f}, temp = {self.temp:.3f}\n"
+            f"typical_p = {self.typical_p:.3f}, top_n_sigma = {self.top_n_sigma:.3f}, temp = {self.temp:.3f}\n"
 
             f"\tmirostat = {self.mirostat}, mirostat_lr = {self.mirostat_eta:.3f}, "
             f"mirostat_ent = {self.mirostat_tau:.3f}, adaptive_target = {self.adaptive_target:.3f}, "
-            f"adaptive_decay = {self.adaptive_decay:.3f}"
+            f"adaptive_decay = {self.adaptive_decay:.3f}\n"
+
+            f"\treasoning_budget = {self.reasoning_budget}, "
+            f"reasoning_start = {self.reasoning_start!r}, reasoning_end = {self.reasoning_end!r}\n"
+
+            f"\treasoning_budget_message = {self.reasoning_budget_message!r}, "
+            f"reasoning_start_in_prompt = {self.reasoning_start_in_prompt}, "
+            f"reasoning_start_max_tokens = {self.reasoning_start_max_tokens}"
         )
         return result
 
