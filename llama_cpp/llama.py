@@ -692,9 +692,6 @@ class Llama:
         self._n_vocab = self.n_vocab()
         self._n_ctx = self.n_ctx()
 
-        self._token_nl = self.token_nl()
-        self._token_eos = self.token_eos()
-
         self._candidates = internals.LlamaTokenDataArray(n_vocab=self._n_vocab)
 
         self.n_tokens = 0
@@ -720,13 +717,38 @@ class Llama:
 
         eos_token_id = self.token_eos()
         bos_token_id = self.token_bos()
+        eot_token_id = self.token_eot()
+        sep_token_id = self.token_sep()
+        nl_token_id = self.token_nl()
+        pad_token_id = self.token_pad()
+        mask_token_id = self.token_mask()
 
-        eos_token = (
-            self._model.token_get_text(eos_token_id) if eos_token_id != -1 else ""
-        )
-        bos_token = (
-            self._model.token_get_text(bos_token_id) if bos_token_id != -1 else ""
-        )
+        def _token_text(token_id: int) -> str:
+            return self._model.token_get_text(token_id) if token_id != -1 else ""
+
+        bos_token = _token_text(bos_token_id)
+        eos_token = _token_text(eos_token_id)
+
+        special_tokens_map = {
+            name: text
+            for name, token_id in {
+                "eot_token": eot_token_id,
+                "sep_token": sep_token_id,
+                "nl_token": nl_token_id,
+                "pad_token": pad_token_id,
+                "mask_token": mask_token_id,
+            }.items()
+            if token_id != -1 and (text := _token_text(token_id))
+        }
+
+        stop_token_ids = [
+            token_id
+            for token_id in (eos_token_id, eot_token_id)
+            if token_id != -1
+        ]
+
+        if not stop_token_ids:
+            stop_token_ids = None
 
         # Unfortunately the llama.cpp API does not return metadata arrays, so we can't get template names from tokenizer.chat_templates
         template_choices = dict(
@@ -750,14 +772,14 @@ class Llama:
         for name, template in template_choices.items():
             try:
                 # Attempt to parse and register the template as a valid chat handler.
-                # We wrap this in a try-block because some models (like LLaVA) contain
-                # non-standard Jinja2 tags (e.g., {% generation %}) that cause the
-                # standard parser to crash.
+                # Keep this guarded because model metadata may contain malformed or
+                # model-specific Jinja templates that still cannot be rendered by this runtime.
                 self._chat_handlers[name] = llama_chat_format.Jinja2ChatFormatter(
                     template=template,
                     eos_token=eos_token,
                     bos_token=bos_token,
-                    stop_token_ids=[eos_token_id],
+                    stop_token_ids=stop_token_ids,
+                    special_tokens_map=special_tokens_map,
                 ).to_chat_handler()
             except Exception as e:
                 # If parsing fails (e.g., TemplateSyntaxError), log a warning but do not crash.
