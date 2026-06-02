@@ -10,6 +10,16 @@ The documentation is maintained with the help of LLMs, but the source of truth i
 
 ## Quick Navigation
 
+### Getting Started
+
+Start here if you are installing or rebuilding `llama-cpp-python`.
+
+| Page | Description |
+|---|---|
+| [install\|Installation] | Source installation guide covering Python setup, CMake options, llama.cpp backend selection, hardware acceleration, rebuilds, and verification. |
+
+---
+
 ### Core API
 
 Start here if you are using `llama-cpp-python` directly.
@@ -42,7 +52,7 @@ This section contains maintainer-facing development notes, workflows, and LLM-as
 
 | Page | Description |
 |---|---|
-| [[development/Git Commit Generation Agent]] | Helper workflow for generating clear, structured, and source-aware Git commit messages. |
+| [development/Git Commit Generation Agent] | Helper workflow for generating clear, structured, and source-aware Git commit messages. |
 
 ---
 
@@ -61,13 +71,14 @@ These pages define how the wiki should be written, updated, and reviewed.
 
 If you are new to this wiki, read the pages in this order:
 
-1. [[core/Llama|Llama](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
-2. [[modules/LlamaCache|Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)]
-3. [[modules/LlamaEmbedding|Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)]
-4. [[modules/LlamaGrammar|Llama Grammar](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaGrammar.md)]
-5. [[modules/LlamaSpeculative|Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)]
-6. [[modules/Logger\|Logger](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/Logger.md)]
-7. [[development/Git Commit Generation Agent](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/development/git-commit-generation-agent.md)]
+1. [[install|Installation](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/install.md)]
+2. [[core/Llama|Llama](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
+3. [[modules/LlamaCache|Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)]
+4. [[modules/LlamaEmbedding|Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)]
+5. [[modules/LlamaGrammar|Llama Grammar](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaGrammar.md)]
+6. [[modules/LlamaSpeculative|Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)]
+7. [[modules/Logger\|Logger](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/Logger.md)]
+8. [[development/Git Commit Generation Agent](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/development/git-commit-generation-agent.md)]
 
 If you are contributing documentation, start with:
 1. [[SCHEMA|Wiki Schema](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/SCHEMA.md)]
@@ -81,6 +92,7 @@ The wiki is still being expanded.
 
 Currently available pages:
 
+- `install.md`
 - `core/Llama.md`
 - `modules/LlamaCache.md`
 - `modules/LlamaEmbedding.md`
@@ -99,7 +111,6 @@ Some planned pages may already exist as empty placeholder files. Empty pages are
 
 Future documentation may cover:
 
-- Installation and build options
 - Chat formats and chat handlers
 - Low-level ctypes bindings
 - Multimodal APIs
@@ -126,5 +137,6 @@ This wiki follows a few core rules:
 ## Project Links
 
 - GitHub: [llama-cpp-python](https://github.com/JamePeng/llama-cpp-python)
+- Installation guide: [install](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/install.md)
 - Wiki schema: [SCHEMA](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/SCHEMA.md)
 - Contribution guide: [contributing-to-wiki](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/contributing-to-wiki.md)
