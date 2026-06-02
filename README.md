@@ -64,6 +64,8 @@ Thank you for your continuous support!
 
 ## Installation
 
+For a structured source-install and backend build guide, see [docs/wiki/install.md](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/install.md).
+
 Requirements:
 
   - Python 3.9+
