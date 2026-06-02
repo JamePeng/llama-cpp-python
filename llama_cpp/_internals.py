@@ -774,13 +774,6 @@ class LlamaContext:
         """
         llama_cpp.llama_set_causal_attn(self.ctx, causal_attn)
 
-    def set_warmup(self, warmup: bool):
-        """
-        Set whether the model is in warmup mode or not
-        If true, all model tensors are activated during llama_decode() to load and cache their weights.
-        """
-        llama_cpp.llama_set_warmup(self.ctx, warmup)
-
     def synchronize(self):
         """
         Wait until all computations are finished
