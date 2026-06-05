@@ -1527,7 +1527,7 @@ class LlamaSamplingContext:
         _existing_sampler: Optional[LlamaSampler] = None, # Internal use for cloning
     ):
         if model is None:
-            raise RuntimeError("model must not be None")
+            raise RuntimeError("LlamaSamplingContext: model must not be None")
         self.model = model
 
         self.params = params
@@ -1537,8 +1537,8 @@ class LlamaSamplingContext:
         lparams = llama_cpp.llama_sampler_chain_default_params()
         lparams.no_perf = params.no_perf
 
-        # history (bounded)
-        # last n tokens to consider for penalize (default: %d, 0 = disabled, -1 = ctx_size)
+        # History (bounded)
+        # Last n tokens to consider for penalize (default: %d, 0 = disabled, -1 = ctx_size)
         if self.params.penalty_last_n == -1:
             # full context
             self.params.penalty_last_n = self.model.n_ctx_train()
@@ -1551,10 +1551,10 @@ class LlamaSamplingContext:
             )
         self.prev = deque(maxlen=max(self.params.n_prev, 32))
 
-        # reusable token data array
+        # Reusable token data array
         self._cur_p = LlamaTokenDataArray(n_vocab=self.n_vocab)
 
-        # reusable numpy logits view
+        # Reusable numpy logits view
         self._logits_view = None
         self._logits_ptr_addr = None
 
@@ -1566,14 +1566,14 @@ class LlamaSamplingContext:
             sorted=False,
         )
 
-        # sampler chain
+        # Sampler chain
         if _existing_sampler:
             self.sampler_chain = _existing_sampler
         else:
             self.sampler_chain = LlamaSampler()
             self._build_sampler_chain()
 
-        # grammar sampler
+        # Grammar sampler
         self.grammar_sampler = None
         if params.grammar:
             self.grammar_sampler = GrammarSampler(
@@ -1582,6 +1582,9 @@ class LlamaSamplingContext:
                 params.grammar_lazy,
                 params.grammar_triggers,
             )
+
+        # Active Python reasoning-budget sampler for this sampling context.
+        self.reasoning_budget_sampler: Optional[ReasoningBudgetSampler] = None
 
     def _build_sampler_chain(self):
         """
@@ -1594,7 +1597,7 @@ class LlamaSamplingContext:
         m = self.model
 
         if m is None:
-            raise RuntimeError("Model required to build sampler chain firstly")
+            raise RuntimeError("LlamaSamplingContext: Model required to build sampler chain firstly")
 
         use_adaptive_p = False
 
@@ -1628,7 +1631,66 @@ class LlamaSamplingContext:
                 p.dry_sequence_breakers
             )
 
-        # --- 5. Core Sampling Strategies (The "Filter" Loop) ---
+        # --- 5. Reasoning Budget ---
+        #
+        # Install before top-k/top-p/min-p filters so the forced end token cannot
+        # be removed from the candidate set before forcing happens.
+        # This sampler only controls the first reasoning block. Later blocks are ignored.
+        if p.reasoning_budget < -1:
+            raise ValueError(
+                "LlamaSamplingContext: reasoning_budget must be -1, 0, or a positive integer"
+            )
+
+        if p.reasoning_budget >= 0:
+            start_tokens = None
+            if not p.reasoning_start_in_prompt:
+                start_tokens = m.tokenize(
+                    p.reasoning_start.encode("utf-8"),
+                    add_bos=False,
+                    special=True,
+                )
+                if not start_tokens:
+                    raise ValueError("LlamaSamplingContext: reasoning_start produced no tokens")
+
+            end_tokens = m.tokenize(
+                p.reasoning_end.encode("utf-8"),
+                add_bos=False,
+                special=True,
+            )
+            if not end_tokens:
+                raise ValueError("LlamaSamplingContext: reasoning_end produced no tokens")
+
+            forced_text = (p.reasoning_budget_message or "") + p.reasoning_end
+            forced_tokens = m.tokenize(
+                forced_text.encode("utf-8"),
+                add_bos=False,
+                special=True,
+            )
+            if not forced_tokens:
+                raise ValueError("LlamaSamplingContext: reasoning forced text produced no tokens")
+
+            rb_sampler = ReasoningBudgetSampler(
+                model=m,
+                reasoning_budget=p.reasoning_budget,
+                start_tokens=start_tokens,
+                end_tokens=end_tokens,
+                forced_tokens=forced_tokens,
+                initial_state=(
+                    ReasoningBudgetState.COUNTING
+                    if p.reasoning_start_in_prompt
+                    else ReasoningBudgetState.IDLE
+                ),
+                start_max_tokens=p.reasoning_start_max_tokens,
+                wait_utf8=True,
+            )
+
+            # Keep a direct Python reference so force_reasoning_budget() can
+            # manually transition COUNTING -> FORCING at runtime.
+            self.reasoning_budget_sampler = rb_sampler
+
+            s.add_custom(rb_sampler)
+
+        # --- 6. Core Sampling Strategies (The "Filter" Loop) ---
         # We iterate through the list to preserve user-defined order for these specific samplers
         for stype in p.samplers:
             if stype == CommonSamplerType.CUSTOM:
@@ -1660,7 +1722,7 @@ class LlamaSamplingContext:
             elif stype == CommonSamplerType.ADAPTIVE_P:
                 use_adaptive_p = True
 
-        # --- 6. Final Distribution / Selection ---
+        # --- 7. Final Distribution / Selection ---
         # Mirostat overrides standard greedy/dist sampling
         if p.mirostat == 1 and m:
             s.add_mirostat(m.n_vocab(), p.seed, p.mirostat_tau, p.mirostat_eta, 100)
@@ -1839,6 +1901,10 @@ class LlamaSamplingContext:
             self.sampler_chain.close()
             self.sampler_chain = None
 
+        # Clear the convenience reference used for manual reasoning-budget force.
+        # The actual sampler lifetime is owned by sampler_chain.close().
+        self.reasoning_budget_sampler = None
+
         # Release large token data buffer used during sampling.
         # Important for high-vocab models to avoid memory retention.
         if hasattr(self, "_cur_p"):
@@ -1885,24 +1951,53 @@ class LlamaSamplingContext:
         # Use the model linked to the context to detokenize
         return ctx_main.model.detokenize(last_n_tokens).decode("utf-8", errors="replace")
 
+    def force_reasoning_budget(self) -> bool:
+        """
+        Manually force the active reasoning-budget sampler to end thinking.
+
+        This mirrors llama.cpp's common_sampler_reasoning_budget_force()
+        behavior at the Python sampling-context level.
+
+        Returns:
+            True if the sampler was actively COUNTING inside the first reasoning
+            block and was transitioned to FORCING.
+
+            False if:
+            - no reasoning-budget sampler is installed
+            - the sampler is IDLE
+            - the sampler is WAITING_UTF8
+            - the sampler is already FORCING
+            - the sampler is DONE
+
+        Important:
+            Calling this while already FORCING must not rewind force_pos. The
+            underlying ReasoningBudgetSampler.force() handles this by allowing
+            only COUNTING -> FORCING.
+        """
+        if self.reasoning_budget_sampler is None:
+            return False
+
+        return self.reasoning_budget_sampler.force()
+
 
 class CustomSampler:
     """
-    Python wrapper for llama.cpp custom sampler.
+    Base class for Python-backed custom samplers in the Llama sampler chain.
 
-    apply_func:
-        Callable receiving llama_token_data_array
-        and modifying logits in-place.
+    Responsibilities:
+    - Provides apply, accept, reset, free and clone callbacks for the C sampler chain.
+    - Keeps Python references alive to prevent GC while C sampler still holds function pointers.
+    - Implements safe close to clear all callback references.
     """
 
     def __init__(
         self,
         apply_func: Callable[[llama_cpp.llama_token_data_array], None],
-        name: str = "custom",
         accept_func: Optional[Callable] = None,
         reset_func: Optional[Callable] = None,
         free_func: Optional[Callable] = None,
         clone_func: Optional[Callable] = None,
+        name: str = "custom",
     ):
         if not callable(apply_func):
             raise TypeError("apply_func must be callable")
@@ -2002,6 +2097,389 @@ class CustomSampler:
         self.close()
 
 
+class ReasoningBudgetSampler(CustomSampler):
+    """
+    Generic first-reasoning-block budget sampler.
+
+    This sampler is intentionally model-agnostic. It does not infer model
+    families, inspect chat templates, or guess reasoning tags. The caller is
+    responsible for passing the correct reasoning_start and reasoning_end token
+    sequences.
+
+    Behavior:
+        1. Wait for the first reasoning_start token sequence, unless the prompt
+           already inserted it and initial_state is COUNTING.
+        2. Count accepted tokens inside the first reasoning block.
+        3. If reasoning_end appears naturally, switch to DONE.
+        4. If the budget is exhausted first, force:
+               reasoning_budget_message + reasoning_end
+           token by token.
+        5. Once DONE, remain passthrough forever. Later reasoning tags are ignored.
+
+    This mirrors the core idea of llama.cpp's reasoning-budget sampler while
+    keeping the Python API small and explicit.
+    """
+
+    def __init__(
+        self,
+        *,
+        model: LlamaModel,
+        reasoning_budget: int,
+        start_tokens: Optional[Sequence[int]],
+        end_tokens: Sequence[int],
+        forced_tokens: Sequence[int],
+        initial_state: ReasoningBudgetState = ReasoningBudgetState.IDLE,
+        start_max_tokens: Optional[int] = 32,
+        wait_utf8: bool = True,
+    ):
+        """
+        Initialize the reasoning budget sampler.
+
+        Args:
+            model:
+                The active LlamaModel wrapper. Used for token_to_piece() when
+                checking UTF-8 boundaries.
+
+            reasoning_budget:
+                Token budget inside the first reasoning block.
+                Must be >= 0 here. The disabled value -1 is handled before this
+                sampler is created.
+
+                0:
+                    Force the end sequence immediately after reasoning starts.
+
+                N > 0:
+                    Allow at most N accepted tokens inside the reasoning block.
+
+            start_tokens:
+                Token sequence that starts reasoning budget counting.
+                Must be provided when initial_state is IDLE.
+                Can be None when initial_state is COUNTING, which is used when
+                the prompt/chat template has already inserted reasoning_start.
+
+            end_tokens:
+                Token sequence that naturally ends the reasoning block.
+
+            forced_tokens:
+                Token sequence forced when the budget is exhausted. This should
+                normally be tokenized from:
+                    reasoning_budget_message + reasoning_end
+
+            initial_state:
+                Initial state of the sampler.
+                IDLE:
+                    Wait for start_tokens during generation.
+                COUNTING:
+                    Start counting from the first generated token. Use this when
+                    reasoning_start is already present in the prompt.
+
+            start_max_tokens:
+                Safety window for non-reasoning models. If start_tokens are not
+                observed within this many generated tokens, the sampler switches
+                to DONE and becomes a no-op. Set to None to wait indefinitely.
+
+            wait_utf8:
+                If True, when the budget is exhausted on an incomplete UTF-8
+                token piece, wait until a complete UTF-8 boundary before forcing
+                the end sequence.
+        """
+        if model is None:
+            raise ValueError("model must not be None")
+
+        if reasoning_budget < 0:
+            raise ValueError("reasoning_budget must be >= 0")
+
+        self.model = model
+
+        # Maximum number of tokens allowed inside the first reasoning block.
+        # The disabled value (-1) should be handled before constructing this sampler.
+        self.reasoning_budget = int(reasoning_budget)
+
+        # Remaining tokens in the active reasoning block.
+        self.remaining = int(reasoning_budget)
+
+        # Incremental matcher for the first reasoning_start sequence.
+        # Empty matcher is allowed only when initial_state=COUNTING.
+        self.start_matcher = TokenMatcher(start_tokens)
+
+        # Incremental matcher for the natural reasoning_end sequence.
+        self.end_matcher = TokenMatcher(end_tokens)
+
+        # Token sequence forced after budget exhaustion:
+        #   reasoning_budget_message + reasoning_end
+        self.forced_tokens = list(forced_tokens)
+
+        if initial_state == ReasoningBudgetState.IDLE and not self.start_matcher.tokens:
+            raise ValueError(
+                "start_tokens must not be empty when initial_state=IDLE"
+            )
+
+        if not self.end_matcher.tokens:
+            raise ValueError("end_tokens must not be empty")
+
+        if not self.forced_tokens:
+            raise ValueError("forced_tokens must not be empty")
+
+        # State used by reset(). This is important for templates that already
+        # insert reasoning_start into the prompt: reset must return to COUNTING,
+        # not always IDLE.
+        self.initial_state = ReasoningBudgetState(initial_state)
+
+        # Current runtime state.
+        self.state = ReasoningBudgetState(initial_state)
+
+        # Index of the next token in forced_tokens to force.
+        self.force_pos = 0
+
+        # Count of generated tokens observed by this sampler.
+        # Used only in IDLE to enforce start_max_tokens.
+        self.generated_tokens = 0
+
+        # Maximum number of generated tokens to wait for reasoning_start.
+        # None means wait indefinitely.
+        self.start_max_tokens = start_max_tokens
+
+        # Whether to delay forcing until a complete UTF-8 boundary.
+        self.wait_utf8 = wait_utf8
+
+        # Keep cloned Python sampler objects alive when llama.cpp clones the
+        # sampler chain. Without this, cloned Python callbacks could be garbage
+        # collected while C still holds function pointers to them.
+        self._clone_keep_alive: List["ReasoningBudgetSampler"] = []
+
+        if self.state == ReasoningBudgetState.COUNTING and self.remaining <= 0:
+            self.state = ReasoningBudgetState.FORCING
+
+        super().__init__(
+            apply_func=self._apply,
+            accept_func=self._accept,
+            reset_func=self._reset,
+            clone_func=self._clone,
+            name="reasoning-budget",
+        )
+
+    def force(self) -> bool:
+        """
+        Manually transition the active reasoning block into forced ending.
+
+        This method is useful for external interruption scenarios, such as:
+        - user clicks "stop thinking"
+        - server-side thinking timeout
+        - UI wants to skip the rest of the reasoning block while still allowing
+        the model to continue with the final answer
+
+        The transition is allowed only from COUNTING. This matches llama.cpp's
+        common_reasoning_budget_force() behavior and avoids unsafe rewinding when
+        the sampler is already FORCING.
+        """
+        if self.state != ReasoningBudgetState.COUNTING:
+            return False
+
+        self.state = ReasoningBudgetState.FORCING
+        self.force_pos = 0
+        self.end_matcher.reset()
+        return True
+
+    def _token_utf8_complete(self, token: int) -> bool:
+        """
+        Return whether the token piece is a complete UTF-8 byte sequence.
+
+        This is a safety feature. If the budget is exhausted in the middle of a
+        multi-byte UTF-8 sequence, the sampler waits until a complete boundary
+        before forcing reasoning_budget_message + reasoning_end.
+        """
+        if not self.wait_utf8:
+            return True
+
+        try:
+            piece = self.model.token_to_piece(token, special=False)
+            if not piece:
+                return True
+            piece.decode("utf-8")
+            return True
+        except UnicodeDecodeError:
+            return False
+        except Exception:
+            # Avoid getting stuck forever if token_to_piece behaves unexpectedly.
+            return True
+
+    def _start_counting(self) -> None:
+        """
+        Enter COUNTING state and initialize the budget window.
+
+        If reasoning_budget is 0, immediately enter FORCING state.
+        """
+        self.state = ReasoningBudgetState.COUNTING
+        self.remaining = self.reasoning_budget
+        self.end_matcher.reset()
+        self.force_pos = 0
+
+        if self.remaining <= 0:
+            self.state = ReasoningBudgetState.FORCING
+
+    def _accept(self, token: int) -> None:
+        """
+        Update sampler state after one token has been accepted.
+
+        This method does not modify logits. It only tracks:
+            - whether reasoning_start has appeared
+            - whether reasoning_end has appeared
+            - how much budget remains
+            - where we are in the forced token sequence
+        """
+        self.generated_tokens += 1
+
+        if self.state == ReasoningBudgetState.IDLE:
+            if self.start_matcher.advance(token):
+                self._start_counting()
+                return
+
+            # Safety for non-reasoning models:
+            #
+            # If no reasoning_start appears near the beginning, assume this
+            # completion has no visible reasoning block. Switch to DONE forever
+            # so later literal mentions of reasoning_start do not accidentally
+            # activate the budget controller.
+            if (
+                self.start_max_tokens is not None
+                and self.generated_tokens >= self.start_max_tokens
+            ):
+                self.state = ReasoningBudgetState.DONE
+            return
+
+        if self.state in (
+            ReasoningBudgetState.COUNTING,
+            ReasoningBudgetState.WAITING_UTF8,
+        ):
+            if self.end_matcher.advance(token):
+                self.state = ReasoningBudgetState.DONE
+                return
+
+            utf8_complete = self._token_utf8_complete(token)
+
+            if self.state == ReasoningBudgetState.WAITING_UTF8:
+                if utf8_complete:
+                    self.state = ReasoningBudgetState.FORCING
+                    self.force_pos = 0
+                    self.end_matcher.reset()
+                return
+
+            self.remaining -= 1
+            if self.remaining <= 0:
+                if utf8_complete:
+                    self.state = ReasoningBudgetState.FORCING
+                    self.force_pos = 0
+                    self.end_matcher.reset()
+                else:
+                    self.state = ReasoningBudgetState.WAITING_UTF8
+                    self.end_matcher.reset()
+            return
+
+        if self.state == ReasoningBudgetState.FORCING:
+            self.force_pos += 1
+            if self.force_pos >= len(self.forced_tokens):
+                self.state = ReasoningBudgetState.DONE
+            return
+
+        if self.state == ReasoningBudgetState.DONE:
+            # Only the first reasoning block is budget-controlled.
+            # Later reasoning tags are normal generated text.
+            return
+
+    def _apply(self, cur_p: llama_cpp.llama_token_data_array) -> None:
+        """
+        Apply logits forcing before sampling.
+
+        In FORCING state, only forced_tokens[force_pos] is allowed. All other
+        candidate logits are set to -inf. The forced token is set to +inf to make
+        the intent explicit and robust against previous logit modifications.
+        """
+        if self.state != ReasoningBudgetState.FORCING:
+            return
+
+        if self.force_pos >= len(self.forced_tokens):
+            return
+
+        forced = self.forced_tokens[self.force_pos]
+        data = cur_p.data
+        found = False
+
+        for i in range(cur_p.size):
+            if data[i].id == forced:
+                data[i].logit = float("inf")
+                found = True
+            else:
+                data[i].logit = float("-inf")
+
+        cur_p.sorted = False
+        cur_p.selected = -1
+
+        if not found:
+            raise RuntimeError(
+                f"ReasoningBudgetSampler: forced token {forced} is not present "
+                "in the candidate array. Move ReasoningBudgetSampler earlier in "
+                "the sampler chain."
+            )
+
+    def _reset(self) -> None:
+        """
+        Reset the sampler to its configured initial state.
+
+        Uses self.initial_state to determine whether to start in:
+        - IDLE: wait for reasoning_start token sequence
+        - COUNTING: prompt already contains start token, begin counting immediately
+
+        Also resets internal counters and matchers:
+        - remaining budget
+        - generated_tokens
+        - start_matcher / end_matcher positions
+        - force_pos
+        """
+        self.state = self.initial_state
+        self.remaining = self.reasoning_budget
+        self.generated_tokens = 0
+        self.force_pos = 0
+
+        if self.start_matcher:
+            self.start_matcher.reset()
+        self.end_matcher.reset()
+
+        # If initial_state = COUNTING and budget is zero, immediately enter FORCING
+        if self.state == ReasoningBudgetState.COUNTING and self.remaining <= 0:
+            self.state = ReasoningBudgetState.FORCING
+
+    def _clone(self):
+        """
+        Clone the full runtime state.
+
+        This mirrors the newer llama.cpp reasoning-budget sampler behavior where
+        clone copies the full sampler context, not only the static configuration.
+        """
+        cloned = ReasoningBudgetSampler(
+            model=self.model,
+            reasoning_budget=self.reasoning_budget,
+            start_tokens=self.start_matcher.tokens,
+            end_tokens=self.end_matcher.tokens,
+            forced_tokens=self.forced_tokens,
+            initial_state=self.initial_state,
+            start_max_tokens=self.start_max_tokens,
+            wait_utf8=self.wait_utf8,
+        )
+
+        cloned.remaining = self.remaining
+        cloned.state = self.state
+        cloned.force_pos = self.force_pos
+        cloned.generated_tokens = self.generated_tokens
+        cloned.start_matcher.pos = self.start_matcher.pos
+        cloned.end_matcher.pos = self.end_matcher.pos
+
+        # Keep the cloned Python object alive on the source sampler. The cloned
+        # LlamaSampler wrapper does not own this object directly because the C
+        # sampler clone is created through the callback.
+        self._clone_keep_alive.append(cloned)
+
+        return cloned.get_sampler()
+
 class LlamaSampler:
     def __init__(self, existing_sampler_p: Optional[llama_cpp.llama_sampler_p] = None):
         if existing_sampler_p:
@@ -2055,12 +2533,13 @@ class LlamaSampler:
 
         new_sampler = LlamaSampler(existing_sampler_p=new_sampler_p)
 
-        # copy _keep_alive and custom_samplers list to new sampler
-        if self._keep_alive:
-            new_sampler._keep_alive = self._keep_alive.copy()
-
-        if self.custom_samplers:
-            new_sampler.custom_samplers = self.custom_samplers.copy()
+        # llama_sampler_clone() clones C samplers internally. For Python-backed
+        # custom samplers, the clone_func returns a new C sampler whose Python
+        # callback object is kept alive by the original custom sampler. Shallow
+        # copying custom_samplers would make the cloned chain close the original
+        # Python custom sampler, causing premature close/double-free issues.
+        new_sampler._keep_alive = self._keep_alive.copy() if self._keep_alive else []
+        new_sampler.custom_samplers = []
 
         return new_sampler
 
@@ -2249,6 +2728,10 @@ class LlamaSampler:
         self.custom_samplers.append(
             [llama_cpp.llama_sampler_chain_n(self.sampler) - 1, custom_sampler]
         )
+
+        # Keep the Python callback object alive while the C sampler chain holds
+        # function pointers to it.
+        self._keep_alive.append(custom_sampler)
 
     def get_seed(self) -> int:
         assert self.sampler is not None
