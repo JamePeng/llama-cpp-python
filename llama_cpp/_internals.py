@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import enum
 import os
+import sys
 
 from typing import (
     Callable,
@@ -1566,6 +1567,9 @@ class LlamaSamplingContext:
             sorted=False,
         )
 
+        # Active Python reasoning-budget sampler for this sampling context.
+        self.reasoning_budget_sampler: Optional[ReasoningBudgetSampler] = None
+
         # Sampler chain
         if _existing_sampler:
             self.sampler_chain = _existing_sampler
@@ -1582,9 +1586,6 @@ class LlamaSamplingContext:
                 params.grammar_lazy,
                 params.grammar_triggers,
             )
-
-        # Active Python reasoning-budget sampler for this sampling context.
-        self.reasoning_budget_sampler: Optional[ReasoningBudgetSampler] = None
 
     def _build_sampler_chain(self):
         """
@@ -1682,6 +1683,7 @@ class LlamaSamplingContext:
                 ),
                 start_max_tokens=p.reasoning_start_max_tokens,
                 wait_utf8=True,
+                verbose=getattr(m, "verbose", False),
             )
 
             # Keep a direct Python reference so force_reasoning_budget() can
@@ -2131,6 +2133,7 @@ class ReasoningBudgetSampler(CustomSampler):
         initial_state: ReasoningBudgetState = ReasoningBudgetState.IDLE,
         start_max_tokens: Optional[int] = 32,
         wait_utf8: bool = True,
+        verbose: bool = False,
     ):
         """
         Initialize the reasoning budget sampler.
@@ -2182,6 +2185,11 @@ class ReasoningBudgetSampler(CustomSampler):
                 If True, when the budget is exhausted on an incomplete UTF-8
                 token piece, wait until a complete UTF-8 boundary before forcing
                 the end sequence.
+
+            verbose:
+                If True, print high-level reasoning-budget state transitions to
+                stderr. Logging is intentionally limited to transitions instead
+                of per-token events to avoid noisy generation output.
         """
         if model is None:
             raise ValueError("model must not be None")
@@ -2242,6 +2250,10 @@ class ReasoningBudgetSampler(CustomSampler):
         # Whether to delay forcing until a complete UTF-8 boundary.
         self.wait_utf8 = wait_utf8
 
+        # Whether to print high-level state transition logs.
+        # This follows the model/runtime verbose flag and avoids per-token spam.
+        self.verbose = verbose
+
         # Keep cloned Python sampler objects alive when llama.cpp clones the
         # sampler chain. Without this, cloned Python callbacks could be garbage
         # collected while C still holds function pointers to them.
@@ -2257,6 +2269,19 @@ class ReasoningBudgetSampler(CustomSampler):
             clone_func=self._clone,
             name="reasoning-budget",
         )
+
+        if self.verbose:
+            print(
+                f"ReasoningBudgetSampler: initialized "
+                f"(state={self.state.name}, budget={self.reasoning_budget}, "
+                f"start_max_tokens={self.start_max_tokens}, wait_utf8={self.wait_utf8}).",
+                file=sys.stderr,
+            )
+
+    def _log(self, message: str) -> None:
+        """Print a verbose reasoning-budget state transition message."""
+        if self.verbose:
+            print(f"ReasoningBudgetSampler: {message}", file=sys.stderr)
 
     def force(self) -> bool:
         """
@@ -2278,6 +2303,7 @@ class ReasoningBudgetSampler(CustomSampler):
         self.state = ReasoningBudgetState.FORCING
         self.force_pos = 0
         self.end_matcher.reset()
+        self._log("manual force requested; entering FORCING state.")
         return True
 
     def _token_utf8_complete(self, token: int) -> bool:
@@ -2313,9 +2339,11 @@ class ReasoningBudgetSampler(CustomSampler):
         self.remaining = self.reasoning_budget
         self.end_matcher.reset()
         self.force_pos = 0
+        self._log(f"reasoning_start matched; entering COUNTING state (budget={self.reasoning_budget}).")
 
         if self.remaining <= 0:
             self.state = ReasoningBudgetState.FORCING
+            self._log("budget is 0; entering FORCING state immediately.")
 
     def _accept(self, token: int) -> None:
         """
@@ -2345,6 +2373,10 @@ class ReasoningBudgetSampler(CustomSampler):
                 and self.generated_tokens >= self.start_max_tokens
             ):
                 self.state = ReasoningBudgetState.DONE
+                self._log(
+                    f"reasoning_start not found within {self.start_max_tokens} generated tokens; "
+                    "switching to DONE passthrough."
+                )
             return
 
         if self.state in (
@@ -2353,6 +2385,7 @@ class ReasoningBudgetSampler(CustomSampler):
         ):
             if self.end_matcher.advance(token):
                 self.state = ReasoningBudgetState.DONE
+                self._log("reasoning_end matched naturally; switching to DONE passthrough.")
                 return
 
             utf8_complete = self._token_utf8_complete(token)
@@ -2362,6 +2395,7 @@ class ReasoningBudgetSampler(CustomSampler):
                     self.state = ReasoningBudgetState.FORCING
                     self.force_pos = 0
                     self.end_matcher.reset()
+                    self._log("UTF-8 boundary reached; entering FORCING state.")
                 return
 
             self.remaining -= 1
@@ -2370,15 +2404,18 @@ class ReasoningBudgetSampler(CustomSampler):
                     self.state = ReasoningBudgetState.FORCING
                     self.force_pos = 0
                     self.end_matcher.reset()
+                    self._log("reasoning budget exhausted; entering FORCING state.")
                 else:
                     self.state = ReasoningBudgetState.WAITING_UTF8
                     self.end_matcher.reset()
+                    self._log("reasoning budget exhausted; waiting for UTF-8 boundary before forcing.")
             return
 
         if self.state == ReasoningBudgetState.FORCING:
             self.force_pos += 1
             if self.force_pos >= len(self.forced_tokens):
                 self.state = ReasoningBudgetState.DONE
+                self._log("forced end sequence completed; switching to DONE passthrough.")
             return
 
         if self.state == ReasoningBudgetState.DONE:
@@ -2448,6 +2485,8 @@ class ReasoningBudgetSampler(CustomSampler):
         if self.state == ReasoningBudgetState.COUNTING and self.remaining <= 0:
             self.state = ReasoningBudgetState.FORCING
 
+        self._log(f"reset to {self.state.name} state.")
+
     def _clone(self):
         """
         Clone the full runtime state.
@@ -2464,6 +2503,7 @@ class ReasoningBudgetSampler(CustomSampler):
             initial_state=self.initial_state,
             start_max_tokens=self.start_max_tokens,
             wait_utf8=self.wait_utf8,
+            verbose=self.verbose,
         )
 
         cloned.remaining = self.remaining
