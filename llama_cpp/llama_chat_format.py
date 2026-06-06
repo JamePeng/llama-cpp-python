@@ -3292,7 +3292,8 @@ class MTMDChatHandler:
         bitmap = self._mtmd_cpp.mtmd_helper_bitmap_init_from_buf(
             self.mtmd_ctx,
             (ctypes.c_uint8 * len(media_bytes)).from_buffer(bytearray(media_bytes)),
-            len(media_bytes)
+            len(media_bytes),
+            False,
         )
 
         if bitmap is None:

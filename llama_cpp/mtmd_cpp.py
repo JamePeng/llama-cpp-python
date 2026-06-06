@@ -326,7 +326,10 @@ def mtmd_get_audio_sample_rate(ctx: mtmd_context_p) -> c_int:
 # // if bitmap is audio:
 # //     length of data must be n_samples * sizeof(float)
 # //     the data is in float format (PCM F32)
-
+# // if data == nullptr:
+# //     the bitmap is considered "empty", and will be treated as a placeholder for counting tokens
+# //     you can pass the bitmap via mtmd_tokenize(), then call mtmd_*_get_n_tokens() to count the tokens
+# //     note: passing a placeholder bitmap to mtmd_encode() will return an error
 # MTMD_API mtmd_bitmap *         mtmd_bitmap_init           (uint32_t nx, uint32_t ny, const unsigned char * data);
 @ctypes_function_mtmd(
     "mtmd_bitmap_init", [
@@ -787,11 +790,22 @@ def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p): #
 # // it calls mtmd_helper_bitmap_init_from_buf() internally
 # // returns nullptr on failure
 # // this function is thread-safe
-# MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname);
+# MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder);
 
 @ctypes_function_mtmd(
-    "mtmd_helper_bitmap_init_from_file", [mtmd_context_p_ctypes, c_char_p], mtmd_bitmap_p_ctypes)
-def mtmd_helper_bitmap_init_from_file(ctx: mtmd_context_p, fname: c_char_p) -> mtmd_bitmap_p:
+    "mtmd_helper_bitmap_init_from_file", [
+        mtmd_context_p_ctypes,
+        c_char_p,
+        c_bool,
+    ],
+    mtmd_bitmap_p_ctypes
+)
+def mtmd_helper_bitmap_init_from_file(
+    ctx: mtmd_context_p,
+    fname: c_char_p,
+    placeholder: c_bool,
+    /,
+) -> mtmd_bitmap_p:
     """
     helper function to construct a mtmd_bitmap from a file
     it calls mtmd_helper_bitmap_init_from_buf() internally
@@ -807,13 +821,21 @@ def mtmd_helper_bitmap_init_from_file(ctx: mtmd_context_p, fname: c_char_p) -> m
 # // note: audio files will be auto-detected based on magic bytes
 # // returns nullptr on failure
 # // this function is thread-safe
-# MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len);
+# MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder);
 @ctypes_function_mtmd(
-    "mtmd_helper_bitmap_init_from_buf", [mtmd_context_p_ctypes, POINTER(c_uint8), c_size_t], mtmd_bitmap_p_ctypes)
+    "mtmd_helper_bitmap_init_from_buf", [
+        mtmd_context_p_ctypes,
+        POINTER(c_uint8),
+        c_size_t,
+        c_bool,
+    ],
+    mtmd_bitmap_p_ctypes
+)
 def mtmd_helper_bitmap_init_from_buf(
     ctx: mtmd_context_p,
     buf: CtypesArray[c_uint8],
     len: c_size_t,
+    placeholder: c_bool,
     /,
 ) -> mtmd_bitmap_p:
     """
