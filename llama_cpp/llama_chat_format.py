@@ -3641,7 +3641,7 @@ class MTMDChatHandler:
 
                     # Stage 5: Multimodal Physical OOM Defense
                     if n_past + chunk_n_tokens > llama.n_ctx():
-                        if llama._ctx.memory_can_shift():
+                        if not llama._ctx.memory_can_shift():
                             raise RuntimeError(
                                 f"{self.log_prefix}(__call__): Context Shift is explicitly disabled by the C++ backend "
                                 f"(n_pos_per_embd > 1 or incompatible M-RoPE). "
