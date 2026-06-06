@@ -26,6 +26,7 @@ This package provides:
         - [Dynamic LoRA Example](https://github.com/JamePeng/llama-cpp-python#dynamic-lora-example)
         - [Control Vector Injection (Representation Engineering)](https://github.com/JamePeng/llama-cpp-python#control-vector-injection-representation-engineering)
     - [Sampling Configuration & Usage (LlamaSamplingParams)](https://github.com/JamePeng/llama-cpp-python#sampling-configuration--usage-llamasamplingparams)
+        - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
