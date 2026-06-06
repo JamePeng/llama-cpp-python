@@ -131,6 +131,17 @@ class LlamaChatCompletionHandler(Protocol):
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
+        # Reasoning Budget Params
+        #
+        # Generic first-reasoning-block budget control. These parameters are
+        # passed through to llama.create_completion() without model-specific
+        # inference or template guessing.
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
@@ -829,6 +840,17 @@ def chat_formatter_to_chat_completion_handler(
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
+        # Reasoning Budget Params
+        #
+        # Generic first-reasoning-block budget control. These parameters are
+        # passed through to llama.create_completion() without model-specific
+        # inference or template guessing.
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
@@ -964,6 +986,12 @@ def chat_formatter_to_chat_completion_handler(
             stopping_criteria=stopping_criteria,
             grammar=grammar,
             logit_bias=logit_bias,
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
         if tool is not None:
             tool_name = tool["function"]["name"]
@@ -3512,6 +3540,12 @@ class MTMDChatHandler:
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         add_generation_prompt: bool = True,
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
@@ -3772,6 +3806,12 @@ class MTMDChatHandler:
             logits_processor=logits_processor,
             grammar=grammar,
             logit_bias=logit_bias,
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
 
         if tool is not None:
