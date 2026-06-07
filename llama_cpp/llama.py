@@ -503,6 +503,7 @@ class Llama:
         self.context_params.n_threads_batch = self.n_threads_batch
 
         self.context_params.ctx_type = ctx_type
+        self.context_params.ctx_other = None
         self.context_params.rope_scaling_type = (
             rope_scaling_type
             if rope_scaling_type is not None

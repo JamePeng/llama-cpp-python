@@ -898,6 +898,9 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
 #     struct llama_sampler_seq_config * samplers;
 #     size_t                            n_samplers;
+#     // a source/target/parent context
+#     // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
+#     struct llama_context * ctx_other;
 # };
 class llama_context_params(ctypes.Structure):
     """Parameters for llama_context
@@ -945,6 +948,8 @@ class llama_context_params(ctypes.Structure):
 
         samplers(llama_sampler_seq_config *): the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
         n_samplers(size_t): numbers of sampler chains
+
+        ctx_other(llama_context *): a source/target/parent context can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
     """
 
     if TYPE_CHECKING:
@@ -983,6 +988,7 @@ class llama_context_params(ctypes.Structure):
         kv_unified:bool
         samplers: ctypes.c_void_p
         n_samplers: int
+        ctx_other: ctypes.c_void_p
 
     _fields_ = [
         ("n_ctx", ctypes.c_uint32),
@@ -1020,6 +1026,7 @@ class llama_context_params(ctypes.Structure):
         ("kv_unified", ctypes.c_bool),
         ("samplers", llama_sampler_seq_config_p),
         ("n_samplers", ctypes.c_int),
+        ("ctx_other", ctypes.c_void_p),
     ]
 
 llama_context_params_p = ctypes.POINTER(llama_context_params)
