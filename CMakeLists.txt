@@ -135,7 +135,7 @@ function(llama_cpp_python_install_windows_openmp_runtime)
             message(WARNING
                 "LLAMA_CPP_OPENMP_RUNTIME_DLL was set, but the file does not exist: "
                 "${LLAMA_CPP_OPENMP_RUNTIME_DLL}. Falling back to Visual Studio "
-                "LLVM OpenMP runtime discovery."
+                "VC143 LLVM OpenMP runtime discovery."
             )
         endif()
     endif()
@@ -144,18 +144,19 @@ function(llama_cpp_python_install_windows_openmp_runtime)
         file(TO_CMAKE_PATH "$ENV{ProgramFiles}" PROGRAMFILES_CMAKE)
         file(TO_CMAKE_PATH "$ENV{ProgramFiles\(x86\)}" PROGRAMFILES_X86_CMAKE)
 
-        set(VS_OPENMP_SEARCH_PATTERNS
-            # Prefer the exact VS 2022 Enterprise / BuildTools LLVM OpenMP redist layout.
+        set(VS_OPENMP_VC143_PATTERNS
+            # Prefer VS 2022 VC143 LLVM OpenMP redist paths.
+            # The MSVC version directory is intentionally globbed because
+            # GitHub runners may contain versions such as 14.44.35112 or 14.44.35207.
             "${PROGRAMFILES_CMAKE}/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC/*/debug_nonredist/x64/Microsoft.VC143.OpenMP.LLVM/libomp140.x86_64.dll"
             "${PROGRAMFILES_X86_CMAKE}/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC/*/debug_nonredist/x64/Microsoft.VC143.OpenMP.LLVM/libomp140.x86_64.dll"
 
-            # Keep these as secondary fallbacks for non-standard installs.
+            # Secondary VS layout fallbacks for unusual installations.
             "${PROGRAMFILES_CMAKE}/Microsoft Visual Studio/2022/BuildTools/VC/Redist/MSVC/*/debug_nonredist/x64/Microsoft.VC143.OpenMP.LLVM/libomp140.x86_64.dll"
             "${PROGRAMFILES_X86_CMAKE}/Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC/*/debug_nonredist/x64/Microsoft.VC143.OpenMP.LLVM/libomp140.x86_64.dll"
-            "C:/Windows/System32/libomp140.x86_64.dll"
         )
 
-        foreach(PATTERN ${VS_OPENMP_SEARCH_PATTERNS})
+        foreach(PATTERN ${VS_OPENMP_VC143_PATTERNS})
             file(GLOB PATTERN_OPENMP_DLLS "${PATTERN}")
             list(APPEND FOUND_OPENMP_DLLS ${PATTERN_OPENMP_DLLS})
         endforeach()
@@ -164,7 +165,16 @@ function(llama_cpp_python_install_windows_openmp_runtime)
             list(REMOVE_DUPLICATES FOUND_OPENMP_DLLS)
             list(SORT FOUND_OPENMP_DLLS COMPARE NATURAL ORDER DESCENDING)
             list(GET FOUND_OPENMP_DLLS 0 OPENMP_RUNTIME_DLL)
-            set(OPENMP_RUNTIME_SOURCE "Visual Studio 2022 LLVM OpenMP redist fallback")
+            set(OPENMP_RUNTIME_SOURCE "Visual Studio 2022 VC143 LLVM OpenMP redist")
+        endif()
+    endif()
+
+    if(NOT OPENMP_RUNTIME_DLL)
+        set(SYSTEM32_OPENMP_RUNTIME_DLL "C:/Windows/System32/libomp140.x86_64.dll")
+
+        if(EXISTS "${SYSTEM32_OPENMP_RUNTIME_DLL}")
+            set(OPENMP_RUNTIME_DLL "${SYSTEM32_OPENMP_RUNTIME_DLL}")
+            set(OPENMP_RUNTIME_SOURCE "System32 fallback")
         endif()
     endif()
 
@@ -177,9 +187,10 @@ function(llama_cpp_python_install_windows_openmp_runtime)
     else()
         message(WARNING
             "Could not find libomp140.x86_64.dll for Windows LLVM OpenMP. "
-            "Searched LLAMA_CPP_OPENMP_RUNTIME_DLL and Visual Studio 2022 "
-            "Enterprise/BuildTools redist paths under Program Files and Program Files (x86), "
-            "with a fuzzy MSVC version match such as 14.44.35112 or 14.44.35207. "
+            "Searched LLAMA_CPP_OPENMP_RUNTIME_DLL, Visual Studio 2022 "
+            "Enterprise/BuildTools VC143 redist paths under Program Files and "
+            "Program Files (x86), with a fuzzy MSVC version match such as "
+            "14.44.35112 or 14.44.35207, and C:/Windows/System32 as a final fallback. "
             "If GGML_OPENMP=ON and GGML CPU backend DLLs are built with LLVM OpenMP, "
             "the packaged ggml-cpu-*.dll files may fail to load at runtime. "
             "Set LLAMA_CPP_OPENMP_RUNTIME_DLL to the full path of libomp140.x86_64.dll "
