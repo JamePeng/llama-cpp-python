@@ -3064,6 +3064,8 @@ class MTMDChatHandler:
                             "{% else %}"
                                 "data:audio/{{ content.input_audio.format }};base64,{{ content.input_audio.data }}"
                             "{% endif %}"
+                        "{% elif content.type == 'video_url' %}"
+                            "{{ content.video_url if content.video_url is string else content.video_url.url }}"
                         "{% elif content.type == 'text' %}"
                             "{{ content.text }}"
                         "{% endif %}"
@@ -3113,6 +3115,10 @@ class MTMDChatHandler:
         self._mtmd_cpp = mtmd_cpp
         self.mtmd_ctx: Optional[mtmd_cpp.mtmd_context_p] = None
         self.extra_template_arguments: dict[str, Any] = {}
+
+        self.is_support_vision = False
+        self.is_support_audio = False
+        self.is_support_video = False
 
         if not os.path.exists(clip_model_path):
             raise ValueError(f"{self.log_prefix}(__init__): Clip model path does not exist: {clip_model_path}")
@@ -3181,6 +3187,15 @@ class MTMDChatHandler:
         else:
             if self.verbose:
                 print(f"{self.log_prefix}(_init_mtmd_context): Audio is NOT supported by this mmproj model backend.", file=sys.stderr)
+
+        # Check if video is supported
+        self.is_support_video = self._mtmd_cpp.mtmd_helper_support_video(self.mtmd_ctx)
+        if self.is_support_video:
+            if self.verbose:
+                print(f"{self.log_prefix}(_init_mtmd_context): Video support detected.", file=sys.stderr)
+        else:
+            if self.verbose:
+                print(f"{self.log_prefix}(_init_mtmd_context): Video support is NOT available in this build.", file=sys.stderr)
 
     def close(self) -> None:
         """Explicitly free the mtmd context and vision model resources."""
@@ -3259,7 +3274,16 @@ class MTMDChatHandler:
                                 if url:
                                     media_items.append({"url": url, "type": "audio"})
 
-                    # 3. Text & Unknown Types
+                    # 3. Video Processing
+                    elif content_type == "video_url":
+                        if not self.is_support_video:
+                            raise ValueError(f"{self.log_prefix}: This libmtmd build does not support video inputs.")
+
+                        video_url = content["video_url"]
+                        url = video_url if isinstance(video_url, str) else video_url["url"]
+                        media_items.append({"url": url, "type": "video"})
+
+                    # 4. Text & Unknown Types
                     elif content_type == "text":
                         continue
                     else:
@@ -3274,6 +3298,7 @@ class MTMDChatHandler:
         Supported formats:
           - Images (via stb_image): jpg, png, bmp, etc.
           - Audio (via miniaudio): wav, mp3, flac.
+          - Video: depends on whether MTMD_VIDEO was enabled at build time.
 
         Note:
           - Media types (Image vs. Audio) are auto-detected by the C++ backend using magic bytes.
@@ -3283,25 +3308,35 @@ class MTMDChatHandler:
             media_bytes (bytes): The raw byte content of the media file.
 
         Returns:
-            mtmd_bitmap: A pointer to the allocated bitmap structure containing decoded media features.
+            bitmap: mtmd_bitmap *
+            video_ctx: mtmd_helper_video * or NULL
         """
         if self.mtmd_ctx is None:
             raise ValueError(f"{self.log_prefix}(_create_bitmap_from_bytes): mtmd context not initialized.")
 
-        # Create bitmap from buffer using helper function
-        bitmap = self._mtmd_cpp.mtmd_helper_bitmap_init_from_buf(
+        if not media_bytes:
+            raise ValueError(f"{self.log_prefix}(_create_bitmap_from_bytes): empty media bytes.")
+
+        buf = (ctypes.c_uint8 * len(media_bytes)).from_buffer_copy(media_bytes)
+
+        wrapper = self._mtmd_cpp.mtmd_helper_bitmap_init_from_buf(
             self.mtmd_ctx,
-            (ctypes.c_uint8 * len(media_bytes)).from_buffer(bytearray(media_bytes)),
+            buf,
             len(media_bytes),
             False,
         )
 
-        if bitmap is None:
-            raise ValueError(f"{self.log_prefix}(_create_bitmap_from_bytes): "
-                                "Failed to load image or audio file from media bytes "
-                                "(unsupported media format or corrupted data).")
+        if not wrapper.bitmap:
+            if wrapper.video_ctx:
+                self._mtmd_cpp.mtmd_helper_video_free(wrapper.video_ctx)
 
-        return bitmap
+            raise ValueError(
+                f"{self.log_prefix}(_create_bitmap_from_bytes): "
+                "Failed to load media from bytes "
+                "(unsupported media format, corrupted data, or missing helper support)."
+            )
+
+        return wrapper.bitmap, wrapper.video_ctx
 
 
     def _process_mtmd_prompt(
@@ -3360,16 +3395,17 @@ class MTMDChatHandler:
         # 3. Pre-allocate bitmap array to guarantee chronological order during concurrent decoding
         bitmaps = [None] * len(media_items)
         bitmap_cleanup = []
+        video_cleanup = []
         chunks = None
 
         try:
             # Concurrent Media Decoding
             import concurrent.futures
             if media_items:
-                def _create_bitmap_func(idx: int, item: str):
+                def _create_bitmap_func(idx: int, item: dict):
                     media_bytes = self.load_media(item["url"], item["type"])
-                    bitmap = self._create_bitmap_from_bytes(media_bytes)
-                    return idx, bitmap
+                    bitmap, video_ctx = self._create_bitmap_from_bytes(media_bytes)
+                    return idx, bitmap, video_ctx
                 # This method uses multi-threaded parallel processing to convert images or audio to bitmaps,
                 # which can be used in the future to process large numbers of video frames.
                 max_workers = min(llama.n_threads, len(media_items))
@@ -3377,9 +3413,13 @@ class MTMDChatHandler:
                     futures = [executor.submit(_create_bitmap_func, i, item) for i, item in enumerate(media_items)]
 
                     for future in concurrent.futures.as_completed(futures):
-                        idx, bitmap = future.result()
+                        idx, bitmap, video_ctx = future.result()
+
                         bitmaps[idx] = bitmap
                         bitmap_cleanup.append(bitmap)
+
+                        if video_ctx:
+                            video_cleanup.append(video_ctx)
 
                 # Strict validation: Abort if any thread failed to decode its assigned media
                 if any(b is None for b in bitmaps):
@@ -3415,6 +3455,12 @@ class MTMDChatHandler:
             if result != 0:
                 raise ValueError(f"{self.log_prefix}(mtmd_tokenize): Unable to tokenize prompt, res = {result}.")
 
+            # Video helper contexts only need to stay alive until mtmd_tokenize() completes.
+            if video_cleanup:
+                for video_ctx in video_cleanup:
+                    self._mtmd_cpp.mtmd_helper_video_free(video_ctx)
+                video_cleanup.clear()
+
             # 6. Virtual Token Ledger Construction
             full_prompt_ids = []
             chunk_token_spans = []
@@ -3424,6 +3470,7 @@ class MTMDChatHandler:
             # Cursor to track the actual media contents (URLs or base64 data) provided by the user
             media_items_count = len(media_items)
             media_items_cur = 0
+            last_media_id = None
 
             for i in range(n_chunks):
                 chunk = self._mtmd_cpp.mtmd_input_chunks_get(chunks, i)
@@ -3463,7 +3510,11 @@ class MTMDChatHandler:
                         # while instantly breaking the match if the image content changes.
                         # media_id = - (zlib.crc32(real_media_url.encode('utf-8')) % (2**24)) - 100
                         media_id = - (zlib.crc32(real_media_url.encode('utf-8')) & 0xFFFFFF) - 100
+                        last_media_id = media_id
                         media_items_cur += 1
+                    elif last_media_id is not None:
+                        # video may expand into multiple image chunks from one media marker
+                        media_id = last_media_id
                     else:
                         # Magic Negative Number as fallback :)
                         media_id = -314159
@@ -3492,6 +3543,12 @@ class MTMDChatHandler:
                 for bitmap in bitmap_cleanup:
                     self._mtmd_cpp.mtmd_bitmap_free(bitmap)
                 bitmap_cleanup = None
+            # Free videos
+            if len(video_cleanup) > 0:
+                for video_ctx in video_cleanup:
+                    self._mtmd_cpp.mtmd_helper_video_free(video_ctx)
+                video_cleanup = None
+
             bitmaps = None
 
             raise e
@@ -3825,18 +3882,22 @@ class MTMDChatHandler:
     def load_media(self, media_url: str, media_type: str) -> bytes:
         """
         Unified dispatcher for loading media payloads.
-        Routes the URL/URI to the specific image or audio processor based on the media_type.
+        Routes the URL/URI to the specific image, audio, or video processor based on the media_type.
         """
         if media_type == "image":
             return self._load_image(media_url)
+
         elif media_type == "audio":
-            audio_bytes = self._load_audio(media_url)
-            # Apply ironclad magic bytes validation before returning
+            audio_bytes = self._load_bytes(media_url, timeout=15, kind="audio")
             try:
                 self.detect_audio_format(audio_bytes)
             except ValueError as e:
                 raise ValueError(f"{self.log_prefix}(load_media): {e}")
             return audio_bytes
+
+        elif media_type == "video":
+            return self._load_bytes(media_url, timeout=30, kind="video")
+
         else:
             raise ValueError(f"{self.log_prefix}(load_media): Unknown media type '{media_type}'")
 
@@ -3876,41 +3937,51 @@ class MTMDChatHandler:
                 "The underlying C++ miniaudio backend ONLY supports WAV, MP3, and FLAC."
             )
 
+    DEFAULT_HTTP_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/148.0.0.0 Safari/537.36"
+        ),
+    }
+
     @staticmethod
-    def _load_audio(audio_url: str) -> bytes:
+    def _load_bytes(media_url: str, timeout: int = 15, kind: str = "media") -> bytes:
         """
-        Load audio from either a URL, local path, or a data URI and return raw bytes.
+        Load raw bytes from a data URI, local file path, or remote HTTP/HTTPS URL.
         """
+        media_bytes = b""
 
-        audio_bytes = b""
-
-        # 1. Handle data URI (base64)
-        if audio_url.strip().startswith("data:"):
-            comma_pos = audio_url.find(",")
+        # 1. Handle data URI
+        if media_url.strip().startswith("data:"):
+            comma_pos = media_url.find(",")
             if comma_pos == -1:
                 raise ValueError("Invalid data URI: missing comma separator")
-            base64_data = audio_url[comma_pos + 1 :]
-            audio_bytes = base64.b64decode(base64_data)
+
+            base64_data = media_url[comma_pos + 1:]
+            media_bytes = base64.b64decode(base64_data)
 
         # 2. Handle local file path
-        elif os.path.exists(audio_url):
-            with open(audio_url, "rb") as f:
-                audio_bytes = f.read()
+        elif os.path.exists(media_url):
+            with open(media_url, "rb") as f:
+                media_bytes = f.read()
 
         # 3. Handle remote URL via HTTP/HTTPS
         else:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            req = urllib.request.Request(audio_url, headers=headers)
+            req = urllib.request.Request(
+                media_url,
+                headers=MTMDChatHandler.DEFAULT_HTTP_HEADERS,
+            )
             try:
-                with urllib.request.urlopen(req, timeout=15) as f:
-                    audio_bytes = f.read()
+                with urllib.request.urlopen(req, timeout=timeout) as f:
+                    media_bytes = f.read()
             except (URLError, HTTPError) as e:
-                raise ConnectionError(f"Failed to download audio from {audio_url}: {e}")
+                raise ConnectionError(f"Failed to download {kind} from {media_url}: {e}")
 
-        if not audio_bytes:
-            raise ValueError("Empty audio data received")
+        if not media_bytes:
+            raise ValueError(f"Empty {kind} data received")
 
-        return audio_bytes
+        return media_bytes
 
     @staticmethod
     def _load_image(image_url: str) -> bytes:
@@ -3926,28 +3997,14 @@ class MTMDChatHandler:
         Returns:
             JPEG-encoded bytes (quality=95) in RGB mode, suitable for most vision models.
         """
-        image_bytes = b""
+        # 1. Load image bytes from image_url
+        image_bytes = MTMDChatHandler._load_bytes(
+            image_url,
+            timeout=15,
+            kind="image",
+        )
 
-        # 1. Handle data URI (base64)
-        if image_url.strip().startswith("data:"):
-            # Split only once from the right to correctly handle mime types containing commas
-            comma_pos = image_url.find(",")
-            if comma_pos == -1:
-                raise ValueError("Invalid data URI: missing comma separator")
-            base64_data = image_url[comma_pos + 1 :]
-            image_bytes = base64.b64decode(base64_data)
-
-        # 2. Handle local/remote URL
-        else:
-            headers = {"User-Agent": "Mozilla/5.0"}
-            req = urllib.request.Request(image_url, headers=headers)
-
-            try:
-                with urllib.request.urlopen(req, timeout=15) as f:
-                    image_bytes = f.read()
-            except (URLError, HTTPError) as e:
-                raise ConnectionError(f"Failed to download image from {image_url}: {e}")
-
+        # 2. Check if image_bytes is empty.
         if not image_bytes:
             raise ValueError("Empty image data received")
 
