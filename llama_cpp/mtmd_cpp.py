@@ -10,12 +10,14 @@ from ctypes import (
     c_uint8,
     c_int32,
     c_uint32,
+    c_int64,
     c_float,
     c_void_p,
     c_size_t,
     POINTER,
     _Pointer,  # type: ignore
     Structure,
+    CFUNCTYPE
 )
 import pathlib
 from typing import (
@@ -318,6 +320,16 @@ def mtmd_get_audio_sample_rate(ctx: mtmd_context_p) -> c_int:
     """
     ...
 
+# // get the current marker string
+# MTMD_API const char * mtmd_get_marker(const mtmd_context * ctx);
+@ctypes_function_mtmd(
+    "mtmd_get_marker", [mtmd_context_p_ctypes], c_char_p)
+def mtmd_get_marker(ctx: mtmd_context_p) -> c_char_p:
+    """
+    get the current marker string
+    """
+    ...
+
 # // mtmd_bitmap
 # //
 # // if bitmap is image:
@@ -417,6 +429,58 @@ def mtmd_bitmap_set_id(
     id: c_char_p,
     /,
 ):
+    ...
+
+
+# // mtmd_bitmap lazy
+# //
+# // this is a special bitmap that:
+# // - does not hold the actual data
+# // - can be expanded into one or more chunks (either media to text chunks)
+# // user must provide a callback to fill in the data when mtmd_tokenize() is called
+# // this is useful for large video inputs:
+# // - allow reading video frame by frame, without loading the entire video into memory
+# // - allow tracking the whole video with a single ID (for example, the file hash)
+
+# // set (*out_bitmap) to non-nullptr to emit a bitmap chunk; it will be freed automatically
+# // set (*out_text) to non-nullptr to emit a text chunk; it must be heap-allocated, null-terminated and will be freed automatically
+# // either out_bitmap or out_text can be set, but not both
+# // out_bitmap cannot be another lazy bitmap (no nested lazy allowed)
+# // return value:
+# //    0 on success
+# //   -1 on EOF (signal to mtmd_tokenize to move on)
+# //   -2 on error (signal to mtmd_tokenize to abort)
+# typedef int(* mtmd_bitmap_lazy_callback)(
+#     size_t chunk_idx,
+#     void * user_data,
+#     mtmd_bitmap ** out_bitmap,
+#     char ** out_text);
+mtmd_bitmap_lazy_callback = CFUNCTYPE(
+    c_int,
+    c_size_t,                 # chunk_idx
+    c_void_p,                 # user_data
+    POINTER(mtmd_bitmap_p),   # mtmd_bitmap ** out_bitmap
+    POINTER(c_char_p),        # char ** out_text
+)
+
+# MTMD_API mtmd_bitmap * mtmd_bitmap_init_lazy(mtmd_context * ctx,
+#                                              const char * id, // usually set to file hash
+#                                              void * user_data,
+#                                              mtmd_bitmap_lazy_callback callback);
+@ctypes_function_mtmd(
+    "mtmd_input_chunks_get", [
+        mtmd_context_p_ctypes,
+        c_char_p,
+        c_void_p,
+        mtmd_bitmap_lazy_callback,
+    ], mtmd_bitmap_p_ctypes)
+def mtmd_input_chunks_get(
+    ctx: mtmd_context_p,
+    id: c_char_p,
+    user_data: c_void_p,
+    callback: mtmd_bitmap_lazy_callback,  # type: ignore
+    /,
+) -> mtmd_bitmap_p:
     ...
 
 
@@ -772,6 +836,9 @@ def mtmd_test_create_input_chunks() -> mtmd_input_chunk_p:
 # // BREAKING CHANGES are expected.
 # //
 
+# struct mtmd_helper_video;
+mtmd_helper_video_p = NewType("mtmd_helper_video_p", int)
+mtmd_helper_video_p_ctypes = c_void_p
 
 # // Set callback for all future logging events.
 # // If this is not called, or NULL is supplied, everything is output on stderr.
@@ -786,11 +853,33 @@ def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p): #
     ...
 
 
+# // Returns true if this build includes video support (MTMD_VIDEO was ON at compile time).
+# MTMD_API bool mtmd_helper_support_video(mtmd_context * ctx);
+@ctypes_function_mtmd(
+    "mtmd_helper_support_video", [mtmd_context_p], c_bool)
+def mtmd_helper_support_video(ctx: mtmd_context_p) -> c_bool:
+    """
+    Returns true if this build includes video support (MTMD_VIDEO was ON at compile time).
+    """
+    ...
+
+
+# struct mtmd_helper_bitmap_wrapper {
+#     mtmd_bitmap * bitmap;
+#     mtmd_helper_video * video_ctx;
+# };
+class mtmd_helper_bitmap_wrapper(Structure):
+    _fields_ = [
+        ("bitmap", mtmd_bitmap_p),
+        ("video_ctx", mtmd_helper_video_p),
+    ]
+mtmd_helper_bitmap_wrapper_p_ctypes = POINTER(mtmd_helper_bitmap_wrapper)
+
 # // helper function to construct a mtmd_bitmap from a file
 # // it calls mtmd_helper_bitmap_init_from_buf() internally
 # // returns nullptr on failure
 # // this function is thread-safe
-# MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder);
+# MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder);
 
 @ctypes_function_mtmd(
     "mtmd_helper_bitmap_init_from_file", [
@@ -798,14 +887,14 @@ def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p): #
         c_char_p,
         c_bool,
     ],
-    mtmd_bitmap_p_ctypes
+    mtmd_helper_bitmap_wrapper
 )
 def mtmd_helper_bitmap_init_from_file(
     ctx: mtmd_context_p,
     fname: c_char_p,
     placeholder: c_bool,
     /,
-) -> mtmd_bitmap_p:
+) -> mtmd_helper_bitmap_wrapper:
     """
     helper function to construct a mtmd_bitmap from a file
     it calls mtmd_helper_bitmap_init_from_buf() internally
@@ -818,10 +907,13 @@ def mtmd_helper_bitmap_init_from_file(
 # // supported formats:
 # //     image: formats supported by stb_image: jpg, png, bmp, gif, etc.
 # //     audio: formats supported by miniaudio: wav, mp3, flac
-# // note: audio files will be auto-detected based on magic bytes
+# // note:
+# //   - for now, video input is only supported via C++ helper functions
+# //   - audio files will be auto-detected based on magic bytes
+# //   - output bitmap will have FNV hash as the ID
 # // returns nullptr on failure
 # // this function is thread-safe
-# MTMD_API mtmd_bitmap * mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder);
+# MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder);
 @ctypes_function_mtmd(
     "mtmd_helper_bitmap_init_from_buf", [
         mtmd_context_p_ctypes,
@@ -829,7 +921,7 @@ def mtmd_helper_bitmap_init_from_file(
         c_size_t,
         c_bool,
     ],
-    mtmd_bitmap_p_ctypes
+    mtmd_helper_bitmap_wrapper
 )
 def mtmd_helper_bitmap_init_from_buf(
     ctx: mtmd_context_p,
@@ -837,13 +929,16 @@ def mtmd_helper_bitmap_init_from_buf(
     len: c_size_t,
     placeholder: c_bool,
     /,
-) -> mtmd_bitmap_p:
+) -> mtmd_helper_bitmap_wrapper:
     """
     helper function to construct a mtmd_bitmap from a buffer containing a file
     supported formats:
-         image: formats supported by stb_image: jpg, png, bmp, gif, etc.
-         audio: formats supported by miniaudio: wav, mp3, flac
-    note: audio files will be auto-detected based on magic bytes
+        image: formats supported by stb_image: jpg, png, bmp, gif, etc.
+        audio: formats supported by miniaudio: wav, mp3, flac
+    note:
+        - for now, video input is only supported via C++ helper functions
+        - audio files will be auto-detected based on magic bytes
+        - output bitmap will have FNV hash as the ID
     returns nullptr on failure
     """
     ...
@@ -1018,5 +1113,183 @@ def mtmd_helper_decode_image_chunk(
     helper function to decode an image whose embeddings have already been calculated
     this helper will handle batching and pre/post decoding setup (for ex. gemma 3 requires non-causal attention)
     ret 0 on success, -1 on chunk not being a valid image chunk, 1 on decode failure
+    """
+    ...
+
+# //
+# // video input helpers (requires ffmpeg/ffprobe installed on the system)
+# // the notion of video only exists at the helper level, it is not visible to the core mtmd library
+# //
+# // NOTE: this implementation is model-agnostic, it can be used with any vision-capable model
+# //       however, it may not be accurate for some specific models
+# //       (this is expected for now, to keep the implementation simple)
+# //
+
+# struct mtmd_helper_video_info {
+#     uint32_t width;
+#     uint32_t height;
+#     float    fps;      // effective fps (fps_target if set, else original video fps)
+#     int32_t  n_frames; // estimated total frames at effective fps (-1 if unknown)
+# };
+class mtmd_helper_video_info(Structure):
+    _fields_ = [
+        ("width", c_uint32),
+        ("height", c_uint32),
+        ("fps", c_float),
+        ("n_frames", c_int32),
+    ]
+mtmd_helper_video_info_p_ctypes = POINTER(mtmd_helper_video_info)
+
+
+# struct mtmd_helper_video_init_params {
+#     float fps_target;            // desired output fps; <= 0 means use the video's native fps, defaulted to 4.0f
+#     const char * ffmpeg_bin_dir; // directory containing ffmpeg/ffprobe binaries; NULL means search PATH
+#     int64_t timestamp_interval_ms; // interval for adding timestamp as text chunk (example: "[10m50.5s]"); <= 0 means no timestamp, defaulted to 5000ms
+#     // TODO @ngxson : allow "placeholder" bitmap output for counting tokens
+# };
+class mtmd_helper_video_init_params(Structure):
+    _fields_ = [
+        ("fps_target", c_float),
+        ("ffmpeg_bin_dir", c_char_p),
+        ("timestamp_interval_ms", c_int64),
+    ]
+mtmd_helper_video_init_params_p_ctypes = POINTER(mtmd_helper_video_init_params)
+
+
+# MTMD_API struct mtmd_helper_video_init_params mtmd_helper_video_init_params_default(void);
+@ctypes_function_mtmd(
+    "mtmd_helper_video_init_params_default",
+    [],
+    mtmd_helper_video_init_params,
+)
+def mtmd_helper_video_init_params_default(
+    /,
+) -> mtmd_helper_video_init_params:
+    """
+    get default init params for mtmd_helper_video
+    """
+    ...
+
+
+# // returns NULL on failure (ffprobe not found, file unreadable, etc.)
+# MTMD_API mtmd_helper_video * mtmd_helper_video_init(
+#                     struct mtmd_context * mctx,
+#                     const char * path,
+#                     struct mtmd_helper_video_init_params params);
+@ctypes_function_mtmd(
+    "mtmd_helper_video_init", [
+        mtmd_context_p_ctypes,
+        c_char_p,
+        mtmd_helper_video_init_params,
+    ],
+    mtmd_helper_video_p)
+def mtmd_helper_video_init(
+    mctx: mtmd_context_p,
+    path: c_char_p,
+    params: mtmd_helper_video_init_params,
+    /,
+) -> mtmd_helper_video_p:
+    """
+    helper function to init an mtmd_helper_video object
+    returns NULL on failure (ffprobe not found, file unreadable, etc.)
+    """
+    ...
+
+
+# // Same as mtmd_helper_video_init(), but reads from an in-memory buffer.
+# // The buffer is copied internally; the caller does not need to keep it alive.
+# // Note: pipe input is not seekable, so seeking will use output-side seeking
+# // (ffmpeg decodes and discards frames up to the target position).
+# MTMD_API mtmd_helper_video * mtmd_helper_video_init_from_buf(
+#                     struct mtmd_context * mctx,
+#                     const unsigned char * buf, size_t len,
+#                     struct mtmd_helper_video_init_params params);
+@ctypes_function_mtmd(
+    "mtmd_helper_video_init_from_buf",
+    [
+        mtmd_context_p_ctypes,
+        c_char_p,
+        c_size_t,
+        mtmd_helper_video_init_params,
+    ],
+    mtmd_helper_video_p_ctypes,
+)
+def mtmd_helper_video_init_from_buf(
+    mctx: mtmd_context_p,
+    buf: c_char_p,
+    len: int,
+    params: mtmd_helper_video_init_params,
+    /,
+) -> mtmd_helper_video_p:
+    """
+    helper function to init an mtmd_helper_video object from an in-memory video buffer
+
+    The buffer is copied internally, so the caller does not need to keep it alive
+    after this function returns.
+    """
+    ...
+
+
+# MTMD_API void mtmd_helper_video_free(mtmd_helper_video * ctx);
+@ctypes_function_mtmd("mtmd_helper_video_free", [mtmd_helper_video_p_ctypes], None)
+def mtmd_helper_video_free(
+    ctx: mtmd_helper_video_p,
+    /,
+) -> None:
+    """
+    free an mtmd_helper_video object
+    """
+    ...
+
+
+# MTMD_API struct mtmd_helper_video_info mtmd_helper_video_get_info(const mtmd_helper_video * ctx);
+@ctypes_function_mtmd("mtmd_helper_video_get_info", [mtmd_helper_video_p_ctypes], mtmd_helper_video_info)
+def mtmd_helper_video_get_info(
+    ctx: mtmd_helper_video_p,
+    /,
+) -> mtmd_helper_video_info:
+    """
+    get video information from an mtmd_helper_video object
+    """
+    ...
+
+
+# // Read the next item from the video stream; exactly one of out_bitmap or out_text is set per call.
+# // *out_bitmap - heap-allocated; caller must free with mtmd_bitmap_free()
+# // *out_text   - heap-allocated (always via strdup/malloc); caller must free with free()
+# // returns 0 on success, -1 on EOF, -2 on error
+# MTMD_API int32_t mtmd_helper_video_read_next(mtmd_helper_video * ctx,
+#             mtmd_bitmap ** out_bitmap,
+#             char ** out_text);
+@ctypes_function_mtmd(
+    "mtmd_helper_video_read_next",
+    [
+        mtmd_helper_video_p_ctypes,
+        POINTER(mtmd_bitmap_p_ctypes),
+        POINTER(c_char_p),
+    ],
+    c_int32,
+)
+def mtmd_helper_video_read_next(
+    ctx: mtmd_helper_video_p,
+    out_bitmap: POINTER(mtmd_bitmap_p_ctypes),  # type: ignore
+    out_text:   POINTER(c_char_p),              # type: ignore
+    /,
+) -> int:
+    """
+    read the next item from the video stream
+
+    Exactly one of out_bitmap or out_text is set per successful call.
+
+    out_bitmap:
+        heap-allocated bitmap; caller must free it with mtmd_bitmap_free()
+
+    out_text:
+        heap-allocated string via strdup/malloc; caller must free it with free()
+
+    returns:
+        0  on success
+        -1 on EOF
+        -2 on error
     """
     ...
