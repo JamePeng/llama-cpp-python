@@ -459,8 +459,8 @@ mtmd_bitmap_lazy_callback = CFUNCTYPE(
     c_int,
     c_size_t,                 # chunk_idx
     c_void_p,                 # user_data
-    POINTER(mtmd_bitmap_p),   # mtmd_bitmap ** out_bitmap
-    POINTER(c_char_p),        # char ** out_text
+    POINTER(mtmd_bitmap_p_ctypes),   # mtmd_bitmap ** out_bitmap
+    POINTER(c_char_p),               # char ** out_text
 )
 
 # MTMD_API mtmd_bitmap * mtmd_bitmap_init_lazy(mtmd_context * ctx,
@@ -856,7 +856,7 @@ def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p): #
 # // Returns true if this build includes video support (MTMD_VIDEO was ON at compile time).
 # MTMD_API bool mtmd_helper_support_video(mtmd_context * ctx);
 @ctypes_function_mtmd(
-    "mtmd_helper_support_video", [mtmd_context_p], c_bool)
+    "mtmd_helper_support_video", [mtmd_context_p_ctypes], c_bool)
 def mtmd_helper_support_video(ctx: mtmd_context_p) -> c_bool:
     """
     Returns true if this build includes video support (MTMD_VIDEO was ON at compile time).
@@ -870,8 +870,8 @@ def mtmd_helper_support_video(ctx: mtmd_context_p) -> c_bool:
 # };
 class mtmd_helper_bitmap_wrapper(Structure):
     _fields_ = [
-        ("bitmap", mtmd_bitmap_p),
-        ("video_ctx", mtmd_helper_video_p),
+        ("bitmap", mtmd_bitmap_p_ctypes),
+        ("video_ctx", mtmd_helper_video_p_ctypes),
     ]
 mtmd_helper_bitmap_wrapper_p_ctypes = POINTER(mtmd_helper_bitmap_wrapper)
 
@@ -1162,9 +1162,7 @@ mtmd_helper_video_init_params_p_ctypes = POINTER(mtmd_helper_video_init_params)
     [],
     mtmd_helper_video_init_params,
 )
-def mtmd_helper_video_init_params_default(
-    /,
-) -> mtmd_helper_video_init_params:
+def mtmd_helper_video_init_params_default() -> mtmd_helper_video_init_params:
     """
     get default init params for mtmd_helper_video
     """
