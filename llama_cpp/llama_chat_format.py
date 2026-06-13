@@ -3341,6 +3341,26 @@ class MTMDChatHandler:
 
         return wrapper.bitmap, wrapper.video_ctx
 
+    def _is_text_chunk(self, chunk_type: int) -> bool:
+        """Return True if `chunk_type` is the MTMD text chunk type enum value."""
+        return (
+            chunk_type
+            == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_TEXT
+        )
+
+    def _is_image_chunk(self, chunk_type: int) -> bool:
+        """Return True if `chunk_type` is the MTMD image chunk type enum value."""
+        return (
+            chunk_type
+            == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_IMAGE
+        )
+
+    def _is_audio_chunk(self, chunk_type: int) -> bool:
+        """Return True if `chunk_type` is the MTMD audio chunk type enum value."""
+        return (
+            chunk_type
+            == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO
+        )
 
     def _process_mtmd_prompt(
         self,
@@ -3480,7 +3500,7 @@ class MTMDChatHandler:
                 if chunk is None: continue
                 chunk_type = self._mtmd_cpp.mtmd_input_chunk_get_type(chunk)
 
-                if chunk_type == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_TEXT:
+                if self._is_text_chunk(chunk_type):
                     # Extract standard text token IDs
                     n_tokens_out = ctypes.c_size_t()
                     tokens_ptr = self._mtmd_cpp.mtmd_input_chunk_get_tokens_text(chunk, ctypes.byref(n_tokens_out))
@@ -3489,10 +3509,7 @@ class MTMDChatHandler:
                         chunk_token_spans.append((current_idx, current_idx + len(tokens), chunk, chunk_type, None))
                         full_prompt_ids.extend(tokens)
                         current_idx += len(tokens)
-                elif chunk_type in [
-                        self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_IMAGE,
-                        self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO
-                    ]:
+                elif self._is_image_chunk(chunk_type) or self._is_audio_chunk(chunk_type):
                     # Extract media properties
                     # Note(JamePeng):
                     # The M-RoPE model is based on `n_pos` instead of `n_tokens` (of course, there's no difference in non-M-RoPE models).
@@ -3673,7 +3690,7 @@ class MTMDChatHandler:
                 if end_idx <= n_past:
                     continue
 
-                if chunk_type == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_TEXT:
+                if self._is_text_chunk(chunk_type):
                     unprocessed_start = max(start_idx, n_past) - start_idx
                     n_tokens_out = ctypes.c_size_t()
                     tokens_ptr = self._mtmd_cpp.mtmd_input_chunk_get_tokens_text(chunk_ptr, ctypes.byref(n_tokens_out))
@@ -3689,14 +3706,11 @@ class MTMDChatHandler:
                             llama.eval(tokens_to_eval)
                             n_past = llama.n_tokens
 
-                elif chunk_type in [
-                        self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_IMAGE,
-                        self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO
-                    ]:
+                elif self._is_image_chunk(chunk_type) or self._is_audio_chunk(chunk_type):
                     chunk_n_tokens = self._mtmd_cpp.mtmd_input_chunk_get_n_tokens(chunk_ptr)
 
                     if self.verbose:
-                        media_str = "IMAGE" if chunk_type == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_IMAGE else "AUDIO"
+                        media_str = "IMAGE" if self._is_image_chunk(chunk_type) else "AUDIO"
                         print(f"{self.log_prefix}(__call__): Evaluating {media_str} chunk ({chunk_n_tokens} tokens) at pos {llama.n_tokens}...", file=sys.stderr)
 
                     # Stage 5: Multimodal Physical OOM Defense
