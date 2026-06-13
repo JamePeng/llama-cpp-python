@@ -153,6 +153,21 @@ mtmd_input_chunk_p_ctypes = c_void_p
 mtmd_input_chunks_p = NewType("mtmd_input_chunks_p", int)
 mtmd_input_chunks_p_ctypes = c_void_p
 
+# struct mtmd_batch {
+#     mtmd_context * ctx;
+#     std::vector<const mtmd_input_chunk *> entries;
+#     std::vector<float> output_embd; // aggregated output embedding for the whole batch
+#     mtmd_batch(mtmd_context * ctx): ctx(ctx) {}
+#     int32_t n_tokens() const {
+#         int32_t n = 0;
+#         for (const auto * chunk : entries) {
+#             n += mtmd_input_chunk_get_n_tokens(chunk);
+#         }
+#         return n;
+#     }
+# };
+mtmd_batch_p = NewType("mtmd_batch_p", int)
+mtmd_batch_p_ctypes = c_void_p
 
 # struct mtmd_input_text {
 #     const char * text;
@@ -210,6 +225,11 @@ class clip_context_params(Structure):
 #     // callback function passed over to mtmd proper
 #     ggml_backend_sched_eval_callback cb_eval;
 #     void * cb_eval_user_data;
+#
+#     // batching params
+#     int32_t batch_max_tokens; // maximum number of output tokens in a batch
+#                               // (note: this is not a hard-limit, the first image will always be added even if it exceeds this limit)
+#                               // (default: 1024)
 # };
 class mtmd_context_params(Structure):
     _fields_ = [
@@ -224,6 +244,7 @@ class mtmd_context_params(Structure):
         ("image_max_tokens", c_int),
         ("cb_eval", ggml_backend_sched_eval_callback),
         ("cb_eval_user_data", c_void_p),
+        ("batch_max_tokens", c_int32),
     ]
 
 mtmd_context_params_p_ctypes = POINTER(mtmd_context_params)
@@ -731,8 +752,8 @@ def mtmd_tokenize(
 
 # // returns 0 on success
 # // TODO: deprecate
-# MTMD_API int32_t mtmd_encode(mtmd_context * ctx,
-#                              const mtmd_image_tokens * image_tokens);
+# DEPRECATED(MTMD_API int32_t mtmd_encode(mtmd_context * ctx, const mtmd_image_tokens * image_tokens),
+#            "use mtmd_encode_chunk() instead");
 @ctypes_function_mtmd(
     "mtmd_encode", [
         mtmd_context_p_ctypes,
@@ -745,10 +766,15 @@ def mtmd_encode(
     image_tokens: mtmd_image_tokens_p,
     /,
 ) -> c_int32:
+    """
+    DEPRECATED: use mtmd_encode_chunk() instead
+    """
     ...
 
 
+# // text chunk will be ignored silently, only media chunk will be encoded
 # // returns 0 on success
+# // returns 1 on generic error
 # MTMD_API int32_t mtmd_encode_chunk(mtmd_context * ctx,
 #                                    const mtmd_input_chunk * chunk);
 @ctypes_function_mtmd(
@@ -763,6 +789,11 @@ def mtmd_encode_chunk(
     chunk: mtmd_input_chunk_p,
     /,
 ) -> c_int32:
+    """
+    text chunk will be ignored silently, only media chunk will be encoded
+    returns 0 on success
+    returns 1 on generic error
+    """
     ...
 
 # // get output embeddings from the last encode pass
@@ -775,6 +806,95 @@ def mtmd_get_output_embd(ctx: mtmd_context_p) -> POINTER(c_float): # type: ignor
     """
     get output embeddings from the last encode pass
     """
+    ...
+
+
+# // batch encoding API
+# // chunks are not owned by the batch, they will not be freed by mtmd_batch_free()
+# // batch is valid for a given context, cannot be shared across contexts
+# MTMD_API mtmd_batch * mtmd_batch_init(mtmd_context * ctx);
+@ctypes_function_mtmd(
+    "mtmd_batch_init",
+    [mtmd_context_p_ctypes],
+    mtmd_batch_p_ctypes,
+)
+def mtmd_batch_init(ctx: mtmd_context_p, /) -> mtmd_batch_p:
+    ...
+
+
+# MTMD_API void         mtmd_batch_free(mtmd_batch * batch);
+@ctypes_function_mtmd(
+    "mtmd_batch_free",
+    [mtmd_batch_p_ctypes],
+    None,
+)
+def mtmd_batch_free(batch: mtmd_batch_p, /):
+    """
+    chunks are not owned by the batch, they will not be freed by mtmd_batch_free()
+    batch is valid for a given context, cannot be shared across contexts
+    """
+    ...
+
+
+# // only media chunks are allowed, text chunks will be rejected
+# // returns 0 on success
+# // returns 1 on generic error
+# // returns 2 if the batch is too large (chunk won't be added)
+# // returns 3 if it cannot be batched with the existing chunks in the batch
+# MTMD_API int32_t mtmd_batch_add_chunk(mtmd_batch * batch, const mtmd_input_chunk * chunk);
+@ctypes_function_mtmd(
+    "mtmd_batch_add_chunk",
+    [
+        mtmd_batch_p_ctypes,
+        mtmd_input_chunk_p_ctypes,
+    ],
+    c_int32,
+)
+def mtmd_batch_add_chunk(
+    batch: mtmd_batch_p,
+    chunk: mtmd_input_chunk_p,
+    /,
+) -> c_int32:
+    """
+    only media chunks are allowed, text chunks will be rejected
+    returns 0 on success
+    returns 1 on generic error
+    returns 2 if the batch is too large (chunk won't be added)
+    returns 3 if it cannot be batched with the existing chunks in the batch
+    """
+    ...
+
+
+# // returns 0 on success
+# // returns 1 on generic error
+# MTMD_API int32_t mtmd_batch_encode(mtmd_batch * batch);
+@ctypes_function_mtmd(
+    "mtmd_batch_encode",
+    [mtmd_batch_p_ctypes],
+    c_int32,
+)
+def mtmd_batch_encode(batch: mtmd_batch_p, /) -> c_int32:
+    """
+    returns 0 on success
+    returns 1 on generic error
+    """
+    ...
+
+
+# MTMD_API float * mtmd_batch_get_output_embd(mtmd_batch * batch, const mtmd_input_chunk * chunk);
+@ctypes_function_mtmd(
+    "mtmd_batch_get_output_embd",
+    [
+        mtmd_batch_p_ctypes,
+        mtmd_input_chunk_p_ctypes,
+    ],
+    POINTER(c_float),
+)
+def mtmd_batch_get_output_embd(
+    batch: mtmd_batch_p,
+    chunk: mtmd_input_chunk_p,
+    /,
+) -> POINTER(c_float):  # type: ignore
     ...
 
 
@@ -947,8 +1067,8 @@ def mtmd_helper_bitmap_init_from_buf(
 # // helper to count the total number of tokens from a list of chunks, useful to keep track of KV cache
 # MTMD_API size_t mtmd_helper_get_n_tokens(const mtmd_input_chunks * chunks);
 @ctypes_function_mtmd(
-    "mtmd_helper_get_n_tokens", [mtmd_input_chunk_p_ctypes], c_size_t)
-def mtmd_helper_get_n_tokens(chunks: mtmd_input_chunk_p) -> c_size_t:
+    "mtmd_helper_get_n_tokens", [mtmd_input_chunks_p_ctypes], c_size_t)
+def mtmd_helper_get_n_tokens(chunks: mtmd_input_chunks_p) -> c_size_t:
     """
     helper to count the total number of tokens from a list of chunks, useful to keep track of KV cache
     """
@@ -959,8 +1079,8 @@ def mtmd_helper_get_n_tokens(chunks: mtmd_input_chunk_p) -> c_size_t:
 # // normally, n_pos is equal to n_tokens, but for M-RoPE it is different
 # MTMD_API llama_pos mtmd_helper_get_n_pos(const mtmd_input_chunks * chunks);
 @ctypes_function_mtmd(
-    "mtmd_helper_get_n_pos", [mtmd_input_chunk_p_ctypes], c_int32)
-def mtmd_helper_get_n_pos(chunks: mtmd_input_chunk_p) -> c_int32:
+    "mtmd_helper_get_n_pos", [mtmd_input_chunks_p_ctypes], c_int32)
+def mtmd_helper_get_n_pos(chunks: mtmd_input_chunks_p) -> c_int32:
     """
     helper to count the total position of tokens from a list of chunks, useful to keep track of n_past
     normally, n_pos is equal to n_tokens, but for M-RoPE it is different
@@ -991,8 +1111,8 @@ def mtmd_helper_image_get_decoder_pos(
 
 # // helper function that automatically:
 # // 1. run llama_decode() on text chunks
-# // 2. run mtmd_encode() on image chunks, then mtmd_get_output_embd() and then llama_decode()
-# // if any of the mtmd_encode() or llama_decode() calls return non-zero, stop and forward the error
+# // 2. run mtmd_encode_chunk() on image chunks, then mtmd_get_output_embd() and then llama_decode()
+# // if any of the mtmd_encode_chunk() or llama_decode() calls return non-zero, stop and forward the error
 # // otherwise, returns 0 on success
 # // this function is NOT thread-safe
 # MTMD_API int32_t mtmd_helper_eval_chunks(mtmd_context * ctx,
@@ -1007,7 +1127,7 @@ def mtmd_helper_image_get_decoder_pos(
     "mtmd_helper_eval_chunks", [
         mtmd_context_p_ctypes,
         llama_cpp.llama_context_p_ctypes,
-        mtmd_input_chunk_p_ctypes,
+        mtmd_input_chunks_p_ctypes,
         c_int32,
         c_int32,
         c_int32,
@@ -1018,7 +1138,7 @@ def mtmd_helper_image_get_decoder_pos(
 def mtmd_helper_eval_chunks(
     ctx: mtmd_context_p,
     lctx: llama_cpp.llama_context_p,
-    chunks: mtmd_input_chunk_p,
+    chunks: mtmd_input_chunks_p,
     n_past: c_int32,
     seq_id: c_int32,
     n_batch: c_int32,
@@ -1106,7 +1226,7 @@ def mtmd_helper_decode_image_chunk(
     n_past: c_int32,
     seq_id: c_int32,
     n_batch: c_int32,
-    new_n_past: c_int32,
+    new_n_past: POINTER(c_int32),   # type: ignore
     /,
 ) -> c_int32:
     """

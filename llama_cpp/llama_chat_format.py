@@ -3094,6 +3094,7 @@ class MTMDChatHandler:
             use_gpu: bool = True,
             image_min_tokens: int = -1,
             image_max_tokens: int = -1,
+            batch_max_tokens: int = 1024,
             **kwargs
     ):
 
@@ -3108,6 +3109,7 @@ class MTMDChatHandler:
         self.clip_model_path = clip_model_path
         self.image_min_tokens = image_min_tokens
         self.image_max_tokens = image_max_tokens
+        self.batch_max_tokens = batch_max_tokens
         self.use_gpu = use_gpu
         self.verbose = verbose
 
@@ -3152,6 +3154,7 @@ class MTMDChatHandler:
         if (self.image_max_tokens < self.image_min_tokens) and self.image_max_tokens > 0:
             raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Configuration Error! image_max_tokens ({self.image_max_tokens}) "
                                 f"cannot be less than image_min_tokens ({self.image_min_tokens}).")
+        self.mctx_params.batch_max_tokens = self.batch_max_tokens
 
         # Cache the model's eos token and bos token
         self.mtmd_eos_token=llama_model.detokenize([llama_model.token_eos()]).decode('utf-8', errors='ignore')
