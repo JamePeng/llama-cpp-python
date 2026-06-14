@@ -96,6 +96,7 @@ class Llama:
     def __init__(
         self,
         model_path: str,
+        mmproj_path: Optional[str] = None,
         *,
         # Model Params
         n_gpu_layers: Union[int, Literal["auto", "all"]] = "auto",
@@ -172,6 +173,7 @@ class Llama:
         log_filters: Optional[Sequence[str]] = None,
         log_filters_case_sensitive: bool = True,
         # Extra Params
+        chat_handler_kwargs: Dict[str, Any] = {},
         **kwargs,  # type: ignore
     ):
         """Load a llama.cpp model from `model_path`.
@@ -711,6 +713,18 @@ class Llama:
                 print(f"Failed to load metadata: {e}", file=sys.stderr)
 
         if self.verbose:
+            print(f"Model metadata: {self.metadata}", file=sys.stderr)
+        
+        if mmproj_path is not None:
+            if self.chat_handler is not None and self.verbose:
+                print("Warning: Both `chat_handler` and `mmproj_path` are not null. Chat handler will be overwritten.", flush = True)
+
+            self.chat_handler = llama_chat_format.GenericMTMDChatHandler(
+                chat_format = self.metadata.get("tokenizer.chat_template", None),
+                mmproj_path = mmproj_path,
+                verbose = self.verbose,
+                **chat_handler_kwargs
+            )
             print(f"Model desc: {self.model_desc}, "
                   f"Model size: {self.model_size / (1024 * 1024):.2f} MB, "
                   f"Model metadata: {self.metadata}",
