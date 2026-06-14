@@ -2856,11 +2856,12 @@ while also answering every question accurately, clearly, and step-by-step when a
 
     def __init__(
             self,
-            clip_model_path: str,
+            mmproj_path: str,
             verbose: bool = True,
             use_gpu: bool = True,
             image_min_tokens: int = -1,
             image_max_tokens: int = -1,
+            chat_template_override: Optional[str] = None,
             **kwargs
     ):
 
@@ -2872,7 +2873,7 @@ while also answering every question accurately, clearly, and step-by-step when a
                 f"If you are passing model-specific parameters, ensure they are supported by {self.log_prefix}."
             )
 
-        self.clip_model_path = clip_model_path
+        self.mmproj_path = mmproj_path
         self.image_min_tokens = image_min_tokens
         self.image_max_tokens = image_max_tokens
         self.use_gpu = use_gpu
@@ -2883,20 +2884,25 @@ while also answering every question accurately, clearly, and step-by-step when a
         self.mtmd_ctx: Optional[mtmd_cpp.mtmd_context_p] = None
         self.extra_template_arguments: dict[str, Any] = {}
 
-        if not os.path.exists(clip_model_path):
-            raise ValueError(f"{self.log_prefix}(__init__): Clip model path does not exist: {clip_model_path}")
+        if not os.path.exists(mmproj_path):
+            raise ValueError(f"{self.log_prefix}(__init__): Clip model path does not exist: {mmproj_path}")
 
         # Pre-compile Jinja template
-        if not hasattr(self, "chat_format") or self.chat_format is None:
+        if (not hasattr(self, "chat_format") or self.chat_format is None) and chat_template_override is None:
             self.chat_format = self.CHAT_FORMAT
+        elif chat_template_override is not None:
+            self.chat_format = chat_template_override
 
         self._chat_format_parser_tags = []
-        self.chat_template = ImmutableSandboxedEnvironment(
-            trim_blocks=True,
-            lstrip_blocks=True,
-        ).from_string(self.chat_format)
+        self.change_chat_template(self.chat_format)
 
         self._exit_stack = ExitStack()
+    
+    def change_chat_template(self, new_template: str):
+        self.chat_template = ImmutableSandboxedEnvironment(
+            trim_blocks=True,
+            lstrip_blocks=True
+        ).from_string(new_template)
 
     def _init_mtmd_context(self, llama_model: llama_core.Llama):
         """Initialize mtmd context with the llama model."""
@@ -2929,13 +2935,13 @@ while also answering every question accurately, clearly, and step-by-step when a
 
         # Initialize mtmd context
         self.mtmd_ctx = self._mtmd_cpp.mtmd_init_from_file(
-            self.clip_model_path.encode(),
+            self.mmproj_path.encode(),
             llama_model.model,
             self.mctx_params
         )
 
         if self.mtmd_ctx is None:
-            raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Failed to load mtmd context from: {self.clip_model_path}")
+            raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Failed to load mtmd context from: {self.mmproj_path}")
 
         # Check if vision is supported
         self.is_support_vision = self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx)
@@ -3835,7 +3841,7 @@ while also answering every question accurately, clearly, and step-by-step when a
             model_path = os.path.join(local_dir, filename)
 
         return cls(
-            clip_model_path=model_path,
+            mmproj_path=model_path,
             **kwargs,
         )
 
@@ -3852,13 +3858,12 @@ class GenericMTMDChatHandler(MTMDChatHandler):
 
     def __init__(
         self,
-        gguf_metadata: Dict[str, Any],
-        clip_model_path: str,
+        chat_format: str,
+        mmproj_path: str,
         verbose: bool = True,
         **kwargs
     ) -> None:
-        self.model_metadata = gguf_metadata
-        self.chat_format = self.model_metadata.get("tokenizer.chat_template", None)
+        self.chat_format = chat_format
 
         if verbose:
             print(f"Got chat template from model:\n```jinja\n{self.chat_format}\n```", flush = True)
@@ -3866,7 +3871,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         if self.chat_format is None:
             raise ValueError("Failed to get model chat template automatically.")
         
-        super().__init__(clip_model_path = clip_model_path, verbose = verbose, **kwargs)
+        super().__init__(mmproj_path = mmproj_path, verbose = verbose, **kwargs)
     
     def __call__(self, **kwargs):
         self._chat_format_parser_tags = [tag for tag in self.KNOWN_MEDIA_TAGS if tag in self.chat_format]
