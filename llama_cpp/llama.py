@@ -121,6 +121,7 @@ class Llama:
         n_ubatch: int = 512,
         n_seq_max: int = 1,
         n_rs_seq: int = 0,
+        n_outputs_max: int = 0,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
         ctx_type: Optional[
@@ -480,7 +481,8 @@ class Llama:
         self.n_batch = min(n_ctx, n_batch)  # ???
         self.n_keep = n_keep if n_keep > 0 else 256
         self.n_seq_max = n_seq_max
-        self.n_rs_seq  = n_rs_seq
+        self.n_rs_seq = n_rs_seq
+        self.n_outputs_max = n_outputs_max
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
@@ -492,12 +494,18 @@ class Llama:
         self.context_params.n_ctx = n_ctx
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
-        self.context_params.n_seq_max = self.n_seq_max
+
+        self.context_params.n_seq_max = max(1, self.n_seq_max)
+        if self.context_params.n_seq_max > llama_cpp_lib.LLAMA_MAX_SEQ:
+            raise RuntimeError(f"n_seq_max must be <= {llama_cpp_lib.LLAMA_MAX_SEQ}")
+
         self.context_params.n_rs_seq = self.n_rs_seq
+        self.context_params.n_outputs_max = self.n_batch if self.n_outputs_max == 0 else self.n_outputs_max
         self.context_params.n_threads = self.n_threads
         self.context_params.n_threads_batch = self.n_threads_batch
 
         self.context_params.ctx_type = ctx_type
+        self.context_params.ctx_other = None
         self.context_params.rope_scaling_type = (
             rope_scaling_type
             if rope_scaling_type is not None
@@ -687,9 +695,6 @@ class Llama:
         self._n_vocab = self.n_vocab()
         self._n_ctx = self.n_ctx()
 
-        self._token_nl = self.token_nl()
-        self._token_eos = self.token_eos()
-
         self._candidates = internals.LlamaTokenDataArray(n_vocab=self._n_vocab)
 
         self.n_tokens = 0
@@ -727,13 +732,38 @@ class Llama:
 
         eos_token_id = self.token_eos()
         bos_token_id = self.token_bos()
+        eot_token_id = self.token_eot()
+        sep_token_id = self.token_sep()
+        nl_token_id = self.token_nl()
+        pad_token_id = self.token_pad()
+        mask_token_id = self.token_mask()
 
-        eos_token = (
-            self._model.token_get_text(eos_token_id) if eos_token_id != -1 else ""
-        )
-        bos_token = (
-            self._model.token_get_text(bos_token_id) if bos_token_id != -1 else ""
-        )
+        def _token_text(token_id: int) -> str:
+            return self._model.token_get_text(token_id) if token_id != -1 else ""
+
+        bos_token = _token_text(bos_token_id)
+        eos_token = _token_text(eos_token_id)
+
+        special_tokens_map = {
+            name: text
+            for name, token_id in {
+                "eot_token": eot_token_id,
+                "sep_token": sep_token_id,
+                "nl_token": nl_token_id,
+                "pad_token": pad_token_id,
+                "mask_token": mask_token_id,
+            }.items()
+            if token_id != -1 and (text := _token_text(token_id))
+        }
+
+        stop_token_ids = [
+            token_id
+            for token_id in (eos_token_id, eot_token_id)
+            if token_id != -1
+        ]
+
+        if not stop_token_ids:
+            stop_token_ids = None
 
         # Unfortunately the llama.cpp API does not return metadata arrays, so we can't get template names from tokenizer.chat_templates
         template_choices = dict(
@@ -757,14 +787,14 @@ class Llama:
         for name, template in template_choices.items():
             try:
                 # Attempt to parse and register the template as a valid chat handler.
-                # We wrap this in a try-block because some models (like LLaVA) contain
-                # non-standard Jinja2 tags (e.g., {% generation %}) that cause the
-                # standard parser to crash.
+                # Keep this guarded because model metadata may contain malformed or
+                # model-specific Jinja templates that still cannot be rendered by this runtime.
                 self._chat_handlers[name] = llama_chat_format.Jinja2ChatFormatter(
                     template=template,
                     eos_token=eos_token,
                     bos_token=bos_token,
-                    stop_token_ids=[eos_token_id],
+                    stop_token_ids=stop_token_ids,
+                    special_tokens_map=special_tokens_map,
                 ).to_chat_handler()
             except Exception as e:
                 # If parsing fails (e.g., TemplateSyntaxError), log a warning but do not crash.
@@ -1340,6 +1370,13 @@ class Llama:
         grammar_lazy: bool = False,
         idx: Optional[int] = None,
         seed: Optional[int] = None,
+        # Reasoning Budget Params
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
     ):
         """Sample a token from the model.
         Returns:
@@ -1398,6 +1435,16 @@ class Llama:
                 logit_bias=self._convert_logit_bias(logit_bias),
                 grammar=grammar.grammar if grammar else "",
                 grammar_lazy=grammar_lazy,
+
+                # Reasoning Budget
+                # This generic controller only counts the first visible reasoning
+                # block. Use reasoning_budget=-1 to leave it disabled.
+                reasoning_budget=reasoning_budget,
+                reasoning_start=reasoning_start,
+                reasoning_end=reasoning_end,
+                reasoning_budget_message=reasoning_budget_message,
+                reasoning_start_in_prompt=reasoning_start_in_prompt,
+                reasoning_start_max_tokens=reasoning_start_max_tokens,
             )
 
             # LogitsProcessor Adapter
@@ -1472,6 +1519,13 @@ class Llama:
         seed: Optional[int] = None,
         active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
         control_vector: Optional[Dict[str, Any]] = None,
+        # Reasoning Budget Params
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
     ) -> Generator[int, Optional[Sequence[int]], None]:
         """Create a generator of tokens from a prompt.
 
@@ -1517,6 +1571,18 @@ class Llama:
             grammar: Optional BNF-like grammar (GBNF) to constrain sampling syntax.
             grammar_lazy: If True, activates grammar constraints only on specific trigger tokens.
             seed: RNG seed for sampling. Overrides the instance seed.
+            reasoning_budget: Token budget for the first visible reasoning block.
+                -1 disables the reasoning budget sampler, 0 forces the block to end
+                immediately after it starts, and N > 0 allows at most N generated tokens.
+            reasoning_start: Token/text sequence that marks the beginning of the first reasoning block.
+                Defaults to "<think>". Pass a model-specific value for non-default tags.
+            reasoning_end: Token/text sequence that marks the natural and forced end of the reasoning block.
+                Defaults to "</think>".
+            reasoning_budget_message: Optional message inserted before reasoning_end when the budget is exhausted.
+            reasoning_start_in_prompt: Set True when the prompt/template has already inserted reasoning_start,
+                so counting starts from the first generated token.
+            reasoning_start_max_tokens: Safety window for non-reasoning models. If reasoning_start is not
+                generated within this many output tokens, the sampler becomes a no-op. Set None to wait indefinitely.
             active_loras: A list of dictionaries specifying the LoRA adapters to dynamically apply during generation.
                 Each dictionary must contain a "name" key (matching a LoRA previously loaded into VRAM via `load_lora()`)
                 and an optional "scale" key (float, defaults to 1.0).
@@ -1667,6 +1733,16 @@ class Llama:
             grammar=grammar._grammar if grammar else "",
             grammar_lazy=grammar_lazy,
             seed=seed if seed is not None else self._seed,
+
+            # Reasoning Budget
+            # Keeps the core sampler model-agnostic: callers provide the visible
+            # reasoning start/end tags, and -1 keeps the controller disabled.
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
 
         # Register custom python-level logits processors if provided
@@ -2050,6 +2126,13 @@ class Llama:
         seed: Optional[int] = None,
         active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
         control_vector: Optional[Dict[str, Any]] = None,
+        # Reasoning Budget Params
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
     ) -> Union[
         Iterator[CreateCompletionResponse], Iterator[CreateCompletionStreamResponse]
     ]:
@@ -2238,6 +2321,12 @@ class Llama:
             seed=seed if seed is not None else self._seed,
             active_loras=active_loras,
             control_vector=control_vector,
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         ):
             if llama_cpp_lib.llama_token_is_eog(self._model.vocab, token):
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
@@ -2702,6 +2791,13 @@ class Llama:
         grammar_lazy: bool = False,
         active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
         control_vector: Optional[Dict[str, Any]] = None,
+        # Reasoning Budget Params
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
     ) -> Union[CreateCompletionResponse, Iterator[CreateCompletionStreamResponse]]:
         """Generate text from a prompt.
 
@@ -2746,6 +2842,14 @@ prompt: The prompt to generate text from.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use for constrained sampling.
             grammar_lazy: If True, enables lazy evaluation.
+            reasoning_budget: Token budget for the first visible reasoning block.
+                -1 disables the sampler, 0 forces an immediate end after reasoning starts,
+                and N > 0 allows at most N generated tokens inside the block.
+            reasoning_start: Token/text sequence that marks the beginning of the first reasoning block.
+            reasoning_end: Token/text sequence that naturally and forcibly ends the reasoning block.
+            reasoning_budget_message: Optional message inserted before reasoning_end when the budget is exhausted.
+            reasoning_start_in_prompt: Set True when the prompt/template already inserted reasoning_start.
+            reasoning_start_max_tokens: Safety window before disabling the sampler for non-reasoning outputs.
             active_loras: A list of dictionaries specifying the LoRA adapters to dynamically apply during generation.
                 Each dictionary must contain a "name" key (matching a LoRA previously loaded into VRAM via `load_lora()`)
                 and an optional "scale" key (float, defaults to 1.0).
@@ -2805,6 +2909,12 @@ prompt: The prompt to generate text from.
             grammar_lazy=grammar_lazy,
             active_loras=active_loras,
             control_vector=control_vector,
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
         if stream:
             chunks: Iterator[CreateCompletionStreamResponse] = completion_or_chunks
@@ -2856,6 +2966,13 @@ prompt: The prompt to generate text from.
         grammar_lazy: bool = False,
         active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
         control_vector: Optional[Dict[str, Any]] = None,
+        # Reasoning Budget Params
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
     ) -> Union[CreateCompletionResponse, Iterator[CreateCompletionStreamResponse]]:
         """Generate text from a prompt.
 
@@ -2900,6 +3017,14 @@ prompt: The prompt to generate text from.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use for constrained sampling.
             grammar_lazy: If True, enables lazy evaluation.
+            reasoning_budget: Token budget for the first visible reasoning block.
+                -1 disables the sampler, 0 forces an immediate end after reasoning starts,
+                and N > 0 allows at most N generated tokens inside the block.
+            reasoning_start: Token/text sequence that marks the beginning of the first reasoning block.
+            reasoning_end: Token/text sequence that naturally and forcibly ends the reasoning block.
+            reasoning_budget_message: Optional message inserted before reasoning_end when the budget is exhausted.
+            reasoning_start_in_prompt: Set True when the prompt/template already inserted reasoning_start.
+            reasoning_start_max_tokens: Safety window before disabling the sampler for non-reasoning outputs.
             active_loras: A list of dictionaries specifying the LoRA adapters to dynamically apply during generation.
                 Each dictionary must contain a "name" key (matching a LoRA previously loaded into VRAM via `load_lora()`)
                 and an optional "scale" key (float, defaults to 1.0).
@@ -2959,6 +3084,12 @@ prompt: The prompt to generate text from.
             grammar_lazy=grammar_lazy,
             active_loras=active_loras,
             control_vector=control_vector,
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
 
     def create_chat_completion(
@@ -3010,6 +3141,13 @@ prompt: The prompt to generate text from.
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
         add_generation_prompt: bool = True,
+        # Reasoning Budget Params
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
     ) -> Union[
         CreateChatCompletionResponse, Iterator[CreateChatCompletionStreamResponse]
     ]:
@@ -3057,6 +3195,14 @@ prompt: The prompt to generate text from.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use.
             grammar_lazy: If True, enables lazy evaluation.
+            reasoning_budget: Token budget for the first visible reasoning block.
+                -1 disables the sampler, 0 forces an immediate end after reasoning starts,
+                and N > 0 allows at most N generated tokens inside the block.
+            reasoning_start: Token/text sequence that marks the beginning of the first reasoning block.
+            reasoning_end: Token/text sequence that naturally and forcibly ends the reasoning block.
+            reasoning_budget_message: Optional message inserted before reasoning_end when the budget is exhausted.
+            reasoning_start_in_prompt: Set True when the prompt/template already inserted reasoning_start.
+            reasoning_start_max_tokens: Safety window before disabling the sampler for non-reasoning outputs.
             active_loras: A list of dictionaries specifying the LoRA adapters to dynamically apply during generation.
                 Each dictionary must contain a "name" key (matching a LoRA previously loaded into VRAM via `load_lora()`)
                 and an optional "scale" key (float, defaults to 1.0).
@@ -3123,6 +3269,12 @@ prompt: The prompt to generate text from.
             control_vector=control_vector,
             assistant_prefill=assistant_prefill,
             add_generation_prompt=add_generation_prompt,
+            reasoning_budget=reasoning_budget,
+            reasoning_start=reasoning_start,
+            reasoning_end=reasoning_end,
+            reasoning_budget_message=reasoning_budget_message,
+            reasoning_start_in_prompt=reasoning_start_in_prompt,
+            reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
 
     def create_chat_completion_openai_v1(

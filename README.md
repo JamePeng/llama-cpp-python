@@ -26,6 +26,7 @@ This package provides:
         - [Dynamic LoRA Example](https://github.com/JamePeng/llama-cpp-python#dynamic-lora-example)
         - [Control Vector Injection (Representation Engineering)](https://github.com/JamePeng/llama-cpp-python#control-vector-injection-representation-engineering)
     - [Sampling Configuration & Usage (LlamaSamplingParams)](https://github.com/JamePeng/llama-cpp-python#sampling-configuration--usage-llamasamplingparams)
+        - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
@@ -63,6 +64,8 @@ I warmly welcome all of you to use this new space. Let's build together:
 Thank you for your continuous support!
 
 ## Installation
+
+For a structured source-install and backend build guide, see [docs/wiki/install.md](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/install.md).
 
 Requirements:
 
@@ -897,6 +900,83 @@ Mirostat actively maintains a target entropy (`tau`) during generation to preven
 * **`logits_processor`** (`LogitsProcessorList`, optional): Custom Python callbacks to modify the logits tensor in-place before sampling.
 * **`stopping_criteria`** (`StoppingCriteriaList`, optional): Custom Python callbacks to halt generation based on the current sequence or scores.
 
+
+### Reasoning Budget (First Reasoning Block)
+
+`llama-cpp-python` provides a generic reasoning-budget sampler for models that expose their thinking content with visible start/end tags. It controls only the **first visible reasoning block** in the generated output. After that block naturally ends or is forcibly closed, the sampler switches to passthrough mode and later reasoning tags are ignored.
+
+This feature is intentionally model-agnostic. It does not infer model families, inspect chat templates, or guess thinking tags. If a model uses tags other than `<think>...</think>`, pass the correct `reasoning_start` and `reasoning_end` explicitly.
+
+| Parameter | Default | Description |
+| --- | --- | --- |
+| `reasoning_budget` | `-1` | Token budget for the first visible reasoning block. `-1` disables the sampler, `0` forces an immediate end after the block starts, and `N > 0` allows at most `N` generated tokens inside the block. |
+| `reasoning_start` | `"<think>"` | Token/text sequence that marks the beginning of the first reasoning block. |
+| `reasoning_end` | `"</think>"` | Token/text sequence that naturally ends the reasoning block. When the budget is exhausted, the sampler forces this sequence. |
+| `reasoning_budget_message` | `None` | Optional message inserted before `reasoning_end` when the budget is exhausted. |
+| `reasoning_start_in_prompt` | `False` | Set to `True` only when the prompt/chat template has already inserted `reasoning_start`, so the sampler should start counting from the first generated token. |
+| `reasoning_start_max_tokens` | `32` | Safety window for non-reasoning outputs. If `reasoning_start` is not generated within this many output tokens, the sampler becomes a no-op. Set to `None` to wait indefinitely. |
+
+Basic usage with the default `<think>...</think>` tags:
+
+```python
+response = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Solve this carefully."}],
+    max_tokens=1024,
+    reasoning_budget=256,
+    reasoning_budget_message="\n[reasoning budget exhausted]\n",
+    # You can also inject a natural-language transition before reasoning_end:
+    # reasoning_budget_message="\n...Wait, I have been thinking long enough. Let me start answering the user's question.\n",
+)
+```
+When the budget is exhausted, the sampler forces: `reasoning_budget_message` + `reasoning_end`
+
+For Mistral-style thinking tags, pass the tags explicitly:
+
+```python
+response = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Solve this carefully."}],
+    max_tokens=1024,
+    reasoning_budget=256,
+    reasoning_start="[THINK]",
+    reasoning_end="[/THINK]",
+)
+```
+
+For Gemma4 channel-style thinking, adjust the start and end markers to match the visible channel tags:
+
+```python
+response = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Solve this carefully."}],
+    max_tokens=1024,
+    reasoning_budget=256,
+    reasoning_start="<|channel>",
+    reasoning_end="<channel|>",
+)
+```
+
+Use `reasoning_start_in_prompt=True` when the prompt or chat template has already inserted the reasoning start tag. In that case, the sampler will not see the start tag during generation, so it must start directly in `COUNTING` state from the first generated token. This is suitable for thinking models or handlers that prefill the assistant prefix with a thinking tag, for example:
+
+```text
+<|im_start|>assistant\n<think>\n
+```
+
+Example:
+
+```python
+response = llm.create_chat_completion(
+    messages=[{"role": "user", "content": "Solve this carefully."}],
+    max_tokens=1024,
+    reasoning_budget=256,
+    reasoning_start="<think>",
+    reasoning_end="</think>",
+    reasoning_start_in_prompt=True,
+)
+```
+
+`reasoning_start_in_prompt` is **not** a generic "thinking enabled" switch. It should only be set when the final prompt already contains `reasoning_start` before generation begins. For templates that merely enable thinking but still expect the model to generate the start tag itself, keep `reasoning_start_in_prompt=False`.
+
+When `verbose=True`, high-level reasoning-budget transitions are printed to stderr, such as initialization, start-tag detection, budget exhaustion, forced ending, and final passthrough.
+
 ### 🛠️ Usage Example
 
 You can pass these parameters directly when calling the model to generate text.
@@ -953,6 +1033,8 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [granite-docling](https://huggingface.co/ibm-granite/granite-docling-258M-GGUF) | `GraniteDoclingChatHandler` | `granite-docling` |
 | [lfm2-vl](https://huggingface.co/LiquidAI/LFM2-VL-3B-GGUF) | `LFM2VLChatHandler` | `lfm2-vl` |
 | [lfm2.5-vl](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF) | `LFM25VLChatHandler` | `lfm2.5-vl` |
+| [deepseek-ocr](https://huggingface.co/JamePeng2023/DeepSeek-OCR-2-GGUF) | `MTMDChatHandler` | `None` |
+| [mineru2.5-pro](https://huggingface.co/JamePeng2023/MinerU2.5-Pro-2605-1.2B-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
 | [paddleocr-vl-1.5](https://huggingface.co/JamePeng2023/PaddleOCR-VL-1.5-GGUF) | `PaddleOCRChatHandler` | `paddleocr` |
 | [qwen2.5-vl](https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
 | [qwen3-asr](https://huggingface.co/JamePeng2023/Qwen3-ASR-1.7B-GGUF) | `Qwen3ASRChatHandler` | `qwen3-asr` |
@@ -1462,7 +1544,9 @@ run_inference(
 
 |  Model             |  Type     |  Link                                                  |  Status      |
 |--------------------|-----------|--------------------------------------------------------|--------------|
-|      `bge-m3`      | Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF)             |  Useful ✅  |
+|`bge-m3`| Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF) |  Useful ✅  |
+|`jina-embeddings-v2-base-zh`| Embedding |[jina-embeddings-v2-base-zh-GGUF](https://huggingface.co/gpustack/jina-embeddings-v2-base-zh-GGUF)  |  Useful ✅  |
+|`jina-embeddings-v3`| Embedding |[jina-embeddings-v3-GGUF](https://huggingface.co/second-state/jina-embeddings-v3-GGUF) |  Useful ✅  |
 |`bge-reranker-v2-m3`|   Rerank  |[bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |  Useful ✅  |
 |`qwen3-reranker`|   Rerank  |[Qwen3-Reranker-GGUF](https://huggingface.co/JamePeng2023/Qwen3-Reranker-GGUF) |  Useful ✅  |
 

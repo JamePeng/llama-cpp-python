@@ -18,6 +18,37 @@ from typing import (
 )
 from typing_extensions import TypeAlias
 
+def _format_library_dir_contents(base_paths: list[pathlib.Path]) -> str:
+    """Format directory contents for diagnostics after library loading fails."""
+    sections = []
+
+    for base_path in base_paths:
+        p = pathlib.Path(base_path)
+
+        if not p.exists():
+            sections.append(f"{p}: <not found>")
+            continue
+
+        if not p.is_dir():
+            sections.append(f"{p}: <not a directory>")
+            continue
+
+        try:
+            # Only list files when reporting a final loading failure.
+            files = sorted(x.name for x in p.iterdir())
+        except Exception as e:
+            sections.append(f"{p}: <failed to list: {e}>")
+            continue
+
+        if files:
+            sections.append(
+                f"{p}:\n"
+                + "\n".join(f"  - {name}" for name in files)
+            )
+        else:
+            sections.append(f"{p}: <empty>")
+
+    return "\n".join(sections)
 
 # Load the library
 def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list[pathlib.Path]]):
@@ -114,9 +145,12 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
                 except Exception as e:
                     errors.append(f"{lib_path}: {e}")
 
+    # Include directory contents only in the failure path to avoid extra work during successful imports.
     raise RuntimeError(
         f"Failed to load '{lib_base_name}' from {base_paths}\n"
         + "\n".join(errors)
+        + "\nLibrary search path contents:\n"
+        + _format_library_dir_contents(base_paths)
     )
 
 

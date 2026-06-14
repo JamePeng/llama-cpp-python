@@ -55,6 +55,8 @@ _lib.llama_max_devices.restype = ctypes.c_size_t
 
 LLAMA_MAX_DEVICES = _lib.llama_max_devices()
 
+LLAMA_MAX_SEQ = 256
+
 # define LLAMA_DEFAULT_SEED 0xFFFFFFFF
 LLAMA_DEFAULT_SEED = 0xFFFFFFFF
 
@@ -122,20 +124,21 @@ llama_seq_id = ctypes.c_int32
 #     LLAMA_VOCAB_TYPE_RWKV   = 5, // RWKV tokenizer based on greedy tokenization
 #     LLAMA_VOCAB_TYPE_PLAMO2 = 6, // PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming
 # };
-LLAMA_VOCAB_TYPE_NONE = 0
-"""For models without vocab"""
-LLAMA_VOCAB_TYPE_SPM = 1
-"""LLaMA tokenizer based on byte-level BPE with byte fallback"""
-LLAMA_VOCAB_TYPE_BPE = 2
-"""GPT-2 tokenizer based on byte-level BPE"""
-LLAMA_VOCAB_TYPE_WPM = 3
-"""BERT tokenizer based on WordPiece"""
-LLAMA_VOCAB_TYPE_UGM = 4
-"""T5 tokenizer based on Unigram"""
-LLAMA_VOCAB_TYPE_RWKV = 5
-"""RWKV tokenizer based on greedy tokenization"""
-LLAMA_VOCAB_TYPE_PLAMO2 = 6
-"""PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming"""
+class llama_vocab_type(enum.IntEnum):
+    LLAMA_VOCAB_TYPE_NONE = 0
+    """For models without vocab"""
+    LLAMA_VOCAB_TYPE_SPM = 1
+    """LLaMA tokenizer based on byte-level BPE with byte fallback"""
+    LLAMA_VOCAB_TYPE_BPE = 2
+    """GPT-2 tokenizer based on byte-level BPE"""
+    LLAMA_VOCAB_TYPE_WPM = 3
+    """BERT tokenizer based on WordPiece"""
+    LLAMA_VOCAB_TYPE_UGM = 4
+    """T5 tokenizer based on Unigram"""
+    LLAMA_VOCAB_TYPE_RWKV = 5
+    """RWKV tokenizer based on greedy tokenization"""
+    LLAMA_VOCAB_TYPE_PLAMO2 = 6
+    """PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming"""
 
 
 # NOTE: Deprecated and will be removed in the future. (already gone in llama.cpp)
@@ -193,58 +196,65 @@ LLAMA_VOCAB_TYPE_PLAMO2 = 6
 #     LLAMA_VOCAB_PRE_TYPE_JOYAI_LLM       = 48,
 #     LLAMA_VOCAB_PRE_TYPE_JAIS2           = 49,
 #     LLAMA_VOCAB_PRE_TYPE_GEMMA4          = 50,
+#     LLAMA_VOCAB_PRE_TYPE_SARVAM_MOE      = 51,
+#     LLAMA_VOCAB_PRE_TYPE_MINICPM5        = 52,
+#     LLAMA_VOCAB_PRE_TYPE_WHITESPACE      = 53,
 # };
-LLAMA_VOCAB_PRE_TYPE_DEFAULT = 0
-LLAMA_VOCAB_PRE_TYPE_LLAMA3 = 1
-LLAMA_VOCAB_PRE_TYPE_DEEPSEEK_LLM = 2
-LLAMA_VOCAB_PRE_TYPE_DEEPSEEK_CODER = 3
-LLAMA_VOCAB_PRE_TYPE_FALCON = 4
-LLAMA_VOCAB_PRE_TYPE_MPT = 5
-LLAMA_VOCAB_PRE_TYPE_STARCODER = 6
-LLAMA_VOCAB_PRE_TYPE_GPT2 = 7
-LLAMA_VOCAB_PRE_TYPE_REFACT = 8
-LLAMA_VOCAB_PRE_TYPE_COMMAND_R = 9
-LLAMA_VOCAB_PRE_TYPE_STABLELM2 = 10
-LLAMA_VOCAB_PRE_TYPE_QWEN2 = 11
-LLAMA_VOCAB_PRE_TYPE_OLMO = 12
-LLAMA_VOCAB_PRE_TYPE_DBRX = 13
-LLAMA_VOCAB_PRE_TYPE_SMAUG = 14
-LLAMA_VOCAB_PRE_TYPE_PORO = 15
-LLAMA_VOCAB_PRE_TYPE_CHATGLM3 = 16
-LLAMA_VOCAB_PRE_TYPE_CHATGLM4 = 17
-LLAMA_VOCAB_PRE_TYPE_VIKING = 18
-LLAMA_VOCAB_PRE_TYPE_JAIS = 19
-LLAMA_VOCAB_PRE_TYPE_TEKKEN = 20
-LLAMA_VOCAB_PRE_TYPE_SMOLLM = 21
-LLAMA_VOCAB_PRE_TYPE_CODESHELL = 22
-LLAMA_VOCAB_PRE_TYPE_BLOOM = 23
-LLAMA_VOCAB_PRE_TYPE_GPT3_FINNISH = 24
-LLAMA_VOCAB_PRE_TYPE_EXAONE = 25
-LLAMA_VOCAB_PRE_TYPE_CHAMELEON = 26
-LLAMA_VOCAB_PRE_TYPE_MINERVA = 27
-LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM = 28
-LLAMA_VOCAB_PRE_TYPE_GPT4O = 29
-LLAMA_VOCAB_PRE_TYPE_SUPERBPE = 30
-LLAMA_VOCAB_PRE_TYPE_TRILLION = 31
-LLAMA_VOCAB_PRE_TYPE_BAILINGMOE = 32
-LLAMA_VOCAB_PRE_TYPE_LLAMA4 = 33
-LLAMA_VOCAB_PRE_TYPE_PIXTRAL = 34
-LLAMA_VOCAB_PRE_TYPE_SEED_CODER = 35
-LLAMA_VOCAB_PRE_TYPE_HUNYUAN  = 36
-LLAMA_VOCAB_PRE_TYPE_KIMI_K2  = 37
-LLAMA_VOCAB_PRE_TYPE_HUNYUAN_DENSE = 38
-LLAMA_VOCAB_PRE_TYPE_GROK_2 = 39
-LLAMA_VOCAB_PRE_TYPE_GRANITE_DOCLING = 40
-LLAMA_VOCAB_PRE_TYPE_MINIMAX_M2 = 41
-LLAMA_VOCAB_PRE_TYPE_AFMOE = 42
-LLAMA_VOCAB_PRE_TYPE_SOLAR_OPEN = 43
-LLAMA_VOCAB_PRE_TYPE_YOUTU = 44
-LLAMA_VOCAB_PRE_TYPE_EXAONE_MOE = 45
-LLAMA_VOCAB_PRE_TYPE_QWEN35 = 46
-LLAMA_VOCAB_PRE_TYPE_TINY_AYA = 47
-LLAMA_VOCAB_PRE_TYPE_JOYAI_LLM = 48
-LLAMA_VOCAB_PRE_TYPE_JAIS2 = 49
-LLAMA_VOCAB_PRE_TYPE_GEMMA4 = 50
+class llama_vocab_pre_type(enum.IntEnum):
+    LLAMA_VOCAB_PRE_TYPE_DEFAULT = 0
+    LLAMA_VOCAB_PRE_TYPE_LLAMA3 = 1
+    LLAMA_VOCAB_PRE_TYPE_DEEPSEEK_LLM = 2
+    LLAMA_VOCAB_PRE_TYPE_DEEPSEEK_CODER = 3
+    LLAMA_VOCAB_PRE_TYPE_FALCON = 4
+    LLAMA_VOCAB_PRE_TYPE_MPT = 5
+    LLAMA_VOCAB_PRE_TYPE_STARCODER = 6
+    LLAMA_VOCAB_PRE_TYPE_GPT2 = 7
+    LLAMA_VOCAB_PRE_TYPE_REFACT = 8
+    LLAMA_VOCAB_PRE_TYPE_COMMAND_R = 9
+    LLAMA_VOCAB_PRE_TYPE_STABLELM2 = 10
+    LLAMA_VOCAB_PRE_TYPE_QWEN2 = 11
+    LLAMA_VOCAB_PRE_TYPE_OLMO = 12
+    LLAMA_VOCAB_PRE_TYPE_DBRX = 13
+    LLAMA_VOCAB_PRE_TYPE_SMAUG = 14
+    LLAMA_VOCAB_PRE_TYPE_PORO = 15
+    LLAMA_VOCAB_PRE_TYPE_CHATGLM3 = 16
+    LLAMA_VOCAB_PRE_TYPE_CHATGLM4 = 17
+    LLAMA_VOCAB_PRE_TYPE_VIKING = 18
+    LLAMA_VOCAB_PRE_TYPE_JAIS = 19
+    LLAMA_VOCAB_PRE_TYPE_TEKKEN = 20
+    LLAMA_VOCAB_PRE_TYPE_SMOLLM = 21
+    LLAMA_VOCAB_PRE_TYPE_CODESHELL = 22
+    LLAMA_VOCAB_PRE_TYPE_BLOOM = 23
+    LLAMA_VOCAB_PRE_TYPE_GPT3_FINNISH = 24
+    LLAMA_VOCAB_PRE_TYPE_EXAONE = 25
+    LLAMA_VOCAB_PRE_TYPE_CHAMELEON = 26
+    LLAMA_VOCAB_PRE_TYPE_MINERVA = 27
+    LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM = 28
+    LLAMA_VOCAB_PRE_TYPE_GPT4O = 29
+    LLAMA_VOCAB_PRE_TYPE_SUPERBPE = 30
+    LLAMA_VOCAB_PRE_TYPE_TRILLION = 31
+    LLAMA_VOCAB_PRE_TYPE_BAILINGMOE = 32
+    LLAMA_VOCAB_PRE_TYPE_LLAMA4 = 33
+    LLAMA_VOCAB_PRE_TYPE_PIXTRAL = 34
+    LLAMA_VOCAB_PRE_TYPE_SEED_CODER = 35
+    LLAMA_VOCAB_PRE_TYPE_HUNYUAN  = 36
+    LLAMA_VOCAB_PRE_TYPE_KIMI_K2  = 37
+    LLAMA_VOCAB_PRE_TYPE_HUNYUAN_DENSE = 38
+    LLAMA_VOCAB_PRE_TYPE_GROK_2 = 39
+    LLAMA_VOCAB_PRE_TYPE_GRANITE_DOCLING = 40
+    LLAMA_VOCAB_PRE_TYPE_MINIMAX_M2 = 41
+    LLAMA_VOCAB_PRE_TYPE_AFMOE = 42
+    LLAMA_VOCAB_PRE_TYPE_SOLAR_OPEN = 43
+    LLAMA_VOCAB_PRE_TYPE_YOUTU = 44
+    LLAMA_VOCAB_PRE_TYPE_EXAONE_MOE = 45
+    LLAMA_VOCAB_PRE_TYPE_QWEN35 = 46
+    LLAMA_VOCAB_PRE_TYPE_TINY_AYA = 47
+    LLAMA_VOCAB_PRE_TYPE_JOYAI_LLM = 48
+    LLAMA_VOCAB_PRE_TYPE_JAIS2 = 49
+    LLAMA_VOCAB_PRE_TYPE_GEMMA4 = 50
+    LLAMA_VOCAB_PRE_TYPE_SARVAM_MOE = 51
+    LLAMA_VOCAB_PRE_TYPE_MINICPM5 = 52
+    LLAMA_VOCAB_PRE_TYPE_WHITESPACE = 53
 
 
 # // note: these values should be synchronized with ggml_rope
@@ -257,12 +267,13 @@ LLAMA_VOCAB_PRE_TYPE_GEMMA4 = 50
 #     LLAMA_ROPE_TYPE_IMROPE = GGML_ROPE_TYPE_IMROPE,
 #     LLAMA_ROPE_TYPE_VISION = GGML_ROPE_TYPE_VISION,
 # };
-LLAMA_ROPE_TYPE_NONE = -1
-LLAMA_ROPE_TYPE_NORM = 0
-LLAMA_ROPE_TYPE_NEOX = GGML_ROPE_TYPE_NEOX = 2
-LLAMA_ROPE_TYPE_MROPE = GGML_ROPE_TYPE_MROPE = 8
-LLAMA_ROPE_TYPE_IMROPE = GGML_ROPE_TYPE_IMROPE = 40
-LLAMA_ROPE_TYPE_VISION = GGML_ROPE_TYPE_VISION = 24
+class llama_rope_type(enum.IntEnum):
+    LLAMA_ROPE_TYPE_NONE = -1
+    LLAMA_ROPE_TYPE_NORM = 0
+    LLAMA_ROPE_TYPE_NEOX = GGML_ROPE_TYPE_NEOX = 2
+    LLAMA_ROPE_TYPE_MROPE = GGML_ROPE_TYPE_MROPE = 8
+    LLAMA_ROPE_TYPE_VISION = GGML_ROPE_TYPE_VISION = 24
+    LLAMA_ROPE_TYPE_IMROPE = GGML_ROPE_TYPE_IMROPE = 40
 
 
 # enum llama_token_type { //TODO: remove, required until per token attributes are available from GGUF file
@@ -274,13 +285,14 @@ LLAMA_ROPE_TYPE_VISION = GGML_ROPE_TYPE_VISION = 24
 #     LLAMA_TOKEN_TYPE_UNUSED       = 5,
 #     LLAMA_TOKEN_TYPE_BYTE         = 6,
 # };
-LLAMA_TOKEN_TYPE_UNDEFINED = 0
-LLAMA_TOKEN_TYPE_NORMAL = 1
-LLAMA_TOKEN_TYPE_UNKNOWN = 2
-LLAMA_TOKEN_TYPE_CONTROL = 3
-LLAMA_TOKEN_TYPE_USER_DEFINED = 4
-LLAMA_TOKEN_TYPE_UNUSED = 5
-LLAMA_TOKEN_TYPE_BYTE = 6
+class llama_token_type(enum.IntEnum):
+    LLAMA_TOKEN_TYPE_UNDEFINED = 0
+    LLAMA_TOKEN_TYPE_NORMAL = 1
+    LLAMA_TOKEN_TYPE_UNKNOWN = 2
+    LLAMA_TOKEN_TYPE_CONTROL = 3
+    LLAMA_TOKEN_TYPE_USER_DEFINED = 4
+    LLAMA_TOKEN_TYPE_UNUSED = 5
+    LLAMA_TOKEN_TYPE_BYTE = 6
 
 
 # enum llama_token_attr {
@@ -355,45 +367,46 @@ LLAMA_TOKEN_ATTR_SINGLE_WORD = 1 << 9
 #
 #     LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
 # };
-LLAMA_FTYPE_ALL_F32 = 0
-LLAMA_FTYPE_MOSTLY_F16 = 1
-LLAMA_FTYPE_MOSTLY_Q4_0 = 2
-LLAMA_FTYPE_MOSTLY_Q4_1 = 3
-LLAMA_FTYPE_MOSTLY_Q8_0 = 7
-LLAMA_FTYPE_MOSTLY_Q5_0 = 8
-LLAMA_FTYPE_MOSTLY_Q5_1 = 9
-LLAMA_FTYPE_MOSTLY_Q2_K = 10
-LLAMA_FTYPE_MOSTLY_Q3_K_S = 11
-LLAMA_FTYPE_MOSTLY_Q3_K_M = 12
-LLAMA_FTYPE_MOSTLY_Q3_K_L = 13
-LLAMA_FTYPE_MOSTLY_Q4_K_S = 14
-LLAMA_FTYPE_MOSTLY_Q4_K_M = 15
-LLAMA_FTYPE_MOSTLY_Q5_K_S = 16
-LLAMA_FTYPE_MOSTLY_Q5_K_M = 17
-LLAMA_FTYPE_MOSTLY_Q6_K = 18
-LLAMA_FTYPE_MOSTLY_IQ2_XXS = 19
-LLAMA_FTYPE_MOSTLY_IQ2_XS = 20
-LLAMA_FTYPE_MOSTLY_Q2_K_S = 21
-LLAMA_FTYPE_MOSTLY_IQ3_XS = 22
-LLAMA_FTYPE_MOSTLY_IQ3_XXS = 23
-LLAMA_FTYPE_MOSTLY_IQ1_S = 24
-LLAMA_FTYPE_MOSTLY_IQ4_NL = 25
-LLAMA_FTYPE_MOSTLY_IQ3_S = 26
-LLAMA_FTYPE_MOSTLY_IQ3_M = 27
-LLAMA_FTYPE_MOSTLY_IQ2_S = 28
-LLAMA_FTYPE_MOSTLY_IQ2_M = 29
-LLAMA_FTYPE_MOSTLY_IQ4_XS = 30
-LLAMA_FTYPE_MOSTLY_IQ1_M = 31
-LLAMA_FTYPE_MOSTLY_BF16 = 32
-# LLAMA_FTYPE_MOSTLY_Q4_0_4_4 = 33
-# LLAMA_FTYPE_MOSTLY_Q4_0_4_8 = 34
-# LLAMA_FTYPE_MOSTLY_Q4_0_8_8 = 35
-LLAMA_FTYPE_MOSTLY_TQ1_0 = 36
-LLAMA_FTYPE_MOSTLY_TQ2_0 = 37
-LLAMA_FTYPE_MOSTLY_MXFP4_MOE = 38
-LLAMA_FTYPE_MOSTLY_NVFP4 = 39
-LLAMA_FTYPE_MOSTLY_Q1_0 = 40
-LLAMA_FTYPE_GUESSED = 1024
+class llama_ftype(enum.IntEnum):
+    LLAMA_FTYPE_ALL_F32 = 0
+    LLAMA_FTYPE_MOSTLY_F16 = 1
+    LLAMA_FTYPE_MOSTLY_Q4_0 = 2
+    LLAMA_FTYPE_MOSTLY_Q4_1 = 3
+    LLAMA_FTYPE_MOSTLY_Q8_0 = 7
+    LLAMA_FTYPE_MOSTLY_Q5_0 = 8
+    LLAMA_FTYPE_MOSTLY_Q5_1 = 9
+    LLAMA_FTYPE_MOSTLY_Q2_K = 10
+    LLAMA_FTYPE_MOSTLY_Q3_K_S = 11
+    LLAMA_FTYPE_MOSTLY_Q3_K_M = 12
+    LLAMA_FTYPE_MOSTLY_Q3_K_L = 13
+    LLAMA_FTYPE_MOSTLY_Q4_K_S = 14
+    LLAMA_FTYPE_MOSTLY_Q4_K_M = 15
+    LLAMA_FTYPE_MOSTLY_Q5_K_S = 16
+    LLAMA_FTYPE_MOSTLY_Q5_K_M = 17
+    LLAMA_FTYPE_MOSTLY_Q6_K = 18
+    LLAMA_FTYPE_MOSTLY_IQ2_XXS = 19
+    LLAMA_FTYPE_MOSTLY_IQ2_XS = 20
+    LLAMA_FTYPE_MOSTLY_Q2_K_S = 21
+    LLAMA_FTYPE_MOSTLY_IQ3_XS = 22
+    LLAMA_FTYPE_MOSTLY_IQ3_XXS = 23
+    LLAMA_FTYPE_MOSTLY_IQ1_S = 24
+    LLAMA_FTYPE_MOSTLY_IQ4_NL = 25
+    LLAMA_FTYPE_MOSTLY_IQ3_S = 26
+    LLAMA_FTYPE_MOSTLY_IQ3_M = 27
+    LLAMA_FTYPE_MOSTLY_IQ2_S = 28
+    LLAMA_FTYPE_MOSTLY_IQ2_M = 29
+    LLAMA_FTYPE_MOSTLY_IQ4_XS = 30
+    LLAMA_FTYPE_MOSTLY_IQ1_M = 31
+    LLAMA_FTYPE_MOSTLY_BF16 = 32
+    # LLAMA_FTYPE_MOSTLY_Q4_0_4_4 = 33
+    # LLAMA_FTYPE_MOSTLY_Q4_0_4_8 = 34
+    # LLAMA_FTYPE_MOSTLY_Q4_0_8_8 = 35
+    LLAMA_FTYPE_MOSTLY_TQ1_0 = 36
+    LLAMA_FTYPE_MOSTLY_TQ2_0 = 37
+    LLAMA_FTYPE_MOSTLY_MXFP4_MOE = 38
+    LLAMA_FTYPE_MOSTLY_NVFP4 = 39
+    LLAMA_FTYPE_MOSTLY_Q1_0 = 40
+    LLAMA_FTYPE_GUESSED = 1024
 
 # enum llama_rope_scaling_type {
 #     LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED = -1,
@@ -836,6 +849,7 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     uint32_t n_ubatch;          // physical maximum batch size
 #     uint32_t n_seq_max;         // max number of sequences (i.e. distinct states for recurrent models)
 #     uint32_t n_rs_seq;          // number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
+#     uint32_t n_outputs_max;     // max outputs in a ubatch (0 = n_batch)
 #     int32_t  n_threads;         // number of threads to use for generation
 #     int32_t  n_threads_batch;   // number of threads to use for batch processing
 
@@ -884,6 +898,9 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     // note: the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
 #     struct llama_sampler_seq_config * samplers;
 #     size_t                            n_samplers;
+#     // a source/target/parent context
+#     // can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
+#     struct llama_context * ctx_other;
 # };
 class llama_context_params(ctypes.Structure):
     """Parameters for llama_context
@@ -894,6 +911,7 @@ class llama_context_params(ctypes.Structure):
         n_ubatch (int): physical maximum batch size
         n_seq_max (int): max number of sequences (i.e. distinct states for recurrent models)
         n_rs_seq (int): number of recurrent-state snapshots per seq for rollback (0 = no rollback) [EXPERIMENTAL]
+        n_outputs_max (int): max outputs in a ubatch (0 = n_batch)
         n_threads (int): number of threads to use for generation
         n_threads_batch (int): number of threads to use for batch processing
 
@@ -930,6 +948,8 @@ class llama_context_params(ctypes.Structure):
 
         samplers(llama_sampler_seq_config *): the samplers must be sampler chains (i.e. use llama_sampler_chain_init)
         n_samplers(size_t): numbers of sampler chains
+
+        ctx_other(llama_context *): a source/target/parent context can be utilized in various ways, for example by sharing results or llama_memory between 2 contexts
     """
 
     if TYPE_CHECKING:
@@ -938,6 +958,7 @@ class llama_context_params(ctypes.Structure):
         n_ubatch: int
         n_seq_max: int
         n_rs_seq: int
+        n_outputs_max: int
         n_threads: int
         n_threads_batch: int
         ctx_type: int
@@ -967,6 +988,7 @@ class llama_context_params(ctypes.Structure):
         kv_unified:bool
         samplers: ctypes.c_void_p
         n_samplers: int
+        ctx_other: ctypes.c_void_p
 
     _fields_ = [
         ("n_ctx", ctypes.c_uint32),
@@ -974,6 +996,7 @@ class llama_context_params(ctypes.Structure):
         ("n_ubatch", ctypes.c_uint32),
         ("n_seq_max", ctypes.c_uint32),
         ("n_rs_seq", ctypes.c_uint32),
+        ("n_outputs_max", ctypes.c_uint32),
         ("n_threads", ctypes.c_int32),
         ("n_threads_batch", ctypes.c_int32),
         ("ctx_type", ctypes.c_int),
@@ -1003,6 +1026,7 @@ class llama_context_params(ctypes.Structure):
         ("kv_unified", ctypes.c_bool),
         ("samplers", llama_sampler_seq_config_p),
         ("n_samplers", ctypes.c_int),
+        ("ctx_other", ctypes.c_void_p),
     ]
 
 llama_context_params_p = ctypes.POINTER(llama_context_params)
@@ -3068,11 +3092,15 @@ def llama_set_causal_attn(ctx: llama_context_p, causal_attn: bool, /):
 
 # // Set whether the model is in warmup mode or not
 # // If true, all model tensors are activated during llama_decode() to load and cache their weights.
-# LLAMA_API void llama_set_warmup(struct llama_context * ctx, bool warmup);
+# //
+# // note: using this can cause extra graph reallocations because it changes the graph topology with MoE models,
+# //       so it is generally not recommended to use in practice. will be removed in the future
+# DEPRECATED(LLAMA_API void llama_set_warmup(struct llama_context * ctx, bool warmup),
+#         "user code should do warmup runs manually [TAG_LLAMA_GRAPH_NO_WARMUP]");
 @ctypes_function("llama_set_warmup", [llama_context_p_ctypes, ctypes.c_bool], None)
 def llama_set_warmup(ctx: llama_context_p, warmup: bool, /):
-    """ Set whether the model is in warmup mode or not
-    If true, all model tensors are activated during llama_decode() to load and cache their weights"""
+    """DEPRECATED: using this can cause extra graph reallocations because it changes the graph topology with MoE models,
+    so it is generally not recommended to use in practice. will be removed in the future"""
     ...
 
 # // Set abort callback

@@ -7,6 +7,308 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.40-Milestone] Reasoning Budget Control, Gemma 4 12B Support, Enhanced Jinja2ChatFormatter, NGram k/k4v Speculative Decoding, Faster Native Sampling and Multimodal Improvements
+
+- feat(internals): Add `ReasoningBudgetSampler` support
+    - Add Python-backed `ReasoningBudgetSampler` for first reasoning-block control
+    - Install the sampler before probability filters to preserve forced end tokens
+    - Support `reasoning_budget` **-1/0/N** semantics in sampling params
+    - Force `reasoning_budget_message` + `reasoning_end` when the budget is exhausted
+    - Add manual `force_reasoning_budget()` at the sampling-context level
+    - Match llama.cpp force behavior by allowing only `COUNTING -> FORCING`
+    - Keep DONE as permanent passthrough and ignore later reasoning tags
+    - Support prefilled reasoning starts with `reasoning_start_in_prompt`
+    - Preserve UTF-8 boundary safety before forcing the end sequence
+    - Keep Python-backed custom sampler callbacks alive across C sampler usage
+    - Avoid shallow-copying custom_samplers when cloning sampler chains
+    - Add `verbose` parameter to `ReasoningBudgetSampler` to print high-level
+    state transitions to stderr.
+    - Log key events: initialization, `reasoning_start matched`, `budget exhausted`,
+    `forced end sequence`, `UTF-8 boundary waiting`, `manual force`, `natural end`, `reset`.
+    - Pass `verbose=getattr(model, "verbose", False)` from `LlamaSamplingContext`
+    when building the sampler chain.
+    - Preserve verbose flag when cloning the sampler.
+
+- feat(Llama): pass `reasoning budget` params through Llama APIs
+    - Add `reasoning budget` params to public completion and chat entry points
+    - Forward the params from chat handlers into `create_completion`
+    - Propagate reasoning budget controls down to `generate` and `sampling params`
+    - Document -1/0/N reasoning_budget behavior in completion docstrings
+    - Support custom `reasoning_start` and `reasoning_end` tags without model-specific inference
+    - Support `reasoning_budget_message` and `reasoning_start_in_prompt`
+    - Wire `MTMD chat handler` to the same reasoning budget controls
+
+- feat(sampling): add reasoning budget configurations
+    * Introduce reasoning budget and block control parameters to `LlamaSamplingParams`
+    to mirror llama.cpp CLI semantics. This includes:
+    - `reasoning_budget`
+    - `reasoning_start` / `reasoning_end`
+    - `reasoning_budget_message`
+    - `reasoning_start_in_prompt`
+    - `reasoning_start_max_tokens`
+    - Fix typo from typ_p to typical_p in logs
+    - Also updated `print_params()` to include these new metrics.
+
+- feat: add `ReasoningBudgetState` enum and `TokenMatcher` helper class to _internals.py
+    * Introduce `ReasoningBudgetState` enum and `TokenMatcher` helper class
+    to `_internals.py`. This lays the groundwork for the upcoming
+    `ReasoningBudgetSampler`, mirroring the state machine defined in
+    `common/reasoning-budget.h`.
+
+    - `ReasoningBudgetState`: Tracks the lifecycle of the first reasoning block.
+    - `TokenMatcher`: Handles incremental matching for multi-token sequences.
+
+- docs(README): document reasoning budget sampler usage
+    - Add README section for first reasoning-block budget control
+    - Document reasoning_budget -1/0/N semantics and related sampler parameters
+    - Explain reasoning_budget_message injection before reasoning_end
+    - Add examples for default <think> tags, Mistral [THINK] tags, and Gemma4 channel tags
+    - Clarify when to use reasoning_start_in_prompt for prefilled thinking tags
+    - Note that reasoning_start_in_prompt is not a generic thinking-enabled switch
+    - Mention verbose transition logs for reasoning-budget state changes
+    - docs(README): Update ReasoningBudgetSampler quick link
+
+- feat(chat-format): Update `google/gemma-4` chat template jinja
+
+- feat(llama): enhance chat template initialization with full special tokens
+    * Update Llama.__init__ to register additional tokenizer special tokens
+    and improve stop token handling for chat templates.
+
+    - Expose extra special tokens (EOT, SEP, NL, PAD, MASK) via
+    `special_tokens_map` to Jinja2ChatFormatter.
+    - Keep BOS and EOS tokens as explicit parameters, no longer redundantly
+    put them in `special_tokens_map`.
+    - Build `stop_token_ids` once, including EOS and EOT tokens, skipping
+    invalid (-1) ids.
+    - Update try-block comment: now `{% generation %}` blocks are supported,
+    guard only against malformed or model-specific templates.
+    - This ensures better compatibility with HuggingFace-style chat templates
+    while maintaining llama-cpp-python prompt-rendering behavior.
+
+- **feat(chat-format): improve Jinja2ChatFormatter HF compatibility**
+    * Enhance Jinja2ChatFormatter to better support HuggingFace-style chat
+    templates while keeping the formatter lightweight and aligned with
+    llama-cpp-python's prompt-rendering needs.
+
+    - Key changes:
+        - Add IgnoreGenerationTags Jinja extension for HF `{% generation %}` blocks.
+        - Enable Jinja loop controls for chat templates using break/continue.
+        - Register Transformers-compatible `tojson` behavior.
+        - Register `raise_exception` and `strftime_now` as Jinja globals.
+        - Add `special_tokens_map` support for additional template variables.
+        - Add optional `documents` argument for document-aware templates.
+        - Precompute text stop sequences and token-id stopping criteria.
+        - Improve type normalization for `stop_token_ids`.
+        - Expand docstrings for formatter initialization and render-time variables.
+
+- docs(wiki): update SCHEMA.md to v0.4 with full wiki path layout
+    - Added comprehensive docs/wiki/ directory structure overview.
+    - Reorganized modules description; removed hardcoded module page list.
+    - Clarified top-level file purposes and update guidance.
+    - Updated page type examples and templates (Class/Module, Feature, Example, Development).
+    - Strengthened cross-linking rules and update/placeholder guidance.
+    - Bumped schema version from 0.3 → 0.4 and last_modified date.
+
+- docs(install): add source-aligned build and backend guide
+    * Document installation workflows for llama-cpp-python with a focus on
+    the underlying llama.cpp CMake build configuration.
+    - Add virtual environment, source install, editable install, rebuild, and
+    verification guidance.
+    - Document common CMake options such as GGML_NATIVE,
+    GGML_BACKEND_DL, GGML_CPU_ALL_VARIANTS, and compiler selection.
+    - Summarize backend-specific build flags for CUDA, BLAS, Metal, Vulkan,
+    OpenVINO, HIP, SYCL, OpenCL, CANN, ZenDNN, and zDNN.
+    - Include backend runtime notes and common installation pitfalls while
+    keeping server-related installation content out of the page.
+    - docs(wiki): link installation guide from index
+        * Promote the completed installation guide into the wiki entry point so
+        new users can find build and backend setup instructions before reading
+        API-specific documentation.
+        - Add a Getting Started section that links to install.md.
+        - Move installation to the top of the recommended reading order.
+        - Mark install.md as an available page.
+        - Remove installation from the planned documentation areas.
+    - docs(readme): link detailed installation wiki guide
+
+- feat(mtmd): improve fallback chat template for multimodal models
+    - Add BOS/EOS token handling to the default MTMD chat format.
+    - Use a clearer role-based template with explicit USER and ASSISTANT prefixes.
+    - Append a newline after each message to keep generated prompts readable.
+    - Treat EOS as the end marker for the serialized conversation history before
+    the optional generation prompt.
+    - Improve fallback behavior for multimodal GGUF models that do not provide a
+    chat template, such as OCR-oriented models like `DeepSeek-OCR 1/2`.
+    - Make the default system prompt a single normalized string while preserving
+    its original meaning.
+    - Clean up minor formatting around MTMD context parameter initialization.
+    - docs(Readme): Update `Deepseek-OCR-2-GGUF` Link
+    - docs(README): update `MinerU2.5-Pro-2605-1.2B` OCR model support and link
+
+    This improves prompt compatibility for multimodal models that either lack a
+    GGUF chat template or are not yet covered by a complete custom chat handler.
+
+- refactor(internals): align model metadata wrappers with llama.cpp API
+    - Use `llama_vocab_n_tokens()` instead of the old vocab size helper.
+    - Add Python wrappers for model description, size, chat template, and
+    trained RoPE frequency scaling.
+    - Clarify model capability helpers with docstrings matching llama.cpp
+    semantics.
+    - Rename `desc()` and `size()` to `model_desc()` and `model_size()` to
+    make their scope explicit.
+    - Drop the unused `get_tensor()` stub since llama.cpp does not expose it.
+    - Route rerank template lookup through `LlamaModel.model_chat_template()` for
+    consistency with the internal model abstraction.
+
+- feat(chat_handler): update multimodal handlers for Qwen2.5-VL, Qwen3-VL, and PaddleOCR
+    - Update PaddleOCRChatHandler to support version 1.6
+    - Add token configuration and stop sequences for Qwen2.5-VL and Qwen3-VL
+    - Standardize input_ids initialization in __call__ methods for Qwen2.5-VL, Qwen3-ASR, and Qwen3-VL handlers
+
+- **perf(eval): skip unnecessary logit array copies during native sampling**
+    * Introduce the `copy_logits` parameter to `Llama.eval()` to control
+    whether C-level logits are copied into the Python `self.scores` array.
+    - Automatically disable `copy_logits` during the generation loop unless
+    Python-side hooks (`logits_processor`, `stopping_criteria`) or
+    `logits_all` explicitly require them.
+    - Skip logit copies entirely for intermediate prompt evaluations (e.g.,
+    before hybrid checkpoints).
+    - Update logit retrieval to use `get_logits_ith(-1)` to accurately fetch
+    the final token's logits when copying is required.
+
+    In a PDF-reading summarization workload, this reduced the end-to-end completion
+    time from 41.32s to 25.93s, a ~37.2% improvement. The main generation hot path
+    also improved noticeably:
+
+    - `_create_completion`: 41.32s -> 25.93s
+    - `generate`: 37.82s -> below the top sampled entries
+    - `eval`: 35.14s -> 21.96s
+    - logits retrieval/copy path: 29.89s `get_logits()` -> 18.68s `get_logits_ith()`
+    - `decode`: 3.89s -> 2.25s
+    - `detokenize`: 2.60s -> 1.33s
+    - `sample`: 2.35s -> 2.03s
+
+    This significantly reduces CPU overhead and memory bandwidth during generation,
+    as the native `llama.cpp` sampler reads directly from the C context without
+    needing to expose the `n_vocab` array to Python on every token.
+
+- docs(CUDA): Add note about PDL optimization for newer NVIDIA GPUs (CC ≥ 90)
+
+- docs(readme/wiki): update supported embeddings models table
+    - Add `jina-embeddings-v2-base-zh`
+    - Add `jina-embeddings-v3`
+    - Minor table formatting clean up
+
+- docs(development): add AI agent prompt for git commit generation
+    * Introduce `git-commit-generation-agent.md` to the development wiki to
+    standardize the creation of high-quality git commit messages using LLM
+    assistants.
+
+    - Define the system persona, core principles (Conventional Commits, DCO),
+    and strict formatting rules for generating commits.
+    - Provide concrete template examples for build, performance, and
+    documentation updates.
+    - Ensure future maintainers and contributors can easily generate
+    consistent, maintainer-level commits that explicitly explain the "Why"
+    and "How" of code changes.
+
+- docs(wiki): add development helper to index
+    * Introduce the development section in the wiki index so maintainer-facing
+    workflows and LLM-assisted helper tools are discoverable from the main
+    navigation.
+
+    - Add a Development section with a link to the Git commit generation agent.
+    Include the helper in the recommended reading order for new wiki users.
+    - Add development/git-commit-generation-agent.md to the available pages list.
+
+- feat(LlamaContext): add safety checks and docstrings to logits retrieval
+    - Add explicit null pointer validation to `get_logits` and `get_logits_ith`.
+    These methods now raise a `RuntimeError` instead of silently returning
+    invalid pointers when logits are unavailable or the index is out of bounds.
+    - Add comprehensive docstrings to both methods, detailing the underlying
+    buffer shape and memory layout.
+    - Include a performance warning in `get_logits_ith` about the internal
+    synchronization/reordering overhead to discourage its use on the hot path.
+
+- **feat(speculative): upgrade ngram map decoder with k/k4v modes
+Enhance `LlamaNGramMapDecoding` to align with the upstream llama.cpp
+ngram-map algorithm, offering better memory management and draft quality.**
+    - Introduce `mode` selection ("k" and "k4v"): "k" stores only historical
+    positions for memory efficiency, while "k4v" caches continuation values
+    directly for faster lookups.
+    - Add `min_hits` threshold to filter out low-confidence drafts.
+    - Implement `max_entries_per_key` to cap dictionary growth and prevent
+    memory bloat during long-context generations.
+    - Improve state synchronization (`_sync_and_index`) using `sync_check_tokens`
+    to safely verify incremental history appends.
+    - Add explicit lifecycle management methods (`clear`, `close`, `accept`)
+    for better API symmetry and resource cleanup.
+    - examples: add benchmark script for speculative decoding
+        - Add `benchmark_speculative.py` to the `examples/benchmark` directory.
+        - Test `LlamaPromptLookupDecoding` and `LlamaNGramMapDecoding` (k/k4v).
+        - Include diverse test scenarios (code, JSON logs, tables, essays) to
+        measure tokens-per-second (TPS) speedup compared to baseline generation.
+
+- docs(speculative): update wiki for NGramMap k/k4v modes and lifecycle APIs
+Reflect the recent architectural upgrades to `LlamaNGramMapDecoding` in
+the official documentation.
+
+    - Document the new `__init__` parameters (`mode`, `min_hits`,
+    `max_entries_per_key`, `sync_check_tokens`) and their validation rules.
+    - Add a detailed comparison table explaining the memory and behavior
+    differences between the `"k"` and `"k4v"` lookup modes.
+    - Document the newly exposed lifecycle methods (`clear`, `close`, `accept`).
+    - Add comprehensive usage examples demonstrating `k4v` mode with memory caps.
+    - Update internal state descriptions (replacing `_ngram_map` with `_map_k`
+    and `_map_k4v`).
+    - Add a strong production warning against the legacy `LlamaPromptLookupDecoding`
+    and cross-link the new `benchmark_speculative.py` script.
+
+- docs(readme): revamp speculative decoding documentation
+Expand the Speculative Decoding section to fully document the
+new `LlamaNGramMapDecoding` capabilities and configuration options.
+
+    - Clarify that `LlamaNGramMapDecoding` is a model-free prompt lookup
+    decoder that does not require a secondary GGUF draft model.
+    - Add a detailed parameter table explaining `mode` (k vs. k4v),
+    `min_hits`, memory caps, and sync thresholds.
+    - Provide usage examples and tuning recommendations for different
+    hardware (e.g., lowering `num_pred_tokens` for CPU setups).
+    - Demote the older `LlamaPromptLookupDecoding` to a legacy section,
+    warning about its sliding-window overhead on long contexts.
+    - Add practical notes on performance and state management (`clear()`).
+
+- docs(readme): Removed outdated macOS installation guides and added the latest installation notes.
+
+- docs(readme): Add Windows ROCm build instructions(by **@0xDELUXA**)
+    - Optimize the formatting of the ROCm section in README.md.
+
+- fix: wire LFM VL chat handlers into server loader(by **@JayAnderson360**)
+
+- build(cmake): disable building of upstream unified binary
+    - Set `LLAMA_BUILD_APP` to `OFF` to prevent the compilation of the new
+    unified `llama` binary introduced in upstream llama.cpp.
+
+    - Since the Python package only requires the underlying shared libraries
+    and specific targets, explicitly disabling the standalone application
+    reduces build times and prevents unnecessary executable artifacts from
+    being compiled.
+
+- build(deps): align Jinja2 minimum with Transformers
+    - Require Jinja2 >= 3.1.0 for HuggingFace-style chat template support.
+
+    - The updated Jinja2ChatFormatter relies on behavior aligned with Transformers'
+    chat-template runtime, which also requires Jinja2 3.1 or newer. Updating the
+    minimum dependency avoids parser/runtime differences with older Jinja versions.
+
+- ci : update metal build/test job to macos-26/macos-15-intel
+    - Build on the Tahoe runners in order to enable the tensor API for M5 and A19.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/f71af352a52b8efe824c7a698d0632afa4794c01](https://github.com/ggml-org/llama.cpp/commit/f71af352a52b8efe824c7a698d0632afa4794c01)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260606
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/a778c57d73ec7d4f43e2518a513e7d4cf68a0df8...db8292d336ae1e708623792426481c414754353e
+
 ## [0.3.39] Dynamic GGML Backends, Qwen3-ASR/MiniCPM-V-4.6, On-Device Hybrid Checkpoint, and Granular Logging
 
 -  **ci(cu131/128/126/124): build wheels with GGML dynamic backends for windows/Linux**
@@ -513,7 +815,7 @@ This commit significantly overhauls the media parsing and loading pipeline in `M
 
 - feat: Update llama.cpp to [ggml-org/llama.cpp/commit/f5ddcd1696eca5069dc7915f4d4c03c9a709afea](https://github.com/ggml-org/llama.cpp/commit/f5ddcd1696eca5069dc7915f4d4c03c9a709afea)
 
-## [0.3.30] Milestone Release
+## [0.3.30-Milestone] Milestone Release
 
 I will update the release notes for version 0.3.30 in the [discussion](https://github.com/JamePeng/llama-cpp-python/discussions).
 
