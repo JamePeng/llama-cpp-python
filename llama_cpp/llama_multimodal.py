@@ -91,6 +91,8 @@ class MTMDChatHandler:
         "{% endif %}"
     )
 
+    KNOWN_MEDIA_TAGS: List[str] = []
+
     def __init__(
         self,
         mmproj_path: Optional[str] = None,
@@ -1189,41 +1191,137 @@ class MTMDChatHandler:
             **kwargs,
         )
 
-# Experiments are not recommended for this purpose at this time.
+# Generic template-driven MTMD handler.
 class GenericMTMDChatHandler(MTMDChatHandler):
+    """
+    Generic MTMD chat handler backed by the model-provided chat template.
+
+    This handler is intentionally template-driven. It renders the model's
+    tokenizer.chat_template first, then normalizes rendered media URLs or
+    placeholder tokens into MTMD media markers before tokenization.
+
+    It is designed for model templates that emit media placeholders such as
+    <|image_pad|>, <|image|>, <image>, [IMG], or Kimi-style <|media_pad|>.
+    Model-specific handlers may still be preferable when a model requires
+    special stop tokens, generation flags, or non-standard template arguments.
+    """
+
     KNOWN_MEDIA_TAGS = [
+        # Pad placeholders inside model-specific wrappers.
         "<|image_pad|>",
         "<|audio_pad|>",
         "<|video_pad|>",
+
+        # Direct placeholders inside Gemma/Llama/GLM-style wrappers.
         "<|image|>",
         "<|audio|>",
         "<|video|>",
-        "[IMG]"
+
+        # LLaVA / LFM / Mistral-style placeholders.
+        "<image>",
+        "<audio>",
+        "<video>",
+        "[IMG]",
+
+        # Kimi-style placeholders.
+        "<|media_pad|>",
+        "<|kimi_k25_video_placeholder|>",
     ]
 
     def __init__(
         self,
-        chat_format: str,
+        chat_format: Optional[str],
         mmproj_path: str,
         verbose: bool = True,
+        chat_template_name: Optional[str] = None,
         **kwargs
     ) -> None:
-
         self.chat_format = chat_format
-        if self.chat_format is None:
-            raise ValueError("Failed to get model chat template automatically.")
-
+        self.chat_template_name = chat_template_name
         self.verbose = verbose
-        if self.verbose:
-            print(f"Got chat template from model:\n```jinja\n{self.chat_format}\n```", flush = True)
+
+        if self.verbose and self.chat_format is not None:
+            print(
+                f"{self.__class__.__name__}.__init__: using provided chat template:\n"
+                f"```jinja\n{self.chat_format}\n```",
+                file=sys.stderr,
+            )
 
         super().__init__(mmproj_path = mmproj_path, verbose = verbose, **kwargs)
 
+    def _resolve_chat_format(self, llama: llama_core.Llama) -> str:
+        # Highest priority: use the template explicitly provided by the caller.
+        if self.chat_format is not None:
+            return self.chat_format
+
+        chat_format = None
+
+        # The Llama instance is only available at call time, so query llama.cpp here
+        # for either the requested named template or the model's default template.
+        try:
+            name = (
+                self.chat_template_name.encode("utf-8")
+                if self.chat_template_name is not None
+                else None
+            )
+            chat_format = llama._model.model_chat_template(name)
+        except Exception as exc:
+            if self.verbose:
+                print(
+                    f"{self.log_prefix}: failed to load chat template"
+                    f"{f' {self.chat_template_name!r}' if self.chat_template_name else ''} "
+                    f"from llama model: {exc}",
+                    file=sys.stderr,
+                )
+
+        # If a named template is unavailable, try the default model template.
+        if chat_format is None and self.chat_template_name is not None:
+            try:
+                chat_format = llama._model.model_chat_template(None)
+                if self.verbose and chat_format is not None:
+                    print(
+                        f"{self.log_prefix}: chat template {self.chat_template_name!r} "
+                        "not found; using default model chat template.",
+                        file=sys.stderr,
+                    )
+            except Exception as exc:
+                if self.verbose:
+                    print(
+                        f"{self.log_prefix}: failed to load default model chat template: {exc}",
+                        file=sys.stderr,
+                    )
+
+        # Last resort: use the generic built-in MTMD template.
+        if chat_format is None:
+            chat_format = self.CHAT_FORMAT
+            if self.verbose:
+                print(
+                    f"{self.log_prefix}: no model chat template found; "
+                    "using MTMDChatHandler built-in CHAT_FORMAT.",
+                    file=sys.stderr,
+                )
+
+        self.chat_format = chat_format
+        return chat_format
+
     def __call__(self, **kwargs):
+        llama = kwargs["llama"]
+
+        self._resolve_chat_format(llama)
+
+        if self.chat_format is None:
+            raise ValueError(
+                f"{self.log_prefix}: failed to resolve a chat template. "
+                "`chat_format` must be a Jinja chat template string. You may pass it "
+                "directly, read it from a chat_template.jinja file, set a valid "
+                "`chat_template_name` for a named template stored in the model, or use "
+                "a model that provides tokenizer.chat_template metadata."
+            )
+
         self._chat_format_parser_tags = [tag for tag in self.KNOWN_MEDIA_TAGS if tag in self.chat_format]
 
         if self.verbose:
-            print(f"{self.log_prefix} - Start processing")
+            print(f"{self.log_prefix} - Start processing", file=sys.stderr)
 
         # Use parent implementation
         return super().__call__(**kwargs)

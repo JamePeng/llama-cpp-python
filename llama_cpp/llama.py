@@ -174,6 +174,7 @@ class Llama:
         log_filters: Optional[Sequence[str]] = None,
         log_filters_case_sensitive: bool = True,
         # Extra Params
+        chat_template_name: Optional[str] = None,
         chat_handler_kwargs: Dict[str, Any] = {},
         **kwargs,  # type: ignore
     ):
@@ -721,6 +722,7 @@ class Llama:
                 chat_format = self.metadata.get("tokenizer.chat_template", None),
                 mmproj_path = mmproj_path,
                 verbose = self.verbose,
+                chat_template_name=chat_template_name,
                 **chat_handler_kwargs
             )
 
