@@ -256,80 +256,195 @@ class MTMDChatHandler:
     def __del__(self) -> None:
         self.close()
 
-    def _get_media_items(self, messages: List[llama_types.ChatCompletionRequestMessage]) -> List[Dict[str, str]]:
+    def _get_media_url(
+        self,
+        content: Dict[str, Any],
+        keys: Tuple[str, ...],
+        media_type: str,
+    ) -> str:
         """
-        Extracts all media payloads (images, audio) sequentially to maintain exact chronological order.
-        Strictly enforces capability checks, raising exceptions if unsupported media is passed.
+        Extract a media URL or data URI from a multimodal content item.
 
-        Returns:
-            media_items: A list of dictionaries containing the media 'url' and its 'type' (image or audio).
+        Different chat templates and client APIs may represent the same media
+        payload with slightly different keys. For example, an image may appear as
+        `image`, `image_url`, or a typed chunk with `{"type": "image", ...}`.
+        This helper checks the provided keys in order and returns the first usable
+        media payload.
+
+        Returns an empty string when none of the requested keys exist or when the
+        payload shape is unsupported. The caller is responsible for raising a
+        media-type-specific error when an empty value is not acceptable.
+        """
+        # Try keys in priority order. This lets callers prefer canonical fields
+        # such as "image" over compatibility aliases such as "image_url", while
+        # still accepting either representation.
+        value = None
+        for key in keys:
+            if key in content:
+                value = content[key]
+                break
+
+        # String payloads may already be URLs, local paths, or data URIs.
+        if isinstance(value, str):
+            return value
+
+        if isinstance(value, dict):
+            # Common OpenAI-style shape:
+            # {"image_url": {"url": "..."}}
+            if "url" in value:
+                return value["url"]
+
+            # Forward-compatible inline media shape:
+            # {"audio": {"data": "...", "format": "wav"}}
+            #
+            # Convert it to a data URI so downstream media loading does not need
+            # separate branches for raw base64 payloads.
+            if "data" in value and "format" in value:
+                media_format = value.get("format", "")
+                media_data = value.get("data", "")
+                if media_format and media_data:
+                    return f"data:{media_type}/{media_format};base64,{media_data}"
+
+        return ""
+
+    def _get_media_items(
+        self,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+    ) -> List[Dict[str, str]]:
+        """
+        Extract media payloads from chat messages in message/content order.
+
+        Supports OpenAI-style typed media chunks as well as template-friendly
+        variants used by multimodal chat templates, such as:
+        - {"type": "image_url", "image_url": {"url": "..."}}
+        - {"type": "image", "image": "..."}
+        - {"image": "..."}
+        - {"type": "audio_url", "audio_url": {"url": "..."}}
+        - {"type": "audio", "audio": "..."}
+        - {"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}
+        - {"type": "video_url", "video_url": {"url": "..."}}
+        - {"type": "video", "video": "..."}
+        - {"video": "..."}
+
+        The returned order must match the media placeholders emitted by the rendered
+        chat template as closely as possible.
         """
         media_items: List[Dict[str, str]] = []
+
         for message in messages:
-            if isinstance(message.get("content"), list):
-                for content in message["content"]:
-                    content_type = content.get("type", "")
+            content_list = message.get("content")
+            if not isinstance(content_list, list):
+                continue
 
-                    # 1. Vision Processing
-                    if content_type == "image_url":
-                        if not self.is_support_vision:
-                            raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support image inputs.")
+            for content in content_list:
+                if not isinstance(content, dict):
+                    continue
 
-                        url = content["image_url"] if isinstance(content["image_url"], str) else content["image_url"]["url"]
-                        media_items.append({"url": url, "type": "image"})
+                content_type = content.get("type", "")
 
-                    # 2. Audio Processing
-                    elif content_type in ["audio", "audio_url", "input_audio"]:
-                        if not self.is_support_audio:
-                            raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support audio inputs.")
+                has_image = (
+                    content_type in ("image", "image_url")
+                    or "image" in content
+                    or "image_url" in content
+                )
+                has_audio = (
+                    content_type in ("audio", "audio_url", "input_audio")
+                    or "audio" in content
+                    or "audio_url" in content
+                    or "input_audio" in content
+                )
+                has_video = (
+                    content_type in ("video", "video_url")
+                    or "video" in content
+                    or "video_url" in content
+                )
 
-                        # Case A: Handle custom/forward-compatible audio_url format
-                        if content_type == "audio_url" or content_type == "audio":
-                            audio_url = content[content_type]
-                            url = audio_url if isinstance(audio_url, str) else audio_url["url"]
-                            media_items.append({"url": url, "type": "audio"})
-                        # Case B: Handle OpenAI standard input_audio format
-                        elif content_type == "input_audio":
-                            input_audio = content.get("input_audio", {})
-                            if isinstance(input_audio, dict) and "data" in input_audio:
-                                # It might just be raw base64 data, we can format it as a data URI to reuse load_audio logic
-                                # input_audio: {
-                                #     data: audio.base64Data,
-                                #     format: audio.mimeType.includes('wav') ? 'wav' : 'mp3'
-                                # }
-                                audio_data = input_audio.get("data", "")
-                                audio_format = input_audio.get("format", "")
+                media_kind_count = int(has_image) + int(has_audio) + int(has_video)
+                if media_kind_count > 1:
+                    raise ValueError(
+                        f"{self.log_prefix}: content item contains multiple media types; "
+                        "each content item must contain only one of image, audio, or video."
+                    )
 
-                                # Strictly align with llama.cpp (require wav/mp3)
-                                if audio_format not in ["wav", "mp3"]:
-                                    raise ValueError(f"{self.log_prefix}: input_audio.format must be either 'wav' or 'mp3'")
+                # 1. Vision Processing
+                if has_image:
+                    if not self.is_support_vision:
+                        raise ValueError(
+                            f"{self.log_prefix}: This mmproj model instance does not support image inputs."
+                        )
 
-                                # Format as a Data URI to reuse the unified load_media logic
-                                media_items.append({
-                                    "url": f"data:audio/{audio_format};base64,{audio_data}",
-                                    "type": "audio"
-                                })
-                            else:
-                                # Just a raw base64 data
-                                url = input_audio if isinstance(input_audio, str) else ""
-                                if url:
-                                    media_items.append({"url": url, "type": "audio"})
+                    url = self._get_media_url(
+                        content,
+                        keys=("image", "image_url"),
+                        media_type="image",
+                    )
+                    if not url:
+                        raise ValueError(f"{self.log_prefix}: missing image url/data.")
 
-                    # 3. Video Processing
-                    elif content_type == "video_url":
-                        if not self.is_support_video:
-                            raise ValueError(f"{self.log_prefix}: This libmtmd build does not support video inputs.")
+                    media_items.append({"url": url, "type": "image"})
 
-                        video_url = content["video_url"]
-                        url = video_url if isinstance(video_url, str) else video_url["url"]
-                        media_items.append({"url": url, "type": "video"})
+                # 2. Audio Processing
+                elif has_audio:
+                    if not self.is_support_audio:
+                        raise ValueError(
+                            f"{self.log_prefix}: This mmproj model instance does not support audio inputs."
+                        )
 
-                    # 4. Text & Unknown Types
-                    elif content_type == "text":
-                        continue
+                    if content_type == "input_audio" or "input_audio" in content:
+                        input_audio = content.get("input_audio", {})
+
+                        if isinstance(input_audio, dict) and "data" in input_audio:
+                            audio_data = input_audio.get("data", "")
+                            audio_format = input_audio.get("format", "")
+
+                            # Strictly align with llama.cpp.
+                            if audio_format not in ["wav", "mp3"]:
+                                raise ValueError(
+                                    f"{self.log_prefix}: input_audio.format must be either 'wav' or 'mp3'"
+                                )
+
+                            url = f"data:audio/{audio_format};base64,{audio_data}"
+                        else:
+                            url = input_audio if isinstance(input_audio, str) else ""
                     else:
-                        if self.verbose:
-                            print(f"{self.log_prefix}: Ignored unknown content type '{content_type}'.", file=sys.stderr)
+                        url = self._get_media_url(
+                            content,
+                            keys=("audio", "audio_url"),
+                            media_type="audio",
+                        )
+
+                    if not url:
+                        raise ValueError(f"{self.log_prefix}: missing audio url/data.")
+
+                    media_items.append({"url": url, "type": "audio"})
+
+                # 3. Video Processing
+                elif has_video:
+                    if not self.is_support_video:
+                        raise ValueError(
+                            f"{self.log_prefix}: This libmtmd build does not support video inputs."
+                        )
+
+                    url = self._get_media_url(
+                        content,
+                        keys=("video", "video_url"),
+                        media_type="video",
+                    )
+                    if not url:
+                        raise ValueError(f"{self.log_prefix}: missing video url/data.")
+
+                    media_items.append({"url": url, "type": "video"})
+
+                # 4. Text & Unknown Types
+                elif content_type == "text" or "text" in content:
+                    continue
+                else:
+                    if self.verbose:
+                        print(
+                            f"{self.log_prefix}: ignored unknown content type '{content_type}'.",
+                            file=sys.stderr,
+                        )
+
         return media_items
 
     def _create_bitmap_from_bytes(self, media_bytes: bytes):
