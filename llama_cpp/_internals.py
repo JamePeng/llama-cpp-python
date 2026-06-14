@@ -152,12 +152,17 @@ class LlamaModel:
         """
         return llama_cpp.llama_model_size(self.model)
 
-    def model_chat_template(self, name: bytes) -> str:
+    def model_chat_template(self, name: Optional[bytes] = None) -> Optional[str]:
         """
-        Get the default chat template. Returns nullptr if not available
-        If name is NULL, returns the default chat template
+        Get a chat template from the model.
+
+        If name is None, returns the default chat template.
+        Returns None if no chat template is available.
         """
-        return llama_cpp.llama_model_chat_template(self.model, name).decode("utf-8")
+        template = llama_cpp.llama_model_chat_template(self.model, name)
+        if template is None:
+            return None
+        return template.decode("utf-8")
 
     def n_params(self) -> int:
         """
