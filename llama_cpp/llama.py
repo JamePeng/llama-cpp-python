@@ -45,6 +45,7 @@ from .llama_cache import (
 from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
 import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_chat_format as llama_chat_format
+import llama_cpp.llama_multimodal as llama_multimodal
 
 from llama_cpp.llama_speculative import LlamaDraftModel
 
@@ -711,20 +712,19 @@ class Llama:
             self.metadata = {}
             if self.verbose:
                 print(f"Failed to load metadata: {e}", file=sys.stderr)
-
-        if self.verbose:
-            print(f"Model metadata: {self.metadata}", file=sys.stderr)
         
         if mmproj_path is not None:
             if self.chat_handler is not None and self.verbose:
                 print("Warning: Both `chat_handler` and `mmproj_path` are not null. Chat handler will be overwritten.", flush = True)
 
-            self.chat_handler = llama_chat_format.GenericMTMDChatHandler(
+            self.chat_handler = llama_multimodal.GenericMTMDChatHandler(
                 chat_format = self.metadata.get("tokenizer.chat_template", None),
                 mmproj_path = mmproj_path,
                 verbose = self.verbose,
                 **chat_handler_kwargs
             )
+
+        if self.verbose:
             print(f"Model desc: {self.model_desc}, "
                   f"Model size: {self.model_size / (1024 * 1024):.2f} MB, "
                   f"Model metadata: {self.metadata}",
