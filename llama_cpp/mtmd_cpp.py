@@ -27,7 +27,7 @@ from typing import (
     TYPE_CHECKING,
 )
 
-import llama_cpp.llama_cpp as llama_cpp
+import llama_cpp.llama_cpp as llama_cpp_lib
 
 from llama_cpp._ctypes_extensions import (
     load_shared_library,
@@ -277,14 +277,14 @@ def mtmd_context_params_default() -> mtmd_context_params:
 @ctypes_function_mtmd(
     "mtmd_init_from_file", [
         c_char_p,
-        llama_cpp.llama_model_p_ctypes,
+        llama_cpp_lib.llama_model_p_ctypes,
         mtmd_context_params,
     ],
     mtmd_context_p_ctypes,
 )
 def mtmd_init_from_file(
     mmproj_fname: c_char_p,
-    text_model: llama_cpp.llama_model_p,
+    text_model: llama_cpp_lib.llama_model_p,
     ctx_params: mtmd_context_params,
     /,
 ) -> mtmd_context_p:
@@ -562,11 +562,11 @@ def mtmd_input_chunk_get_type(chunk: mtmd_input_chunk_p) -> c_int32:
 @ctypes_function_mtmd(
     "mtmd_input_chunk_get_tokens_text",
     [mtmd_input_chunk_p_ctypes, POINTER(c_size_t)],
-    POINTER(llama_cpp.llama_token)
+    POINTER(llama_cpp_lib.llama_token)
 )
 def mtmd_input_chunk_get_tokens_text(
     chunk: mtmd_input_chunk_p, n_tokens_output: "_Pointer[c_size_t]", /
-) -> Optional["_Pointer[llama_cpp.llama_token]"]:
+) -> Optional["_Pointer[llama_cpp_lib.llama_token]"]:
     ...
 
 # MTMD_API const mtmd_image_tokens *  mtmd_input_chunk_get_tokens_image(const mtmd_input_chunk * chunk);
@@ -1126,7 +1126,7 @@ def mtmd_helper_image_get_decoder_pos(
 @ctypes_function_mtmd(
     "mtmd_helper_eval_chunks", [
         mtmd_context_p_ctypes,
-        llama_cpp.llama_context_p_ctypes,
+        llama_cpp_lib.llama_context_p_ctypes,
         mtmd_input_chunks_p_ctypes,
         c_int32,
         c_int32,
@@ -1137,7 +1137,7 @@ def mtmd_helper_image_get_decoder_pos(
     c_int32)
 def mtmd_helper_eval_chunks(
     ctx: mtmd_context_p,
-    lctx: llama_cpp.llama_context_p,
+    lctx: llama_cpp_lib.llama_context_p,
     chunks: mtmd_input_chunks_p,
     n_past: c_int32,
     seq_id: c_int32,
@@ -1169,7 +1169,7 @@ def mtmd_helper_eval_chunks(
 @ctypes_function_mtmd(
     "mtmd_helper_eval_chunk_single", [
         mtmd_context_p_ctypes,
-        llama_cpp.llama_context_p_ctypes,
+        llama_cpp_lib.llama_context_p_ctypes,
         mtmd_input_chunk_p_ctypes,
         c_int32,
         c_int32,
@@ -1180,7 +1180,7 @@ def mtmd_helper_eval_chunks(
     c_int32)
 def mtmd_helper_eval_chunk_single(
     ctx: mtmd_context_p,
-    lctx: llama_cpp.llama_context_p,
+    lctx: llama_cpp_lib.llama_context_p,
     chunks: mtmd_input_chunk_p,
     n_past: c_int32,
     seq_id: c_int32,
@@ -1195,6 +1195,13 @@ def mtmd_helper_eval_chunk_single(
     ...
 
 
+# typedef int32_t (*mtmd_helper_post_decode_callback)(struct llama_batch batch, void * user_data);
+mtmd_helper_post_decode_callback = CFUNCTYPE(
+    c_int32,
+    llama_cpp_lib.llama_batch,
+    c_void_p,
+)
+
 # // helper function to decode an image whose embeddings have already been calculated
 # // this helper will handle batching and pre/post decoding setup (for ex. gemma 3 requires non-causal attention)
 # // ret 0 on success, -1 on chunk not being a valid image chunk, 1 on decode failure
@@ -1205,28 +1212,34 @@ def mtmd_helper_eval_chunk_single(
 #                                                 llama_pos n_past,
 #                                                 llama_seq_id seq_id,
 #                                                 int32_t n_batch,
-#                                                 llama_pos * new_n_past);
+#                                                 llama_pos * new_n_past,
+#                                                 mtmd_helper_post_decode_callback callback,
+#                                                 void * user_data);
 @ctypes_function_mtmd(
     "mtmd_helper_decode_image_chunk", [
         mtmd_context_p_ctypes,
-        llama_cpp.llama_context_p_ctypes,
+        llama_cpp_lib.llama_context_p_ctypes,
         mtmd_input_chunk_p_ctypes,
         POINTER(c_float),
         c_int32,
         c_int32,
         c_int32,
         POINTER(c_int32),
+        mtmd_helper_post_decode_callback,
+        c_void_p,
     ],
     c_int32)
 def mtmd_helper_decode_image_chunk(
     ctx: mtmd_context_p,
-    lctx: llama_cpp.llama_context_p,
-    chunks: mtmd_input_chunk_p,
+    lctx: llama_cpp_lib.llama_context_p,
+    chunk: mtmd_input_chunk_p,
     encoded_embd: POINTER(c_float), # type: ignore
     n_past: c_int32,
     seq_id: c_int32,
     n_batch: c_int32,
     new_n_past: POINTER(c_int32),   # type: ignore
+    callback: mtmd_helper_post_decode_callback, # type: ignore
+    user_data: c_void_p,
     /,
 ) -> c_int32:
     """
