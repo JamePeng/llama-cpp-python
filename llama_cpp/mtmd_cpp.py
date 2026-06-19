@@ -489,13 +489,13 @@ mtmd_bitmap_lazy_callback = CFUNCTYPE(
 #                                              void * user_data,
 #                                              mtmd_bitmap_lazy_callback callback);
 @ctypes_function_mtmd(
-    "mtmd_input_chunks_get", [
+    "mtmd_bitmap_init_lazy", [
         mtmd_context_p_ctypes,
         c_char_p,
         c_void_p,
         mtmd_bitmap_lazy_callback,
     ], mtmd_bitmap_p_ctypes)
-def mtmd_input_chunks_get(
+def mtmd_bitmap_init_lazy(
     ctx: mtmd_context_p,
     id: c_char_p,
     user_data: c_void_p,
@@ -529,11 +529,11 @@ def mtmd_input_chunks_size(chunks: mtmd_input_chunks_p) -> c_size_t:
 @ctypes_function_mtmd(
     "mtmd_input_chunks_get", [
         mtmd_input_chunks_p_ctypes,
-        c_int32,
+        c_size_t,
     ], mtmd_input_chunk_p_ctypes)
 def mtmd_input_chunks_get(
     chunks: mtmd_input_chunks_p,
-    idx: c_int32,
+    idx: c_size_t,
     /,
 ) -> mtmd_input_chunk_p:
     ...
@@ -726,7 +726,7 @@ def mtmd_image_tokens_get_decoder_pos(image_tokens: mtmd_image_tokens_p, pos_0: 
         mtmd_input_chunks_p_ctypes,
         mtmd_input_text_p_ctypes,
         POINTER(mtmd_bitmap_p_ctypes),
-        c_uint,
+        c_size_t,
     ],
     c_int32,
 )
@@ -735,7 +735,7 @@ def mtmd_tokenize(
     output: mtmd_input_chunks_p,
     text: mtmd_input_text_p,
     bitmaps: POINTER(mtmd_bitmap_p), # type: ignore
-    n_bitmaps: c_uint,
+    n_bitmaps: c_size_t,
     /,
 ) -> c_int32:
     """
