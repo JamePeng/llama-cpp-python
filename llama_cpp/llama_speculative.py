@@ -106,10 +106,22 @@ class LlamaNGramMapDecoding(LlamaDraftModel):
         #   key -> {position: continuation}
         #
         # A dict is used so that recent entries can be refreshed when more continuation
-        # tokens become available.
+        # tokens become available. Draft selection is based on continuation frequency,
+        # not just the most recent continuation.
         self._map_k4v: DefaultDict[
             Tuple[int, ...], Dict[int, Tuple[int, ...]]
         ] = collections.defaultdict(dict)
+
+        # Acceptance feedback, aligned with llama.cpp's ngram-map behavior:
+        # accept(n) stores how many tokens were accepted for the key/value used by
+        # the previous draft and limits the future draft length for that key/value.
+        self._accepted_k: Dict[Tuple[int, ...], int] = {}
+        self._accepted_k4v: DefaultDict[
+            Tuple[int, ...], Dict[Tuple[int, ...], int]
+        ] = collections.defaultdict(dict)
+
+        self._last_draft_key: Optional[Tuple[int, ...]] = None
+        self._last_draft_value: Optional[Tuple[int, ...]] = None
 
         self._closed = False
         self._last_draft_len = 0
@@ -124,6 +136,10 @@ class LlamaNGramMapDecoding(LlamaDraftModel):
         self._history.clear()
         self._map_k.clear()
         self._map_k4v.clear()
+        self._accepted_k.clear()
+        self._accepted_k4v.clear()
+        self._last_draft_key = None
+        self._last_draft_value = None
         self._last_draft_len = 0
 
     def close(self) -> None:
@@ -147,13 +163,27 @@ class LlamaNGramMapDecoding(LlamaDraftModel):
         """
         Notify how many draft tokens were accepted by the target model.
 
-        This implementation does not need to update internal state here, because the
-        next call receives the verified token history through `input_ids`.
-
-        The method is kept for API symmetry and future extensions, such as acceptance
-        statistics, adaptive reset, or low-acceptance fallback.
+        The accepted length is written back to the key/value used by the previous
+        draft. Future drafts for the same key/value are truncated to this accepted
+        length, matching llama.cpp's ngram-map feedback loop.
         """
-        return
+        if n_accepted < 0:
+            raise ValueError("n_accepted must be non-negative")
+
+        if self._last_draft_key is None or self._last_draft_len <= 0:
+            return
+
+        accepted = min(int(n_accepted), self._last_draft_len)
+
+        if self.mode == "k":
+            self._accepted_k[self._last_draft_key] = accepted
+        else:
+            if self._last_draft_value is not None:
+                self._accepted_k4v[self._last_draft_key][self._last_draft_value] = accepted
+
+        self._last_draft_key = None
+        self._last_draft_value = None
+        self._last_draft_len = 0
 
     def _sync_and_index(self, input_ids: npt.NDArray[np.intc]) -> None:
         """
@@ -231,9 +261,11 @@ class LlamaNGramMapDecoding(LlamaDraftModel):
             for pos in range(start, end):
                 key_start = pos
                 value_start = pos + self.ngram_size
-                value_end = min(value_start + self.num_pred_tokens, len(self._history))
+                value_end = value_start + self.num_pred_tokens
 
-                if value_start >= value_end:
+                # K4V tracks fixed-size continuation m-grams. Partial tail values are
+                # intentionally skipped so frequency statistics remain comparable.
+                if value_end > len(self._history):
                     continue
 
                 key = tuple(self._history[key_start:value_start])
@@ -267,6 +299,8 @@ class LlamaNGramMapDecoding(LlamaDraftModel):
         _ = kwargs
 
         self._sync_and_index(input_ids)
+        self._last_draft_key = None
+        self._last_draft_value = None
         self._last_draft_len = 0
 
         if len(self._history) < self.ngram_size:
@@ -276,28 +310,57 @@ class LlamaNGramMapDecoding(LlamaDraftModel):
 
         if self.mode == "k":
             positions = self._map_k.get(search_key)
-            if not positions or len(positions) < self.min_hits:
+            if not positions:
                 return np.array([], dtype=np.intc)
 
-            # Use the latest valid match with an available continuation.
+            # Key-only mode follows llama.cpp's ngram-map-k behavior: once a key
+            # match is found, draft from the latest valid match. min_hits is not
+            # used as a confidence gate for key-only mode.
             draft: List[int] = []
+            accepted_limit = self._accepted_k.get(search_key, self.num_pred_tokens)
+            if accepted_limit <= 0:
+                return np.array([], dtype=np.intc)
+
             for pos in reversed(positions):
                 start = pos + self.ngram_size
                 if start < len(self._history):
-                    end = min(start + self.num_pred_tokens, len(self._history))
+                    end = min(start + accepted_limit, len(self._history))
                     draft = self._history[start:end]
                     break
+
+            self._last_draft_key = search_key
 
         else:
             values = self._map_k4v.get(search_key)
             if not values or len(values) < self.min_hits:
                 return np.array([], dtype=np.intc)
 
-            # Use the continuation from the latest historical position.
-            latest_pos = max(values)
-            draft = list(values[latest_pos])
+            # K4V mode chooses the most frequent continuation m-gram rather than the
+            # latest one. If the strongest continuation is not at least twice as
+            # frequent as all other continuations combined, skip drafting.
+            counts = collections.Counter(values.values())
+            best_value, best_count = counts.most_common(1)[0]
+            other_count = sum(counts.values()) - best_count
+
+            if other_count > 0 and best_count < 2 * other_count:
+                return np.array([], dtype=np.intc)
+
+            accepted_limit = self._accepted_k4v[search_key].get(
+                best_value, self.num_pred_tokens
+            )
+            if accepted_limit <= 0:
+                return np.array([], dtype=np.intc)
+
+            draft = list(best_value[:accepted_limit])
+            self._last_draft_key = search_key
+            self._last_draft_value = best_value
 
         self._last_draft_len = len(draft)
+        if self._last_draft_len <= 0:
+            self._last_draft_key = None
+            self._last_draft_value = None
+            return np.array([], dtype=np.intc)
+
         return np.asarray(draft, dtype=np.intc)
 
 
