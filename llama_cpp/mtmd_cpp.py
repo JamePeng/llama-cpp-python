@@ -169,6 +169,13 @@ mtmd_input_chunks_p_ctypes = c_void_p
 mtmd_batch_p = NewType("mtmd_batch_p", int)
 mtmd_batch_p_ctypes = c_void_p
 
+# typedef bool (*mtmd_progress_callback)(float progress, void * user_data);
+mtmd_progress_callback = CFUNCTYPE(
+    c_bool,
+    c_float,                  # progress
+    c_void_p,                 # user_data
+)
+
 # struct mtmd_input_text {
 #     const char * text;
 #     bool add_special;
@@ -217,19 +224,25 @@ class clip_context_params(Structure):
 #     const char * media_marker;
 #     enum llama_flash_attn_type flash_attn_type;
 #     bool warmup; // whether to run a warmup encode pass after initialization
-#
+
 #     // limit number of image tokens, only for vision models with dynamic resolution
 #     int image_min_tokens; // minimum number of tokens for image input (default: read from metadata)
 #     int image_max_tokens; // maximum number of tokens for image input (default: read from metadata)
-#
+
 #     // callback function passed over to mtmd proper
 #     ggml_backend_sched_eval_callback cb_eval;
 #     void * cb_eval_user_data;
-#
+
 #     // batching params
 #     int32_t batch_max_tokens; // maximum number of output tokens in a batch
 #                               // (note: this is not a hard-limit, the first image will always be added even if it exceeds this limit)
 #                               // (default: 1024)
+
+#     // Called with a progress value between 0.0 and 1.0. Pass NULL to disable.
+#     // If the provided progress_callback returns true, model loading continues.
+#     // If it returns false, model loading is immediately aborted.
+#     mtmd_progress_callback progress_callback;
+#     void * progress_callback_user_data;
 # };
 class mtmd_context_params(Structure):
     _fields_ = [
@@ -245,6 +258,8 @@ class mtmd_context_params(Structure):
         ("cb_eval", ggml_backend_sched_eval_callback),
         ("cb_eval_user_data", c_void_p),
         ("batch_max_tokens", c_int32),
+        ("progress_callback", mtmd_progress_callback),
+        ("progress_callback_user_data", c_void_p)
     ]
 
 mtmd_context_params_p_ctypes = POINTER(mtmd_context_params)
@@ -499,7 +514,7 @@ def mtmd_bitmap_init_lazy(
     ctx: mtmd_context_p,
     id: c_char_p,
     user_data: c_void_p,
-    callback: mtmd_bitmap_lazy_callback,  # type: ignore
+    callback: Optional[mtmd_bitmap_lazy_callback],  # type: ignore
     /,
 ) -> mtmd_bitmap_p:
     ...
@@ -1238,7 +1253,7 @@ def mtmd_helper_decode_image_chunk(
     seq_id: c_int32,
     n_batch: c_int32,
     new_n_past: POINTER(c_int32),   # type: ignore
-    callback: mtmd_helper_post_decode_callback, # type: ignore
+    callback: Optional[mtmd_helper_post_decode_callback], # type: ignore
     user_data: c_void_p,
     /,
 ) -> c_int32:
