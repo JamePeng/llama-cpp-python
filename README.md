@@ -123,7 +123,8 @@ pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python
 </details>
 
 **Sanity Checking**  
-`python.exe -c "from llama_cpp import Llama; print('llama-cpp import OK')"`
+Use this line to check if installation was successful before moving further.  
+```python.exe -c "from llama_cpp import Llama; print('llama-cpp import OK')"```
 
 <details>
 <summary>CLI / requirements.txt</summary>
