@@ -110,11 +110,20 @@ CMAKE_ARGS="-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS" \
 ```
 
 ```powershell
-# Windows
+# Windows powershell
 $env:CMAKE_ARGS = "-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
+
+```command prompt
+# Windows command prompt
+set CMAKE_ARGS = "-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS"
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
 </details>
+
+### Sanity Checking
+`python.exe -c "from llama_cpp import Llama; print('llama-cpp import OK')"`
 
 <details>
 <summary>CLI / requirements.txt</summary>
