@@ -3470,6 +3470,10 @@ prompt: The prompt to generate text from.
         """Return the n_layer value."""
         return self._model.n_layer()
 
+    def n_layer_nextn(self) -> int:
+        """Return the n_layer_nextn value."""
+        return self._model.n_layer_nextn()
+
     def n_head(self) -> int:
         """Return the head size."""
         return self._model.n_head()

@@ -123,6 +123,9 @@ class LlamaModel:
     def n_layer(self) -> int:
         return llama_cpp.llama_model_n_layer(self.model)
 
+    def n_layer_nextn(self) -> int:
+        return llama_cpp.llama_model_n_layer_nextn(self.model)
+
     def n_head(self) -> int:
         return llama_cpp.llama_model_n_head(self.model)
 
