@@ -1053,11 +1053,18 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [qwen3.6](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | `Qwen35ChatHandler` | `qwen3.6` |
 | [step3-vl](https://huggingface.co/JamePeng2023/Step3-VL-10B-GGUF) | `Step3VLChatHandler` | `step3-vl` |
 
-Then you'll need to use a custom chat handler to load the clip model and process the chat messages and images.
+Then you'll need to use a custom chat handler to load the mmproj model and process the chat messages and images.
+
+Note: Starting from 0.3.41-preview, in order to extend MTMD capabilities, multimodal-related logic has been separated from `llama_chat_format` into `llama_multimodal`.
+      New implementations are recommended to use the updated multimodal interfaces in `llama_multimodal`
+      For backward compatibility, the legacy `llama_chat_format` path is still retained and continues to support existing integrations, but may be deprecated in future versions.
+      Additionally, the parameter `clip_model_path` has been renamed to `mmproj_path` to better reflect its purpose and align with the underlying multimodal projection model naming convention. 
+      The old parameter name `clip_model_path` is kept as a compatibility alias in some interfaces, but new code should use `mmproj_path` exclusively.
 
 ```python
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Llava15ChatHandler
+# from llama_cpp.llama_chat_format import Llava15ChatHandler
+from llama_cpp.llama_multimodal import Llava15ChatHandler
 
 model_path="path/to/llava/ggml-model-f16.gguf"
 mmproj_path="path/to/llava/mmproj-model-f16.gguf"
@@ -1086,7 +1093,8 @@ You can also pull the model from the Hugging Face Hub using the `from_pretrained
 
 ```python
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import MoondreamChatHandler
+# from llama_cpp.llama_chat_format import MoondreamChatHandler
+from llama_cpp.llama_multimodal import MoondreamChatHandler
 
 chat_handler = MoondreamChatHandler.from_pretrained(
   repo_id="vikhyatk/moondream2",
@@ -1128,7 +1136,8 @@ print(response["choices"][0]["text"])
 ```python
 # Import necessary libraries
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+# from llama_cpp.llama_chat_format import Qwen3VLChatHandler
+from llama_cpp.llama_multimodal import Qwen3VLChatHandler
 import base64
 import os
 
@@ -1285,7 +1294,8 @@ The `Qwen3ASRChatHandler` is specifically designed for the Qwen3 Automatic Speec
 
 ```python
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Qwen3ASRChatHandler
+# from llama_cpp.llama_chat_format import Qwen3ASRChatHandler
+from llama_cpp.llama_multimodal import Qwen3ASRChatHandler
 import base64
 import os
 
@@ -1390,7 +1400,8 @@ Below is a complete, production-ready example demonstrating how to dynamically r
 
 ```python
 from llama_cpp import Llama
-from llama_cpp.llama_chat_format import Gemma4ChatHandler
+# from llama_cpp.llama_chat_format import Gemma4ChatHandler
+from llama_cpp.llama_multimodal import Gemma4ChatHandler
 import base64
 import os
 
