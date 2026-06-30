@@ -515,6 +515,75 @@ class MTMDChatHandler:
             == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO
         )
 
+    def _mtmd_tokenize(
+        self,
+        llama: "llama_core.Llama",
+        text: str,
+        bitmaps: Optional[list] = None,
+        chunks: Optional[Any] = None,
+    ) -> Any:
+        """
+        Perform MTMD hybrid tokenization.
+
+        This function isolates the llama.cpp mtmd_tokenize call
+        so that prompt construction logic is decoupled from runtime execution.
+
+        It guarantees:
+        - stable interface for future async/batch decoding
+        - isolated error handling for tokenizer failures
+        - clean separation between prompt building and C++ binding
+        """
+
+        if chunks is None:
+            chunks = self._mtmd_cpp.mtmd_input_chunks_init()
+            if chunks is None:
+                raise ValueError(
+                    f"{self.log_prefix}(_mtmd_tokenize): failed to init mtmd_input_chunks"
+                )
+
+        # Validate strict alignment between rendered media markers and provided bitmaps
+        # to ensure MTMD tokenization consistency and prevent decoding mismatch errors.
+        if bitmaps is not None:
+            marker_count = text.count(self.media_marker)
+            if marker_count != len(bitmaps):
+                raise ValueError(
+                    f"{self.log_prefix}(_mtmd_tokenize): marker mismatch "
+                    f"(marker_count={marker_count}, bitmap_count={len(bitmaps)})"
+                )
+
+        input_text = self._mtmd_cpp.mtmd_input_text()
+        input_text.text = ctypes.c_char_p(text.encode("utf-8"))
+        input_text.add_special = (llama.n_tokens == 0)
+        input_text.parse_special = True
+
+        bitmap_array = None
+        n_bitmaps = 0
+
+        if bitmaps:
+            n_bitmaps = len(bitmaps)
+            bitmap_array = (self._mtmd_cpp.mtmd_bitmap_p_ctypes * n_bitmaps)(*bitmaps)
+        else:
+            bitmap_array = None
+            n_bitmaps = 0
+
+        result = self._mtmd_cpp.mtmd_tokenize(
+            self.mtmd_ctx,
+            chunks,
+            ctypes.byref(input_text),
+            bitmap_array,
+            n_bitmaps,
+        )
+
+        if result != 0:
+            raise ValueError(
+                f"{self.log_prefix}(_mtmd_tokenize): tokenize failed\n"
+                f"- result={result}\n"
+                f"- text_len={len(text)}\n"
+                f"- n_bitmaps={n_bitmaps}\n"
+            )
+
+        return chunks
+
     def _process_mtmd_prompt(
         self,
         llama: llama_core.Llama,
@@ -572,8 +641,12 @@ class MTMDChatHandler:
             text = text.replace(item["url"], media_marker)
 
         if self.verbose:
-            print(f"{self.log_prefix}(_process_mtmd_prompt): Rendered prompt length: {len(text)} chars, Media count: {len(media_items)}.", file=sys.stderr)
-            print(f"{self.log_prefix}(_process_mtmd_prompt): Rendered prompt: {text}", file=sys.stderr)
+            print(
+                f"{self.log_prefix}(_process_mtmd_prompt): "
+                f"Rendered prompt length: {len(text)} chars, Media count: {len(media_items)}.\n"
+                f"Rendered prompt: {text}",
+                file=sys.stderr,
+            )
 
         # 3. Pre-allocate bitmap array to guarantee chronological order during concurrent decoding
         bitmaps = [None] * len(media_items)
@@ -614,29 +687,13 @@ class MTMDChatHandler:
                 # If there are no images, set the bitmaps to empty.
                 bitmaps = []
 
-            # 4. Initialize mtmd_input_chunks
-            input_text = self._mtmd_cpp.mtmd_input_text()
-            input_text.text = text.encode('utf-8')
-            input_text.add_special = (llama.n_tokens == 0)
-            input_text.parse_special = True
-
-            chunks = self._mtmd_cpp.mtmd_input_chunks_init()
-            if chunks is None:
-                raise ValueError(f"{self.log_prefix}(mtmd_input_chunks_init): Failed to initialize mtmd_input_chunks.")
-
-            # 5. Hybrid Tokenization (Text + Media binding)
-            if len(bitmaps) > 0:
-                bitmap_array = (self._mtmd_cpp.mtmd_bitmap_p_ctypes * len(bitmaps))(*bitmaps)
-                result = self._mtmd_cpp.mtmd_tokenize(
-                    self.mtmd_ctx, chunks, ctypes.byref(input_text), bitmap_array, len(bitmaps)
-                )
-            else:
-                result = self._mtmd_cpp.mtmd_tokenize(
-                    self.mtmd_ctx, chunks, ctypes.byref(input_text), None, 0
-                )
-
-            if result != 0:
-                raise ValueError(f"{self.log_prefix}(mtmd_tokenize): Unable to tokenize prompt, res = {result}.")
+            # 4. Hybrid Tokenization (Text + Media)
+            chunks = self._mtmd_tokenize(
+                llama=llama,
+                text=text,
+                bitmaps=bitmaps,
+                chunks=None,
+            )
 
             # Video helper contexts only need to stay alive until mtmd_tokenize() completes.
             if video_cleanup:
@@ -644,7 +701,7 @@ class MTMDChatHandler:
                     self._mtmd_cpp.mtmd_helper_video_free(video_ctx)
                 video_cleanup.clear()
 
-            # 6. Virtual Token Ledger Construction
+            # 5. Virtual Token Ledger Construction
             full_prompt_ids = []
             chunk_token_spans = []
             current_idx = 0
