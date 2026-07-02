@@ -149,6 +149,12 @@ class LlamaModel:
         llama_cpp.llama_model_desc(self.model, buf, 256)
         return buf.value.decode("utf-8")
 
+    def model_ftype(self) -> int:
+        """
+        Get the model file type (quantization), e.g. LLAMA_FTYPE_MOSTLY_Q8_0
+        """
+        return llama_cpp.llama_model_ftype(self.model)
+
     def model_size(self) -> int:
         """
         Returns the total size of all the tensors in the model in bytes

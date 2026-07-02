@@ -408,6 +408,20 @@ class llama_ftype(enum.IntEnum):
     LLAMA_FTYPE_MOSTLY_Q1_0 = 40
     LLAMA_FTYPE_GUESSED = 1024
 
+# // Get the model file type (quantization) as a string, e.g. "Q8_0" or "Q4_K - Medium"
+# LLAMA_API const char * llama_ftype_name(enum llama_ftype ftype);
+@ctypes_function(
+    "llama_ftype_name",
+    [ctypes.c_int],
+    ctypes.c_char_p,
+)
+def llama_ftype_name(
+    ftype: llama_ftype, /
+) -> bytes:
+    """
+    Get the model file type (quantization) as a string, e.g. "Q8_0" or "Q4_K - Medium"
+    """
+
 # enum llama_rope_scaling_type {
 #     LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED = -1,
 #     LLAMA_ROPE_SCALING_TYPE_NONE        = 0,
@@ -1919,6 +1933,21 @@ def llama_model_desc(
     /,
 ) -> int:
     """Get a string describing the model type"""
+    ...
+
+
+# // Get the model file type (quantization), e.g. LLAMA_FTYPE_MOSTLY_Q8_0
+# LLAMA_API enum llama_ftype llama_model_ftype(const struct llama_model * model);
+@ctypes_function(
+    "llama_model_ftype",
+    [llama_model_p_ctypes],
+    ctypes.c_int,
+)
+def llama_model_ftype(
+    model: llama_model_p,
+    /,
+) -> int:
+    """Get the model file type (quantization), e.g. LLAMA_FTYPE_MOSTLY_Q8_0"""
     ...
 
 
