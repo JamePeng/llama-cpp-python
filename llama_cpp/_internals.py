@@ -100,9 +100,13 @@ class LlamaModel:
         self.close()
 
     def vocab_type(self) -> int:
-        return llama_cpp.llama_vocab_type(self.model)
+        if self.vocab is None:
+            raise RuntimeError("LlamaModel.vocab_type: vocab is None")
+        return llama_cpp.llama_vocab_type(self.vocab)
 
     def n_vocab(self) -> int:
+        if self.vocab is None:
+            raise RuntimeError("LlamaModel.n_vocab: vocab is None")
         return llama_cpp.llama_vocab_n_tokens(self.vocab)
 
     def n_ctx_train(self) -> int:
