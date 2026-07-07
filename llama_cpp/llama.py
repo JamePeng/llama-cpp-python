@@ -721,7 +721,6 @@ class Llama:
             self.chat_handler = llama_multimodal.GenericMTMDChatHandler(
                 chat_format = self.metadata.get("tokenizer.chat_template", None),
                 mmproj_path = mmproj_path,
-                verbose = self.verbose,
                 chat_template_name=chat_template_name,
                 **chat_handler_kwargs
             )

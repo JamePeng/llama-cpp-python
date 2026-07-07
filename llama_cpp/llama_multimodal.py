@@ -102,6 +102,7 @@ class MTMDChatHandler:
         image_max_tokens: int = -1,
         chat_template_override: Optional[str] = None,
         batch_max_tokens: int = 1024,
+        extra_template_arguments: Optional[Dict[str, Any]] = None,
         **kwargs
     ):
 
@@ -148,7 +149,13 @@ class MTMDChatHandler:
         import llama_cpp.mtmd_cpp as mtmd_cpp
         self._mtmd_cpp = mtmd_cpp
         self.mtmd_ctx: Optional[mtmd_cpp.mtmd_context_p] = None
-        self.extra_template_arguments: dict[str, Any] = {}
+
+        if extra_template_arguments is not None and not isinstance(extra_template_arguments, dict):
+            raise TypeError(
+                f"{self.log_prefix}(__init__): `extra_template_arguments` must be a dict."
+            )
+
+        self.extra_template_arguments: dict[str, Any] = dict(extra_template_arguments or {})
 
         self.is_support_vision = False
         self.is_support_audio = False
@@ -515,6 +522,104 @@ class MTMDChatHandler:
             == self._mtmd_cpp.mtmd_input_chunk_type.MTMD_INPUT_CHUNK_TYPE_AUDIO
         )
 
+    def _render_mtmd_prompt(
+        self,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        functions: Optional[List[llama_types.ChatCompletionFunction]] = None,
+        function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[llama_types.ChatCompletionTool]] = None,
+        tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """
+        Render the chat template into plain prompt text.
+
+        This stage only renders the Jinja template. It does not normalize media
+        placeholders or replace media URLs with the MTMD runtime marker.
+        """
+        return self.chat_template.render(
+            messages=messages,
+            add_generation_prompt=add_generation_prompt,
+            eos_token=self.mtmd_eos_token,
+            bos_token=self.mtmd_bos_token,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+            **getattr(self, "extra_template_arguments", {}),
+        )
+
+    def _replace_media_placeholders(
+        self,
+        text: str,
+        media_items: List[Dict[str, str]],
+    ) -> str:
+        """
+        Normalize rendered media placeholders and media URLs into the MTMD runtime marker.
+
+        llama.cpp MTMD tokenization recognizes the canonical media marker, usually
+        `<__media__>`. Model chat templates may render media as model-specific tags
+        such as `<image>`, `<|image|>`, `[IMG]`, `<|image_pad|>`, or as the original
+        URL/data URI. This stage converts those rendered forms into the canonical
+        MTMD marker and validates that the final marker count matches the number of
+        media payloads.
+        """
+        media_marker = self.media_marker
+
+        # 1. Replace known template-specific media tags first.
+        #
+        # This handles templates that render placeholders such as:
+        #   <image>, <|image|>, [IMG], <|image_pad|>, <|media_pad|>, etc.
+        for tag in self._chat_format_parser_tags:
+            if tag in text:
+                text = text.replace(tag, media_marker)
+
+        # 2. Replace rendered media URLs/data URIs.
+        #
+        # This handles templates that directly render the original image/audio/video
+        # URL or data URI instead of a symbolic placeholder.
+        for item in media_items:
+            url = item.get("url", "")
+            if url and url in text:
+                text = text.replace(url, media_marker, 1)
+
+        # 3. Validate only after all normalization is complete.
+        marker_count = text.count(media_marker)
+        if marker_count != len(media_items):
+            raise ValueError(
+                f"{self.log_prefix}(_replace_media_placeholders): media marker mismatch "
+                f"(marker_count={marker_count}, media_count={len(media_items)})"
+            )
+
+        return text
+
+    def _render_and_replace_media(
+        self,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        media_items: List[Dict[str, str]],
+        functions: Optional[List[llama_types.ChatCompletionFunction]] = None,
+        function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[llama_types.ChatCompletionTool]] = None,
+        tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+        add_generation_prompt: bool = True,
+    ) -> str:
+        """
+        Render chat messages and normalize rendered media placeholders into MTMD markers.
+        """
+        text = self._render_mtmd_prompt(
+            messages=messages,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+            add_generation_prompt=add_generation_prompt,
+        )
+
+        return self._replace_media_placeholders(
+            text=text,
+            media_items=media_items,
+        )
+
     def _mtmd_tokenize(
         self,
         llama: "llama_core.Llama",
@@ -615,30 +720,17 @@ class MTMDChatHandler:
             messages = [{"role": "system", "content": self.DEFAULT_SYSTEM_MESSAGE}] + messages
 
         media_items = self._get_media_items(messages)
-        media_marker = self.media_marker
 
-        # 2. Render the chat template and replace actual URLs with C++ media markers
-        text = self.chat_template.render(
+        # 2. Render chat template and normalize media placeholders to MTMD markers.
+        text = self._render_and_replace_media(
             messages=messages,
-            add_generation_prompt=add_generation_prompt,
-            eos_token=self.mtmd_eos_token,
-            bos_token=self.mtmd_bos_token,
+            media_items=media_items,
             functions=functions,
             function_call=function_call,
             tools=tools,
             tool_choice=tool_choice,
-            **getattr(self, 'extra_template_arguments', {})
+            add_generation_prompt=add_generation_prompt,
         )
-
-        for tag in self._chat_format_parser_tags:
-            if tag not in text:
-                continue
-
-            text = text.replace(tag, media_marker)
-
-        # Replace image_url by media_marker in text
-        for item in media_items:
-            text = text.replace(item["url"], media_marker)
 
         if self.verbose:
             print(
