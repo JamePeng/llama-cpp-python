@@ -1053,75 +1053,141 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [qwen3.6](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | `Qwen35ChatHandler` | `qwen3.6` |
 | [step3-vl](https://huggingface.co/JamePeng2023/Step3-VL-10B-GGUF) | `Step3VLChatHandler` | `step3-vl` |
 
-Then you'll need to use a custom chat handler to load the mmproj model and process the chat messages and images.
+Then you'll need to load the multimodal projection model (`mmproj`) together with the main language model.
 
-Note: Starting from 0.3.41-preview, in order to extend MTMD capabilities, multimodal-related logic has been separated from `llama_chat_format` into `llama_multimodal`.
-      New implementations are recommended to use the updated multimodal interfaces in `llama_multimodal`
-      For backward compatibility, the legacy `llama_chat_format` path is still retained and continues to support existing integrations, but may be deprecated in future versions.
-      Additionally, the parameter `clip_model_path` has been renamed to `mmproj_path` to better reflect its purpose and align with the underlying multimodal projection model naming convention. 
-      The old parameter name `clip_model_path` is kept as a compatibility alias in some interfaces, but new code should use `mmproj_path` exclusively.
+Starting from `0.3.41-preview`, new multimodal implementations are recommended to use the updated interfaces in `llama_multimodal`. For backward compatibility, the legacy `llama_chat_format` path is still retained, but may be deprecated in future versions.
+
+The parameter `clip_model_path` has been renamed to `mmproj_path` to better reflect its purpose and align with llama.cpp's multimodal projection model naming convention. New code should use `mmproj_path` exclusively.
+
+### Generic MTMD Chat Handler
+
+For multimodal GGUF models that already include a valid `tokenizer.chat_template`, you can use the generic MTMD handler through `mmproj_path`.
+
+This is especially useful for newer multimodal models that have not yet received a dedicated Python chat handler. The generic handler renders the model-provided Jinja chat template, then normalizes rendered media placeholders or media URLs into the canonical llama.cpp MTMD media marker, usually `<__media__>`, before calling `mtmd_tokenize`.
+
+> **Note:** `GenericMTMDChatHandler` is intended as a flexible fallback for template-driven multimodal models. Because different model families may use different media ordering rules, reasoning switches, stop tokens, or special template variables, some models may still require a dedicated chat handler. Please test carefully and report issues if you encounter incorrect prompts, missing media markers, or mismatched media counts.
 
 ```python
 from llama_cpp import Llama
-# from llama_cpp.llama_chat_format import Llava15ChatHandler
-from llama_cpp.llama_multimodal import Llava15ChatHandler
 
-model_path="path/to/llava/ggml-model-f16.gguf"
-mmproj_path="path/to/llava/mmproj-model-f16.gguf"
+# Model and multimodal projection paths
+MODEL_PATH = r"path/to/model.gguf"
+MMPROJ_PATH = r"path/to/mmproj.gguf"
 
 llm = Llama(
-  model_path=model_path,
-  chat_handler=Llava15ChatHandler(clip_model_path=mmproj_path),
-  n_ctx=2048,
-)
-
-llm.create_chat_completion(
-    messages = [
-        {"role": "system", "content": "You are an assistant who perfectly describes images."},
-        {
-            "role": "user",
-            "content": [
-                {"type" : "text", "text": "What's in this image?"},
-                {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg" } }
-            ]
-        }
-    ]
-)
-```
-
-You can also pull the model from the Hugging Face Hub using the `from_pretrained` method.
-
-```python
-from llama_cpp import Llama
-# from llama_cpp.llama_chat_format import MoondreamChatHandler
-from llama_cpp.llama_multimodal import MoondreamChatHandler
-
-chat_handler = MoondreamChatHandler.from_pretrained(
-  repo_id="vikhyatk/moondream2",
-  filename="*mmproj*",
-)
-
-llm = Llama.from_pretrained(
-  repo_id="vikhyatk/moondream2",
-  filename="*text-model*",
-  chat_handler=chat_handler,
-  n_ctx=2048, # n_ctx should be increased to accommodate the image embedding
+    model_path=MODEL_PATH,
+    mmproj_path=MMPROJ_PATH,
+    n_gpu_layers=-1,
+    n_ctx=10240,
+    verbose=True,
+    verbosity=2,
+    chat_handler_kwargs={
+        "verbose": True,
+    },
 )
 
 response = llm.create_chat_completion(
-    messages = [
+    messages=[
         {
             "role": "user",
             "content": [
-                {"type" : "text", "text": "What's in this image?"},
-                {"type": "image_url", "image_url": {"url": "https://upload.wikimedia.org/wikipedia/commons/thumb/d/dd/Gfp-wisconsin-madison-the-nature-boardwalk.jpg/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg" } }
-
-            ]
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "path/to/image.jpg",
+                    },
+                },
+                {
+                    "type": "text",
+                    "text": "Describe this image in detail.",
+                },
+            ],
         }
     ]
 )
-print(response["choices"][0]["text"])
+
+print(response["choices"][0]["message"]["content"])
+````
+
+#### Chat Template Resolution Order
+
+`GenericMTMDChatHandler` resolves the chat template in the following order:
+
+1. Use the explicit `chat_format` passed through `chat_handler_kwargs`, if provided.
+2. Use the named model chat template if `chat_template_name` is provided.
+3. Fall back to the default `tokenizer.chat_template` stored in the GGUF model metadata.
+4. Fall back to the built-in MTMD chat template if no model template is available.
+
+Example using a named chat template:
+
+```python
+llm = Llama(
+    model_path=r"path/to/model.gguf",
+    mmproj_path=r"path/to/mmproj.gguf",
+    # chat_template_name="default",
+    n_gpu_layers=-1,
+    n_ctx=4096,
+    chat_handler_kwargs={
+        "verbose": False,
+    },
+)
 ```
+
+#### Passing Extra Template Arguments
+
+Some model chat templates expose optional Jinja variables such as `enable_thinking`, `add_vision_id`, or model-specific media token switches. Further details can be obtained by analyzing the chat templates provided in `chat_template.jinja` or `tokenizer_config.json` for each model.
+
+You can pass those values through `chat_handler_kwargs["extra_template_arguments"]`:
+
+```python
+from llama_cpp import Llama
+
+# Model and multimodal projection paths
+MODEL_PATH = r"path/to/model.gguf"
+MMPROJ_PATH = r"path/to/mmproj.gguf"
+
+llm = Llama(
+    model_path=MODEL_PATH,
+    mmproj_path=MMPROJ_PATH,
+    n_gpu_layers=-1,
+    n_ctx=10240,
+    verbose=False,
+    verbosity=1,
+    chat_handler_kwargs={
+        "extra_template_arguments": {
+            "enable_thinking": True,
+        },
+        "verbose": False,
+    },
+)
+...
+```
+
+The values inside `extra_template_arguments` are passed directly into the Jinja template render call.
+
+For models that already have a dedicated handler, you can still instantiate that handler directly:
+
+```python
+from llama_cpp import Llama
+from llama_cpp.llama_multimodal import PaddleOCRChatHandler
+
+MODEL_PATH = r"path/to/model.gguf"
+MMPROJ_PATH = r"path/to/mmproj.gguf"
+
+llm = Llama(
+    model_path=MODEL_PATH,
+    chat_handler=PaddleOCRChatHandler(
+        mmproj_path=MMPROJ_PATH,
+    ),
+    n_gpu_layers=-1,    # Use all available GPU layers
+    n_ctx = 0,          # Context window size
+    n_batch=2048,
+)
+...
+```
+
+Use `GenericMTMDChatHandler` when the model-provided `tokenizer.chat_template` already works correctly. Prefer a dedicated handler when the model requires custom prompt construction, special reasoning behavior, custom stop tokens, OCR/ASR-specific handling, or non-standard media ordering.
+
 
 **Note**: Multi-modal models also support tool calling and JSON mode.
 
