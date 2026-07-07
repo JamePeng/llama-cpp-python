@@ -29,6 +29,7 @@ This package provides:
         - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
+        - [Introducing Generic MTMD Chat Handler](https://github.com/JamePeng/llama-cpp-python#generic-mtmd-chat-handler)
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
         - [Speech Recognition With Qwen3-ASR (Speech-to-Text)](https://github.com/JamePeng/llama-cpp-python#speech-recognition-with-qwen3-asr-speech-to-text)
         - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--text)
