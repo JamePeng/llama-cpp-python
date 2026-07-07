@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.41] Template-Driven MTMD, Broader Multimodal Inputs, and Smarter N-Gram Drafting
+
+- refactor(mtmd): extract prompt rendering and media marker normalization
+    - Add extra_template_arguments to MTMD chat handlers and pass them through to the Jinja chat template render call. This allows generic model templates to receive render-time options such as enable_thinking, add_vision_id, or model-specific template jinja variables.
+    - Extract MTMD prompt rendering into dedicated helpers:
+        * _render_mtmd_prompt() for pure chat template rendering
+        * _replace_media_placeholders() for normalizing rendered media tags and URLs into the MTMD runtime marker
+        * _render_and_replace_media() for the combined render-and-normalize stage
+    - This removes inline render/replace logic from _process_mtmd_prompt(), keeps media marker validation after normalization, and improves separation between prompt construction and MTMD tokenization.
+
+- docs(README): add GenericMTMDChatHandler usage guide
+    - Replace the legacy Llava multimodal loading example with a GenericMTMDChatHandler
+    usage guide for template-driven multimodal GGUF models.
+    - Document loading mmproj through Llama, chat template resolution order,
+    extra_template_arguments for model-specific Jinja variables, and when to prefer
+    a dedicated multimodal chat handler.
+    - Also clarify the mmproj_path naming, llama_multimodal migration, and note that
+    the generic handler is intended as a flexible fallback for models without
+    dedicated handlers and may require additional testing for model-specific
+    prompting behavior.
+    - Update Generic MTMD Chat Handler directory index.
+
+- refactor(mtmd): extract mtmd_tokenize into _mtmd_tokenize standalone helper
+    - Introduce `_mtmd_tokenize()` to encapsulate llama.cpp mtmd_tokenize binding
+    - Decouple hybrid tokenization logic from `_process_mtmd_prompt`
+    - Improve separation of concerns between prompt construction and C++ binding
+    - Preserve strict media marker validation to ensure token/bitmap alignment
+
+- feat(speculative): Improve ngram-map draft selection and accept feedback
+    - Store accepted draft lengths per key/value and truncate future drafts accordingly
+    - Make key-only mode draft on any key match without applying min_hits
+    - Select k4v continuations by frequency instead of latest occurrence
+    - Skip ambiguous k4v drafts when the top continuation is not dominant
+    - Track fixed-size k4v continuations to keep frequency statistics comparable
+
+- feat(mtmd): broaden multimodal media extraction
+    - Broaden MTMD media extraction to support common multimodal content shapes used
+    by model chat templates.
+    - In addition to OpenAI-style image_url/audio_url/video_url chunks, accept
+    image/audio/video typed chunks and direct media keys such as {"image": "..."},
+    {"audio": "..."}, or {"video": "..."}. This keeps the extracted media list
+    aligned with templates that emit placeholders for image, audio, or video content
+    without requiring URL-specific chunk names.
+    - Add a shared helper for extracting URLs, local paths, existing data URIs, or
+    inline base64 payloads from media content items. Preserve capability checks,
+    strict input_audio format validation, and explicit errors for missing or
+    ambiguous media payloads.
+
+- feat(mtmd): enhance generic chat template support
+    - Enhance GenericMTMDChatHandler to better support model-provided chat templates.
+    - Allow the generic handler to accept an optional named chat template, load it
+    from the model at call time via llama_model_chat_template(), fall back to the
+    model's default chat template, and finally use the built-in MTMD CHAT_FORMAT
+    when no model template is available.
+    - Also expand the generic media placeholder list for common multimodal templates
+    and document the handler as a template-driven MTMD implementation. This prepares
+    the generic path for a later render-driven placeholder replacement pass.
+
+- fix(model): handle missing chat templates
+    - Update `LlamaModel.model_chat_template()` to return Optional[str] and accept
+    name=None for the default model chat template.
+    - `llama_model_chat_template()` may return nullptr when no chat template is
+    available. Handle that case explicitly instead of decoding a null pointer, and
+    return None so callers can apply their own fallback logic.
+
+- fix(vocab): update `LlamaModel.vocab_type` to use self.vocab and add None checks
+
+- refactor(mtmd): move multimodal handlers to separate module `llama_multimodal`
+    - Move `MTMDChatHandler`, `GenericMTMDChatHandler``, and model-specific multimodal
+    chat handlers out of `llama_chat_format.py` into `llama_multimodal.py`.
+    - `llama_chat_format.py` has grown too large and difficult to maintain, especially
+    as MTMD support expands beyond image-only use cases. Splitting multimodal
+    handling into its own module makes the chat formatting layer smaller and keeps
+    media loading, MTMD tokenization, multimodal KV-cache bookkeeping, and handler
+    implementations in a dedicated place.
+    - This also prepares the codebase for broader multimodal support and future video
+    frame / image batch evaluation, where the media-processing path will need to
+    evolve independently from text-only chat formatting.
+    - Keep backward-compatible re-exports from `llama_chat_format.py` so existing
+    imports continue to work.
+    - Also keep `clip_model_path` as a deprecated initialization alias for
+    `mmproj_path` in the base MTMD handler.
+    - docs: update mtmd chat handler import paths in README
+        - Update import statements for multi-modal chat handlers from llama_cpp.llama_chat_format to llama_cpp.llama_multimodal in the documentation examples.
+
+- feat: Implemented generic multimodal chat handler prototype (by **@alcoftTAO**)
+
+- docs(README): Added command prompt scenario for README.md (by **@patrikpatrik**)
+    - Updated command prompt scenario under Configuration -> Environment Variables
+    - Sanity checking after successful installation of wheel
+
+- feat(MTMDChatHandler): add chunk type helpers
+    - Add small helper methods `_is_text_chunk`/`_is_image_chunk`/`_is_audio_chunk` for checking 
+    MTMD text, image, and audio chunk type enum values.
+    - This keeps MTMD prompt processing easier to read and avoids repeating direct
+    enum comparisons when building token spans for text and media chunks.
+
+- feat(mtmd): add video input support to `MTMDChatHandler`
+    - Add video_url handling to the MTMD chat template and media extraction
+    pipeline. Detect whether the loaded libmtmd build supports video helpers
+    and reject video inputs early when MTMD_VIDEO is unavailable.
+    - Update media loading and bitmap creation for the new helper wrapper API.
+    mtmd_helper_bitmap_init_from_buf now returns a bitmap wrapper containing
+    both the decoded bitmap and an optional video helper context, so keep the
+    video context alive until mtmd_tokenize completes and release it afterward.
+    - Also consolidate duplicated audio/video byte loading into a shared
+    _load_bytes helper, reuse it for image loading, and add richer default HTTP
+    headers for remote media requests.
+
+- build(CMakelists): Improve Windows LLVM OpenMP runtime `libomp140.x86_64.dll` discovery
+    - Also improve diagnostics by reporting the selected runtime source and path,
+    warning when an explicit override points to a missing file, and keeping a clear
+    runtime warning when no OpenMP DLL can be found.
+    - prefer VS 2022 VC143 OpenMP redist and keep System32 as final fallback。
+
+- feat(_ctypes_extensions): improve error diagnostics for shared library loading
+    When `load_shared_library` fails, the resulting `RuntimeError` now
+    includes a listing of the contents of the searched directories. This
+    provides immediate context to help developers diagnose missing, misplaced,
+    or incorrectly named library files.
+
+    - Added `_format_library_dir_contents` to safely format directory listings.
+    - Appended the directory listing to the failure message.
+    - Confined this diagnostic work strictly to the failure path to avoid any
+    performance overhead during successful imports.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/3899b39ce2acc2e019f149b7107f24b6ca297390](https://github.com/ggml-org/llama.cpp/commit/3899b39ce2acc2e019f149b7107f24b6ca297390)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260707
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/12861b918f67b62f78f28c5cabb7223f766e1097...b9b58594023ab673c2dda6723f8909d85d65a2e5
+
+
 ## [0.3.40-Milestone] Reasoning Budget Control, Gemma 4 12B Support, Enhanced Jinja2ChatFormatter, NGram k/k4v Speculative Decoding, Faster Native Sampling and Multimodal Improvements
 
 - feat(internals): Add `ReasoningBudgetSampler` support
