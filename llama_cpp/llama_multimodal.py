@@ -1010,7 +1010,12 @@ class MTMDChatHandler:
 
                         if tokens_to_eval:
                             if self.verbose:
-                                print(f"{self.log_prefix}(__call__): Evaluating TEXT chunk ({len(tokens_to_eval)} tokens) at pos {llama.n_tokens}...", file=sys.stderr)
+                                print(
+                                    f"{self.log_prefix}(__call__): Evaluating TEXT chunk "
+                                    f"({len(tokens_to_eval)} tokens) at pos {llama.n_tokens}...",
+                                    file=sys.stderr,
+                                )
+
                             # Text evaluation delegates shift and chunking to native llama.eval
                             llama.eval(tokens_to_eval)
                             n_past = llama.n_tokens

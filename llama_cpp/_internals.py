@@ -746,7 +746,14 @@ class LlamaContext:
                           (e.g., negative error codes or invalid batch structures).
         """
         self._assert_ctx()
-        return_code = llama_cpp.llama_decode(self.ctx, batch.batch)
+        try:
+            return_code = llama_cpp.llama_decode(self.ctx, batch.batch)
+        except Exception as e:
+            raise RuntimeError(
+                "llama_decode raised a native exception before returning a status code. "
+                "This may indicate an invalid batch, invalid token id, corrupted context, "
+                "backend memory issue, or native access violation."
+            ) from e
 
         if return_code == 0:
             return 0

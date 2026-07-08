@@ -1082,6 +1082,37 @@ class Llama:
             print(f"Llama.abort: Abort signal received. Terminating generation...", file=sys.stderr)
         self._abort_event.set()
 
+    def _validate_eval_tokens(
+            self,
+            tokens: Sequence[int],
+    ) -> None:
+        """Validate token ids before passing them to llama_decode.
+
+        This mirrors llama.cpp server-side token validation and prevents invalid
+        token ids from reaching the native decode path, where they may cause hard
+        crashes instead of Python exceptions.
+        """
+        if not tokens:
+            return
+
+        for i, tok in enumerate(tokens):
+            if not isinstance(tok, int):
+                raise ValueError(
+                    f"Llama.eval: invalid token type at index {i}: "
+                    f"{type(tok).__name__}"
+                )
+
+            if tok < 0:
+                raise ValueError(
+                    f"Llama.eval: invalid negative token id at index {i}: {tok}"
+                )
+
+            if tok >= self._n_vocab:
+                raise ValueError(
+                    f"Llama.eval: token out of vocab at index {i}: "
+                    f"{tok} >= n_vocab({self._n_vocab})"
+                )
+
     def eval(
             self,
             tokens: Sequence[int],
@@ -1105,6 +1136,11 @@ class Llama:
         n_eval = len(tokens)
         if n_eval == 0:
             return
+
+        # Validate token ids before any context shifting, batch construction, or
+        # native llama_decode call. Invalid ids may otherwise reach the C/C++ backend
+        # and cause hard crashes instead of Python exceptions.
+        self._validate_eval_tokens(tokens)
 
         # Context Shift: Prevent OOM by discarding older tokens when context limit is reached.
         if self.n_tokens + n_eval > self._n_ctx:
@@ -1265,9 +1301,11 @@ class Llama:
                         current_batch_size //= 2
 
                 except Exception as e:
+                    min_pos = min(current_batch_size, 16)
+                    preview = chunk[:min_pos]
                     # Catch fatal backend failures (e.g., Code -2, -3)
                     raise RuntimeError(f"Llama.eval(decode): Fatal Decode Error at Pos {self.n_tokens}, "
-                                       f"Batch size {current_batch_size}: {str(e)}") from e
+                                       f"Batch size {current_batch_size}, chunk[:{min_pos}]={preview}: {str(e)}") from e
 
             if not success:
                 raise RuntimeError("Llama.eval(decode): Failed completely even with batch size 1.")
