@@ -1119,6 +1119,33 @@ class LlamaBatch:
                 "separate embedding or mixed-batch path instead."
             )
 
+    def _validate_seq_ids(self, seq_ids: Sequence[int], where: str) -> int:
+        n_seq_id = len(seq_ids)
+
+        if n_seq_id <= 0:
+            raise ValueError(f"LlamaBatch.{where}: seq_ids must not be empty.")
+
+        if n_seq_id > self.n_seq_max:
+            raise ValueError(
+                f"LlamaBatch.{where}: token belongs to {n_seq_id} sequences, "
+                f"but n_seq_max was initialized to {self.n_seq_max}."
+            )
+
+        for seq_id in seq_ids:
+            if not isinstance(seq_id, int):
+                raise ValueError(
+                    f"LlamaBatch.{where}: seq_id must be int, got "
+                    f"{type(seq_id).__name__}."
+                )
+
+            if seq_id < 0 or seq_id >= self.n_seq_max:
+                raise ValueError(
+                    f"LlamaBatch.{where}: invalid seq_id {seq_id}; "
+                    f"expected 0 <= seq_id < {self.n_seq_max}."
+                )
+
+        return n_seq_id
+
     def add_token(self, token: int, pos: int, seq_ids: Sequence[int], logits: bool):
         """
         Adds a single token to the batch.
@@ -1141,10 +1168,8 @@ class LlamaBatch:
         self.batch.token[idx] = token
         self.batch.pos[idx] = pos
 
-        n_seq_id = len(seq_ids)
-        if n_seq_id > self.n_seq_max:
-            raise ValueError(f"LlamaBatch Error[add_token]: Token belongs to {n_seq_id} sequences, "
-                             f"but n_seq_max was initialized to {self.n_seq_max}.")
+        n_seq_id = self._validate_seq_ids(seq_ids, "add_token")
+
         self.batch.n_seq_id[idx] = n_seq_id
 
         for i, seq_id in enumerate(seq_ids):
@@ -1194,20 +1219,7 @@ class LlamaBatch:
                 f"Space left: {self.n_tokens_capacity - current_count}"
             )
 
-        n_seq_id = len(seq_ids)
-        if n_seq_id <= 0:
-            raise ValueError("LlamaBatch Error[add_sequence]: seq_ids must not be empty.")
-
-        if n_seq_id > self.n_seq_max:
-            raise ValueError(f"LlamaBatch Error[add_sequence]: Token belongs to {n_seq_id} sequences, "
-                             f"but n_seq_max was initialized to {self.n_seq_max}.")
-
-        for seq_id in seq_ids:
-            if seq_id < 0 or seq_id >= self.n_seq_max:
-                raise ValueError(
-                    f"LlamaBatch Error[add_sequence]: invalid seq_id {seq_id}; "
-                    f"expected 0 <= seq_id < {self.n_seq_max}"
-                )
+        n_seq_id = self._validate_seq_ids(seq_ids, "add_sequence")
 
         for i in range(n_tokens):
             j = current_count + i
@@ -1220,6 +1232,141 @@ class LlamaBatch:
                 self.batch.seq_id[j][k] = seq_id
 
             self.batch.logits[j] = logits_array[i]
+
+        self.batch.n_tokens += n_tokens
+
+    def _require_embedding_buffer(self, where: str) -> None:
+        self._require_open(where)
+
+        if self.embd <= 0:
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires an embedding batch, but embd={self.embd}."
+            )
+
+        if not bool(self.batch.embd):
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires batch.embd, but batch.embd is NULL."
+            )
+
+    def add_embedding(
+        self,
+        embedding: Sequence[float],
+        pos: int,
+        seq_ids: Sequence[int],
+        logits: bool = False,
+    ) -> None:
+        """
+        Add one embedding row to an embedding batch.
+
+        This is for embd-only llama_batch input:
+            batch.token == NULL
+            batch.embd  != NULL
+
+        Args:
+            embedding: One embedding vector of length self.embd.
+            pos: Logical sequence position.
+            seq_ids: Sequence ids this embedding belongs to, usually [0].
+            logits: Whether to request output for this row.
+        """
+        self._require_embedding_buffer("add_embedding")
+
+        if len(embedding) != self.embd:
+            raise ValueError(
+                f"LlamaBatch.add_embedding: embedding length mismatch: "
+                f"{len(embedding)} != embd({self.embd})."
+            )
+
+        idx = self.batch.n_tokens
+        if idx >= self.n_tokens_capacity:
+            raise IndexError(
+                f"LlamaBatch overflow[add_embedding]: capacity "
+                f"{self.n_tokens_capacity} reached."
+            )
+
+        n_seq_id = self._validate_seq_ids(seq_ids, "add_embedding")
+
+        base = idx * self.embd
+        for d, value in enumerate(embedding):
+            self.batch.embd[base + d] = float(value)
+
+        self.batch.pos[idx] = pos
+        self.batch.n_seq_id[idx] = n_seq_id
+
+        for i, seq_id in enumerate(seq_ids):
+            self.batch.seq_id[idx][i] = seq_id
+
+        self.batch.logits[idx] = logits
+        self.batch.n_tokens += 1
+
+    def add_embeddings(
+        self,
+        embeddings: Sequence[float],
+        *,
+        pos_array: Sequence[int],
+        seq_ids: Sequence[int],
+        logits_array: Optional[Sequence[bool]] = None,
+    ) -> None:
+        """
+        Add multiple embedding rows to an embedding batch.
+
+        embeddings layout:
+            row-major [n_tokens, self.embd]
+
+        The number of rows is inferred from pos_array. This method supports
+        embedding-only llama_batch inputs:
+
+            batch.token == NULL
+            batch.embd  != NULL
+
+        It only supports one logical position per embedding row. M-RoPE media
+        embedding batches should continue to use MTMD helper APIs.
+        """
+        self._require_embedding_buffer("add_embeddings")
+
+        n_tokens = len(pos_array)
+        if n_tokens <= 0:
+            raise ValueError("LlamaBatch.add_embeddings: pos_array must not be empty.")
+
+        if logits_array is None:
+            logits_array = [False] * n_tokens
+        elif len(logits_array) != n_tokens:
+            raise ValueError(
+                f"LlamaBatch.add_embeddings: logits_array length mismatch: "
+                f"{len(logits_array)} != {n_tokens}."
+            )
+
+        expected = n_tokens * self.embd
+        if len(embeddings) != expected:
+            raise ValueError(
+                f"LlamaBatch.add_embeddings: embeddings length mismatch: "
+                f"{len(embeddings)} != n_tokens({n_tokens}) * embd({self.embd}) = {expected}."
+            )
+
+        current_count = self.batch.n_tokens
+        if current_count + n_tokens > self.n_tokens_capacity:
+            raise IndexError(
+                f"LlamaBatch overflow[add_embeddings]: cannot add {n_tokens} rows. "
+                f"Space left: {self.n_tokens_capacity - current_count}."
+            )
+
+        n_seq_id = self._validate_seq_ids(seq_ids, "add_embeddings")
+
+        for i in range(n_tokens):
+            j = current_count + i
+
+            src_base = i * self.embd
+            dst_base = j * self.embd
+
+            for d in range(self.embd):
+                self.batch.embd[dst_base + d] = float(embeddings[src_base + d])
+
+            self.batch.pos[j] = int(pos_array[i])
+            self.batch.n_seq_id[j] = n_seq_id
+
+            for k, seq_id in enumerate(seq_ids):
+                self.batch.seq_id[j][k] = int(seq_id)
+
+            self.batch.logits[j] = int(logits_array[i])
 
         self.batch.n_tokens += n_tokens
 
