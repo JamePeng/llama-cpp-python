@@ -1008,9 +1008,11 @@ class LlamaBatch:
     ):
         # logical validity of parameters
         if n_tokens <= 0:
-            raise ValueError(f"n_tokens must be positive, got {n_tokens}")
+            raise ValueError(f"LlamaBatch[__init__]: n_tokens must be positive, got {n_tokens}")
+        if embd < 0:
+            raise ValueError(f"LlamaBatch[__init__]: embd must be non-negative, got {embd}")
         if n_seq_max <= 0:
-            raise ValueError(f"n_seq_max must be positive, got {n_seq_max}")
+            raise ValueError(f"LlamaBatch[__init__]: n_seq_max must be positive, got {n_seq_max}")
 
         self.n_tokens_capacity = n_tokens
         self.embd = embd
@@ -1018,11 +1020,24 @@ class LlamaBatch:
         self.verbose = verbose
         self._exit_stack = ExitStack()
 
-        batch = llama_cpp.llama_batch_init(self.n_tokens_capacity, self.embd, self.n_seq_max)
+        # llama_batch_init allocates either batch.token or batch.embd:
+        #
+        #   embd == 0 -> token batch
+        #   embd > 0  -> embedding batch
+        #
+        # Some llama.cpp paths, such as EAGLE3/MTP, manually create mixed
+        # token+embd batches after initialization. This wrapper keeps that
+        # possibility open, but add_token/add_sequence only support token input.
+        batch = llama_cpp.llama_batch_init(
+            self.n_tokens_capacity,
+            self.embd,
+            self.n_seq_max,
+        )
 
         if batch is None:
             raise MemoryError(
-                f"Failed to allocate memory for llama_batch via llama_batch_init({n_tokens},{embd},{n_seq_max})"
+                f"Failed to allocate memory for llama_batch via "
+                f"llama_batch_init({n_tokens},{embd},{n_seq_max})"
             )
 
         self.batch = batch
@@ -1066,17 +1081,43 @@ class LlamaBatch:
             return self.n_tokens_capacity - self.batch.n_tokens
         else:
             raise RuntimeError(
-                f"LlamaBatch Critical Error: n_tokens ({self.batch.n_tokens}) exceeds capacity ({self.n_tokens_capacity}). "
-                "This implies a buffer overflow or corrupted internal state."
+                f"LlamaBatch Critical Error: n_tokens ({self.batch.n_tokens}) exceeds capacity "
+                f"({self.n_tokens_capacity}). This implies a buffer overflow or "
+                "corrupted internal state."
             )
 
     def reset(self):
         """
-        Resets the batch counter to 0. Does not free memory, just resets the index.
-        Call this before starting a new decoding step.
+        Reset the logical batch counter.
+
+        This does not free or clear the underlying C buffers. llama_decode only
+        reads entries in [0, batch.n_tokens), so resetting n_tokens is enough and
+        matches llama.cpp's reusable batch pattern.
         """
-        if self.batch is not None:
-            self.batch.n_tokens = 0
+        if self.batch is None:
+            return
+        self.batch.n_tokens = 0
+
+    def _require_open(self, where: str) -> None:
+        if self.batch is None:
+            raise RuntimeError(f"LlamaBatch.{where}: batch has been closed.")
+
+    def _require_token_buffer(self, where: str) -> None:
+        """
+        Require that batch.token is available.
+
+        llama_batch_init allocates batch.token only when embd == 0. Some advanced
+        llama.cpp paths manually create mixed token+embd batches, but this Python
+        token API should only write token ids when batch.token is non-null.
+        """
+        self._require_open(where)
+
+        if not bool(self.batch.token):
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires a token buffer, but batch.token is NULL. "
+                "This batch was likely initialized as an embedding batch. Use a "
+                "separate embedding or mixed-batch path instead."
+            )
 
     def add_token(self, token: int, pos: int, seq_ids: Sequence[int], logits: bool):
         """
@@ -1091,6 +1132,8 @@ class LlamaBatch:
                      A single token can be part of multiple sequences simultaneously.
             logits: A boolean flag indicating whether the backend should compute logits for this token.
         """
+        self._require_token_buffer("add_token")
+
         idx = self.batch.n_tokens
         if idx >= self.n_tokens_capacity:
             raise IndexError(f"LlamaBatch overflow[add_token]: Cannot add token. Capacity {self.n_tokens_capacity} reached.")
@@ -1114,22 +1157,36 @@ class LlamaBatch:
         self,
         token_array: Sequence[int],
         pos_array: Sequence[int],
-        seq_ids: Sequence[Sequence[int]],
+        seq_ids: Sequence[int],
         logits_array: Sequence[bool]
     ):
         """
-        Adds a sequence of tokens to the batch in a vectorized manner.
-        Strictly maps the provided arrays to the underlying C++ batch structure without subjective overriding.
+        Adds a sequence of tokens to the batch.
 
         Args:
-            token_array: A sequence of token IDs to be evaluated.
-            pos_array: A sequence of logical positions corresponding to each token.
-            seq_id_array: A sequence of lists, where each list contains the sequence IDs for the respective token.
-                          (e.g., [[0], [0], [0]] for 3 tokens belonging to sequence 0).
-            logits_array: A sequence of boolean flags indicating whether to compute logits for each token.
+            token_array: Token ids to evaluate.
+            pos_array: Logical positions for each token.
+            seq_ids: Sequence ids shared by every token in this call, usually [0].
+                    A token can belong to multiple sequences, for example [0, 1],
+                    matching llama.cpp's per-token seq_id list.
+            logits_array: Whether to request logits/output for each token.
         """
+        self._require_token_buffer("add_sequence")
+
         n_tokens = len(token_array)
         current_count = self.batch.n_tokens
+
+        if len(pos_array) != n_tokens:
+            raise ValueError(
+                f"LlamaBatch.add_sequence: pos_array length mismatch: "
+                f"{len(pos_array)} != {n_tokens}."
+            )
+
+        if len(logits_array) != n_tokens:
+            raise ValueError(
+                f"LlamaBatch.add_sequence: logits_array length mismatch: "
+                f"{len(logits_array)} != {n_tokens}."
+            )
 
         if current_count + n_tokens > self.n_tokens_capacity:
             raise IndexError(
@@ -1138,12 +1195,23 @@ class LlamaBatch:
             )
 
         n_seq_id = len(seq_ids)
+        if n_seq_id <= 0:
+            raise ValueError("LlamaBatch Error[add_sequence]: seq_ids must not be empty.")
+
         if n_seq_id > self.n_seq_max:
             raise ValueError(f"LlamaBatch Error[add_sequence]: Token belongs to {n_seq_id} sequences, "
                              f"but n_seq_max was initialized to {self.n_seq_max}.")
 
+        for seq_id in seq_ids:
+            if seq_id < 0 or seq_id >= self.n_seq_max:
+                raise ValueError(
+                    f"LlamaBatch Error[add_sequence]: invalid seq_id {seq_id}; "
+                    f"expected 0 <= seq_id < {self.n_seq_max}"
+                )
+
         for i in range(n_tokens):
             j = current_count + i
+
             self.batch.token[j] = token_array[i]
             self.batch.pos[j] = pos_array[i]
 
