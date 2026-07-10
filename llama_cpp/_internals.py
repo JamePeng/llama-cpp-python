@@ -1004,6 +1004,7 @@ class LlamaBatch:
         n_tokens: int,
         embd: int,
         n_seq_max: int,
+        mixed: bool = False,
         verbose: bool = True
     ):
         # logical validity of parameters
@@ -1013,11 +1014,16 @@ class LlamaBatch:
             raise ValueError(f"LlamaBatch[__init__]: embd must be non-negative, got {embd}")
         if n_seq_max <= 0:
             raise ValueError(f"LlamaBatch[__init__]: n_seq_max must be positive, got {n_seq_max}")
+        if mixed and embd <= 0:
+            raise ValueError("LlamaBatch[__init__]: mixed batch requires embd > 0.")
 
         self.n_tokens_capacity = n_tokens
         self.embd = embd
         self.n_seq_max = n_seq_max
+        self.mixed = mixed
         self.verbose = verbose
+        self._token_buf = None
+        self._owns_token = False
         self._exit_stack = ExitStack()
 
         # llama_batch_init allocates either batch.token or batch.embd:
@@ -1040,16 +1046,41 @@ class LlamaBatch:
                 f"llama_batch_init({n_tokens},{embd},{n_seq_max})"
             )
 
+        if mixed:
+            if bool(batch.token):
+                raise RuntimeError(
+                    "LlamaBatch[__init__]: expected batch.token to be NULL for "
+                    "mixed embedding batch initialized with embd > 0."
+                )
+            if not bool(batch.embd):
+                raise RuntimeError(
+                    "LlamaBatch[__init__]: expected batch.embd to be non-NULL "
+                    "for mixed batch."
+                )
+
+            self._token_buf = (
+                llama_cpp.llama_token * self.n_tokens_capacity
+            )()
+            batch.token = self._token_buf
+            self._owns_token = True
+
         self.batch = batch
 
     def close(self):
         """Manually free LlamaBatch resources."""
         if getattr(self, "batch", None) is not None:
             try:
+                if getattr(self, "_owns_token", False):
+                    # batch.token points to a Python-owned ctypes buffer in mixed mode.
+                    # llama_batch_free() would call free(batch.token), so clear it first.
+                    self.batch.token = None
                 llama_cpp.llama_batch_free(self.batch)
             except Exception:
                 pass
             self.batch = None
+
+        self._token_buf = None
+        self._owns_token = False
 
         if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
             self._exit_stack.close()
@@ -1111,6 +1142,12 @@ class LlamaBatch:
         token API should only write token ids when batch.token is non-null.
         """
         self._require_open(where)
+
+        if self.mixed:
+            raise RuntimeError(
+                f"LlamaBatch.{where} is for token-only batches. "
+                "Use add_token_embedding for mixed batches."
+            )
 
         if not bool(self.batch.token):
             raise RuntimeError(
@@ -1237,6 +1274,12 @@ class LlamaBatch:
 
     def _require_embedding_buffer(self, where: str) -> None:
         self._require_open(where)
+
+        if self.mixed:
+            raise RuntimeError(
+                f"LlamaBatch.{where} is for embedding-only batches. "
+                "Use add_token_embedding for mixed batches."
+            )
 
         if self.embd <= 0:
             raise RuntimeError(
@@ -1369,6 +1412,80 @@ class LlamaBatch:
             self.batch.logits[j] = int(logits_array[i])
 
         self.batch.n_tokens += n_tokens
+
+    def _require_mixed_buffer(self, where: str) -> None:
+        self._require_open(where)
+
+        if not self.mixed:
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires mixed=True batch."
+            )
+
+        if self.embd <= 0:
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires mixed token+embedding batch, "
+                f"but embd={self.embd}."
+            )
+
+        if not bool(self.batch.token):
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires batch.token, but batch.token is NULL."
+            )
+
+        if not bool(self.batch.embd):
+            raise RuntimeError(
+                f"LlamaBatch.{where} requires batch.embd, but batch.embd is NULL."
+            )
+
+    def add_token_embedding(
+        self,
+        token: int,
+        embedding: Sequence[float],
+        pos: int,
+        seq_ids: Sequence[int],
+        logits: bool,
+    ) -> None:
+        """
+        Add one mixed token+embedding row.
+
+        This is for EAGLE3/MTP-style decoder inputs where each batch row contains:
+            token id
+            embedding vector
+            position
+            seq ids
+            logits flag
+        """
+        self._require_mixed_buffer("add_token_embedding")
+
+        if len(embedding) != self.embd:
+            raise ValueError(
+                f"LlamaBatch.add_token_embedding: embedding length mismatch: "
+                f"{len(embedding)} != embd({self.embd})."
+            )
+
+        idx = self.batch.n_tokens
+        if idx >= self.n_tokens_capacity:
+            raise IndexError(
+                f"LlamaBatch overflow[add_token_embedding]: capacity "
+                f"{self.n_tokens_capacity} reached."
+            )
+
+        n_seq_id = self._validate_seq_ids(seq_ids, "add_token_embedding")
+
+        self.batch.token[idx] = token
+
+        base = idx * self.embd
+        for d, value in enumerate(embedding):
+            self.batch.embd[base + d] = float(value)
+
+        self.batch.pos[idx] = pos
+        self.batch.n_seq_id[idx] = n_seq_id
+
+        for i, seq_id in enumerate(seq_ids):
+            self.batch.seq_id[idx][i] = seq_id
+
+        self.batch.logits[idx] = logits
+        self.batch.n_tokens += 1
 
 
 # Embedding functions
