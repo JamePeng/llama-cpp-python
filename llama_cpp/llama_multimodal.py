@@ -565,6 +565,10 @@ class MTMDChatHandler:
         media payloads.
         """
         media_marker = self.media_marker
+        if not media_marker:
+            raise ValueError(
+                f"{self.log_prefix}(_replace_media_placeholders): media marker must not be empty."
+            )
 
         # 1. Replace known template-specific media tags first.
         #
@@ -583,12 +587,19 @@ class MTMDChatHandler:
             if url and url in text:
                 text = text.replace(url, media_marker, 1)
 
-        # 3. Validate only after all normalization is complete.
+        # 3. Validate after all normalization is complete.
         marker_count = text.count(media_marker)
-        if marker_count != len(media_items):
+        media_count = len(media_items)
+
+        if marker_count != media_count:
             raise ValueError(
-                f"{self.log_prefix}(_replace_media_placeholders): media marker mismatch "
-                f"(marker_count={marker_count}, media_count={len(media_items)})"
+                f"{self.log_prefix}(_replace_media_placeholders): media marker mismatch\n"
+                f"- marker_count={marker_count}\n"
+                f"- media_count={media_count}\n"
+                f"- media_marker={media_marker!r}\n"
+                "Each media item must render to exactly one MTMD media marker. "
+                "Check whether the chat template rendered both a media tag and the "
+                "original URL/data URI, or failed to render a media placeholder."
             )
 
         return text
@@ -620,11 +631,68 @@ class MTMDChatHandler:
             media_items=media_items,
         )
 
+    def _validate_mtmd_inputs(
+        self,
+        *,
+        text: str,
+        bitmaps: Optional[List[Any]] = None,
+    ) -> None:
+        """
+        Validate Python-side MTMD tokenizer inputs before calling mtmd_tokenize.
+
+        This mirrors the most important checks in llama.cpp mtmd_tokenizer:
+        - mtmd context must be initialized
+        - rendered text must be a string
+        - media marker must not be empty
+        - media marker count must match bitmap count
+        - bitmap entries must not be None
+
+        Pure text input is valid:
+            bitmaps is None or []
+            marker_count == 0
+        """
+        if self.mtmd_ctx is None:
+            raise ValueError(
+                f"{self.log_prefix}(_validate_mtmd_inputs): mtmd context not initialized."
+            )
+
+        if not isinstance(text, str):
+            raise TypeError(
+                f"{self.log_prefix}(_validate_mtmd_inputs): text must be str, "
+                f"got {type(text).__name__}."
+            )
+
+        if not self.media_marker:
+            raise ValueError(
+                f"{self.log_prefix}(_validate_mtmd_inputs): media marker must not be empty."
+            )
+
+        if bitmaps is None:
+            bitmaps = []
+
+        marker_count = text.count(self.media_marker)
+        bitmap_count = len(bitmaps)
+
+        if marker_count != bitmap_count:
+            raise ValueError(
+                f"{self.log_prefix}(_validate_mtmd_inputs): media marker mismatch\n"
+                f"- marker_count={marker_count}\n"
+                f"- bitmap_count={bitmap_count}\n"
+                f"- media_marker={self.media_marker!r}\n"
+                "The rendered prompt must contain exactly one media marker per decoded media input."
+            )
+
+        for i, bitmap in enumerate(bitmaps):
+            if bitmap is None:
+                raise ValueError(
+                    f"{self.log_prefix}(_validate_mtmd_inputs): bitmap[{i}] is None."
+                )
+
     def _mtmd_tokenize(
         self,
         llama: "llama_core.Llama",
         text: str,
-        bitmaps: Optional[list] = None,
+        bitmaps: Optional[List[Any]] = None,
         chunks: Optional[Any] = None,
     ) -> Any:
         """
@@ -637,7 +705,19 @@ class MTMDChatHandler:
         - stable interface for future async/batch decoding
         - isolated error handling for tokenizer failures
         - clean separation between prompt building and C++ binding
+        - strict Python-side marker/bitmap validation before native tokenization
+
+        Pure text input is valid:
+            bitmaps is None or []
+            marker_count == 0
         """
+        if bitmaps is None:
+            bitmaps = []
+
+        self._validate_mtmd_inputs(
+            text=text,
+            bitmaps=bitmaps,
+        )
 
         if chunks is None:
             chunks = self._mtmd_cpp.mtmd_input_chunks_init()
@@ -646,30 +726,19 @@ class MTMDChatHandler:
                     f"{self.log_prefix}(_mtmd_tokenize): failed to init mtmd_input_chunks"
                 )
 
-        # Validate strict alignment between rendered media markers and provided bitmaps
-        # to ensure MTMD tokenization consistency and prevent decoding mismatch errors.
-        if bitmaps is not None:
-            marker_count = text.count(self.media_marker)
-            if marker_count != len(bitmaps):
-                raise ValueError(
-                    f"{self.log_prefix}(_mtmd_tokenize): marker mismatch "
-                    f"(marker_count={marker_count}, bitmap_count={len(bitmaps)})"
-                )
-
         input_text = self._mtmd_cpp.mtmd_input_text()
         input_text.text = ctypes.c_char_p(text.encode("utf-8"))
         input_text.add_special = (llama.n_tokens == 0)
         input_text.parse_special = True
 
-        bitmap_array = None
-        n_bitmaps = 0
+        n_bitmaps = len(bitmaps)
 
-        if bitmaps:
-            n_bitmaps = len(bitmaps)
-            bitmap_array = (self._mtmd_cpp.mtmd_bitmap_p_ctypes * n_bitmaps)(*bitmaps)
+        if n_bitmaps > 0:
+            bitmap_array = (
+                self._mtmd_cpp.mtmd_bitmap_p_ctypes * n_bitmaps
+            )(*bitmaps)
         else:
             bitmap_array = None
-            n_bitmaps = 0
 
         result = self._mtmd_cpp.mtmd_tokenize(
             self.mtmd_ctx,
@@ -680,11 +749,19 @@ class MTMDChatHandler:
         )
 
         if result != 0:
+            marker_count = text.count(self.media_marker)
             raise ValueError(
-                f"{self.log_prefix}(_mtmd_tokenize): tokenize failed\n"
+                f"{self.log_prefix}(_mtmd_tokenize): mtmd_tokenize failed\n"
                 f"- result={result}\n"
                 f"- text_len={len(text)}\n"
+                f"- marker_count={marker_count}\n"
                 f"- n_bitmaps={n_bitmaps}\n"
+                f"- supports_vision={self.is_support_vision}\n"
+                f"- supports_audio={self.is_support_audio}\n"
+                f"- supports_video={self.is_support_video}\n"
+                "Possible causes: marker/bitmap mismatch, invalid image/audio data, "
+                "unsupported vision/audio projector, failed media preprocessing, "
+                "or text tokenization failure."
             )
 
         return chunks
@@ -858,6 +935,15 @@ class MTMDChatHandler:
                     current_idx += chunk_n_tokens
                 else:
                     raise TypeError(f"{self.log_prefix}(mtmd_input_chunk_get_type): Invalid chunk type, chunk_type = {chunk_type}.")
+
+            if media_items_cur != media_items_count:
+                raise RuntimeError(
+                    f"{self.log_prefix}(_process_mtmd_prompt): not all media inputs were consumed by MTMD chunks\n"
+                    f"- consumed={media_items_cur}\n"
+                    f"- media_items={media_items_count}\n"
+                    "This usually means the rendered prompt did not produce enough media chunks, "
+                    "or the chat template/media marker normalization is incorrect."
+                )
 
             return full_prompt_ids, chunk_token_spans, chunks, bitmap_cleanup
 
