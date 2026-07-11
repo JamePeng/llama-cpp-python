@@ -90,17 +90,8 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
 
     # Add the library directory to the DLL search path on Windows (if needed)
     if sys.platform == "win32":
-        for base_path in base_paths:
-            p = pathlib.Path(base_path)
-            if p.exists() and p.is_dir():
-                os.add_dll_directory(str(p))
-                os.environ["PATH"] = str(p) + os.pathsep + os.environ["PATH"]
 
-    if sys.platform == "win32" and sys.version_info >= (3, 9):
-        for base_path in base_paths:
-            p = pathlib.Path(base_path)
-            if p.exists() and p.is_dir():
-                os.add_dll_directory(str(p))
+        # Add CUDA runtime DLL directories if CUDA is available.
         if "CUDA_PATH" in os.environ:
             cuda_path = os.environ["CUDA_PATH"]
             sub_dirs_to_add = [
@@ -114,13 +105,35 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
                 if os.path.exists(full_path):
                     os.add_dll_directory(full_path)
 
+        # Add HIP runtime DLL directories when HIP backend is available.
         if "HIP_PATH" in os.environ:
             os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
             os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "lib"))
 
+        # Add Vulkan SDK DLL directories when Vulkan backend is enabled.
         if "VULKAN_SDK" in os.environ:
             os.add_dll_directory(os.path.join(os.environ["VULKAN_SDK"], "Bin"))
             os.add_dll_directory(os.path.join(os.environ["VULKAN_SDK"], "Lib"))
+
+        # Add package-provided library directories.
+        #
+        # The paths are added in reverse order intentionally.
+        # This ensures that the first entry in base_paths gets prepended
+        # to PATH last, making it the highest priority search location.
+        #
+        # Example:
+        #   base_paths = [
+        #       package/lib,
+        #       package/bin,
+        #   ]
+        #
+        # After reversed iteration:
+        #   PATH = package/lib;package/bin;...
+        for base_path in reversed(base_paths):
+            p = pathlib.Path(base_path)
+            if p.exists() and p.is_dir():
+                os.add_dll_directory(str(p))
+                os.environ["PATH"] = str(p) + os.pathsep + os.environ["PATH"]
 
         cdll_args["winmode"] = ctypes.RTLD_GLOBAL
 
@@ -130,7 +143,9 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
     lib_path = find_library(lib_base_name)
     if lib_path:
         try:
-            return ctypes.CDLL(lib_path, **cdll_args)
+            lib = ctypes.CDLL(lib_path, **cdll_args)
+            print(f"[llama-cpp-python].find_library: loaded library from {lib_path}")
+            return lib
         except Exception as e:
             errors.append(f"{lib_path}: {e}")
 
@@ -141,7 +156,9 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
 
             if lib_path.exists():
                 try:
-                    return ctypes.CDLL(str(lib_path), **cdll_args)
+                    lib = ctypes.CDLL(str(lib_path), **cdll_args)
+                    print(f"[llama-cpp-python].provided_path: loaded library from {lib_path}")
+                    return lib
                 except Exception as e:
                     errors.append(f"{lib_path}: {e}")
 
