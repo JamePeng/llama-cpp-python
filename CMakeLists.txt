@@ -336,6 +336,7 @@ if (LLAMA_BUILD)
     set(GGML_BACKEND_TARGETS
         ggml-cann
         ggml-cuda
+        ggml-et
         ggml-hexagon
         ggml-hip
         ggml-metal
