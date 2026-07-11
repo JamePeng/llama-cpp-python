@@ -27,13 +27,13 @@ libggml_base_paths = [
     libggml_base_path / "bin",
 ]
 
-libggml = load_shared_library("ggml", libggml_base_paths)
-
-ggml_function = ctypes_function_for_shared_library(libggml)
-
 libggml_base = load_shared_library("ggml-base", libggml_base_paths)
 
 ggml_base_function = ctypes_function_for_shared_library(libggml_base)
+
+libggml = load_shared_library("ggml", libggml_base_paths)
+
+ggml_function = ctypes_function_for_shared_library(libggml)
 
 # // ====== ggml.h ======
 
