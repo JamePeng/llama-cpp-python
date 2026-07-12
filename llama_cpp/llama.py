@@ -1301,7 +1301,7 @@ class Llama:
                         current_batch_size //= 2
 
                 except Exception as e:
-                    min_pos = min(current_batch_size, 16)
+                    min_pos = min(current_batch_size, 128)
                     preview = chunk[:min_pos]
                     # Catch fatal backend failures (e.g., Code -2, -3)
                     raise RuntimeError(f"Llama.eval(decode): Fatal Decode Error at Pos {self.n_tokens}, "
