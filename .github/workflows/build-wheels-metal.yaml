@@ -37,7 +37,7 @@ jobs:
         id: get_version
         shell: bash
         run: |
-          VERSION=$(python -c "import llama_cpp; print(llama_cpp.__version__)")
+          VERSION=$(python -c "import importlib.metadata; print(importlib.metadata.version('llama-cpp-python'))")
           echo "Detected version: $VERSION"
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
