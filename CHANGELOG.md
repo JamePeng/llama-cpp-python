@@ -7,6 +7,101 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.42] More Reliable Dynamic Backend Loading, Safer MTMD Processing, and Advanced Batch Support
+
+- fix(loader): improve Windows DLL search path handling and diagnostics
+    - Remove duplicated Windows DLL directory registration logic
+    - Add optional CUDA, HIP, and Vulkan runtime DLL search paths
+    - Keep bundled library paths with correct priority order for loading, need `/lib` > `/bin`
+    - Add comments explaining DLL search path ordering behavior
+    - Add load source diagnostics for system and bundled libraries
+    - Improve visibility when debugging shared library loading issues
+
+    **Note**:
+    * For most single-DLL backends, the bin directory can still work as a fallback search path. However, some cases may fail due to missing dependencies such as `libomp140.x86_64.dll`.
+    * For `multi-DLL backends`, such as the `SYCL backend`, which depends on multiple DLLs (`dnnl.dll`, `tbb12.dll`, `mk_*.dll`, etc.), loading ggml-sycl.dll may fail when its dependent DLLs cannot be found, potentially resulting in an `access violation` crash.
+    * This update ensures that the DLL search path prioritizes /lib instead of /bin during the initial lookup stage, improving backend loading reliability.
+    * Special thanks to **@allanmeng** for reporting and testing the SYCL backend issue.
+
+- fix(ggml): load ggml-base before ggml library
+    - Load ggml-base shared library before ggml to ensure the base
+    runtime dependency is initialized prior to loading the main ggml
+    library.
+
+    - This improves dynamic library loading reliability on platforms
+    where ggml depends on ggml-base during initialization.
+
+- fix(mtmd): validate MTMD inputs before tokenization
+    - Add Python-side MTMD input validation before calling the native mtmd_tokenize
+    path. Normalize missing bitmap lists to empty lists for pure text prompts, check
+    that rendered media markers match decoded bitmap inputs, reject missing bitmap
+    entries, and validate that the media marker is available.
+
+    - Improve media placeholder mismatch errors with marker counts and marker details,
+    and surface mtmd_tokenize failures with richer diagnostic context including media
+    counts and backend support flags.
+
+- feat(LlamaBatch): add mixed token embedding batch support
+    - Add optional mixed=True initialization for LlamaBatch so token+embedding rows can
+    be represented in a single llama_batch. Mixed batches keep the native embd buffer
+    from llama_batch_init and attach a Python-owned token buffer, which is cleared
+    before llama_batch_free() to avoid invalid ownership.
+
+    - Route token-only and embedding-only write APIs away from mixed batches, add
+    mixed-batch validation, and introduce add_token_embedding for EAGLE3/MTP-style
+    decoder inputs containing both token ids and embedding vectors.
+
+    - This prepares LlamaBatch for speculative decoding paths that require mixed
+    token+hidden-state inputs, especially EAGLE3 and MTP. It keeps ordinary
+    token-only and embedding-only APIs separated while providing a dedicated
+    add_token_embedding path for mixed decoder rows.
+
+- feat(LlamaBatch): add embedding rows to LlamaBatch
+    - Add shared seq_id validation for token and embedding batch writes.
+
+    - Introduce embedding-buffer checks plus add_embedding and add_embeddings helpers
+    for embd-only llama_batch inputs, enabling decoder paths that consume external
+    embedding rows while keeping token writes restricted to token buffers.
+
+    - This prepares LlamaBatch for embedding-only decode paths, such as speculative
+    decoding feature injection or external encoder/projector outputs.
+
+    - It does not implement mixed token+embedding batches yet; those still need a
+    separate ownership-safe design for the token buffer.
+
+- fix(LlamaBatch): harden LlamaBatch token writes
+    - Clarify llama_batch token vs embedding allocation semantics and keep future
+    embedding/mixed-batch support open.
+
+    - Add token-buffer checks before add_token/add_sequence, validate add_sequence
+    input lengths and seq_ids, and improve error messages for invalid batch
+    configuration.
+
+- fix(eval): validate eval tokens before native decode
+    - Add token-id validation at the Llama.eval() boundary before context shifting,
+    batch construction, or llama_decode execution. This prevents invalid token
+    types, negative token ids, and out-of-vocabulary ids from reaching the native
+    decode path, where they may otherwise cause hard crashes instead of Python
+    exceptions.
+
+    - Wrap llama_decode with defensive exception handling in LlamaContext.decode() so
+    native exceptions are surfaced with clearer diagnostic context.
+
+    - Also include a small token preview in Llama.eval() fatal decode errors to make
+    backend failures easier to debug without changing the existing recoverable KV
+    slot handling behavior.
+
+- fix(types): make assistant message name optional
+    - Mark the assistant message `name` field as `NotRequired[Optional[str]]`
+    to match the optional nature of assistant message metadata and avoid
+    requiring callers to provide `name` in typed chat completion requests.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/e3546c7948e3af463d0b401e6421d5a4c2faf565](https://github.com/ggml-org/llama.cpp/commit/e3546c7948e3af463d0b401e6421d5a4c2faf565)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260711
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/169d5e1a43fb6ff4e5b6f5d0f26f1ec8acbd97b8...3da4c603612c3344031b32ffbeb1da1c84bb205a
+
 ## [0.3.41] Template-Driven MTMD, Broader Multimodal Inputs, and Smarter N-Gram Drafting
 
 - refactor(mtmd): extract prompt rendering and media marker normalization
