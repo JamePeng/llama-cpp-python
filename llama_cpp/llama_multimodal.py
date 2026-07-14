@@ -155,19 +155,23 @@ class MTMDChatHandler:
                 f"{self.log_prefix}(__init__): `extra_template_arguments` must be a dict."
             )
 
+        self.chat_format_override = chat_template_override
         self.extra_template_arguments: dict[str, Any] = dict(extra_template_arguments or {})
 
         self.is_support_vision = False
         self.is_support_audio = False
         self.is_support_video = False
 
-        # Pre-compile Jinja template
-        if (not hasattr(self, "chat_format") or self.chat_format is None) and chat_template_override is None:
-            self.chat_format = self.CHAT_FORMAT
-        elif chat_template_override is not None:
-            self.chat_format = chat_template_override
-
+        self.chat_template = None
         self._chat_format_parser_tags = []
+        self._template_initialized = False
+
+        # Pre-compile Jinja template
+        if (not hasattr(self, "chat_format") or self.chat_format is None) and self.chat_format_override is not None:
+            self.chat_format = self.chat_format_override
+        elif self.chat_format is None and self.chat_format_override is None:
+            self.chat_format = self.CHAT_FORMAT
+
         self._change_chat_template(self.chat_format)
 
         self._exit_stack = ExitStack()
@@ -250,11 +254,15 @@ class MTMDChatHandler:
         if getattr(self, "mtmd_ctx", None) is not None:
             try:
                 self._mtmd_cpp.mtmd_free(self.mtmd_ctx)
+                self.mtmd_ctx = None
             except Exception:
                 pass
-            self.mtmd_ctx = None
-            self.mctx_params = None
-            self.chat_template = None
+        self.mctx_params = None
+        self.chat_format = None
+        self.chat_template = None
+        self.chat_template_override = None
+        self._template_initialized = False
+        self._chat_format_parser_tags = []
 
         if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
             self._exit_stack.close()
@@ -1661,8 +1669,18 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         self.chat_format = chat_format
         return chat_format
 
-    def __call__(self, **kwargs):
-        llama = kwargs["llama"]
+    def _ensure_chat_template(
+        self,
+        llama: llama_core.Llama,
+    ) -> None:
+        """
+        Resolve and analyze chat template once.
+
+        Chat template metadata is static for a model instance,
+        so it should not be recomputed for every request.
+        """
+        if self._template_initialized:
+            return
 
         self._resolve_chat_format(llama)
 
@@ -1675,7 +1693,18 @@ class GenericMTMDChatHandler(MTMDChatHandler):
                 "a model that provides tokenizer.chat_template metadata."
             )
 
-        self._chat_format_parser_tags = [tag for tag in self.KNOWN_MEDIA_TAGS if tag in self.chat_format]
+        self._chat_format_parser_tags = [
+            tag
+            for tag in self.KNOWN_MEDIA_TAGS
+            if tag in self.chat_format
+        ]
+
+        self._template_initialized = True
+
+    def __call__(self, **kwargs):
+        llama = kwargs["llama"]
+
+        self._ensure_chat_template(llama)
 
         if self.verbose:
             print(f"{self.log_prefix} - Start processing", file=sys.stderr)
