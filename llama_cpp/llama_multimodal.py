@@ -727,7 +727,9 @@ class MTMDChatHandler:
                 )
 
         input_text = self._mtmd_cpp.mtmd_input_text()
-        input_text.text = ctypes.c_char_p(text.encode("utf-8"))
+        encoded_text = text.encode("utf-8")
+        input_text.text = ctypes.c_char_p(encoded_text)
+        input_text.text_len = len(encoded_text)
         input_text.add_special = (llama.n_tokens == 0)
         input_text.parse_special = True
 

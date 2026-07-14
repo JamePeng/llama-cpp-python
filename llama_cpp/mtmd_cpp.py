@@ -178,12 +178,14 @@ mtmd_progress_callback = CFUNCTYPE(
 
 # struct mtmd_input_text {
 #     const char * text;
+#     size_t text_len;
 #     bool add_special;
 #     bool parse_special;
 # };
 class mtmd_input_text(Structure):
     _fields_ = [
         ("text", c_char_p),
+        ("text_len", c_size_t),
         ("add_special", c_bool),
         ("parse_special", c_bool),
     ]
