@@ -1,6 +1,6 @@
 import numpy as np
 from typing import Union, List, Optional, Dict, Any, Tuple
-import llama_cpp.llama_cpp as llama_cpp
+import llama_cpp.llama_cpp as llama_cpp_lib
 from .llama_types import Embedding
 from .llama import Llama
 # Pooling types from .llama_cpp
@@ -141,7 +141,7 @@ class LlamaEmbedding(Llama):
 
         # Determine the output dimension
         if is_rank:
-            out_dim = llama_cpp.llama_model_n_cls_out(self._model.model)
+            out_dim = llama_cpp_lib.llama_model_n_cls_out(self._model.model)
         else:
             out_dim = self.n_embd()
 
@@ -166,9 +166,9 @@ class LlamaEmbedding(Llama):
 
         # Reset Context and Batch
         if self.verbose:
-            llama_cpp.llama_perf_context_reset(ctx)
+            llama_cpp_lib.llama_perf_context_reset(ctx)
         self._batch.reset()
-        llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), True)
+        llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(ctx), True)
 
         # Initialize State Variables
         results: List[Any] = []
@@ -190,7 +190,7 @@ class LlamaEmbedding(Llama):
                     doc_tokens_embd = []
                     for _ in range(seq_len):
                         # Get the vector of the i-th token
-                        ptr = llama_cpp.llama_get_embeddings_ith(ctx, curr_token_idx)
+                        ptr = llama_cpp_lib.llama_get_embeddings_ith(ctx, curr_token_idx)
                         if ptr is None:
                             # Fallback: append zero vector or skip (here we zero-pad to keep shape)
                             doc_tokens_embd.append([0.0] * out_dim)
@@ -207,7 +207,7 @@ class LlamaEmbedding(Llama):
             else:
                 for i in range(len(batch_seq_lens)):
                     # Obtain the vector of the i-th sequence.
-                    ptr = llama_cpp.llama_get_embeddings_seq(ctx, i)
+                    ptr = llama_cpp_lib.llama_get_embeddings_seq(ctx, i)
                     data = ptr[:out_dim]
 
                     if not is_rank:
@@ -219,7 +219,7 @@ class LlamaEmbedding(Llama):
                         results.append(data)
 
             self._batch.reset()
-            llama_cpp.llama_memory_clear(llama_cpp.llama_get_memory(ctx), True)
+            llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(ctx), True)
             batch_seq_lens = []
 
         # Main Streaming Loop
@@ -272,7 +272,7 @@ class LlamaEmbedding(Llama):
         _decode_batch()
 
         if self.verbose:
-            llama_cpp.llama_perf_context_print(ctx)
+            llama_cpp_lib.llama_perf_context_print(ctx)
 
         final_result = results[0] if is_single else results
 
