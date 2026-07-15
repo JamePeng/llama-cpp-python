@@ -9,6 +9,7 @@ from ctypes.util import find_library
 from typing import (
     Any,
     Callable,
+    Iterable,
     List,
     Union,
     Optional,
@@ -201,20 +202,60 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def ctypes_function_for_shared_library(lib: ctypes.CDLL):
-    """Decorator for defining ctypes functions with type hints"""
+    """Create a decorator used to bind typed Python declarations to C symbols.
+
+    The returned decorator accepts either a single exported symbol name or an
+    iterable of ABI-compatible aliases. When aliases are provided, they are
+    checked in order and the first available symbol is selected.
+    """
 
     def ctypes_function(
-        name: str, argtypes: List[Any], restype: Any, enabled: bool = True
+        name: Union[str, Iterable[str]],
+        argtypes: List[Any],
+        restype: Any,
+        enabled: bool = True,
     ):
+        """Bind a Python declaration to one of the requested C symbols.
+
+        Args:
+            name: A symbol name or an ordered iterable of compatible aliases.
+            argtypes: The ctypes argument types assigned to the C function.
+            restype: The ctypes return type assigned to the C function.
+            enabled: Return the original Python declaration when disabled.
+
+        Raises:
+            ValueError: If no symbol names are provided.
+            AttributeError: If none of the requested symbols exist in the
+                shared library.
+        """
+        symbol_names = (name,) if isinstance(name, str) else tuple(name)
+
+        if not symbol_names:
+            raise ValueError("At least one shared library symbol name is required")
+
         def decorator(f: F) -> F:
-            if enabled:
-                func = getattr(lib, name)
+            if not enabled:
+                return f
+
+            for symbol_name in symbol_names:
+                try:
+                    func = getattr(lib, symbol_name)
+                except AttributeError:
+                    continue
+
                 func.argtypes = argtypes
                 func.restype = restype
-                functools.wraps(f)(func)
+                functools.update_wrapper(func, f)
+
+                # Preserve the actual exported symbol selected at runtime for
+                # diagnostics, especially when ABI aliases are being used.
+                func.__ctypes_symbol_name__ = symbol_name
                 return func
-            else:
-                return f
+
+            raise AttributeError(
+                "None of the shared library symbols were found: "
+                + ", ".join(symbol_names)
+            )
 
         return decorator
 
