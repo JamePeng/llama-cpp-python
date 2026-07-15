@@ -122,6 +122,7 @@ class GGMLStatus(enum.IntEnum):
 #     GGML_TYPE_MXFP4   = 39, // MXFP4 (1 block)
 #     GGML_TYPE_NVFP4   = 40, // NVFP4 (4 blocks, E4M3 scale)
 #     GGML_TYPE_Q1_0    = 41,
+#     GGML_TYPE_Q2_0    = 42,
 #     GGML_TYPE_COUNT   = 42,
 # };
 class GGMLType(enum.IntEnum):
@@ -159,7 +160,8 @@ class GGMLType(enum.IntEnum):
     GGML_TYPE_MXFP4 = 39
     GGML_TYPE_NVFP4 = 40
     GGML_TYPE_Q1_0 = 41
-    GGML_TYPE_COUNT = 42
+    GGML_TYPE_Q2_0 = 42
+    GGML_TYPE_COUNT = 43
 
 
 # // precision
@@ -201,6 +203,7 @@ class GGMLPrec(enum.IntEnum):
 #     GGML_FTYPE_MOSTLY_MXFP4   = 25, // except 1d tensors
 #     GGML_FTYPE_MOSTLY_NVFP4   = 26, // except 1d tensors
 #     GGML_FTYPE_MOSTLY_Q1_0    = 27, // except 1d tensors
+#     GGML_FTYPE_MOSTLY_Q2_0    = 28, // except 1d tensors
 # };
 class GGMLFType(enum.IntEnum):
     GGML_FTYPE_UNKNOWN        = -1
@@ -230,6 +233,7 @@ class GGMLFType(enum.IntEnum):
     GGML_FTYPE_MOSTLY_MXFP4   = 25
     GGML_FTYPE_MOSTLY_NVFP4   = 26
     GGML_FTYPE_MOSTLY_Q1_0    = 27
+    GGML_FTYPE_MOSTLY_Q2_0    = 28
 
 
 # // available tensor operations:

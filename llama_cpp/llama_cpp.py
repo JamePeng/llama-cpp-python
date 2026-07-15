@@ -364,6 +364,7 @@ LLAMA_TOKEN_ATTR_SINGLE_WORD = 1 << 9
 #     LLAMA_FTYPE_MOSTLY_MXFP4_MOE     = 38, // except 1d tensors
 #     LLAMA_FTYPE_MOSTLY_NVFP4         = 39, // except 1d tensors
 #     LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
+#     LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
 #
 #     LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
 # };
@@ -372,6 +373,9 @@ class llama_ftype(enum.IntEnum):
     LLAMA_FTYPE_MOSTLY_F16 = 1
     LLAMA_FTYPE_MOSTLY_Q4_0 = 2
     LLAMA_FTYPE_MOSTLY_Q4_1 = 3
+    # LLAMA_FTYPE_MOSTLY_Q4_1_SOME_F16 = 4
+    # LLAMA_FTYPE_MOSTLY_Q4_2 = 5
+    # LLAMA_FTYPE_MOSTLY_Q4_3 = 6
     LLAMA_FTYPE_MOSTLY_Q8_0 = 7
     LLAMA_FTYPE_MOSTLY_Q5_0 = 8
     LLAMA_FTYPE_MOSTLY_Q5_1 = 9
@@ -406,6 +410,7 @@ class llama_ftype(enum.IntEnum):
     LLAMA_FTYPE_MOSTLY_MXFP4_MOE = 38
     LLAMA_FTYPE_MOSTLY_NVFP4 = 39
     LLAMA_FTYPE_MOSTLY_Q1_0 = 40
+    LLAMA_FTYPE_MOSTLY_Q2_0 = 41
     LLAMA_FTYPE_GUESSED = 1024
 
 # // Get the model file type (quantization) as a string, e.g. "Q8_0" or "Q4_K - Medium"
@@ -428,7 +433,7 @@ def llama_ftype_name(
 #     LLAMA_ROPE_SCALING_TYPE_LINEAR      = 1,
 #     LLAMA_ROPE_SCALING_TYPE_YARN        = 2,
 #     LLAMA_ROPE_SCALING_TYPE_LONGROPE    = 3,
-#     LLAMA_ROPE_SCALING_TYPE_MAX_VALUE   = LLAMA_ROPE_SCALING_TYPE_YARN,
+#     LLAMA_ROPE_SCALING_TYPE_MAX_VALUE   = LLAMA_ROPE_SCALING_TYPE_LONGROPE,
 # };
 class llama_rope_scaling_type(enum.IntEnum):
     LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED = -1
@@ -436,7 +441,7 @@ class llama_rope_scaling_type(enum.IntEnum):
     LLAMA_ROPE_SCALING_TYPE_LINEAR = 1
     LLAMA_ROPE_SCALING_TYPE_YARN = 2
     LLAMA_ROPE_SCALING_TYPE_LONGROPE = 3
-    LLAMA_ROPE_SCALING_TYPE_MAX_VALUE = LLAMA_ROPE_SCALING_TYPE_YARN
+    LLAMA_ROPE_SCALING_TYPE_MAX_VALUE = LLAMA_ROPE_SCALING_TYPE_LONGROPE
 
 # enum llama_pooling_type {
 #     LLAMA_POOLING_TYPE_UNSPECIFIED = -1,
