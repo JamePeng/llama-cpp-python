@@ -10,6 +10,7 @@ from ._ggml import (
     ggml_backend_sched_eval_callback,
     ggml_log_callback,
     ggml_opt_get_optimizer_params,
+    ggml_cgraph
 )
 
 from typing import (
@@ -5068,4 +5069,296 @@ def llama_opt_epoch(
     callback_train: ctypes.c_void_p,
     callback_eval: ctypes.c_void_p, /
 ):
+    ...
+
+##############################
+# // llama.cpp/src/llama-ext.h
+##############################
+
+# // this is a staging header for new llama.cpp API
+# // breaking changes and C++ are allowed. everything here should be considered WIP
+# // try as much as possible to not include this header in the rest of the codebase
+
+ctypes_function_llama_ext = ctypes_function_for_shared_library(_lib)
+
+# // Reserve a new compute graph. It is valid until the next call to llama_graph_reserve.
+# LLAMA_API struct ggml_cgraph * llama_graph_reserve(
+#         struct llama_context * ctx,
+#         uint32_t n_tokens,
+#         uint32_t n_seqs,
+#         uint32_t n_outputs);
+@ctypes_function_llama_ext(
+    [
+        "llama_graph_reserve",
+        "?llama_graph_reserve@@YAPEAUggml_cgraph@@PEAUllama_context@@III@Z",
+        "__Z19llama_graph_reserveP13llama_contextjjj",
+    ],
+    [llama_context_p_ctypes, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_uint32],
+    ctypes.POINTER(ggml_cgraph),
+    required=False,
+)
+def llama_graph_reserve(
+    ctx: llama_context_p,
+    n_tokens: ctypes.c_uint32,
+    n_seqs: ctypes.c_uint32,
+    n_outputs: ctypes.c_uint32,
+) -> ctypes.POINTER(ggml_cgraph):  # type: ignore
+    """
+    Reserve a new compute graph. It is valid until the next call to llama_graph_reserve.
+    """
+    ...
+
+# // Get the default ggml_type for a given ftype.
+# LLAMA_API ggml_type llama_ftype_get_default_type(llama_ftype ftype);
+@ctypes_function_llama_ext(
+    [
+        "llama_ftype_get_default_type",
+        "?llama_ftype_get_default_type@@YA?AW4ggml_type@@W4llama_ftype@@@Z",
+        "__Z28llama_ftype_get_default_type11llama_ftype",
+    ],
+    [ctypes.c_int],
+    int,
+    required=False,
+)
+def llama_ftype_get_default_type(
+    ftype: llama_ftype
+) -> int:
+    """
+    Get the default ggml_type for a given ftype.
+    """
+    ...
+
+# LLAMA_API int32_t llama_model_n_expert (const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_n_expert",
+        "?llama_model_n_expert@@YAHPEBUllama_model@@@Z",
+        "__Z20llama_model_n_expertPK11llama_model",
+    ],
+    [llama_model_p_ctypes],
+    ctypes.c_int32,
+    required=False,
+)
+def llama_model_n_expert(
+    model: llama_model_p
+) -> ctypes.c_int32:
+    ...
+
+# LLAMA_API int32_t llama_model_n_devices(const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_n_devices",
+        "?llama_model_n_devices@@YAHPEBUllama_model@@@Z",
+        "__Z21llama_model_n_devicesPK11llama_model",
+    ],
+    [llama_model_p_ctypes],
+    ctypes.c_int32,
+    required=False,
+)
+def llama_model_n_devices(
+    model: llama_model_p
+) -> ctypes.c_int32:
+    ...
+
+# LLAMA_API ggml_backend_dev_t llama_model_get_device(const struct llama_model * model, int i);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_get_device",
+        "?llama_model_get_device@@YAPEAUggml_backend_device@@PEBUllama_model@@H@Z",
+        "__Z22llama_model_get_devicePK11llama_modeli",
+    ],
+    [llama_model_p_ctypes, ctypes.c_int],
+    ctypes.c_void_p,
+    required=False,
+)
+def llama_model_get_device(
+    model: llama_model_p,
+    i: int,
+) -> ctypes.c_void_p:
+    ...
+
+# // Set whether the context outputs nextn embeddings or not
+# // If masked == true,  output the embeddings only for the tokens with batch.logits != 0
+# // If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+# LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value, bool masked);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_embeddings_nextn",
+        "?llama_set_embeddings_nextn@@YAXPEAUllama_context@@_N1@Z",
+        "__Z26llama_set_embeddings_nextnP13llama_contextbb",
+    ],
+    [llama_context_p_ctypes, ctypes.c_bool, ctypes.c_bool],
+    None,
+    required=False,
+)
+def llama_set_embeddings_nextn(
+    ctx: llama_context_p,
+    value: bool,
+    masked: bool,
+):
+    """
+    Set whether the context outputs nextn embeddings or not
+    If masked == true,  output the embeddings only for the tokens with batch.logits != 0
+    If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+    """
+    ...
+
+# // Select which appended NextN block the DECODER_MTP graph runs (offset past
+# // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
+# // chain multiple trained NextN heads. Default 0 (first head).
+# LLAMA_API void llama_set_nextn_layer_offset(struct llama_context * ctx, int32_t offset);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_nextn_layer_offset",
+        "?llama_set_nextn_layer_offset@@YAXPEAUllama_context@@H@Z",
+        "__Z28llama_set_nextn_layer_offsetP13llama_contexti",
+    ],
+    [llama_context_p_ctypes, ctypes.c_int32],
+    None,
+    required=False,
+)
+def llama_set_nextn_layer_offset(
+    ctx: llama_context_p,
+    offset: ctypes.c_int32,
+):
+    """
+    Select which appended NextN block the DECODER_MTP graph runs (offset past
+    the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
+    chain multiple trained NextN heads. Default 0 (first head).
+    """
+    ...
+
+# // mirrors:
+# // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
+# LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
+@ctypes_function_llama_ext(
+    [
+        "llama_get_embeddings_nextn",
+        "?llama_get_embeddings_nextn@@YAPEAMPEAUllama_context@@@Z",
+        "__Z26llama_get_embeddings_nextnP13llama_context",
+    ],
+    [llama_context_p_ctypes],
+    ctypes.POINTER(ctypes.c_float),
+    required=False,
+)
+def llama_get_embeddings_nextn(
+    ctx: llama_context_p,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    ...
+
+# // LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
+# LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
+@ctypes_function_llama_ext(
+    [
+        "llama_get_embeddings_nextn_ith",
+        "?llama_get_embeddings_nextn_ith@@YAPEAMPEAUllama_context@@H@Z",
+        "__Z30llama_get_embeddings_nextn_ithP13llama_contexti",
+    ],
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.POINTER(ctypes.c_float),
+    required=False,
+)
+def llama_get_embeddings_nextn_ith(
+    ctx: llama_context_p,
+    i: ctypes.c_int32,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    ...
+
+# // Set whether the context outputs the input embeddings of a specific layer
+# LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid, bool value);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_embeddings_layer_inp",
+        "?llama_set_embeddings_layer_inp@@YAXPEAUllama_context@@I_N@Z",
+        "__Z30llama_set_embeddings_layer_inpP13llama_contextjb",
+    ],
+    [llama_context_p_ctypes, ctypes.c_int32, ctypes.c_bool],
+    ctypes.POINTER(ctypes.c_float),
+    required=False,
+)
+def llama_set_embeddings_layer_inp(
+    ctx: llama_context_p,
+    lid: ctypes.c_int32,
+    value: bool,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    """
+    Set whether the context outputs the input embeddings of a specific layer
+    """
+    ...
+
+# // mirrors:
+# // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
+# LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
+@ctypes_function_llama_ext(
+    [
+        "llama_get_embeddings_layer_inp",
+        "?llama_get_embeddings_layer_inp@@YAPEAMPEAUllama_context@@I@Z",
+        "__Z30llama_get_embeddings_layer_inpP13llama_contextj",
+    ],
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.POINTER(ctypes.c_float),
+    required=False,
+)
+def llama_get_embeddings_layer_inp(
+    ctx: llama_context_p,
+    lid: ctypes.c_int32,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    ...
+
+# LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
+@ctypes_function_llama_ext(
+    [
+        "llama_get_ctx_other",
+        "?llama_get_ctx_other@@YAPEAUllama_context@@PEAU1@@Z",
+        "__Z19llama_get_ctx_otherP13llama_context",
+    ],
+    [llama_context_p_ctypes],
+    llama_context_p_ctypes,
+    required=False,
+)
+def llama_get_ctx_other(
+    ctx: llama_context_p,
+) -> llama_context_p:
+    ...
+
+# // model/context data extraction
+
+# // returns pointer to the target-model layer indices
+# LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_target_layer_ids",
+        "?llama_model_target_layer_ids@@YAPEBHPEBUllama_model@@@Z",
+        "__Z28llama_model_target_layer_idsPK11llama_model",
+    ],
+    [llama_model_p_ctypes],
+    ctypes.POINTER(ctypes.c_int32),
+    required=False,
+)
+def llama_model_target_layer_ids(
+    model: llama_model_p
+) -> ctypes.POINTER(ctypes.c_int32):  # type: ignore
+    """
+    returns pointer to the target-model layer indices
+    """
+    ...
+
+# // returns the number of extracted layers from target model
+# LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_target_layer_ids_n",
+        "?llama_model_target_layer_ids_n@@YAIPEBUllama_model@@@Z",
+        "__Z30llama_model_target_layer_ids_nPK11llama_model"
+    ],
+    [llama_model_p_ctypes],
+    ctypes.POINTER(ctypes.c_uint32),
+    required=False,
+)
+def llama_model_target_layer_ids_n(
+    model: llama_model_p
+) -> ctypes.POINTER(ctypes.c_uint32):  # type: ignore
+    """
+    returns the number of extracted layers from target model
+    """
     ...
