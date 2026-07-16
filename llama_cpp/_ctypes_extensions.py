@@ -214,6 +214,7 @@ def ctypes_function_for_shared_library(lib: ctypes.CDLL):
         argtypes: List[Any],
         restype: Any,
         enabled: bool = True,
+        required: bool = True,
     ):
         """Bind a Python declaration to one of the requested C symbols.
 
@@ -222,6 +223,7 @@ def ctypes_function_for_shared_library(lib: ctypes.CDLL):
             argtypes: The ctypes argument types assigned to the C function.
             restype: The ctypes return type assigned to the C function.
             enabled: Return the original Python declaration when disabled.
+            required: Raise if symbol is missing. If False, create a runtime unavailable stub.
 
         Raises:
             ValueError: If no symbol names are provided.
@@ -252,10 +254,36 @@ def ctypes_function_for_shared_library(lib: ctypes.CDLL):
                 func.__ctypes_symbol_name__ = symbol_name
                 return func
 
-            raise AttributeError(
+            message = (
                 "None of the shared library symbols were found: "
                 + ", ".join(symbol_names)
             )
+
+            if required:
+                raise AttributeError(message)
+
+            # Optional extension API.
+            # Keep import working when the symbol is unavailable.
+            print(
+                "[llama-cpp-python].ctypes_function: WARNING! optional API unavailable\n"
+                f"  symbols: {', '.join(symbol_names)}\n"
+                f"  library: {getattr(lib, '_name', '<unknown>')}"
+            )
+
+            def unavailable(*args, **kwargs):
+                raise RuntimeError(
+                    "This llama.cpp extension API is unavailable.\n"
+                    f"Required symbol(s): {', '.join(symbol_names)}\n"
+                    f"Library: {getattr(lib, '_name', '<unknown>')}"
+                )
+
+            functools.update_wrapper(unavailable, f)
+
+            # Mark unavailable extension API.
+            unavailable.__ctypes_symbol_name__ = None
+            unavailable.__ctypes_optional__ = True
+
+            return unavailable
 
         return decorator
 
