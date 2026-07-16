@@ -155,6 +155,10 @@ class MTMDChatHandler:
                 f"{self.log_prefix}(__init__): `extra_template_arguments` must be a dict."
             )
 
+        # Preserve subclass attributes
+        if not hasattr(self, "chat_format"):
+            self.chat_format = None
+
         self.chat_format_override = chat_template_override
         self.extra_template_arguments: dict[str, Any] = dict(extra_template_arguments or {})
 
@@ -167,10 +171,11 @@ class MTMDChatHandler:
         self._template_initialized = False
 
         # Pre-compile Jinja template
-        if (not hasattr(self, "chat_format") or self.chat_format is None) and self.chat_format_override is not None:
-            self.chat_format = self.chat_format_override
-        elif self.chat_format is None and self.chat_format_override is None:
-            self.chat_format = self.CHAT_FORMAT
+        if self.chat_format is None:
+            if self.chat_format_override is not None:
+                self.chat_format = self.chat_format_override
+            else:
+                self.chat_format = self.CHAT_FORMAT
 
         self._change_chat_template(self.chat_format)
 
