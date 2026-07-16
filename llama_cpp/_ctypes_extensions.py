@@ -244,6 +244,18 @@ def ctypes_function_for_shared_library(lib: ctypes.CDLL):
                     func = getattr(lib, symbol_name)
                 except AttributeError:
                     continue
+                # Validate ctypes argument declarations before assigning them.
+                # ctypes requires every argtype to provide from_param().
+                for index, argtype in enumerate(argtypes):
+                    if not hasattr(argtype, "from_param"):
+                        raise TypeError(
+                            "Invalid ctypes argument type:\n"
+                            f"  function: {f.__name__}\n"
+                            f"  symbol: {symbol_name}\n"
+                            f"  arg index: {index}\n"
+                            f"  arg type: {argtype!r}\n"
+                            f"  expected: a ctypes type with from_param()"
+                        )
 
                 func.argtypes = argtypes
                 func.restype = restype
