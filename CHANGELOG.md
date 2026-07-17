@@ -2,10 +2,84 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [0.3.43] Better llama.cpp ABI Compatibility, MTMD Performance and Extension API Support
+
+- patch(Gemma4ChatHandler): Synchronize huggingface gemma4 latest chat template
+    - fix: chat template — null handling, reasoning preservation, turn-tag balance, input validation
+    - https://huggingface.co/google/gemma-4-31B-it/commit/68abe48010cbe15293462fa11e901a60639a44e5
+
+- feat(llama_ext): support optional llama-ext.h API bindings
+    - Add Python ctypes bindings for the experimental APIs exposed by
+    llama-ext.h, including NextN/MTP embeddings, and model metadata extraction.
+    - Extension symbols are loaded optionally to handle ABI changes, renamed
+    symbols, and builds that do not export experimental APIs without breaking
+    the main Python bindings.
+
+- feat(ctypes): handle missing optional symbols gracefully
+    - Allow ctypes bindings to mark symbols as optional through the `required`
+    flag.
+    - Missing symbols caused by ABI naming differences, API changes, or experimental
+    extensions will no longer break library loading. Optional APIs emit diagnostic
+    warnings and provide runtime unavailable stubs instead.
+
+- fix(ctypes): validate argument types before binding shared library functions
+    - Add explicit validation for ctypes function argument declarations before
+    assigning them to the loaded shared library function.
+    - This provides clearer error messages when invalid Python types are passed
+    to `argtypes`, instead of exposing the internal ctypes error about missing
+    `from_param()` methods.
+
+- fix(ctypes): validate argument types before binding shared library functions
+    - Add explicit validation for ctypes function argument declarations before
+    assigning them to the loaded shared library function.
+    - This provides clearer error messages when invalid Python types are passed
+    to `argtypes`, instead of exposing the internal ctypes error about missing
+    `from_param()` methods.
+
+- feat(ctypes): support ABI-compatible symbol aliases
+    - Allow ctypes_function_for_shared_library to accept either a single
+    symbol name or an ordered iterable of ABI-compatible aliases.
+    - Resolve aliases in order and bind the first exported symbol found while
+    preserving the selected symbol name for runtime diagnostics. Also improve
+    error reporting for empty alias lists and missing symbols.
+
+- refactor(mtmd): cache Generic MTMD chat template resolution for accelerate the processing speed of `__call__`.
+    - Refactor MTMD chat template handling to resolve and analyze the chat template only
+    once per handler instance instead of on every request.
+    - Add template initialization state, cache parsed media placeholder tags, and support
+    explicit chat template overrides through a dedicated field. Improve lifecycle cleanup
+    by resetting cached template state and MTMD resources during handler close.
+    - This keeps `GenericMTMDChatHandler` runtime processing focused on message rendering and media tokenization
+    while avoiding repeated chat template resolution overhead.
+
+- fix(mtmd): preserve subclass chat format during MTMD initialization
+    - Ensure MTMDChatHandler initialization remains compatible with specialized chat
+    handlers that define their own chat_format before calling super().__init__().
+    - Initialize chat_format only when it is not already provided by the subclass,
+    then apply chat_format_override or fallback to the built-in MTMD template.
+    This prevents AttributeError during inherited handler initialization while
+    keeping template override behavior unchanged.
+
+- refactor(embedding): rename `llama_cpp` import alias to `llama_cpp_lib`
+    - Rename the `llama_cpp.llama_cpp` import alias to `llama_cpp_lib` to avoid potential namespace conflicts with the local `.llama_cpp` imports. Update all affected call sites in `llama_embedding.py`.
+
+- patch(Llama): Increase chunk preview limit to 128 in Llama.eval exception
+    - Raises the maximum tokens captured for the error message preview from 16 to 128, improving visibility into the offending chunk during fatal backend crashes.
+
+- ci(metal): get package version from importlib metadata
+    * Avoid importing llama_cpp when detecting the package version.
+    * This prevents initialization side effects and keeps CI version extraction reliable.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/86d86ed4396b4130922f7b9af26e3d9fc11a591b](https://github.com/ggml-org/llama.cpp/commit/86d86ed4396b4130922f7b9af26e3d9fc11a591b)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260716
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/e522cecb93907c67ffe2e339b7009c93d3fb0f59...a64128351a1d04c6dd644e3908070f7ea2002f20
 
 ## [0.3.42] More Reliable Dynamic Backend Loading, Safer MTMD Processing, and Advanced Batch Support
 
