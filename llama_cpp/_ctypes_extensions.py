@@ -5,6 +5,7 @@ import os
 import ctypes
 import functools
 import pathlib
+import importlib.metadata
 from ctypes.util import find_library
 from typing import (
     Any,
@@ -18,6 +19,15 @@ from typing import (
     Generic,
 )
 from typing_extensions import TypeAlias
+
+def _version_at_least(version: str) -> bool:
+    """Check whether installed llama-cpp-python version meets requirement."""
+    try:
+        current = importlib.metadata.version("llama-cpp-python")
+        from packaging.version import Version
+        return Version(current) >= Version(version)
+    except Exception:
+        return False
 
 def _format_library_dir_contents(base_paths: list[pathlib.Path]) -> str:
     """Format directory contents for diagnostics after library loading fails."""

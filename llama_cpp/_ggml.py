@@ -6,10 +6,9 @@ import ctypes
 import enum
 import os
 import pathlib
-
 from llama_cpp._ctypes_extensions import (
+    _version_at_least,
     load_shared_library,
-    byref,
     ctypes_function_for_shared_library,
 )
 
@@ -21,11 +20,45 @@ from typing import (
     TYPE_CHECKING,
 )
 
+def _preload_openmp_runtime():
+    """Preload bundled OpenMP runtime before loading ggml-base.
+
+    This is required on Windows when CPU backends depend on the packaged
+    OpenMP runtime DLL.
+    """
+
+    # Only Windows DLL loading requires this workaround.
+    if os.name != "nt":
+        return
+
+    # Keep compatibility with older package versions.
+    if not _version_at_least("0.3.39"):
+        return
+
+    libomp_path = (pathlib.Path(__file__).parent / "lib" / "libomp140.x86_64.dll")
+
+    if not libomp_path.exists():
+        print(f"[llama-cpp-python] WARNING: bundled OpenMP runtime not found: {libomp_path}")
+        return
+
+    try:
+        ctypes.CDLL(str(libomp_path), winmode=ctypes.RTLD_GLOBAL)
+        print(f"[llama-cpp-python] loaded bundled OpenMP runtime: {libomp_path}")
+    except Exception as e:
+        print(
+            "[llama-cpp-python] WARNING: failed to load bundled OpenMP runtime:\n"
+            f"  path: {libomp_path}\n"
+            f"  error: {e}"
+        )
+
 libggml_base_path = pathlib.Path(os.path.abspath(os.path.dirname(__file__)))
 libggml_base_paths = [
     libggml_base_path / "lib",
     libggml_base_path / "bin",
 ]
+
+# Load bundled OpenMP runtime before ggml-base on Windows.
+_preload_openmp_runtime()
 
 libggml_base = load_shared_library("ggml-base", libggml_base_paths)
 
