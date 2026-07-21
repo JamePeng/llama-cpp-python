@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.44] Improved Windows DLL(OpenMP) Loading Reliability for GGML Backends
+
+- fix(ggml): preload bundled OpenMP runtime before loading ggml-base
+    - Preload the packaged `libomp140.x86_64.dll` on Windows before initializing
+    ggml-base to ensure CPU backend DLLs can resolve their OpenMP runtime
+    dependency.
+    - This only applies to Windows builds with llama-cpp-python >= 0.3.39 and
+    uses the bundled runtime from the package lib directory, avoiding the need
+    for users to configure system PATH or install additional OpenMP runtimes.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/846e991ec3c7ccec49112ff2c5b00b710e5f551d](https://github.com/ggml-org/llama.cpp/commit/846e991ec3c7ccec49112ff2c5b00b710e5f551d)
+
 ## [0.3.43] Better llama.cpp ABI Compatibility, MTMD Performance and Extension API Support
 
 - patch(Gemma4ChatHandler): Synchronize huggingface gemma4 latest chat template
