@@ -54,11 +54,14 @@ class LlamaModel:
         self.params = params
         self.verbose = verbose
         self._exit_stack = ExitStack()
+        self.model = None
+        self.vocab = None
+        self._lora_registry: Dict[str, LlamaLoraAdapter] = {}
 
         model = None
 
         if not os.path.exists(path_model):
-            raise ValueError(f"Model path does not exist: {path_model}")
+            raise ValueError(f"LlamaModel[__init__]: Model path does not exist: {path_model}")
 
         with suppress_stdout_stderr(disable=verbose):
             model = llama_cpp.llama_model_load_from_file(
@@ -68,15 +71,20 @@ class LlamaModel:
         if model is None:
             raise ValueError(f"Failed to load model from file: {path_model}")
 
-        vocab = llama_cpp.llama_model_get_vocab(model)
-
-        if vocab is None:
-            raise ValueError(f"Failed to get vocab from model: {path_model}")
-
+        # Record ownership immediately so every later failure can release the
+        # native model. In particular, a failed vocab lookup must not leak the
+        # successfully loaded model.
         self.model = model
-        self.vocab = vocab
+        try:
+            vocab = llama_cpp.llama_model_get_vocab(model)
+            if vocab is None:
+                raise ValueError(f"LlamaModel[__init__]: Failed to get vocab from model: {path_model}")
+        except BaseException:
+            llama_cpp.llama_model_free(model)
+            self.model = None
+            raise
 
-        self._lora_registry: Dict[str, LlamaLoraAdapter] = {}
+        self.vocab = vocab
 
     def close(self):
         """Manually free LlamaModel and Vocab/Lora resources."""
@@ -574,6 +582,10 @@ class LlamaContext:
             self._exit_stack.close()
             self._exit_stack = None
 
+        # The context no longer needs to keep its parent model alive once the
+        # native context and its callbacks have been released.
+        self.model = None
+
     def __del__(self):
         self.close()
 
@@ -1025,6 +1037,7 @@ class LlamaBatch:
         self._token_buf = None
         self._owns_token = False
         self._exit_stack = ExitStack()
+        self.batch = None
 
         # llama_batch_init allocates either batch.token or batch.embd:
         #
@@ -1046,25 +1059,30 @@ class LlamaBatch:
                 f"llama_batch_init({n_tokens},{embd},{n_seq_max})"
             )
 
-        if mixed:
-            if bool(batch.token):
-                raise RuntimeError(
-                    "LlamaBatch[__init__]: expected batch.token to be NULL for "
-                    "mixed embedding batch initialized with embd > 0."
-                )
-            if not bool(batch.embd):
-                raise RuntimeError(
-                    "LlamaBatch[__init__]: expected batch.embd to be non-NULL "
-                    "for mixed batch."
-                )
-
-            self._token_buf = (
-                llama_cpp.llama_token * self.n_tokens_capacity
-            )()
-            batch.token = self._token_buf
-            self._owns_token = True
-
+        # Take ownership before validating or allocating supplementary Python
+        # buffers so close() can release the native allocation on every failure.
         self.batch = batch
+        try:
+            if mixed:
+                if bool(batch.token):
+                    raise RuntimeError(
+                        "LlamaBatch[__init__]: expected batch.token to be NULL for "
+                        "mixed embedding batch initialized with embd > 0."
+                    )
+                if not bool(batch.embd):
+                    raise RuntimeError(
+                        "LlamaBatch[__init__]: expected batch.embd to be non-NULL "
+                        "for mixed batch."
+                    )
+
+                self._token_buf = (
+                    llama_cpp.llama_token * self.n_tokens_capacity
+                )()
+                batch.token = self._token_buf
+                self._owns_token = True
+        except BaseException:
+            self.close()
+            raise
 
     def close(self):
         """Manually free LlamaBatch resources."""
@@ -1894,6 +1912,19 @@ class LlamaSamplingContext:
         self.model = model
 
         self.params = params
+        # Initialize every resource-bearing attribute before performing work
+        # that can fail. This keeps close() safe for partially initialized
+        # instances.
+        self.prev = None
+        self._cur_p = None
+        self.sampler_chain = None
+        self.grammar_sampler = None
+        self.reasoning_budget_sampler = None
+        self._logits_view = None
+        self._logits_ptr_addr = None
+        self._single_token = None
+        self._single_array = None
+
         self.vocab = llama_cpp.llama_model_get_vocab(model.model)
         self.n_vocab = model.n_vocab()
 
@@ -1940,7 +1971,6 @@ class LlamaSamplingContext:
             self._build_sampler_chain()
 
         # Grammar sampler
-        self.grammar_sampler = None
         if params.grammar:
             self.grammar_sampler = GrammarSampler(
                 model,
@@ -2256,12 +2286,12 @@ class LlamaSamplingContext:
 
         # Free grammar sampler if it was initialized.
         # This releases underlying llama.cpp sampler memory.
-        if self.grammar_sampler:
+        if getattr(self, "grammar_sampler", None):
             self.grammar_sampler.close()
             self.grammar_sampler = None
 
         # Free the sampler chain and all attached C samplers.
-        if self.sampler_chain:
+        if getattr(self, "sampler_chain", None):
             self.sampler_chain.close()
             self.sampler_chain = None
 
@@ -2279,7 +2309,7 @@ class LlamaSamplingContext:
             self._cur_p = None
 
         # Clear token history deque to drop references.
-        if hasattr(self, "prev"):
+        if getattr(self, "prev", None) is not None:
             self.prev.clear()
             self.prev = None
 
@@ -2290,6 +2320,12 @@ class LlamaSamplingContext:
         # Break references to small C structs used in grammar rejection sampling.
         self._single_token = None
         self._single_array = None
+
+        # A closed sampling context must not keep the model or configuration
+        # graph alive merely because the wrapper itself is still referenced.
+        self.vocab = None
+        self.model = None
+        self.params = None
 
     def __del__(self):
         try:

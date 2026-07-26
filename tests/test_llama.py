@@ -19,6 +19,158 @@ from typing import (
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
 
 
+def test_model_init_frees_native_model_when_vocab_lookup_fails(monkeypatch):
+    native_model_handle = object()
+    freed_model_handles = []
+
+    def model_path_exists(_path):
+        return True
+
+    def load_native_model(_path, _params):
+        return native_model_handle
+
+    def fail_to_get_model_vocab(_model_handle):
+        return None
+
+    def record_model_free(model_handle):
+        freed_model_handles.append(model_handle)
+
+    monkeypatch.setattr(internals.os.path, "exists", model_path_exists)
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_model_load_from_file",
+        load_native_model,
+    )
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_model_get_vocab",
+        fail_to_get_model_vocab,
+    )
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_model_free",
+        record_model_free,
+    )
+
+    with pytest.raises(ValueError, match="Failed to get vocab"):
+        internals.LlamaModel(
+            path_model="model.gguf",
+            params=object(),
+            verbose=False,
+        )
+
+    assert freed_model_handles == [native_model_handle]
+
+
+def test_batch_init_frees_native_batch_when_validation_fails(monkeypatch):
+    class InvalidMixedNativeBatch:
+        token = object()
+        embd = object()
+
+    invalid_mixed_batch = InvalidMixedNativeBatch()
+    freed_batch_handles = []
+
+    def allocate_invalid_mixed_batch(_n_tokens, _embd, _n_seq_max):
+        return invalid_mixed_batch
+
+    def record_batch_free(batch_handle):
+        freed_batch_handles.append(batch_handle)
+
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_batch_init",
+        allocate_invalid_mixed_batch,
+    )
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_batch_free",
+        record_batch_free,
+    )
+
+    with pytest.raises(RuntimeError, match="expected batch.token to be NULL"):
+        internals.LlamaBatch(
+            n_tokens=1,
+            embd=1,
+            n_seq_max=1,
+            mixed=True,
+            verbose=False,
+        )
+
+    assert freed_batch_handles == [invalid_mixed_batch]
+
+
+def test_context_close_releases_parent_references():
+    context = internals.LlamaContext.__new__(internals.LlamaContext)
+    context.ctx = None
+    context.model = object()
+    context.params = object()
+    context._exit_stack = None
+
+    context.close()
+    context.close() # Closing an already closed context must be a no-op.
+
+    assert context.model is None
+    assert context.params is None
+
+
+def test_sampling_context_partial_init_can_close_idempotently(monkeypatch):
+    closed_resources = []
+
+    class MinimalModelForSampling:
+        model = object()
+        verbose = False
+
+        def n_vocab(self):
+            return 8
+
+    class TrackedTokenDataArray:
+        def __init__(self, *, n_vocab):
+            assert n_vocab == 8
+
+        def close(self):
+            closed_resources.append("token-data")
+
+    class TrackedSamplerChain:
+        def close(self):
+            closed_resources.append("sampler-chain")
+
+    def get_sampling_vocab(_model_handle):
+        return object()
+
+    def fail_sampler_chain_build(_sampling_context):
+        raise RuntimeError("sampler chain build failed")
+
+    monkeypatch.setattr(internals, "LlamaTokenDataArray", TrackedTokenDataArray)
+    monkeypatch.setattr(internals, "LlamaSampler", TrackedSamplerChain)
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_model_get_vocab",
+        get_sampling_vocab,
+    )
+    monkeypatch.setattr(
+        internals.LlamaSamplingContext,
+        "_build_sampler_chain",
+        fail_sampler_chain_build,
+    )
+
+    sampling_context = internals.LlamaSamplingContext.__new__(
+        internals.LlamaSamplingContext
+    )
+    with pytest.raises(RuntimeError, match="sampler chain build failed"):
+        sampling_context.__init__(
+            params=internals.LlamaSamplingParams(),
+            model=MinimalModelForSampling(),
+        )
+
+    sampling_context.close()
+    sampling_context.close() # Closing an already closed context must be a no-op.
+
+    assert closed_resources == ["sampler-chain", "token-data"]
+    assert sampling_context.model is None
+    assert sampling_context.params is None
+    assert sampling_context.vocab is None
+
+
 def test_llama_cpp_version():
     assert llama_cpp.__version__
 
