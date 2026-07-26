@@ -1165,7 +1165,9 @@ class LlamaBatch:
         if n_seq_id > self.n_seq_max:
             raise ValueError(
                 f"LlamaBatch.{where}: token belongs to {n_seq_id} sequences, "
-                f"but n_seq_max was initialized to {self.n_seq_max}."
+                f"but this batch was initialized with n_seq_max={self.n_seq_max}. "
+                f"Increase n_seq_max to at least {n_seq_id} when constructing "
+                "Llama, LlamaEmbedding, or LlamaBatch."
             )
 
         for seq_id in seq_ids:
@@ -1175,10 +1177,22 @@ class LlamaBatch:
                     f"{type(seq_id).__name__}."
                 )
 
-            if seq_id < 0 or seq_id >= self.n_seq_max:
+            if seq_id < 0:
                 raise ValueError(
                     f"LlamaBatch.{where}: invalid seq_id {seq_id}; "
-                    f"expected 0 <= seq_id < {self.n_seq_max}."
+                    "sequence IDs must be non-negative integers."
+                )
+
+            if seq_id >= self.n_seq_max:
+                required_n_seq_max = seq_id + 1
+                raise ValueError(
+                    f"LlamaBatch.{where}: seq_id={seq_id} exceeds the configured "
+                    f"sequence capacity (n_seq_max={self.n_seq_max}; valid IDs "
+                    f"are 0 through {self.n_seq_max - 1}). For parallel batching, "
+                    f"initialize Llama or LlamaEmbedding with "
+                    f"n_seq_max>={required_n_seq_max}, or create LlamaBatch "
+                    "with that value. Use seq_id=0 when processing only one "
+                    "sequence."
                 )
 
         return n_seq_id
@@ -1486,15 +1500,6 @@ class LlamaBatch:
 
         self.batch.logits[idx] = logits
         self.batch.n_tokens += 1
-
-
-# Embedding functions
-def normalize_embedding(embedding):
-    norm = float(np.linalg.norm(embedding))
-    if norm == 0.0:
-        return embedding
-    return [v / norm for v in embedding]
-
 
 class LlamaTokenDataArray:
     """
