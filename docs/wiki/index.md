@@ -44,6 +44,17 @@ These pages document major source modules and related classes.
 
 ---
 
+### Features
+
+Workflow guides combine related classes and configuration into complete usage
+patterns.
+
+| Page | Description |
+|---|---|
+| [features/embeddings-rerank\|Embeddings and Reranking] | Sentence embeddings, token-level vectors, normalization, streaming batches, similarity output, and cross-encoder reranking. |
+
+---
+
 ### Development
 
 This section contains maintainer-facing development notes, workflows, and LLM-assisted helper tools for working on `llama-cpp-python`.
@@ -99,6 +110,7 @@ Currently available pages:
 - `modules/LlamaGrammar.md`
 - `modules/LlamaSpeculative.md`
 - `modules/Logger.md`
+- `features/embeddings-rerank.md`
 - `development/git-commit-generation-agent.md`
 - `SCHEMA.md`
 - `contributing-to-wiki.md`
