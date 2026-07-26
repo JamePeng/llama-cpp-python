@@ -1648,7 +1648,12 @@ To generate embeddings, use the `LlamaEmbedding` class. It automatically configu
 from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 
 # Initialize the model (automatically sets embeddings=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
+llm = LlamaEmbedding(
+    model_path="path/to/bge-m3.gguf",
+    n_gpu_layers=-1,
+    pooling_type=LLAMA_POOLING_TYPE_NONE,
+    n_seq_max=128,  # Maximum independent sequences in one decode batch
+)
 
 # 1. Simple usage (OpenAI-compatible format)
 response = llm.create_embedding("Hello, world!")
@@ -1661,6 +1666,14 @@ embeddings = llm.embed(documents) # Returns a list of lists (vectors)
 
 print(f"Generated {len(embeddings)} vectors.")
 ```
+
+> **Parallel batch capacity:** `n_seq_max` controls how many independent
+> sequence IDs may coexist in one decode batch; it is not the total number of
+> documents accepted by `embed()`. For batch embedding, set it high enough for
+> the number of short documents that can fit within `n_batch`. If an error says
+> `seq_id=1` exceeds `n_seq_max=1`, initialize the model with at least
+> `n_seq_max=2`. For example, use `n_seq_max=8` for up to eight parallel
+> sequences. Larger values can use more context resources.
 
 **Advanced Output Formats:**
 You can request raw arrays or cosine similarity matrices directly:
@@ -1755,14 +1768,28 @@ vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
 embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE)
 ```
 
-### Legacy Usage (Deprecated)
+### Using the standard `Llama` class
 
-The standard `Llama` class still supports basic embedding generation, but it lacks the memory optimizations and reranking capabilities of `LlamaEmbedding`.
+The standard `Llama` class also supports the maintained streaming embedding
+implementation. Initialize it with `embeddings=True`, then call `embed()` for
+raw results or `create_embedding()` for an OpenAI-compatible response.
+`LlamaEmbedding` remains a convenient specialized interface because it enables
+embedding-oriented defaults and provides the `rank()` helper.
 
 ```python
-# Old method - Not recommended for large batches or reranking
-llm = llama_cpp.Llama(model_path="...", embeddings=True)
-emb = llm.create_embedding("text")
+llm = llama_cpp.Llama(
+    model_path="path/to/model.gguf",
+    embeddings=True,
+    n_batch=512,
+    n_seq_max=8,
+    kv_unified=True,
+)
+
+# OpenAI-compatible response; normalize=True selects L2 normalization.
+response = llm.create_embedding(["query", "document"], normalize=True)
+
+# Raw vectors. Integer normalization modes are also supported.
+vectors = llm.embed(["query", "document"], normalize=2)
 ```
 
 ---

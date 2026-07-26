@@ -4,7 +4,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-05-16
+last_updated: 2026-07-26
 version_target: "latest"
 ---
 ```
@@ -430,15 +430,39 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
 ---
 
-## Deprecated / Changed APIs
+## Embeddings
 
-> ⚠️ **Warning:** The internal embedding methods on the `Llama` class are deprecated and will be removed.
+The `Llama` embedding methods are maintained and use streaming batches. Create
+the model with `embeddings=True` before calling them.
 
-* `embed()` ➔ **Deprecated.**
-* `create_embedding()` ➔ **Deprecated.**
+```python
+llm = Llama(
+    model_path="path/to/model.gguf",
+    embeddings=True,
+    n_seq_max=8,
+    kv_unified=True,
+)
 
-**Migration Note:** Do not use `Llama(..., embeddings=True)` combined with `model.create_embedding(...)`. Instead, use the dedicated `LlamaEmbedding` class, which offers optimized batching and reranking support.
-*See: [[LlamaEmbedding]]*
+# Raw sequence or token-level embeddings.
+vectors = llm.embed(["query", "document"], normalize=2)
+
+# OpenAI-compatible response.
+response = llm.create_embedding(["query", "document"], normalize=True)
+```
+
+`embed()` accepts strings, lists of strings, or pre-tokenized inputs. It supports
+token-level output (`LLAMA_POOLING_TYPE_NONE`), sequence pooling, rank-model
+outputs, streaming batches, and llama.cpp integer normalization modes.
+
+For parallel batches, `n_seq_max` must cover every sequence ID active in a
+single decode batch. The default `n_seq_max=1` supports only `seq_id=0`.
+For example, `n_seq_max=8` permits IDs `0` through `7`. If this capacity is
+exceeded, the exception reports the valid range and the minimum value required.
+`n_batch` limits tokens, while `n_seq_max` limits independent sequences.
+
+`LlamaEmbedding` remains available as the specialized convenience class. It
+automatically enables embedding-oriented context options and adds the `rank()`
+helper for formatting query/document pairs.
 
 ---
 

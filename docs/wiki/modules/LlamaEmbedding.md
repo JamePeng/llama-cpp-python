@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-05-31
+last_updated: 2026-07-26
 version_target: "latest"
 ---
 
@@ -38,6 +38,7 @@ version_target: "latest"
 | `n_ctx` | int | 0 | Text context window size (0 = model default). |
 | `n_batch` | int | 512 | Maximum prompt processing batch size. |
 | `n_ubatch` | int | 512 | Physical batch size. |
+| `n_seq_max` | int | 1 (inherited) | Maximum number of independent sequence IDs available in a decode batch. Increase this for parallel embedding batches. |
 | `pooling_type` | int | `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) | Pooling strategy used by the model: `LLAMA_POOLING_TYPE_RANK` (4) for rerankers, `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) for embeddings. |
 | `n_gpu_layers` | int | 0 | Number of layers offloaded to GPU (0 = CPU only, -1 = all layers). |
 | `verbose` | bool | True | Whether to print debug information. |
@@ -46,8 +47,43 @@ version_target: "latest"
 ### Initialization Logic
 
 1. Forces `embeddings=True` to enable embedding support.
-2. Sets `kv_unified=True` to enable unified KV Cache, allowing arbitrary sequence IDs in a batch without "invalid seq_id" errors.
+2. Sets `kv_unified=True` to enable unified KV Cache. Sequence IDs must still
+   fit within the configured `n_seq_max`.
 3. Passes `pooling_type` to the parent class constructor.
+
+### Parallel Batch Capacity
+
+`n_batch`, `n_ubatch`, and `n_seq_max` control different limits:
+
+- `n_batch`: maximum number of input tokens in a logical decode batch.
+- `n_ubatch`: physical token batch size used by llama.cpp.
+- `n_seq_max`: number of independent sequence IDs that may coexist in a decode
+  batch.
+
+For multiple documents, set `n_seq_max` to the desired parallel sequence
+capacity:
+
+```python
+model = LlamaEmbedding(
+    model_path="path/to/model.gguf",
+    n_batch=512,
+    n_ubatch=512,
+    n_seq_max=8,
+)
+```
+
+If the configuration is too small, the error includes the current capacity,
+valid ID range, and required minimum:
+
+```text
+LlamaBatch.add_sequence: seq_id=1 exceeds the configured sequence capacity
+(n_seq_max=1; valid IDs are 0 through 0). For parallel batching, initialize
+Llama or LlamaEmbedding with n_seq_max>=2 ...
+```
+
+`n_seq_max` is not the total number of documents passed to `embed()`; it is the
+number that can be active in one decode batch. Increase it carefully because
+larger values may require more context resources.
 
 ## Core Methods
 
@@ -129,7 +165,10 @@ version_target: "latest"
    - Token-level embeddings: `LLAMA_POOLING_TYPE_NONE (0)`.
 
 2. **Batch Optimization for Large Datasets**:
-   - Adjust `n_batch` and `n_ubatch` to balance performance and memory.
+   - Adjust `n_batch`, `n_ubatch`, and `n_seq_max` to balance parallelism,
+     performance, and memory.
+   - If `seq_id` exceeds the configured capacity, increase `n_seq_max` to at
+     least `seq_id + 1`.
    - Streaming processing avoids OOM for large datasets.
 
 3. **Normalization Selection**:
@@ -153,7 +192,12 @@ To generate embeddings, use the `LlamaEmbedding` class. It automatically configu
 from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 
 # Initialize the model (automatically sets embeddings=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
+llm = LlamaEmbedding(
+    model_path="path/to/bge-m3.gguf",
+    n_gpu_layers=-1,
+    pooling_type=LLAMA_POOLING_TYPE_NONE,
+    n_seq_max=128,
+)
 
 # 1. Simple usage (OpenAI-compatible format)
 response = llm.create_embedding("Hello, world!")
@@ -263,7 +307,8 @@ embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MOD
 ## Notes
 
 - This class is in development; some features may be unstable, especially reranking model support.
-- Performance issues can be addressed by adjusting `n_batch`, `n_ubatch`, and `n_gpu_layers`.
+- Performance issues can be addressed by adjusting `n_batch`, `n_ubatch`,
+  `n_seq_max`, and `n_gpu_layers`.
 - For custom models, manual `pooling_type` configuration may be required to match model behavior.
 
 ## Related Links
