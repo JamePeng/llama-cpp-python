@@ -1950,21 +1950,25 @@ class Llama:
                 )
 
     def create_embedding(
-        self, input: Union[str, List[str]], model: Optional[str] = None
+        self,
+        input: Union[str, List[str]],
+        model: Optional[str] = None,
+        normalize: Union[bool, int] = False,
+        truncate: bool = True,
     ) -> CreateEmbeddingResponse:
-        """Embed a string.
+        """Create an OpenAI-compatible embedding response.
 
         Args:
-            input: The utf-8 encoded string to embed.
+            input: A string or list of strings to embed.
+            model: Model name reported in the response.
+            normalize: ``False`` disables normalization, ``True`` uses L2
+                normalization, and integer values select a llama.cpp
+                normalization mode.
+            truncate: Truncate inputs to the available context/batch capacity.
 
         Returns:
-            An embedding object.
+            An OpenAI-compatible embedding response.
         """
-        warnings.warn(
-            "The `create_embedding` method in `Llama` class is deprecated. "
-            "Please migrate to `LlamaEmbedding.create_embedding` for better efficiency.",
-            DeprecationWarning,
-        )
         model_name: str = model if model is not None else self.model_path
 
         input = input if isinstance(input, list) else [input]
@@ -1972,7 +1976,12 @@ class Llama:
         # get numeric embeddings
         embeds: Union[List[List[float]], List[List[List[float]]]]
         total_tokens: int
-        embeds, total_tokens = self.embed(input, return_count=True)  # type: ignore
+        embeds, total_tokens = self.embed(  # type: ignore
+            input,
+            normalize=normalize,
+            truncate=truncate,
+            return_count=True,
+        )
 
         # convert to CreateEmbeddingResponse
         data: List[Embedding] = [
@@ -1996,130 +2005,209 @@ class Llama:
 
     def embed(
         self,
-        input: Union[str, List[str]],
-        normalize: bool = False,
+        input: Union[str, List[str], List[List[int]]],
+        normalize: Union[bool, int] = False,
         truncate: bool = True,
+        separator: Optional[str] = None,
         return_count: bool = False,
     ):
-        """Embed a string.
+        """Embed strings or pre-tokenized inputs.
 
         Args:
-            input: The utf-8 encoded string to embed.
+            input: A string, a list of strings, or a list of token-id lists.
+            normalize: ``False``/``-1`` disables normalization, ``True`` uses
+                L2 normalization. Integer modes follow llama.cpp's embedding
+                example: 0=max-absolute (scaled to 32760), 1=L1, 2=L2, and
+                values greater than 2 use the corresponding p-norm.
+            truncate: Truncate inputs that exceed the context/batch capacity.
+            separator: Split a single string into multiple inputs.
+            return_count: Return ``(embeddings, token_count)``.
 
         Returns:
-            A list of embeddings
+            Sequence embeddings, token-level embeddings for pooling type NONE,
+            or scalar/vector scores for pooling type RANK.
         """
-        warnings.warn(
-            "The `embed` method in `Llama` class is deprecated and will be removed in future versions. "
-            "Please use the `LlamaEmbedding` class from `llama_embedding` module for optimized performance and reranking support.",
-            DeprecationWarning,
-        )
-
-        n_embd = self.n_embd()
-        n_batch = self.n_batch
-
-        # get pooling information
-        pooling_type = self.pooling_type()
-        logits_all = pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_NONE
-
         if self.context_params.embeddings is False:
             raise RuntimeError(
                 "Llama model must be created with embeddings=True to call this method"
             )
 
+        ctx = self._ctx.ctx
+        n_batch = self.n_batch
+        n_ctx = self._n_ctx
+        n_seq_max = self.context_params.n_seq_max
+
+        pooling_type = self.pooling_type()
+        is_rank = pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_RANK
+        is_none = pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_NONE
+
+        out_dim = (
+            llama_cpp_lib.llama_model_n_cls_out(self._model.model)
+            if is_rank
+            else self.n_embd()
+        )
+
+        # Preserve the historical bool API while accepting llama.cpp's integer
+        # normalization modes used by LlamaEmbedding.
+        if isinstance(normalize, bool):
+            normalize_mode = 2 if normalize else -1
+        elif isinstance(normalize, int):
+            normalize_mode = normalize
+        else:
+            raise TypeError("normalize must be a bool or int")
+
+        def normalize_vector(vector: Sequence[float]) -> List[float]:
+            values = list(vector)
+            if normalize_mode == -1 or is_rank:
+                return values
+
+            array = np.asarray(values, dtype=np.float32)
+            if normalize_mode == 0:
+                norm = float(np.max(np.abs(array))) if array.size else 0.0
+                scale = 32760.0
+            elif normalize_mode == 1:
+                norm = float(np.sum(np.abs(array)))
+                scale = 1.0
+            elif normalize_mode == 2:
+                norm = float(np.linalg.norm(array))
+                scale = 1.0
+            elif normalize_mode > 2:
+                norm = float(
+                    np.sum(np.abs(array) ** normalize_mode)
+                    ** (1.0 / normalize_mode)
+                )
+                scale = 1.0
+            else:
+                return values
+
+            if norm == 0.0:
+                return values
+            return ((array / norm) * scale).tolist()
+
         if self.verbose:
-            llama_cpp_lib.llama_perf_context_reset(self._ctx.ctx)
+            llama_cpp_lib.llama_perf_context_reset(ctx)
 
         if isinstance(input, str):
-            inputs = [input]
+            inputs: List[Union[str, List[int]]] = (
+                input.split(separator) if separator is not None else [input]
+            )
+            is_single = separator is None
         else:
             inputs = input
+            is_single = False
 
-        # reset batch
         self._batch.reset()
+        llama_cpp_lib.llama_memory_clear(
+            llama_cpp_lib.llama_get_memory(ctx), True
+        )
 
-        # decode and fetch embeddings
-        data: Union[List[List[float]], List[List[List[float]]]] = []
-
-        def decode_batch(seq_sizes: List[int]):
-            llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(self._ctx.ctx), True)
-            self._ctx.decode(self._batch)
-            self._batch.reset()
-
-            # store embeddings
-            if pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_NONE:
-                pos: int = 0
-                for i, size in enumerate(seq_sizes):
-                    ptr = llama_cpp_lib.llama_get_embeddings(self._ctx.ctx)
-                    embedding: List[List[float]] = [
-                        ptr[pos + j * n_embd : pos + (j + 1) * n_embd]
-                        for j in range(size)
-                    ]
-                    if normalize:
-                        embedding = [
-                            internals.normalize_embedding(e) for e in embedding
-                        ]
-                    data.append(embedding)
-                    pos += size
-            else:
-                for i in range(len(seq_sizes)):
-                    ptr = llama_cpp_lib.llama_get_embeddings_seq(self._ctx.ctx, i)
-                    embedding: List[float] = ptr[:n_embd]
-                    if normalize:
-                        embedding = internals.normalize_embedding(embedding)
-                    data.append(embedding)
-
-        # init state
+        data: List[Any] = []
+        seq_sizes: List[int] = []
         total_tokens = 0
-        s_batch = []
-        t_batch = 0
-        p_batch = 0
 
-        # accumulate batches and encode
-        for text in inputs:
-            tokens = self.tokenize(text.encode("utf-8"))
-            if truncate:
-                tokens = tokens[:n_batch]
+        def decode_batch() -> None:
+            nonlocal seq_sizes
+            if not seq_sizes:
+                return
+
+            self._ctx.decode(self._batch)
+
+            if is_none:
+                token_index = 0
+                for size in seq_sizes:
+                    token_embeddings: List[List[float]] = []
+                    for _ in range(size):
+                        ptr = llama_cpp_lib.llama_get_embeddings_ith(
+                            ctx, token_index
+                        )
+                        token_embeddings.append(
+                            [0.0] * out_dim
+                            if ptr is None
+                            else normalize_vector(ptr[:out_dim])
+                        )
+                        token_index += 1
+                    data.append(token_embeddings)
+            else:
+                for seq_id in range(len(seq_sizes)):
+                    ptr = llama_cpp_lib.llama_get_embeddings_seq(ctx, seq_id)
+                    if ptr is None:
+                        embedding = [0.0] * out_dim
+                    else:
+                        embedding = list(ptr[:out_dim])
+
+                    if is_rank:
+                        data.append(
+                            embedding[0] if len(embedding) == 1 else embedding
+                        )
+                    else:
+                        data.append(normalize_vector(embedding))
+
+            self._batch.reset()
+            llama_cpp_lib.llama_memory_clear(
+                llama_cpp_lib.llama_get_memory(ctx), True
+            )
+            seq_sizes = []
+
+        for item in inputs:
+            if isinstance(item, str):
+                tokens = self.tokenize(item.encode("utf-8"))
+            elif isinstance(item, list) and (
+                not item or isinstance(item[0], int)
+            ):
+                tokens = item
+            else:
+                raise ValueError("Input item must be str or List[int]")
+
+            max_tokens = min(n_ctx, n_batch)
+            if truncate and len(tokens) > max_tokens:
+                tokens = tokens[:max_tokens]
 
             n_tokens = len(tokens)
             total_tokens += n_tokens
 
-            # check for overrun
             if n_tokens > n_batch:
                 raise ValueError(
                     f"Requested tokens ({n_tokens}) exceed batch size of {n_batch}"
                 )
 
-            # time to eval batch
-            if t_batch + n_tokens > n_batch:
-                decode_batch(s_batch)
-                s_batch = []
-                t_batch = 0
-                p_batch = 0
+            if n_tokens == 0:
+                # Keep result ordering stable when an empty pre-tokenized input
+                # follows sequences that are still waiting to be decoded.
+                decode_batch()
+                data.append(0.0 if is_rank else [])
+                continue
 
-            # add to batch
-            self._batch.add_sequence(tokens, p_batch, logits_all)
+            if (
+                self._batch.n_tokens() + n_tokens > n_batch
+                or len(seq_sizes) >= n_seq_max
+            ):
+                decode_batch()
 
-            # update batch stats
-            s_batch.append(n_tokens)
-            t_batch += n_tokens
-            p_batch += 1
+            seq_id = len(seq_sizes)
+            logits_array = (
+                [True] * n_tokens
+                if is_none
+                else [False] * (n_tokens - 1) + [True]
+            )
+            self._batch.add_sequence(
+                token_array=tokens,
+                pos_array=list(range(n_tokens)),
+                seq_ids=[seq_id],
+                logits_array=logits_array,
+            )
+            seq_sizes.append(n_tokens)
 
-        # hanlde last batch
-        decode_batch(s_batch)
+        decode_batch()
 
         if self.verbose:
-            llama_cpp_lib.llama_perf_context_print(self._ctx.ctx)
+            llama_cpp_lib.llama_perf_context_print(ctx)
 
-        output = data[0] if isinstance(input, str) else data
-
-        llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(self._ctx.ctx), True)
+        output = data[0] if is_single else data
         self.reset()
 
         if return_count:
             return output, total_tokens
-        else:
-            return output
+        return output
 
     def _create_completion(
         self,
