@@ -64,6 +64,32 @@ def test_llama_cpp_tokenization():
     assert text == llama.detokenize(tokens)
 
 
+def test_llama_batch_seq_id_error_guidance():
+    """Sequence-capacity errors should explain how to fix parallel batching."""
+    batch = internals.LlamaBatch(
+        n_tokens=2,
+        embd=0,
+        n_seq_max=1,
+        verbose=False,
+    )
+    try:
+        with pytest.raises(ValueError) as exc_info:
+            batch.add_sequence(
+                token_array=[1],
+                pos_array=[0],
+                seq_ids=[1],
+                logits_array=[True],
+            )
+
+        message = str(exc_info.value)
+        assert "n_seq_max=1" in message
+        assert "valid IDs are 0 through 0" in message
+        assert "n_seq_max>=2" in message
+        assert "LlamaEmbedding" in message
+    finally:
+        batch.close()
+
+
 @pytest.fixture
 def llama_cpp_model_path():
     """Fixture to download a real GGUF model for integration tests."""
@@ -365,16 +391,75 @@ def test_custom_logits_processor(llama_cpp_model_path):
 
 def test_real_llama_embeddings(llama_cpp_model_path):
     """
-    Test Embedding Generation.
-    Verifies that the model can produce vector embeddings.
+    Test embedding generation through the specialized LlamaEmbedding class.
     """
     model = LlamaEmbedding(
-         model_path=llama_cpp_model_path,
-         n_ctx=32,
-         n_batch=32,
-         n_ubatch=32,
-         pooling_type=LLAMA_POOLING_TYPE_NONE)
-    # Smoke test for now
-    embeddings = model.embed("Hello, world!")
-    assert isinstance(embeddings, list)
-    assert len(embeddings) > 0
+        model_path=llama_cpp_model_path,
+        n_ctx=32,
+        n_batch=32,
+        n_ubatch=32,
+        pooling_type=LLAMA_POOLING_TYPE_NONE,
+    )
+    try:
+        # The inherited n_seq_max=1 processes this list as three streaming
+        # decode batches instead of assigning an invalid seq_id.
+        embeddings = model.embed(["Hello", "world", "embedding"])
+        assert isinstance(embeddings, list)
+        assert len(embeddings) == 3
+        assert all(len(embedding) > 0 for embedding in embeddings)
+    finally:
+        model.close()
+
+
+def test_real_llama_base_embedding_api(llama_cpp_model_path):
+    """
+    Test the maintained embedding API on the standard Llama class.
+
+    Covers pre-tokenized batching, normalization, separator-based string
+    batching, token counts, and the OpenAI-compatible response wrapper.
+    """
+    model = llama_cpp.Llama(
+        model_path=llama_cpp_model_path,
+        embeddings=True,
+        n_ctx=32,
+        n_batch=32,
+        n_ubatch=32,
+        n_seq_max=2,
+        kv_unified=True,
+        pooling_type=LLAMA_POOLING_TYPE_NONE,
+        verbose=False,
+    )
+
+    try:
+        token_inputs = [
+            model.tokenize(b"Hello"),
+            model.tokenize(b"world"),
+        ]
+        embeddings, token_count = model.embed(
+            token_inputs,
+            normalize=True,
+            return_count=True,
+        )
+
+        assert len(embeddings) == len(token_inputs)
+        assert token_count == sum(map(len, token_inputs))
+        assert len(embeddings[0]) == len(token_inputs[0])
+        assert np.linalg.norm(embeddings[0][0]) == pytest.approx(1.0)
+
+        split_embeddings = model.embed(
+            "Hello\nworld",
+            separator="\n",
+            normalize=False,
+        )
+        assert len(split_embeddings) == 2
+
+        response = model.create_embedding(
+            ["Hello", "world"],
+            normalize=2,
+        )
+        assert response["object"] == "list"
+        assert len(response["data"]) == 2
+        assert response["usage"]["prompt_tokens"] > 0
+        assert response["usage"]["total_tokens"] == response["usage"]["prompt_tokens"]
+    finally:
+        model.close()
