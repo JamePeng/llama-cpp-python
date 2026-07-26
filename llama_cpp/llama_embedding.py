@@ -128,7 +128,7 @@ class LlamaEmbedding(Llama):
         ctx = self._ctx.ctx
         n_batch = self.n_batch
         n_ctx = self._n_ctx
-        n_ubatch = self.context_params.n_ubatch
+        n_seq_max = self.context_params.n_seq_max
 
         # Determine if it is in Rerank mode
         try:
@@ -137,8 +137,6 @@ class LlamaEmbedding(Llama):
             pooling_type = LLAMA_POOLING_TYPE_UNSPECIFIED
         is_rank = (pooling_type == LLAMA_POOLING_TYPE_RANK)
         is_none = (pooling_type == LLAMA_POOLING_TYPE_NONE) # Token-level embedding
-        logits_all = True if is_none else False
-
         # Determine the output dimension
         if is_rank:
             out_dim = llama_cpp_lib.llama_model_n_cls_out(self._model.model)
@@ -247,7 +245,10 @@ class LlamaEmbedding(Llama):
                 continue
 
             # Check Batch Capacity
-            if (self._batch.n_tokens() + n_tokens > n_batch) or (idx_in_batch >= n_ubatch):
+            if (
+                self._batch.n_tokens() + n_tokens > n_batch
+                or idx_in_batch >= n_seq_max
+            ):
                 _decode_batch()
                 idx_in_batch = 0
 
