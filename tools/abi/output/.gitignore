@@ -1,0 +1,4 @@
+# Keep generated ABI reports local.
+*
+!.gitignore
+!README.md

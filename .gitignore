@@ -75,6 +75,15 @@ local_settings.py
 models/
 docker/open_llama/*.bin
 
+# Repository-only ABI tool inputs and generated reports.
+# Keep only the directory instructions and local ignore rules tracked.
+/tools/abi/artifacts/*
+!/tools/abi/artifacts/.gitignore
+!/tools/abi/artifacts/README.md
+/tools/abi/output/*
+!/tools/abi/output/.gitignore
+!/tools/abi/output/README.md
+
 # C extensions (llama_cpp bindings)
 llama_cpp/*.so
 llama_cpp/*.dylib
