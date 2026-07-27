@@ -118,13 +118,19 @@ def load_shared_library(lib_base_name: str, base_paths: Union[pathlib.Path, list
 
         # Add HIP runtime DLL directories when HIP backend is available.
         if "HIP_PATH" in os.environ:
-            os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "bin"))
-            os.add_dll_directory(os.path.join(os.environ["HIP_PATH"], "lib"))
+            hip_path = os.environ["HIP_PATH"]
+            for sub_dir in ["bin", "lib"]:
+                full_path = os.path.join(hip_path, sub_dir)
+                if os.path.exists(full_path):
+                    os.add_dll_directory(full_path)
 
         # Add Vulkan SDK DLL directories when Vulkan backend is enabled.
         if "VULKAN_SDK" in os.environ:
-            os.add_dll_directory(os.path.join(os.environ["VULKAN_SDK"], "Bin"))
-            os.add_dll_directory(os.path.join(os.environ["VULKAN_SDK"], "Lib"))
+            vulkan_sdk = os.environ["VULKAN_SDK"]
+            for sub_dir in ["Bin", "Lib"]:
+                full_path = os.path.join(vulkan_sdk, sub_dir)
+                if os.path.exists(full_path):
+                    os.add_dll_directory(full_path)
 
         # Add package-provided library directories.
         #
