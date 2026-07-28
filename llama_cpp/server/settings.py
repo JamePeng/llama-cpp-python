@@ -32,8 +32,12 @@ class ModelSettings(BaseSettings):
     )
     split_mode: int = Field(
         default=llama_cpp.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
-        description="The split mode to use.",
+        description="how to split the model across multiple GPUs",
     )
+    load_mode: int = Field(
+            default=llama_cpp.llama_load_mode.LLAMA_LOAD_MODE_MMAP,
+            description="how to load the model",
+        )
     main_gpu: int = Field(
         default=0,
         ge=0,
@@ -45,18 +49,6 @@ class ModelSettings(BaseSettings):
     )
     vocab_only: bool = Field(
         default=False, description="Whether to only return the vocabulary."
-    )
-    use_mmap: bool = Field(
-        default=True,
-        description="Enable mmap to use filesystem cache.",
-    )
-    use_direct_io: bool = Field(
-        default=False,
-        description="Use direct io, takes precedence over use_mmap.",
-    )
-    use_mlock: bool = Field(
-        default=False,
-        description="Use mlock for force system to keep model in RAM",
     )
     check_tensors: bool = Field(
         default=False,

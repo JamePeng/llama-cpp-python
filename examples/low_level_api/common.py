@@ -60,9 +60,6 @@ class GptParams:
 
     instruct: bool = False
     perplexity: bool = False
-    use_mmap: bool = True
-    use_direct_io: bool = False
-    use_mlock: bool = False
     mem_test: bool = False
     verbose_prompt: bool = False
 

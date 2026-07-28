@@ -294,12 +294,10 @@ class LlamaProxy:
             # Model Params
             n_gpu_layers=settings.n_gpu_layers,
             split_mode=settings.split_mode,
+            load_mode=settings.load_mode,
             main_gpu=settings.main_gpu,
             tensor_split=settings.tensor_split,
             vocab_only=settings.vocab_only,
-            use_mmap=settings.use_mmap,
-            use_direct_io=settings.use_direct_io,
-            use_mlock=settings.use_mlock,
             check_tensors=settings.check_tensors,
             use_extra_bufts=settings.use_extra_bufts,
             no_host=settings.no_host,

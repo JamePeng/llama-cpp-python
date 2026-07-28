@@ -104,10 +104,11 @@ class Llama:
         cpu_moe: bool = False,
         n_cpu_moe: int = 0,
         split_mode: int = llama_cpp_lib.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
+        load_mode: int = llama_cpp_lib.llama_load_mode.LLAMA_LOAD_MODE_MMAP,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
         vocab_only: bool = False,
-        use_mmap: bool = True,
+        use_mmap: bool = False,
         use_direct_io: bool = False,
         use_mlock: bool = False,
         check_tensors: bool = False,
@@ -215,11 +216,10 @@ class Llama:
             n_cpu_moe: Keep the MoE expert weights of the first N layers on CPU.
                 Useful when VRAM is insufficient for MoE models.
             split_mode: How to split the model across GPUs. See llama_cpp.LLAMA_SPLIT_* for options.
+            load_mode: How to load the model. See llama_cpp.LLAMA_LOAD_MODE_* for options.
             main_gpu: main_gpu interpretation depends on split_mode: LLAMA_SPLIT_MODE_NONE: the GPU that is used for the entire model. LLAMA_SPLIT_MODE_ROW: the GPU that is used for small tensors and intermediate results. LLAMA_SPLIT_MODE_LAYER: ignored
             tensor_split: How split tensors should be distributed across GPUs. If None, the model is not split.
             vocab_only: Only load the vocabulary no weights.
-            use_mmap: Use mmap if possible.
-            use_mlock: Force the system to keep the model in RAM.
             check_tensors: validate model tensor data
             use_extra_bufts: use extra buffer types (used for weight repacking)
             no_host: bypass host buffer allowing extra buffers to be used
@@ -352,10 +352,19 @@ class Llama:
 
         self.model_path = model_path
 
+        if (use_mmap or use_direct_io or use_mlock) and verbose:
+            print(
+                "Llama.__init__: WARNING: "
+                "Legacy load options (`use_mmap`, `use_direct_io`, `use_mlock`) "
+                "are deprecated. Use `load_mode` instead.",
+                file=sys.stderr,
+            )
+
         # Model Params
         self.model_params = llama_cpp_lib.llama_model_default_params()
         self.model_params.n_gpu_layers = self._parse_n_gpu_layers(n_gpu_layers)
         self.model_params.split_mode = split_mode
+        self.model_params.load_mode = load_mode
         self.model_params.main_gpu = main_gpu
         self.tensor_split = tensor_split
         self._c_tensor_split = None
@@ -371,9 +380,6 @@ class Llama:
             )  # keep a reference to the array so it is not gc'd
             self.model_params.tensor_split = self._c_tensor_split
         self.model_params.vocab_only = vocab_only
-        self.model_params.use_mmap = use_mmap
-        self.model_params.use_direct_io = use_direct_io
-        self.model_params.use_mlock = use_mlock
         self.model_params.check_tensors = check_tensors
         self.model_params.use_extra_bufts = use_extra_bufts
         self.model_params.no_host = no_host
@@ -3445,12 +3451,10 @@ prompt: The prompt to generate text from.
             cpu_moe=self.cpu_moe,
             n_cpu_moe=self.n_cpu_moe,
             split_mode=self.model_params.split_mode,
+            load_mode=self.model_params.load_mode,
             main_gpu=self.model_params.main_gpu,
             tensor_split=self.tensor_split,
             vocab_only=self.model_params.vocab_only,
-            use_mmap=self.model_params.use_mmap,
-            use_direct_io=self.model_params.use_direct_io,
-            use_mlock=self.model_params.use_mlock,
             check_tensors=self.model_params.check_tensors,
             use_extra_bufts=self.model_params.use_extra_bufts,
             no_host=self.model_params.no_host,

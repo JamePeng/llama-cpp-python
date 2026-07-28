@@ -260,9 +260,6 @@ def test_real_model(llama_cpp_model_path):
 
     # 1. Setup Model Parameters
     params = llama_cpp.llama_model_default_params()
-    params.use_mmap = llama_cpp.llama_supports_mmap()
-    params.use_direct_io = False
-    params.use_mlock = llama_cpp.llama_supports_mlock()
     params.check_tensors = False
 
     # 2. Load the Model
