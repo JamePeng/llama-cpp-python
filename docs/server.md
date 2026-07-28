@@ -37,6 +37,26 @@ CLI arguments and environment variables are available for all of the fields defi
 
 Additionally the server supports configuration check out the [configuration section](#configuration-and-multi-model-support) for more information and examples.
 
+#### Model loading mode
+
+Use `load_mode` to select how the server loads model data. The corresponding
+CLI option is `--load_mode`, the environment variable is `LOAD_MODE`, and a
+multi-model JSON configuration can set `"load_mode"` for each model.
+`use_mmap`, `use_direct_io`, and `use_mlock` are no longer server settings.
+
+| Value | Mode | Description |
+|---:|---|---|
+| `0` | `LLAMA_LOAD_MODE_NONE` | Use no special model-loading mode. |
+| `1` | `LLAMA_LOAD_MODE_MMAP` | Memory-map the model. This is the default. |
+| `2` | `LLAMA_LOAD_MODE_MLOCK` | Keep the loaded model in RAM rather than allowing it to be swapped or compressed. |
+| `3` | `LLAMA_LOAD_MODE_MMAP_MLOCK` | Memory-map the model and keep its mapped pages in RAM. |
+| `4` | `LLAMA_LOAD_MODE_DIRECT_IO` | Use direct I/O when it is available. |
+
+For example, start the server with memory mapping plus memory locking:
+
+```bash
+python3 -m llama_cpp.server --model <model_path> --load_mode 3
+```
 
 ## Guides
 

@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-07-26
+last_updated: 2026-07-29
 version_target: "latest"
 ---
 
@@ -36,12 +36,46 @@ Initialize the model and context. Note that model loading will immediately alloc
 | `cpu_moe` | `bool` | `False` | Whether to keep all MoE weights on CPU |
 | `n_cpu_moe` | `int` | `0` | Number of first N MoE layers to keep on CPU (compatible with `cpu_moe`) |
 | `split_mode` | `int` | `LLAMA_SPLIT_MODE_LAYER` | Model GPU split mode:<br>• `LLAMA_SPLIT_MODE_NONE`: single GPU<br>• `LLAMA_SPLIT_MODE_ROW`: row-level split<br>• `LLAMA_SPLIT_MODE_LAYER`: layer-level split |
+| `load_mode` | `int` (`llama_load_mode`) | `LLAMA_LOAD_MODE_MMAP` | How model data is loaded. Select one of the `LLAMA_LOAD_MODE_*` values described below. |
 | `main_gpu` | `int` | `0` | The primary GPU to use for intermediate results or the entire model. |
 | `tensor_split` | `List[float]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
-| `use_mmap` | `bool` | `True` | Whether to use memory mapping (mmap) if possible. |
-| `use_mlock` | `bool` | `False` | Force the system to keep the model in RAM, preventing swapping. |
 | `kv_overrides` | `Dict` | `None` | Key-value overrides for the model metadata (supports bool, int, float, str). |
 | `numa` | `Union[bool, int]` | `False` | NUMA strategy (e.g., `GGML_NUMA_STRATEGY_DISTRIBUTE`). |
+
+#### Model Load Modes
+
+`load_mode` replaces the legacy `use_mmap`, `use_direct_io`, and `use_mlock`
+arguments. It accepts a member of `llama_cpp.llama_load_mode`:
+
+| Value | Integer | Description |
+| :--- | :---: | :--- |
+| `LLAMA_LOAD_MODE_NONE` | `0` | Use no special model-loading mode. |
+| `LLAMA_LOAD_MODE_MMAP` | `1` | Memory-map the model. This is the default. |
+| `LLAMA_LOAD_MODE_MLOCK` | `2` | Keep the loaded model in RAM rather than allowing it to be swapped or compressed. |
+| `LLAMA_LOAD_MODE_MMAP_MLOCK` | `3` | Memory-map the model and keep its mapped pages in RAM. |
+| `LLAMA_LOAD_MODE_DIRECT_IO` | `4` | Use direct I/O when it is available. |
+
+```python
+import llama_cpp
+
+llm = llama_cpp.Llama(
+    model_path="models/model.gguf",
+    load_mode=llama_cpp.llama_load_mode.LLAMA_LOAD_MODE_MMAP_MLOCK,
+)
+```
+
+The legacy loading arguments are retained only for call compatibility. They no
+longer configure the underlying model parameters and may emit a deprecation
+warning; set `load_mode` explicitly instead. Use the following migration
+mapping:
+
+| Legacy configuration | Replacement |
+| :--- | :--- |
+| `use_mmap=False, use_mlock=False` | `load_mode=LLAMA_LOAD_MODE_NONE` |
+| `use_mmap=True, use_mlock=False` | `load_mode=LLAMA_LOAD_MODE_MMAP` |
+| `use_mmap=False, use_mlock=True` | `load_mode=LLAMA_LOAD_MODE_MLOCK` |
+| `use_mmap=True, use_mlock=True` | `load_mode=LLAMA_LOAD_MODE_MMAP_MLOCK` |
+| `use_direct_io=True` | `load_mode=LLAMA_LOAD_MODE_DIRECT_IO` |
 
 ### Context & Batch Parameters
 
