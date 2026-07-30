@@ -3544,6 +3544,26 @@ def llama_vocab_get_add_sep(vocab: llama_vocab_p, /) -> bool:
     ...
 
 
+# // model-specific suppress tokens (gguf key: tokenizer.ggml.suppress_tokens)
+# LLAMA_API const llama_token * llama_vocab_get_suppress_tokens(const struct llama_vocab * vocab, int32_t * n_suppress_tokens);
+@ctypes_function(
+    "llama_vocab_get_suppress_tokens",
+    [
+        llama_vocab_p_ctypes,
+        ctypes.POINTER(ctypes.c_int32),
+    ],
+    llama_token_p,
+)
+def llama_vocab_get_suppress_tokens(
+    vocab: llama_vocab_p,
+    n_suppress_tokens: ctypes.POINTER(ctypes.c_int32),  # type: ignore
+) -> llama_token_p:  # type: ignore
+    """
+    model-specific suppress tokens (gguf key: tokenizer.ggml.suppress_tokens)
+    """
+    ...
+
+
 # LLAMA_API llama_token llama_vocab_fim_pre(const struct llama_vocab * vocab);
 @ctypes_function(
     "llama_vocab_fim_pre",
