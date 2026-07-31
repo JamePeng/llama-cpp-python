@@ -107,14 +107,16 @@ class Llama:
         load_mode: int = llama_cpp_lib.llama_load_mode.LLAMA_LOAD_MODE_MMAP,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
-        vocab_only: bool = False,
+        kv_overrides: Optional[Dict[str, Union[bool, int, float, str]]] = None,
         use_mmap: bool = False,
         use_direct_io: bool = False,
         use_mlock: bool = False,
+        vocab_only: bool = False,
         check_tensors: bool = False,
-        use_extra_bufts: bool = False,
+        use_extra_bufts: bool = True,
         no_host: bool = False,
-        kv_overrides: Optional[Dict[str, Union[bool, int, float, str]]] = None,
+        no_alloc: bool = False,
+        load_mtp: bool = False,
         # Context Params
         seed: int = llama_cpp_lib.LLAMA_DEFAULT_SEED,
         n_ctx: int = 512,
@@ -219,11 +221,13 @@ class Llama:
             load_mode: How to load the model. See llama_cpp.LLAMA_LOAD_MODE_* for options.
             main_gpu: main_gpu interpretation depends on split_mode: LLAMA_SPLIT_MODE_NONE: the GPU that is used for the entire model. LLAMA_SPLIT_MODE_ROW: the GPU that is used for small tensors and intermediate results. LLAMA_SPLIT_MODE_LAYER: ignored
             tensor_split: How split tensors should be distributed across GPUs. If None, the model is not split.
+            kv_overrides: Key-value overrides for the model.
             vocab_only: Only load the vocabulary no weights.
             check_tensors: validate model tensor data
             use_extra_bufts: use extra buffer types (used for weight repacking)
             no_host: bypass host buffer allowing extra buffers to be used
-            kv_overrides: Key-value overrides for the model.
+            no_alloc: only load metadata and simulate memory allocations
+            load_mtp: whether to load MTP layers
             seed: RNG seed, -1 for random
             n_ctx: Text context, 0 = from model
             n_keep: Number of tokens to keep from initial prompt
@@ -383,6 +387,8 @@ class Llama:
         self.model_params.check_tensors = check_tensors
         self.model_params.use_extra_bufts = use_extra_bufts
         self.model_params.no_host = no_host
+        self.model_params.no_alloc = no_alloc
+        self.model_params.load_mtp = load_mtp
 
         # Logic of cpu_moe, n_cpu_moe
         # Reference from llama.cpp/tools/llama-bench/llama-bench.cpp
@@ -3454,11 +3460,13 @@ prompt: The prompt to generate text from.
             load_mode=self.model_params.load_mode,
             main_gpu=self.model_params.main_gpu,
             tensor_split=self.tensor_split,
+            kv_overrides=self.kv_overrides,
             vocab_only=self.model_params.vocab_only,
             check_tensors=self.model_params.check_tensors,
             use_extra_bufts=self.model_params.use_extra_bufts,
             no_host=self.model_params.no_host,
-            kv_overrides=self.kv_overrides,
+            no_alloc=self.model_params.no_alloc,
+            load_mtp=self.model_params.load_mtp,
             # Context Params
             seed=self._seed,
             n_ctx=self.context_params.n_ctx,
