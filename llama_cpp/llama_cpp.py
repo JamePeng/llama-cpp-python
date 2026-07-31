@@ -5318,15 +5318,15 @@ def llama_get_embeddings_nextn_ith(
         "__Z30llama_set_embeddings_layer_inpP13llama_contextjb",
         "_Z30llama_set_embeddings_layer_inpP13llama_contextjb",
     ],
-    [llama_context_p_ctypes, ctypes.c_int32, ctypes.c_bool],
-    ctypes.POINTER(ctypes.c_float),
+    [llama_context_p_ctypes, ctypes.c_uint32, ctypes.c_bool],
+    None,
     required=False,
 )
 def llama_set_embeddings_layer_inp(
     ctx: llama_context_p,
-    lid: ctypes.c_int32,
+    lid: ctypes.c_uint32,
     value: bool,
-) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+) -> None:  # type: ignore
     """
     Set whether the context outputs the input embeddings of a specific layer
     """
@@ -5342,13 +5342,13 @@ def llama_set_embeddings_layer_inp(
         "__Z30llama_get_embeddings_layer_inpP13llama_contextj",
         "_Z30llama_get_embeddings_layer_inpP13llama_contextj",
     ],
-    [llama_context_p_ctypes, ctypes.c_int32],
+    [llama_context_p_ctypes, ctypes.c_uint32],
     ctypes.POINTER(ctypes.c_float),
     required=False,
 )
 def llama_get_embeddings_layer_inp(
     ctx: llama_context_p,
-    lid: ctypes.c_int32,
+    lid: ctypes.c_uint32,
 ) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
     ...
 
@@ -5402,12 +5402,12 @@ def llama_model_target_layer_ids(
         "_Z30llama_model_target_layer_ids_nPK11llama_model",
     ],
     [llama_model_p_ctypes],
-    ctypes.POINTER(ctypes.c_uint32),
+    ctypes.c_uint32,
     required=False,
 )
 def llama_model_target_layer_ids_n(
     model: llama_model_p
-) -> ctypes.POINTER(ctypes.c_uint32):  # type: ignore
+) -> int:
     """
     returns the number of extracted layers from target model
     """
