@@ -798,6 +798,7 @@ class llama_model_tensor_buft_override(ctypes.Structure):
 #     bool use_extra_bufts; // use extra buffer types (used for weight repacking)
 #     bool no_host;         // bypass host buffer allowing extra buffers to be used
 #     bool no_alloc;        // only load metadata and simulate memory allocations
+#     bool load_mtp;        // whether to load MTP layers
 # };
 class llama_model_params(ctypes.Structure):
     """Parameters for llama_model
@@ -817,7 +818,8 @@ class llama_model_params(ctypes.Structure):
         check_tensors (bool): validate model tensor data
         use_extra_bufts (bool): use extra buffer types (used for weight repacking)
         no_host (bool): bypass host buffer allowing extra buffers to be used
-        no_alloc (bool): only load metadata and simulate memory allocations"""
+        no_alloc (bool): only load metadata and simulate memory allocations
+        load_mtp (bool): whether to load MTP layers"""
 
     if TYPE_CHECKING:
         devices: CtypesArray[ctypes.c_void_p]  # NOTE: unused
@@ -835,6 +837,7 @@ class llama_model_params(ctypes.Structure):
         use_extra_bufts: bool
         no_host: bool
         no_alloc: bool
+        load_mtp: bool
 
     _fields_ = [
         ("devices", ctypes.POINTER(ctypes.c_void_p)), # NOTE: unnused
@@ -852,6 +855,7 @@ class llama_model_params(ctypes.Structure):
         ("use_extra_bufts", ctypes.c_bool),
         ("no_host", ctypes.c_bool),
         ("no_alloc", ctypes.c_bool),
+        ("load_mtp", ctypes.c_bool),
     ]
 
 llama_model_params_p = ctypes.POINTER(llama_model_params)
