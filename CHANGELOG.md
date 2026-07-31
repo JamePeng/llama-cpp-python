@@ -7,6 +7,158 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.45] Reactivated Built-in Embeddings, Modern Model Loading, and Stronger Cross-Platform Reliability
+
+- fix(ctypes): correct llama-ext binding signatures
+    - use uint32_t for layer IDs
+    - fix void return type for embedding extraction control
+    - return target layer count as uint32_t
+
+- feat(llama): expose additional model loading options
+    - add `no_alloc` and `load_mtp` parameters
+    - enable `extra buffer types` by default
+
+- feat(llama): support llama_model_params `load_mode`
+    - Update model loading configuration to use the new `load_mode` field from
+    llama_model_params and align with the latest llama.cpp API changes.
+    - Remove deprecated internal handling of legacy loading flags and keep
+    backward compatibility by warning users when `use_mmap`, `use_direct_io`,
+    or `use_mlock` are still used.
+    - This prepares the Python bindings for the updated llama.cpp model loading
+    interface while providing a smoother migration path for existing users.
+    - docs: document `load_mode` migration
+        - Replace references to the legacy model loading flags with load_mode, document all supported loading modes for the Python API and server, and update the performance tuning example.
+
+- feat(tools): add cross-platform ABI inspection utility
+    - Inspect `PE`, `ELF`, and `Mach-O` exports and normalize platform-specific symbol names.
+    - Validate optional `llama_ext` ctypes aliases across Windows, Linux, and macOS builds. Keep artifacts and timestamped privacy-safe reports local to the repository.
+    - More information see here: [Cross-platform ABI inspection](https://github.com/JamePeng/llama-cpp-python/tree/main/tools/abi)
+
+- fix(ctypes): support GCC/Clang mangled symbols for optional llama_ext APIs
+    - Add missing `_Z` Itanium C++ ABI symbol variants to ctypes function
+    lookup lists. This improves compatibility with Linux and macOS builds
+    where C++ symbols are exported using GCC/Clang name mangling.
+    - Issue report from **@ckcfcc** (https://github.com/JamePeng/llama-cpp-python/issues/159)
+
+- fix(loader): guard `HIP_PATH` and `VULKAN_SDK` dirs with os.path.exists
+os.add_dll_directory() raises FileNotFoundError [WinError 3] when the
+directory does not exist, so a stale `HIP_PATH` or `VULKAN_SDK` left behind by
+an uninstalled SDK makes "import llama_cpp" fail outright on Windows.(by **@emptyngton**)
+
+    The CUDA_PATH branch above already guards each candidate directory with
+    os.path.exists(); this applies the same pattern to the HIP and Vulkan
+    branches. Valid directories are still added individually, so a partially
+    removed SDK contributes whichever of bin/lib remain instead of raising.
+
+- fix(_internals): clean up native resources on initialization failures
+    - Register native model and batch ownership immediately after allocation
+    so later validation failures cannot leak llama.cpp resources.
+    Free a loaded model when vocab lookup fails, and route mixed-batch setup
+    failures through idempotent cleanup.
+    - Initialize sampling-context resource fields before fallible setup and
+    make partial teardown safe to repeat. This prevents missing attributes
+    from interrupting cleanup when sampler-chain construction fails.
+    - Clear model, vocabulary, and sampling parameter references after native
+    context and sampler resources have been released. This prevents closed
+    wrapper objects from unnecessarily keeping models and related Python
+    objects alive.
+    - Add failure-injection tests that verify model and batch handles are freed
+    exactly once and partially initialized sampling contexts release their resources
+    idempotently.Extend lifecycle tests to verify that parent references are cleared
+    and that repeated close calls remain safe.
+
+- test(chat-format): modernize coverage with Qwen3.5-style templates
+    - Replace the legacy Mistral-focused chat format tests with self-contained
+    Qwen3.5-style Jinja template coverage:
+        - verify ChatML system, user, and assistant message rendering
+        - cover enabled and disabled thinking generation prompts
+        - test image and video placeholders with vision identifiers
+        - validate tool definitions, tool calls, and tool response history
+        - add clear error coverage for invalid message structures
+        - verify model-specific stop token criteria
+        - keep the tests independent of tokenizer files and model weights
+
+- docs(readme): replace the new logo with fork project branding
+    - Add the new llama-cpp-python logo asset under docs and update the README
+    header to reference the repository-local image.
+    - the new logo which combined llama, C++, and Project branding remains readable.
+
+- docs(embedding): add end-to-end embeddings and reranking guide
+    - Create a schema-compliant feature guide covering sentence embeddings,
+    token-level vectors, reranking workflows, pooling modes, normalization,
+    streaming batch configuration, return shapes, and output formats.
+    - Add complete examples for the standard Llama API, LlamaEmbedding,
+    pre-tokenized inputs, cosine-similarity output, and cross-encoder
+    reranking.
+    - Document common configuration problems, implementation limitations, and
+    the embedding and reranking model families currently listed as supported
+    by the project.
+    - Expose the new feature guide through the Wiki index.
+
+- docs(llama): expand embedding parameters and API guidance
+    - Add a role overview and reorganize constructor options into focused,
+    readable parameter groups.
+    - Document embedding, pooling, attention, KV cache, sequence capacity, and
+    recurrent-state settings with their defaults and runtime behavior.
+    - Expand the embed() and create_embedding() sections with normalization
+    modes, return shapes, batching semantics, pooling recommendations,
+    OpenAI compatibility notes, and resource-safe examples.
+    - Fix the YAML frontmatter and improve Markdown spacing for cleaner Wiki
+    rendering.
+
+- docs(embedding): document maintained APIs and sequence batch capacity
+    - Replace the deprecated Llama embedding guidance with current embed() and
+    create_embedding() usage.
+    - Document the roles of n_batch, n_ubatch, and n_seq_max, including
+    parallel batching examples, resource considerations, common sequence ID
+    errors, and the required configuration changes.
+    - Clarify that LlamaEmbedding remains a convenience interface for
+    embedding-oriented defaults and reranking workflows.
+
+- docs(example): refresh the built-in embedding usage example
+    - Fix the Llama constructor option from embedding=True to embeddings=True
+    and demonstrate L2-normalized output through create_embedding().
+
+- test(embedding): cover built-in and streaming embedding workflows
+    - Add coverage for actionable LlamaBatch sequence-capacity errors and the
+    maintained embedding APIs on the standard Llama class.
+    - Verify pre-tokenized batches, normalization, separator-based inputs,
+    token accounting, OpenAI-compatible responses, and LlamaEmbedding
+    streaming behavior with n_seq_max=1.
+    - Explicitly close embedding models after integration tests to release
+    native context and model resources.
+
+- fix(embedding): respect n_seq_max when streaming embedding batches
+    - Use the configured sequence capacity instead of n_ubatch when deciding
+    when to decode the current LlamaEmbedding batch.
+    - This prevents invalid sequence IDs for multi-document inputs and allows
+    the default n_seq_max=1 configuration to process documents sequentially
+    without failing.
+
+- refactor(batch): improve sequence capacity validation guidance
+    - Make LlamaBatch sequence validation errors explain the configured
+    n_seq_max value, valid sequence ID range, and minimum capacity required
+    for parallel batching.
+    - Handle negative sequence IDs separately and provide actionable setup
+    guidance for Llama, LlamaEmbedding, and direct LlamaBatch users.
+    - Remove the unused normalize_embedding helper now that normalization is
+    handled by the embedding pipeline.
+
+- feat(embedding): modernize the built-in Llama embedding API
+    - Replace the legacy embedding path with sequence-aware streaming batch
+    processing based on the current LlamaBatch interface.
+    - Support string, batched string, and pre-tokenized inputs, token-level and
+    rank pooling outputs, separator-based splitting, token accounting, and
+    llama.cpp-compatible normalization modes.
+    - Restore embed() and create_embedding() as maintained Llama APIs while
+    preserving the existing boolean normalization behavior.
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/876a4321163249c43ca4e986818fab5ab081f282](https://github.com/ggml-org/llama.cpp/commit/876a4321163249c43ca4e986818fab5ab081f282)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260801
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/ebf6099b81cf67cfb5eec569466367c9fa04e9d4...aafc6fb74ebfba6a044510f80b5e9ad277109c12
+
 ## [0.3.44] Improved Windows DLL(OpenMP) Loading Reliability for GGML Backends
 
 - fix(ggml): preload bundled OpenMP runtime before loading ggml-base
