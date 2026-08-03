@@ -35,6 +35,12 @@ def _preload_openmp_runtime():
     if not _version_at_least("0.3.39"):
         return
 
+    # Some ComfyUI environments include complex software packages and may also contain
+    # additional OpenMP libraries (such as `libiomp5md.dll`);
+    # the best approach is to delete the conflicting libraries
+    # (i.e., OpenMP dynamic libraries that are not the VC143 version).
+    os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
     libomp_path = (pathlib.Path(__file__).parent / "lib" / "libomp140.x86_64.dll")
 
     if not libomp_path.exists():
@@ -54,7 +60,7 @@ def _preload_openmp_runtime():
 libggml_base_path = pathlib.Path(os.path.abspath(os.path.dirname(__file__)))
 libggml_base_paths = [
     libggml_base_path / "lib",
-    libggml_base_path / "bin",
+    # libggml_base_path / "bin",  # The `bin` path is no longer used as a search path for dynamic ggml libraries.
 ]
 
 # Load bundled OpenMP runtime before ggml-base on Windows.
