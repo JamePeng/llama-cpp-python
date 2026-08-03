@@ -4130,6 +4130,7 @@ llama_sampler_context_t = ctypes.c_void_p
 #     struct ggml_tensor * probs;
 #     struct ggml_tensor * sampled;
 #     struct ggml_tensor * candidates;
+#     int64_t              n_vocab;
 # };
 class llama_sampler_data(ctypes.Structure):
     if TYPE_CHECKING:
@@ -4137,12 +4138,14 @@ class llama_sampler_data(ctypes.Structure):
         probs: ctypes.c_void_p
         sampled: ctypes.c_void_p
         candidates: ctypes.c_void_p
+        n_vocab: ctypes.c_int64
 
     _fields_ = [
         ("logits", ctypes.c_void_p),
         ("probs", ctypes.c_void_p),
         ("sampled", ctypes.c_void_p),
         ("candidates", ctypes.c_void_p),
+        ("n_vocab", ctypes.c_int64),
     ]
 
 
@@ -4654,9 +4657,9 @@ def llama_sampler_init_grammar_lazy_patterns(
 # /// NOTE: Avoid using on the full vocabulary as searching for repeated tokens can become slow. For example, apply top-k or top-p sampling first.
 # LLAMA_API struct llama_sampler * llama_sampler_init_penalties(
 #                          int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty, -1 = context size)
-#                            float   penalty_repeat,   // 1.0 = disabled
-#                            float   penalty_freq,     // 0.0 = disabled
-#                            float   penalty_present); // 0.0 = disabled
+#                            float   penalty_repeat,   // must be > 0.0, 1.0 = disabled
+#                            float   penalty_freq,     // must be finite, 0.0 = disabled
+#                            float   penalty_present); // must be finite, 0.0 = disabled
 @ctypes_function(
     "llama_sampler_init_penalties",
     [ctypes.c_int32, ctypes.c_float, ctypes.c_float, ctypes.c_float],
