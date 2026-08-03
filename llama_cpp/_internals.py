@@ -868,6 +868,63 @@ class LlamaContext:
         self._assert_ctx()
         return llama_cpp.llama_get_embeddings_seq(self.ctx, seq_id)
 
+    def set_embeddings_nextn(self, enabled: bool, masked: bool) -> None:
+        """
+        Set whether the context outputs nextn embeddings or not
+        If masked == true,  output the embeddings only for the tokens with batch.logits != 0
+        If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+        """
+        self._assert_ctx()
+        llama_cpp.llama_set_embeddings_nextn(self.ctx, enabled, masked)
+
+    def get_embeddings_nextn(self):
+        self._assert_ctx()
+        embeddings = llama_cpp.llama_get_embeddings_nextn(self.ctx)
+        if not embeddings:
+            raise RuntimeError("LlamaContext.get_embeddings_nextn: output is unavailable")
+        return embeddings
+
+    def get_embeddings_nextn_ith(self, i: int):
+        self._assert_ctx()
+        embeddings = llama_cpp.llama_get_embeddings_nextn_ith(self.ctx, i)
+        if not embeddings:
+            raise RuntimeError(
+                f"LlamaContext.get_embeddings_nextn_ith: invalid output index {i}"
+            )
+        return embeddings
+
+    def set_embeddings_layer_inp(self, layer_id: int, enabled: bool) -> None:
+        self._assert_ctx()
+        if layer_id < 0:
+            raise ValueError("layer_id must be non-negative")
+        llama_cpp.llama_set_embeddings_layer_inp(self.ctx, layer_id, enabled)
+
+    def get_embeddings_layer_inp(self, layer_id: int):
+        self._assert_ctx()
+        if layer_id < 0:
+            raise ValueError("layer_id must be non-negative")
+        embeddings = llama_cpp.llama_get_embeddings_layer_inp(self.ctx, layer_id)
+        if not embeddings:
+            raise RuntimeError(
+                f"LlamaContext.get_embeddings_layer_inp: layer {layer_id} output is unavailable"
+            )
+        return embeddings
+
+    def set_nextn_layer_offset(self, offset: int) -> None:
+        """
+        Select which appended NextN block the DECODER_MTP graph runs (offset past
+        the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
+        chain multiple trained NextN heads. Default 0 (first head).
+        """
+        self._assert_ctx()
+        if offset < 0:
+            raise ValueError("NextN layer offset must be non-negative")
+        llama_cpp.llama_set_nextn_layer_offset(self.ctx, offset)
+
+    def get_ctx_other(self):
+        self._assert_ctx()
+        return llama_cpp.llama_get_ctx_other(self.ctx)
+
     def reset_timings(self):
         llama_cpp.llama_perf_context_reset(self.ctx)
 
