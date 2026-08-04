@@ -2064,6 +2064,7 @@ class LlamaSamplingContext:
         # Note: In some implementations, penalties come before other samplers
         if CommonSamplerType.PENALTIES in p.samplers:
             s.add_penalties(
+                self.n_vocab,
                 p.penalty_last_n,
                 p.penalty_repeat,
                 p.penalty_freq,
@@ -3176,8 +3177,8 @@ class LlamaSampler:
                 c_trigger_tokens, len(trigger_tokens)
             ))
 
-    def add_penalties(self, penalty_last_n: int, penalty_repeat: float, penalty_freq: float, penalty_present: float):
-        self._add_sampler(llama_cpp.llama_sampler_init_penalties(penalty_last_n, penalty_repeat, penalty_freq, penalty_present))
+    def add_penalties(self, n_vocab: int, penalty_last_n: int, penalty_repeat: float, penalty_freq: float, penalty_present: float):
+        self._add_sampler(llama_cpp.llama_sampler_init_penalties(n_vocab, penalty_last_n, penalty_repeat, penalty_freq, penalty_present))
 
     def add_dry(self, model: LlamaModel, multiplier: float, base: float, allowed_len: int, last_n: int, breakers: List[str]):
         """DRY (Don't Repeat Yourself) sampler."""
