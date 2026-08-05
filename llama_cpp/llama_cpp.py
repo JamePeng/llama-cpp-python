@@ -4660,7 +4660,7 @@ def llama_sampler_init_grammar_lazy_patterns(
 # /// NOTE: Avoid using on the full vocabulary as searching for repeated tokens can become slow. For example, apply top-k or top-p sampling first.
 # LLAMA_API struct llama_sampler * llama_sampler_init_penalties(
 #                          int32_t   n_vocab,
-#                          int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty, -1 = context size)
+#                          int32_t   penalty_last_n,   // last n tokens to penalize (0 = disable penalty)
 #                            float   penalty_repeat,   // must be > 0.0, 1.0 = disabled
 #                            float   penalty_freq,     // must be finite, 0.0 = disabled
 #                            float   penalty_present); // must be finite, 0.0 = disabled
@@ -4687,20 +4687,18 @@ def llama_sampler_init_penalties(
 
 
 # ///  @details DRY sampler, designed by p-e-w, as described in: https://github.com/oobabooga/text-generation-webui/pull/5677, porting Koboldcpp implementation authored by pi6am: https://github.com/LostRuins/koboldcpp/pull/982
-# LLAMA_API struct llama_sampler *    llama_sampler_init_dry(
+# LLAMA_API struct llama_sampler * llama_sampler_init_dry(
 #         const struct llama_vocab *  vocab,
-#                          int32_t    n_ctx_train,
 #                            float    dry_multiplier,
 #                            float    dry_base,
 #                          int32_t    dry_allowed_length,
-#                          int32_t    dry_penalty_last_n,
+#                          int32_t    dry_penalty_last_n, // last n tokens to penalize (0 = disable penalty)
 #                       const char ** seq_breakers,
 #                           size_t    num_breakers);
 @ctypes_function(
     "llama_sampler_init_dry",
     [
         llama_vocab_p_ctypes,
-        ctypes.c_int32,
         ctypes.c_float,
         ctypes.c_float,
         ctypes.c_int32,
@@ -4712,7 +4710,6 @@ def llama_sampler_init_penalties(
 )
 def llama_sampler_init_dry(
     vocab: llama_vocab_p,
-    n_ctx_train: int,
     dry_multiplier: float,
     dry_base: float,
     dry_allowed_length: int,
@@ -5424,5 +5421,33 @@ def llama_model_target_layer_ids_n(
 ) -> int:
     """
     returns the number of extracted layers from target model
+    """
+    ...
+
+# // retrieves the whole token embedding matrix in F32 format (n_embd * n_vocab)
+# // returns total number of elements or 0 on error
+# // if out is nullptr, returns the number of tokens without writing to out
+# // caller must allocate enough memory for out before calling
+# LLAMA_API uint32_t llama_model_get_tok_embd(const struct llama_model * model, float * out);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_get_tok_embd",
+        "?llama_model_get_tok_embd@@YAIPEBUllama_model@@PEAM@Z",
+        "__Z24llama_model_get_tok_embdPK11llama_modelPf",
+        "_Z24llama_model_get_tok_embdPK11llama_modelPf",
+    ],
+    [llama_model_p_ctypes, ctypes.POINTER(ctypes.c_float)],
+    ctypes.c_uint32,
+    required=False,
+)
+def llama_model_get_tok_embd(
+    model: llama_model_p,
+    out: Optional[ctypes.POINTER(ctypes.c_float)],  # type: ignore
+) -> int:
+    """
+    retrieves the whole token embedding matrix in F32 format (n_embd * n_vocab)
+    returns total number of elements or 0 on error
+    if out is nullptr, returns the number of tokens without writing to out
+    caller must allocate enough memory for out before calling
     """
     ...

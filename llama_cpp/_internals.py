@@ -147,6 +147,55 @@ class LlamaModel:
     def n_swa(self) -> int:
         return llama_cpp.llama_model_n_swa(self.model)
 
+    def target_layer_ids_n(self) -> int:
+        """Return the number of target-model layers extracted by this model."""
+        return llama_cpp.llama_model_target_layer_ids_n(self.model)
+
+    def target_layer_ids(self) -> List[int]:
+        """Return the target-model layer indices extracted by this model."""
+        count = self.target_layer_ids_n()
+        if count == 0:
+            return []
+
+        layer_ids = llama_cpp.llama_model_target_layer_ids(self.model)
+        if not layer_ids:
+            raise RuntimeError(
+                "LlamaModel.target_layer_ids: native API returned a null pointer "
+                f"for {count} layer IDs"
+            )
+        return [int(layer_ids[i]) for i in range(count)]
+
+    def get_tok_embd(self) -> npt.NDArray[np.float32]:
+        """Return a copy of the token embedding matrix as ``[n_vocab, n_embd]``."""
+        element_count = llama_cpp.llama_model_get_tok_embd(self.model, None)
+        if element_count == 0:
+            raise RuntimeError(
+                "LlamaModel.get_tok_embd: token embedding matrix is unavailable"
+            )
+
+        n_vocab = self.n_vocab()
+        n_embd = self.n_embd()
+        expected_count = n_vocab * n_embd
+        if element_count != expected_count:
+            raise RuntimeError(
+                "LlamaModel.get_tok_embd: unexpected token embedding size: "
+                f"native API returned {element_count} elements, expected "
+                f"{expected_count} ({n_vocab} x {n_embd})"
+            )
+
+        out = np.empty(element_count, dtype=np.float32)
+        written = llama_cpp.llama_model_get_tok_embd(
+            self.model,
+            out.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        )
+        if written != element_count:
+            raise RuntimeError(
+                "LlamaModel.get_tok_embd: failed to copy the complete token "
+                f"embedding matrix ({written}/{element_count} elements)"
+            )
+
+        return out.reshape(n_vocab, n_embd)
+
     def rope_freq_scale_train(self) -> float:
         """
         Get the model's RoPE frequency scaling factor
@@ -1767,7 +1816,7 @@ class LlamaSamplingParams:
     dynatemp_range: float = 0.00     # 0.0 = disabled
     dynatemp_exponent: float = 1.00  # controls how entropy maps to temperature in dynamic temperature sampler
 
-    penalty_last_n: int = 64         # last n tokens to penalize (0 = disable penalty, -1 = context size)
+    penalty_last_n: int = 64         # last n tokens to penalize (0 = disable penalty)
     penalty_repeat: float = 1.0      # 1.0 = disabled
     penalty_freq: float = 0.00       # 0.0 = disabled
     penalty_present: float = 0.00    # 0.0 = disabled
@@ -1775,7 +1824,7 @@ class LlamaSamplingParams:
     dry_multiplier: float = 0.0      # 0.0 = disabled;      DRY repetition penalty for tokens extending repetition:
     dry_base: float = 1.75           # 0.0 = disabled;      multiplier * base ^ (length of sequence before token - allowed length)
     dry_allowed_length: int = 2      # tokens extending repetitions beyond this receive penalty
-    dry_penalty_last_n: int = -1     # how many tokens to scan for repetitions (0 = disable penalty, -1 = context size)
+    dry_penalty_last_n: int = 64     # how many tokens to scan for repetitions (0 = disable penalty)
 
     adaptive_target: float = -1.0    # select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
     adaptive_decay: float = 0.90     # EMA decay for adaptation; history ≈ 1/(1-decay) tokens (0.0 - 0.99)
@@ -3188,7 +3237,6 @@ class LlamaSampler:
 
         self._add_sampler(llama_cpp.llama_sampler_init_dry(
             model.vocab,
-            model.n_ctx_train(),
             multiplier,
             base,
             allowed_len,
