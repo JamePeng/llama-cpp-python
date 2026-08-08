@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.46] Extended Model APIs, MTMD Binding Updates, and Improved Runtime Compatibility
+
+- feat(mtmd): update bindings for audio generation and chunk serialization
+    - add input chunk save/load APIs
+    - add experimental generated-audio types and processing APIs
+    - support HunyuanVL decoder positions
+    - sync enum values and correct ctypes signatures
+
+- feat(model): expose target layer ids and token embeddings
+    - Add LlamaModel helpers for accessing target layer metadata and extracting
+    the token embedding matrix from the native model.
+    - The new APIs provide:
+        - target_layer_ids() for retrieving target model layer indices
+        - get_tok_embd() for copying the token embedding matrix as a NumPy array
+    - Add validation for native return values, including null pointers, unexpected
+    embedding sizes, and incomplete copy operations to provide clearer runtime
+    errors.
+    - Also update sampling parameter comments to match the current llama.cpp
+    behavior for penalty window configuration.
+
+- feat(internals): expose NextN embedding APIs on LlamaContext
+    - Add accessors for NextN and layer input embeddings
+    - Support selecting the NextN layer offset
+    - Expose the auxiliary context handle
+    - Validate layer IDs, offsets, and unavailable outputs
+
+- fix(windows): handle conflicting OpenMP and ggml libraries
+    - Allow duplicate OpenMP runtimes in complex environments such as ComfyUI
+        - Some ComfyUI environments include complex software packages and may also contain additional OpenMP libraries (such as `libiomp5md.dll`);
+        - the best approach is to delete the **conflicting libraries** (i.e., OpenMP dynamic libraries that are not the VC143 version).
+    - Stop searching the deprecated /bin directory for ggml dynamic libraries
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/69bf6437914596fbbc4caf09a7ac16f2acdd1a94](https://github.com/ggml-org/llama.cpp/commit/69bf6437914596fbbc4caf09a7ac16f2acdd1a94)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260808
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/d9d27a7bdf1c27d50c1490ad6acd825f31804902...3397ecb3d64a4f7ba21f0877baa34f6f6a852386
+
 ## [0.3.45] Reactivated Built-in Embeddings, Modern Model Loading, and Stronger Cross-Platform Reliability
 
 - fix(ctypes): correct llama-ext binding signatures
