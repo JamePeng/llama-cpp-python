@@ -2489,12 +2489,18 @@ class LlamaSamplingContext:
 
 class CustomSampler:
     """
-    Base class for Python-backed custom samplers in the Llama sampler chain.
+    CPU sampler adapter backed by Python callbacks.
 
     Responsibilities:
-    - Provides apply, accept, reset, free and clone callbacks for the C sampler chain.
-    - Keeps Python references alive to prevent GC while C sampler still holds function pointers.
-    - Implements safe close to clear all callback references.
+    - Expose Python apply, accept, reset, free, and clone functions through
+      llama_sampler_i callbacks.
+    - Keep callback references alive while llama.cpp holds their function
+      pointers.
+    - Release the native sampler and break callback reference cycles on close.
+
+    Backend sampling is intentionally unsupported. Every backend hook in
+    llama_sampler_i is explicitly initialized to NULL, including backend_reset
+    and copy_state, so llama.cpp keeps this sampler on the CPU callback path.
     """
 
     def __init__(
@@ -2545,7 +2551,7 @@ class CustomSampler:
         self._cb_free_ref = llama_cpp.llama_sampler_free_fn(_cb_free)
         self._cb_clone_ref = llama_cpp.llama_sampler_clone_fn(_cb_clone)
 
-        # Build llama_sampler_i
+        # Build the CPU-facing llama_sampler_i callback table.
         self.llama_sampler_i = llama_cpp.llama_sampler_i()
 
         self.llama_sampler_i.name = self._cb_name_ref
@@ -2555,7 +2561,9 @@ class CustomSampler:
         self.llama_sampler_i.free = self._cb_free_ref
         self.llama_sampler_i.clone = self._cb_clone_ref
 
-        # Disable backend hooks
+        # Explicitly disable every backend hook instead of relying on ctypes
+        # zero-initialization. Python-backed samplers operate through the CPU
+        # callbacks above and do not own backend sampling graph state.
         self.llama_sampler_i.backend_init = ctypes.cast(
             0, llama_cpp.llama_sampler_backend_init_fn
         )
@@ -2567,6 +2575,12 @@ class CustomSampler:
         )
         self.llama_sampler_i.backend_set_input = ctypes.cast(
             0, llama_cpp.llama_sampler_backend_set_input_fn
+        )
+        self.llama_sampler_i.backend_reset = ctypes.cast(
+            0, llama_cpp.llama_sampler_backend_reset_fn
+        )
+        self.llama_sampler_i.copy_state = ctypes.cast(
+            0, llama_cpp.llama_sampler_copy_state_fn
         )
 
         self.sampler_p = llama_cpp.llama_sampler_init(
@@ -2625,6 +2639,11 @@ class ReasoningBudgetSampler(CustomSampler):
 
     This mirrors the core idea of llama.cpp's reasoning-budget sampler while
     keeping the Python API small and explicit.
+
+    As a CustomSampler subclass, this remains CPU/Python-backed. Its backend
+    hooks, including backend_reset and copy_state, stay disabled; runtime state
+    is managed by the regular _accept(), _apply(), _reset(), and _clone()
+    callbacks instead.
     """
 
     def __init__(
