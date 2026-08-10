@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-07-29
+last_updated: 2026-08-10
 version_target: "latest"
 ---
 
@@ -87,7 +87,8 @@ mapping:
 | `n_ubatch` | `int` | `512` | Maximum number of tokens in a physical micro-batch processed by llama.cpp. |
 | `n_seq_max` | `int` | `1` | Maximum independent sequence states in one decode batch. Embedding calls split automatically at this limit; larger values enable more parallel sequences. |
 | `n_rs_seq` | `int` | `0` | Experimental recurrent-state snapshots retained per sequence for rollback. `0` disables rollback snapshots. |
-| `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` is converted to the effective `n_batch`. |
+| `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` lets llama.cpp use the effective `n_batch`. |
+| `n_outputs_max_per_seq` | `int` | `1` | Maximum outputs per sequence. `0` lets llama.cpp use the effective `n_outputs_max`. |
 | `n_threads` | `int` | `None` | Number of threads for generation (defaults to CPU count // 2). |
 | `n_threads_batch` | `int` | `None` | Number of threads for batch processing (defaults to CPU count). |
 | `ctx_type` | `int` | `LLAMA_CONTEXT_TYPE_DEFAULT` | Context implementation selected by llama.cpp. Keep the default unless a model or backend requires another context type. |

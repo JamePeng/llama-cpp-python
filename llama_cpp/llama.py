@@ -126,6 +126,7 @@ class Llama:
         n_seq_max: int = 1,
         n_rs_seq: int = 0,
         n_outputs_max: int = 0,
+        n_outputs_max_per_seq: int = 1,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
         ctx_type: Optional[
@@ -234,8 +235,12 @@ class Llama:
             n_batch: Prompt processing maximum batch size
             n_ubatch: Physical batch size
             n_seq_max: max number of sequences (i.e. distinct states for recurrent models)
+            n_rs_seq: Number of recurrent-state snapshots per sequence for rollback. 0 disables rollback snapshots. Experimental.
+            n_outputs_max: Maximum outputs in a physical batch. 0 lets llama.cpp use the effective n_batch.
+            n_outputs_max_per_seq: Maximum outputs per sequence. 0 lets llama.cpp use the effective n_outputs_max.
             n_threads: Number of threads to use for generation
             n_threads_batch: Number of threads to use for batch processing
+            ctx_type: Context implementation type, such as the MTP context type.
             rope_scaling_type: RoPE scaling type, from `enum llama_rope_scaling_type`. ref: https://github.com/ggml-org/llama.cpp/pull/2054
             pooling_type: Pooling type, from `enum llama_pooling_type`.
             attention_type: attention type to use for embeddings
@@ -497,6 +502,7 @@ class Llama:
         self.n_seq_max = n_seq_max
         self.n_rs_seq = n_rs_seq
         self.n_outputs_max = n_outputs_max
+        self.n_outputs_max_per_seq = n_outputs_max_per_seq
         self.n_threads = n_threads or max(multiprocessing.cpu_count() // 2, 1)
         self.n_threads_batch = n_threads_batch or multiprocessing.cpu_count()
 
@@ -514,7 +520,8 @@ class Llama:
             raise RuntimeError(f"n_seq_max must be <= {llama_cpp_lib.LLAMA_MAX_SEQ}")
 
         self.context_params.n_rs_seq = self.n_rs_seq
-        self.context_params.n_outputs_max = self.n_batch if self.n_outputs_max == 0 else self.n_outputs_max
+        self.context_params.n_outputs_max = max(self.n_outputs_max, 0)
+        self.context_params.n_outputs_max_per_seq = max(self.n_outputs_max_per_seq, 0)
         self.context_params.n_threads = self.n_threads
         self.context_params.n_threads_batch = self.n_threads_batch
 
@@ -3470,10 +3477,15 @@ prompt: The prompt to generate text from.
             # Context Params
             seed=self._seed,
             n_ctx=self.context_params.n_ctx,
-            n_batch=self.n_batch,
+            n_batch=self.context_params.n_batch,
             n_ubatch=self.context_params.n_ubatch,
+            n_seq_max=self.context_params.n_seq_max,
+            n_rs_seq=self.context_params.n_rs_seq,
+            n_outputs_max=self.context_params.n_outputs_max,
+            n_outputs_max_per_seq=self.context_params.n_outputs_max_per_seq,
             n_threads=self.context_params.n_threads,
             n_threads_batch=self.context_params.n_threads_batch,
+            ctx_type=self.context_params.ctx_type,
             rope_scaling_type=self.context_params.rope_scaling_type,
             pooling_type=self.context_params.pooling_type,
             attention_type=self.context_params.attention_type,
