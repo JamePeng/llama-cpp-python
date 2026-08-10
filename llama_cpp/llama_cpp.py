@@ -1071,7 +1071,7 @@ class llama_context_params(ctypes.Structure):
         ("swa_full", ctypes.c_bool),
         ("kv_unified", ctypes.c_bool),
         ("samplers", llama_sampler_seq_config_p),
-        ("n_samplers", ctypes.c_int),
+        ("n_samplers", ctypes.c_size_t),
         ("ctx_other", ctypes.c_void_p),
     ]
 
