@@ -104,7 +104,7 @@ class Llama:
         cpu_moe: bool = False,
         n_cpu_moe: int = 0,
         split_mode: int = llama_cpp_lib.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
-        load_mode: int = llama_cpp_lib.llama_load_mode.LLAMA_LOAD_MODE_MMAP,
+        load_mode: int = llama_cpp_lib.llama_load_mode.LLAMA_LOAD_MODE_AUTO,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
         kv_overrides: Optional[Dict[str, Union[bool, int, float, str]]] = None,

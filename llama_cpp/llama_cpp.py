@@ -511,18 +511,20 @@ class llama_split_mode(enum.IntEnum):
     LLAMA_SPLIT_MODE_TENSOR = 3
 
 # enum llama_load_mode {
-#     LLAMA_LOAD_MODE_NONE       = 0, // no special loading mode
-#     LLAMA_LOAD_MODE_MMAP       = 1, // memory map the model
-#     LLAMA_LOAD_MODE_MLOCK      = 2, // force system to keep model in RAM rather than swapping or compressing
-#     LLAMA_LOAD_MODE_MMAP_MLOCK = 3, // mmap + force system to keep model in RAM rather than swapping or compressing
-#     LLAMA_LOAD_MODE_DIRECT_IO  = 4, // use direct I/O if available
+#     LLAMA_LOAD_MODE_AUTO       = -1, // auto-detect based on device capabilities
+#     LLAMA_LOAD_MODE_NONE       =  0, // no special loading mode
+#     LLAMA_LOAD_MODE_MMAP       =  1, // memory map the model
+#     LLAMA_LOAD_MODE_MLOCK      =  2, // force system to keep model in RAM rather than swapping or compressing
+#     LLAMA_LOAD_MODE_MMAP_MLOCK =  3, // mmap + force system to keep model in RAM rather than swapping or compressing
+#     LLAMA_LOAD_MODE_DIRECT_IO  =  4, // use direct I/O if available
 # };
 class llama_load_mode(enum.IntEnum):
-    LLAMA_LOAD_MODE_NONE       = 0  # no special loading mode
-    LLAMA_LOAD_MODE_MMAP       = 1  # memory map the model
-    LLAMA_LOAD_MODE_MLOCK      = 2  # force system to keep model in RAM rather than swapping or compressing
-    LLAMA_LOAD_MODE_MMAP_MLOCK = 3  # mmap + force system to keep model in RAM rather than swapping or compressing
-    LLAMA_LOAD_MODE_DIRECT_IO  = 4  # use direct I/O if available
+    LLAMA_LOAD_MODE_AUTO       = -1  # auto-detect based on device capabilities
+    LLAMA_LOAD_MODE_NONE       =  0  # no special loading mode
+    LLAMA_LOAD_MODE_MMAP       =  1  # memory map the model
+    LLAMA_LOAD_MODE_MLOCK      =  2  # force system to keep model in RAM rather than swapping or compressing
+    LLAMA_LOAD_MODE_MMAP_MLOCK =  3  # mmap + force system to keep model in RAM rather than swapping or compressing
+    LLAMA_LOAD_MODE_DIRECT_IO  =  4  # use direct I/O if available
 
 # LLAMA_API const char * llama_load_mode_name(enum llama_load_mode load_mode);
 @ctypes_function("llama_load_mode_name", [ctypes.c_int], ctypes.c_char_p)
@@ -1296,6 +1298,17 @@ llama_adapter_lora_p_ctypes = ctypes.POINTER(ctypes.c_void_p)
 # };
 llama_adapter_cvec_p = ctypes.c_void_p
 llama_adapter_cvec_p_ctypes = ctypes.POINTER(ctypes.c_void_p)
+
+
+# LLAMA_API const char * llama_version(void);
+@ctypes_function(
+    "llama_version",
+    [],
+    ctypes.c_char_p,
+)
+def llama_version() -> bytes:
+    """Get libllama version"""
+    ...
 
 
 # // Helpers for getting default parameters
@@ -2853,7 +2866,7 @@ def llama_state_seq_save_file(
 ) -> int:
     ...
 
-
+# If tokens_out is NULL, only the token count is reported through n_token_count_out and no state is loaded
 # LLAMA_API size_t llama_state_seq_load_file(
 #         struct llama_context * ctx,
 #                   const char * filepath,
@@ -2882,6 +2895,9 @@ def llama_state_seq_load_file(
     n_token_count_out: CtypesPointerOrRef[ctypes.c_size_t],
     /,
 ) -> int:
+    """
+    If tokens_out is NULL, only the token count is reported through n_token_count_out and no state is loaded
+    """
     ...
 
 # define LLAMA_STATE_SEQ_FLAGS_NONE 0
@@ -4423,8 +4439,6 @@ def llama_sampler_clone(smpl: llama_sampler_p, /) -> llama_sampler_p:
     ...
 
 
-# // copy mutable sampler state without changing dst or its sampling graph bindings
-# // src and dst must have the same type and configuration
 # LLAMA_API void                   llama_sampler_copy  (const struct llama_sampler * src, struct llama_sampler * dst);
 @ctypes_function(
     "llama_sampler_copy",
@@ -4432,10 +4446,6 @@ def llama_sampler_clone(smpl: llama_sampler_p, /) -> llama_sampler_p:
     None,
 )
 def llama_sampler_copy(src: llama_sampler_p, dst: llama_sampler_p):
-    """
-    copy mutable sampler state without changing dst or its sampling graph bindings
-    src and dst must have the same type and configuration
-    """
     ...
 
 

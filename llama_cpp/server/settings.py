@@ -35,7 +35,7 @@ class ModelSettings(BaseSettings):
         description="how to split the model across multiple GPUs",
     )
     load_mode: int = Field(
-            default=llama_cpp.llama_load_mode.LLAMA_LOAD_MODE_MMAP,
+            default=llama_cpp.llama_load_mode.LLAMA_LOAD_MODE_AUTO,
             description="how to load the model",
         )
     main_gpu: int = Field(
