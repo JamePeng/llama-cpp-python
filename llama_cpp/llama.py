@@ -1089,8 +1089,19 @@ class Llama:
         self._seed = seed
 
     def reset(self):
-        """Reset the model state."""
+        """Reset all Python and native model state."""
+        # Use a full memory clear rather than sequence removal: recurrent state
+        # cannot always be partially truncated, and hybrid memory must clear
+        # both its attention KV cache and recurrent state.
+        self._ctx.memory_clear(True)
+
+        # Keep the Python-side token cursor in sync with the empty native state.
         self.n_tokens = 0
+
+        # Hybrid checkpoints contain snapshots of the state cleared above and
+        # must not be reused after a reset.
+        if self.is_hybrid and self._hybrid_cache_mgr is not None:
+            self._hybrid_cache_mgr.clear()
 
     def abort(self) -> None:
         """
@@ -1737,10 +1748,7 @@ class Llama:
                                 )
         if reset:
             # No prefix matched at all. Completely clear the KV cache to prevent context poisoning.
-            self.n_tokens = 0
-            self._ctx.memory_clear(True)
-            if self.is_hybrid and self._hybrid_cache_mgr is not None:
-                self._hybrid_cache_mgr.clear()
+            self.reset()
             if self.verbose:
                 print("Llama.generate: Context reset requested or no prefix match. Cleared KV cache.", file=sys.stderr)
 
