@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.47] Multi-Output Sampling, Pocket TTS and audio helper API Bindings, and Llama State Reset Improvements
+
+- feat(mtmd): sync Pocket TTS and audio helper API bindings
+    - add Pocket TTS audio generation types and fields
+    - update generated-audio structures for the latest MTMD ABI
+    - expose default generation parameters and audio helper APIs
+    - add multimodal chat capability detection
+
+- fix(llama): fully clear model state on reset
+    - Clear native context memory and invalidate hybrid checkpoints to keep
+      Python state synchronized across standard, recurrent, and hybrid models.
+
+- fix(internals): disable new backend hooks for custom samplers
+    - Explicitly set backend_reset and copy_state to NULL
+    - Clarify CPU callback behavior for CustomSampler
+    - Document inherited backend behavior in ReasoningBudgetSampler
+
+- feat(llama): add multi-output backend sampler API support
+    - expose per-sequence output limits in context parameters
+    - sync sampler reset and state-copy interfaces with llama.cpp
+    - preserve advanced context settings when reconstructing Llama instances
+    - document ordered multi-output sampling behavior
+    - fix(types): use size_t for sampler count
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/ad1de39e0708e3ced9c71bb3c82d93a2c046a73f](https://github.com/ggml-org/llama.cpp/commit/ad1de39e0708e3ced9c71bb3c82d93a2c046a73f)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260813
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/81190b03f6d177988112dad5fc919491a77705d1...9acda8b4b35482d9b2dac9e191bbb9880ddf094e
+
 ## [0.3.46] Extended Model APIs, MTMD Binding Updates, and Improved Runtime Compatibility
 
 - feat(mtmd): update bindings for audio generation and chunk serialization
