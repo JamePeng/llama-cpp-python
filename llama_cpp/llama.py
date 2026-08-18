@@ -47,7 +47,16 @@ import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_chat_format as llama_chat_format
 import llama_cpp.llama_multimodal as llama_multimodal
 
-from llama_cpp.llama_speculative import LlamaDraftModel
+from llama_cpp.llama_speculative import (
+    LlamaDraftModel,
+    LlamaSpeculativeEngine,
+    SpecConfig,
+    SpeculativeType,
+    create_native_spec_engine,
+    create_spec_engine,
+    _speculative_generation_timing_stats,
+    speculative_output_limits,
+)
 
 import llama_cpp._internals as internals
 from ._internals import (
@@ -165,6 +174,7 @@ class Llama:
         chat_handler: Optional[llama_chat_format.LlamaChatCompletionHandler] = None,
         # Speculative Decoding
         draft_model: Optional[LlamaDraftModel] = None,
+        speculative: Optional[Union[SpecConfig, LlamaSpeculativeEngine]] = None,
         # Tokenizer Override
         tokenizer: Optional[BaseLlamaTokenizer] = None,
         # KV cache quantization
@@ -267,6 +277,12 @@ class Llama:
             chat_format: String specifying the chat format to use when calling create_chat_completion.
             chat_handler: Optional chat handler to use when calling create_chat_completion.
             draft_model: Optional draft model to use for speculative decoding.
+                Deprecated; use ``speculative=SpecConfig(...)`` for the
+                llama.cpp-compatible stateful speculative-decoding lifecycle.
+            speculative: Speculative decoding configuration or an initialized
+                speculative engine. Its fields mirror llama.cpp's ``--spec-*``
+                arguments, including draft length, probability threshold,
+                draft model, cache types and backend sampling.
             tokenizer: Optional tokenizer to override the default tokenizer from llama.cpp.
             type_k: KV cache data type for K (default: f16)
             type_v: KV cache data type for V (default: f16)
@@ -360,6 +376,17 @@ class Llama:
                 llama_cpp_lib.llama_numa_init(self.numa)
 
         self.model_path = model_path
+
+        if draft_model is not None and speculative is not None:
+            raise ValueError("draft_model and speculative cannot be used together")
+
+        if isinstance(speculative, SpecConfig):
+            speculative.validate()
+            if (
+                speculative.spec_type == SpeculativeType.DRAFT_MTP
+                and speculative.draft_model_path is None
+            ):
+                load_mtp = True
 
         if (use_mmap or use_direct_io or use_mlock) and verbose:
             print(
@@ -519,7 +546,24 @@ class Llama:
         if self.context_params.n_seq_max > llama_cpp_lib.LLAMA_MAX_SEQ:
             raise RuntimeError(f"n_seq_max must be <= {llama_cpp_lib.LLAMA_MAX_SEQ}")
 
-        self.context_params.n_rs_seq = self.n_rs_seq
+        if (
+            isinstance(speculative, SpecConfig)
+            and speculative.enabled()
+            and self.n_batch > 0
+        ):
+            required_total, required_per_seq = speculative_output_limits(
+                self.n_batch,
+                max(1, self.n_seq_max),
+                speculative.max_draft_tokens(),
+            )
+            # common_context_params_to_llama derives recurrent snapshots from
+            # the speculative method and draft length.
+            if speculative.spec_type.is_draft():
+                self.n_rs_seq = max(self.n_rs_seq, speculative.draft_n_max)
+            self.n_outputs_max = required_total
+            self.n_outputs_max_per_seq = required_per_seq
+
+        self.context_params.n_rs_seq = max(self.n_rs_seq, 0)
         self.context_params.n_outputs_max = max(self.n_outputs_max, 0)
         self.context_params.n_outputs_max_per_seq = max(self.n_outputs_max_per_seq, 0)
         self.context_params.n_threads = self.n_threads
@@ -567,6 +611,48 @@ class Llama:
         )
         self.context_params.yarn_orig_ctx = yarn_orig_ctx if yarn_orig_ctx != 0 else 0
 
+        self._speculative_verifying = False
+        # Set only while generate() is active so eval() can attribute native
+        # process() calls to the current request.
+        self._active_speculative_phase_stats: Optional[Dict[str, Any]] = None
+        self.last_speculative_stats: Dict[str, Any] = {
+            "drafted": 0,
+            "verified": 0,
+            "accepted": 0,
+            "begin_calls": 0,
+            "draft_calls": 0,
+            "process_calls": 0,
+            "accept_calls": 0,
+            "generated_drafts": 0,
+            "accepted_drafts": 0,
+            "accepted_draft_tokens": 0,
+            "draft_token_acceptance_rate": 0.0,
+            "mean_accepted_length": 0.0,
+            "acceptance_rate_per_position": [],
+            "begin_seconds": 0.0,
+            "draft_seconds": 0.0,
+            "process_seconds": 0.0,
+            "accept_seconds": 0.0,
+            "verification_steps": 0,
+            "rollbacks": 0,
+            "native_rollbacks": 0,
+            "checkpoint_rollbacks": 0,
+            "acceptance_rate": 0.0,
+            "generation_tokens": 0,
+            "generation_seconds": 0.0,
+            "generation_tokens_per_second": 0.0,
+            "time_to_first_token_seconds": 0.0,
+            "sustained_tokens": 0,
+            "sustained_seconds": 0.0,
+            "sustained_tokens_per_second": 0.0,
+            # Backward-compatible aliases for the old, ambiguously named fields.
+            "decode_tokens": 0,
+            "decode_seconds": 0.0,
+            "decode_tokens_per_second": 0.0,
+        }
+        # Stateful speculative decoding requests every native verification
+        # output only while checking a draft. It does not require copying every
+        # vocabulary row into the long-lived Python ``scores`` matrix.
         self._logits_all = logits_all if draft_model is None else True
 
         self.context_params.embeddings = embeddings
@@ -640,6 +726,22 @@ class Llama:
             self.context_params.n_batch = self.n_batch
             self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
 
+        # n_ctx=0 resolves n_batch only after model metadata is available, so
+        # derive the speculative output limits again at this point.
+        if isinstance(speculative, SpecConfig) and speculative.enabled():
+            required_total, required_per_seq = speculative_output_limits(
+                self.n_batch,
+                max(1, self.n_seq_max),
+                speculative.max_draft_tokens(),
+            )
+            self.n_outputs_max = required_total
+            self.n_outputs_max_per_seq = required_per_seq
+            if speculative.spec_type.is_draft():
+                self.n_rs_seq = max(self.n_rs_seq, speculative.draft_n_max)
+            self.context_params.n_rs_seq = self.n_rs_seq
+            self.context_params.n_outputs_max = required_total
+            self.context_params.n_outputs_max_per_seq = required_per_seq
+
         self._ctx = self._stack.enter_context(
             contextlib.closing(
                 internals.LlamaContext(
@@ -712,15 +814,45 @@ class Llama:
         ] = {}
 
         self.draft_model = draft_model
+        if isinstance(speculative, SpecConfig):
+            if not speculative.enabled():
+                self.speculative = None
+            elif speculative.spec_type.is_draft():
+                # Draft-family engines depend on the already initialized native
+                # target model/context. The engine may also create and own a
+                # separate draft model/context, as external MTP does.
+                self.speculative: Optional[LlamaSpeculativeEngine] = (
+                    create_native_spec_engine(
+                        speculative,
+                        target_model=self._model,
+                        target_context=self._ctx,
+                        model_params=self.model_params,
+                        context_params=self.context_params,
+                        verbose=self.verbose,
+                    )
+                )
+            else:
+                # Model-free engines, currently NGram variants, only need token
+                # history and can be constructed directly from their config.
+                self.speculative = create_spec_engine(speculative)
+            self.speculative_config: Optional[SpecConfig] = speculative
+        else:
+            self.speculative = speculative
+            self.speculative_config = None
 
         self._n_vocab = self.n_vocab()
         self._n_ctx = self.n_ctx()
 
-        self._candidates = internals.LlamaTokenDataArray(n_vocab=self._n_vocab)
+        # Candidate storage is owned by LlamaSamplingContext. Keeping a second,
+        # unused full-vocabulary array here wastes several MiB on large-vocab
+        # models (for Qwen3.8: 248320 llama_token_data entries plus token IDs).
+        self._candidates = None
 
         self.n_tokens = 0
-        self.input_ids: npt.NDArray[np.intc] = np.ndarray((n_ctx,), dtype=np.intc)
-        self.scores: npt.NDArray[np.single] = np.ndarray((n_ctx if self._logits_all else 1, self._n_vocab), dtype=np.single)
+        self._last_eval_output_start = 0
+        self._last_eval_output_count = 0
+        self.input_ids: npt.NDArray[np.intc] = np.ndarray((self._n_ctx,), dtype=np.intc)
+        self.scores: npt.NDArray[np.single] = np.ndarray((self._n_ctx if self._logits_all else 1, self._n_vocab), dtype=np.single)
 
         try:
             self.metadata = self._model.metadata()
@@ -865,6 +997,10 @@ class Llama:
             self._sampling_ctx.close()
             self._sampling_ctx = None
 
+        if getattr(self, "speculative", None) is not None:
+            self.speculative.close()
+            self.speculative = None
+
         if getattr(self, "_candidates", None) is not None:
             self._candidates.close()
             self._candidates = None
@@ -892,7 +1028,13 @@ class Llama:
             self._stack = None
 
     def __del__(self) -> None:
-        self.close()
+        # __del__ can run after Python has started clearing module globals and
+        # disabled imports. Explicit close() still reports cleanup failures,
+        # while finalization must not emit an unraisable exception.
+        try:
+            self.close()
+        except Exception:
+            pass
 
     @staticmethod
     def _parse_n_gpu_layers(n_gpu_layers: Union[int, str]) -> int:
@@ -1098,10 +1240,16 @@ class Llama:
         # Keep the Python-side token cursor in sync with the empty native state.
         self.n_tokens = 0
 
+        self._last_eval_output_start = 0
+        self._last_eval_output_count = 0
+
         # Hybrid checkpoints contain snapshots of the state cleared above and
         # must not be reused after a reset.
         if self.is_hybrid and self._hybrid_cache_mgr is not None:
             self._hybrid_cache_mgr.clear()
+
+        if self.speculative is not None:
+            self.speculative.clear()
 
     def abort(self) -> None:
         """
@@ -1252,7 +1400,7 @@ class Llama:
             # Configure logits extraction:
             # If _logits_all is True, calculate for every token.
             # Otherwise, only calculate for the very last token in the entire evaluation sequence.
-            if self._logits_all:
+            if self._logits_all or self._speculative_verifying:
                 logits_array = [True] * n_chunk
             else:
                 logits_array = [False] * n_chunk
@@ -1339,6 +1487,21 @@ class Llama:
 
             if not success:
                 raise RuntimeError("Llama.eval(decode): Failed completely even with batch size 1.")
+
+            self._last_eval_output_start = n_past
+            self._last_eval_output_count = current_batch_size
+
+            if self.speculative is not None:
+                phase_stats = self._active_speculative_phase_stats
+                process_started = time.perf_counter()
+                try:
+                    self.speculative.process(self._batch.batch, seq_id=0)
+                finally:
+                    if phase_stats is not None:
+                        phase_stats["process_calls"] += 1
+                        phase_stats["process_seconds"] += (
+                            time.perf_counter() - process_started
+                        )
 
             # Save successfully processed tokens into the Python-side ledger
             self.input_ids[n_past : n_past + current_batch_size] = chunk[:current_batch_size]
@@ -1665,6 +1828,17 @@ class Llama:
             The generated tokens.
         """
         original_tokens = list(tokens)
+        # The Python MTP engine maintains a second context and pending hidden
+        # state. Until speculative checkpoints are persisted alongside the
+        # public prompt cache, rebuild both contexts together for a new reset
+        # generation instead of reusing only the target KV cache.
+        if reset and self.speculative is not None:
+            self.n_tokens = 0
+            self._ctx.memory_clear(True)
+            self.speculative.clear()
+            if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                self._hybrid_cache_mgr.clear()
+
         # Check for kv cache prefix match
         if reset and self.n_tokens > 0:
             # 1. First, check for a 100% exact match of the entire sequence
@@ -1851,15 +2025,170 @@ class Llama:
         sample_idx = self.n_tokens + len(tokens) - 1
         tokens = list(tokens)
 
+        # llama.cpp calls begin() after the prompt batch has been decoded and fed
+        # through common_speculative_process(). Keep the same ordering so model-based
+        # engines can validate/capture their prompt-side state first.
+        speculative_begun = self.speculative is None
+
         # Main evaluation and generation loop
+        pending_draft_count = 0
+        speculative_drafted = 0
+        speculative_verified = 0
+        speculative_accepted = 0
+        speculative_verification_steps = 0
+        speculative_rollbacks = 0
+        speculative_native_rollbacks = 0
+        speculative_checkpoint_rollbacks = 0
+        speculative_decode_tokens = 0
+        speculative_decode_seconds = 0.0
+        speculative_decode_started: Optional[float] = None
+        speculative_ttft_seconds = 0.0
+        speculative_time_to_last_token_seconds = 0.0
+        speculative_phase_stats: Dict[str, Any] = {
+            "begin_calls": 0,
+            "draft_calls": 0,
+            "process_calls": 0,
+            "accept_calls": 0,
+            "generated_drafts": 0,
+            "accepted_drafts": 0,
+            "accepted_tokens": 0,
+            "accepted_tokens_per_position": [],
+            "begin_seconds": 0.0,
+            "draft_seconds": 0.0,
+            "process_seconds": 0.0,
+            "accept_seconds": 0.0,
+        }
+        if self.speculative is not None:
+            self._active_speculative_phase_stats = speculative_phase_stats
+
+        def speculative_begin(prompt_tokens: Sequence[int]) -> None:
+            assert self.speculative is not None
+            started = time.perf_counter()
+            try:
+                self.speculative.begin(prompt_tokens, seq_id=0)
+            finally:
+                speculative_phase_stats["begin_calls"] += 1
+                speculative_phase_stats["begin_seconds"] += (
+                    time.perf_counter() - started
+                )
+
+        def speculative_draft(
+            history: npt.NDArray[np.intc],
+            *,
+            n_past: int,
+            id_last: int,
+            n_max: int,
+        ) -> npt.NDArray[np.intc]:
+            assert self.speculative is not None
+            started = time.perf_counter()
+            try:
+                result = self.speculative.draft(
+                    history,
+                    n_past=n_past,
+                    id_last=id_last,
+                    n_max=n_max,
+                    seq_id=0,
+                )
+            finally:
+                speculative_phase_stats["draft_calls"] += 1
+                speculative_phase_stats["draft_seconds"] += (
+                    time.perf_counter() - started
+                )
+            if len(result) > 0:
+                speculative_phase_stats["generated_drafts"] += 1
+            return result
+
+        def time_speculative_accept(operation: Callable[[], None]) -> None:
+            started = time.perf_counter()
+            try:
+                operation()
+            finally:
+                speculative_phase_stats["accept_seconds"] += (
+                    time.perf_counter() - started
+                )
+
         try:
+            # Match examples/speculative-simple: keep the last prompt token as
+            # id_last, process the preceding prompt first, then verify
+            # [id_last, draft...] together. This lets speculation cover the very
+            # first generated token instead of starting one token late.
+            if self.speculative is not None and tokens:
+                id_last = int(tokens[-1])
+                prompt_prefix = tokens[:-1]
+                if prompt_prefix:
+                    self.eval(
+                        prompt_prefix,
+                        active_loras=active_loras,
+                        control_vector=control_vector,
+                        copy_logits=False,
+                    )
+
+                speculative_begin(self.input_ids[: self.n_tokens].tolist())
+                speculative_begun = True
+                # The prompt prefix is ingested; id_last is intentionally held
+                # back for the first verification batch. Time active speculative
+                # work from here, excluding time suspended at yield.
+                speculative_decode_started = time.perf_counter()
+
+                history_end = self.n_tokens + 1
+                self.input_ids[self.n_tokens] = id_last
+                room = self._n_ctx - history_end - 1
+                initial_draft = np.empty(0, dtype=np.intc)
+                if room > 0:
+                    initial_draft = speculative_draft(
+                        self.input_ids[:history_end],
+                        n_past=self.n_tokens,
+                        id_last=id_last,
+                        n_max=room,
+                    )
+                tokens = [id_last] + initial_draft.astype(int).tolist()
+                pending_draft_count = len(initial_draft)
+                speculative_drafted += len(initial_draft)
+
             while True:
+                n_drafted = pending_draft_count
+                pending_draft_count = 0
+                self._speculative_verifying = n_drafted > 0
+                if n_drafted > 0:
+                    speculative_verified += n_drafted
+                    speculative_verification_steps += 1
+                n_accepted = 0
+                accept_handled = False
+                evaluated_tokens = list(tokens)
+                verification_start = self.n_tokens
+                speculative_checkpoint = None
+                use_native_speculative_rollback = False
+                if n_drafted > 0 and self.speculative is not None:
+                    speculative_checkpoint = self.speculative.checkpoint(seq_id=0)
+                    if self.is_hybrid:
+                        use_native_speculative_rollback = (
+                            self._ctx.n_rs_seq() >= n_drafted
+                            and self.speculative.supports_native_target_rollback()
+                        )
+                        if not use_native_speculative_rollback:
+                            if (
+                                self._hybrid_cache_mgr is None
+                                or self._hybrid_cache_mgr.max_checkpoints <= 0
+                            ):
+                                raise RuntimeError(
+                                    "Speculative decoding on this hybrid/recurrent "
+                                    "target requires ctx_checkpoints > 0"
+                                )
+                            if not self._hybrid_cache_mgr.save_checkpoint(
+                                current_pos=verification_start,
+                                tokens=self.input_ids[:verification_start].tolist(),
+                                seq_id=0,
+                            ):
+                                raise RuntimeError(
+                                    "Failed to checkpoint hybrid target before draft verification"
+                                )
                 if len(tokens) > 0:
                     # For hybrid models processing a prompt (len > 1), force an N-1 checkpoint
                     # to safely allow 1-token rollbacks (e.g., for seed changes on 100% prompt matches).
                     # ONLY apply this if rollback capabilities are enabled (max_checkpoints > 0).
                     if (
                         self.is_hybrid
+                        and self.speculative is None
                         and self._hybrid_cache_mgr is not None
                         and self._hybrid_cache_mgr.max_checkpoints > 0
                         and len(tokens) > 1
@@ -1898,15 +2227,37 @@ class Llama:
                             copy_logits=copy_logits,
                         )
 
+                if self.speculative is not None and not speculative_begun:
+                    speculative_begin(self.input_ids[: self.n_tokens].tolist())
+                    speculative_begun = True
+                    speculative_decode_started = time.perf_counter()
+
                 # Sample loop
                 while sample_idx < self.n_tokens:
                     if self._abort_event.is_set():
                         return
 
-                    token = self._sampling_ctx.sample(self._ctx, idx=-1)
+                    output_idx = sample_idx - self._last_eval_output_start
+                    if not 0 <= output_idx < self._last_eval_output_count:
+                        raise RuntimeError(
+                            "Llama.generate: sampling index is outside the most recent "
+                            "decode output batch: "
+                            f"token_index={sample_idx}, output_start="
+                            f"{self._last_eval_output_start}, output_count="
+                            f"{self._last_eval_output_count}"
+                        )
+                    token = self._sampling_ctx.sample(self._ctx, idx=output_idx)
                     self._sampling_ctx.accept(token, False if grammar is None else True)
 
                     sample_idx += 1
+
+                    if (
+                        n_drafted > 0
+                        and sample_idx < self.n_tokens
+                        and token == self._input_ids[sample_idx]
+                    ):
+                        n_accepted += 1
+                        speculative_accepted += 1
 
                     if stopping_criteria is not None:
                         if stopping_criteria(
@@ -1916,7 +2267,24 @@ class Llama:
                             return
 
                     # Yield the generated token to the caller
+                    if self.speculative is not None:
+                        now = time.perf_counter()
+                        if speculative_decode_started is not None:
+                            speculative_decode_seconds += (
+                                now - speculative_decode_started
+                            )
+                        speculative_decode_started = None
+                        if speculative_decode_tokens == 0:
+                            speculative_ttft_seconds = speculative_decode_seconds
+                        speculative_decode_tokens += 1
+                        # Stop throughput timing at token delivery. Work performed
+                        # after the final yield must not reduce the reported rate.
+                        speculative_time_to_last_token_seconds = (
+                            speculative_decode_seconds
+                        )
                     tokens_or_none = yield token
+                    if self.speculative is not None:
+                        speculative_decode_started = time.perf_counter()
 
                     tokens.clear()
                     tokens.append(token)
@@ -1928,26 +2296,124 @@ class Llama:
                     # mismatched the newly sampled token. We must rollback the KV cache.
                     if sample_idx < self.n_tokens and token != self._input_ids[sample_idx]:
                         self.n_tokens = sample_idx
+                        if self.speculative is not None:
+                            speculative_rollbacks += 1
                         if self.is_hybrid:
-                            if self.verbose:
-                                print("Llama.generate: Draft token rejected for Hybrid model. Rolling back via Checkpoint.", file=sys.stderr)
-                            if self._hybrid_cache_mgr:
-                                best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(self._input_ids[:self.n_tokens].tolist(), 0)
-                                if best_ckpt and self._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
+                            if self.speculative is not None:
+                                if use_native_speculative_rollback:
+                                    speculative_native_rollbacks += 1
+                                    if not self._ctx.memory_seq_rm(
+                                        0, self.n_tokens, -1
+                                    ):
+                                        raise RuntimeError(
+                                            "Native recurrent-state speculative rollback failed"
+                                        )
+                                    time_speculative_accept(
+                                        lambda: self.speculative.rollback_verified(
+                                            speculative_checkpoint,
+                                            n_accepted,
+                                            seq_id=0,
+                                        )
+                                    )
+                                else:
+                                    speculative_checkpoint_rollbacks += 1
+                                    assert self._hybrid_cache_mgr is not None
+                                    best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(
+                                        self.input_ids[:verification_start].tolist(), 0
+                                    )
+                                    if (
+                                        best_ckpt is None
+                                        or best_ckpt.pos != verification_start
+                                        or not self._hybrid_cache_mgr.restore_checkpoint(
+                                            best_ckpt, seq_id=0
+                                        )
+                                    ):
+                                        raise RuntimeError(
+                                            "Failed to restore the exact hybrid checkpoint "
+                                            "for speculative rejection"
+                                        )
+                                    time_speculative_accept(
+                                        lambda: self.speculative.restore(
+                                            speculative_checkpoint, seq_id=0
+                                        )
+                                    )
+                                    self.n_tokens = verification_start
+                                    accepted_inputs = evaluated_tokens[: 1 + n_accepted]
+                                    if accepted_inputs:
+                                        self._speculative_verifying = False
+                                        self.eval(
+                                            accepted_inputs,
+                                            active_loras=active_loras,
+                                            control_vector=control_vector,
+                                            copy_logits=False,
+                                        )
+                                accept_handled = True
+                            else:
+                                best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(
+                                    self._input_ids[:self.n_tokens].tolist(), 0
+                                )
+                                if best_ckpt and self._hybrid_cache_mgr.restore_checkpoint(
+                                    best_ckpt, seq_id=0
+                                ):
                                     self.n_tokens = best_ckpt.pos
                                 else:
                                     self._hybrid_cache_mgr.clear()
                                     self._ctx.memory_clear(True)
                                     self.n_tokens = 0
                         else:
-                            if self.verbose:
+                            if self.verbose and self.speculative is None:
                                 print(f"Llama.generate: Draft token rejected. Truncating context to {self.n_tokens}.", file=sys.stderr)
+                            if self.speculative is not None:
+                                speculative_native_rollbacks += 1
                             self._ctx.memory_seq_rm(0, self.n_tokens, -1)
+                            if self.speculative is not None:
+                                time_speculative_accept(
+                                    lambda: self.speculative.truncate(
+                                        self.n_tokens, seq_id=0
+                                    )
+                                )
 
                         break
 
-                # Speculative Decoding (Draft Model) logic
-                if self.draft_model is not None:
+                # llama.cpp-compatible stateful speculative decoding.
+                if self.speculative is not None:
+                    if n_drafted > 0 and not accept_handled:
+                        time_speculative_accept(
+                            lambda: self.speculative.accept(n_accepted, seq_id=0)
+                        )
+
+                    if n_drafted > 0:
+                        speculative_phase_stats["accept_calls"] += 1
+                        speculative_phase_stats["accepted_tokens"] += n_accepted
+                        if n_accepted > 0:
+                            speculative_phase_stats["accepted_drafts"] += 1
+                        per_position = speculative_phase_stats[
+                            "accepted_tokens_per_position"
+                        ]
+                        if len(per_position) < n_accepted:
+                            per_position.extend([0] * (n_accepted - len(per_position)))
+                        for position in range(n_accepted):
+                            per_position[position] += 1
+
+                    self.input_ids[self.n_tokens : self.n_tokens + len(tokens)] = tokens
+                    history_end = self.n_tokens + len(tokens)
+                    # Match server_slot::get_n_draft_max(): id_last is evaluated at
+                    # the current target position, and one extra context position is
+                    # kept available for shifting/continuation.
+                    room = self._n_ctx - history_end - 1
+                    if room > 0:
+                        draft_tokens = speculative_draft(
+                            self.input_ids[:history_end],
+                            n_past=self.n_tokens,
+                            id_last=int(tokens[-1]),
+                            n_max=room,
+                        )
+                        tokens.extend(draft_tokens.astype(int).tolist())
+                        pending_draft_count = len(draft_tokens)
+                        speculative_drafted += len(draft_tokens)
+
+                # Deprecated stateless draft-model compatibility path.
+                elif self.draft_model is not None:
                     if self.is_hybrid:
                         if self.verbose:
                             print("Llama.generate: Speculative decoding is skipped for Hybrid models.", file=sys.stderr)
@@ -1962,6 +2428,111 @@ class Llama:
                             ]
                         )
         finally:
+            self._speculative_verifying = False
+            if self._active_speculative_phase_stats is speculative_phase_stats:
+                self._active_speculative_phase_stats = None
+            # Throughput ends at delivery of the last output token. In
+            # particular, do not count work performed after the last yield when
+            # the caller closes or resumes the generator.
+            speculative_decode_started = None
+            acceptance_rate = (
+                speculative_accepted / speculative_verified
+                if speculative_verified > 0
+                else 0.0
+            )
+            timing_stats = _speculative_generation_timing_stats(
+                speculative_decode_tokens,
+                speculative_ttft_seconds,
+                speculative_time_to_last_token_seconds,
+            )
+            accept_calls = speculative_phase_stats["accept_calls"]
+            accepted_tokens = speculative_phase_stats["accepted_tokens"]
+            mean_accepted_length = (
+                1.0 + accepted_tokens / accept_calls
+                if accept_calls > 0
+                else 0.0
+            )
+            acceptance_rate_per_position = [
+                count / accept_calls
+                for count in speculative_phase_stats[
+                    "accepted_tokens_per_position"
+                ]
+            ] if accept_calls > 0 else []
+            draft_token_acceptance_rate = (
+                accepted_tokens / speculative_drafted
+                if speculative_drafted > 0
+                else 0.0
+            )
+            self.last_speculative_stats = {
+                "drafted": speculative_drafted,
+                "verified": speculative_verified,
+                "accepted": speculative_accepted,
+                "begin_calls": speculative_phase_stats["begin_calls"],
+                "draft_calls": speculative_phase_stats["draft_calls"],
+                "process_calls": speculative_phase_stats["process_calls"],
+                "accept_calls": accept_calls,
+                "generated_drafts": speculative_phase_stats["generated_drafts"],
+                "accepted_drafts": speculative_phase_stats["accepted_drafts"],
+                "accepted_draft_tokens": accepted_tokens,
+                "draft_token_acceptance_rate": draft_token_acceptance_rate,
+                "mean_accepted_length": mean_accepted_length,
+                "acceptance_rate_per_position": acceptance_rate_per_position,
+                "begin_seconds": speculative_phase_stats["begin_seconds"],
+                "draft_seconds": speculative_phase_stats["draft_seconds"],
+                "process_seconds": speculative_phase_stats["process_seconds"],
+                "accept_seconds": speculative_phase_stats["accept_seconds"],
+                "verification_steps": speculative_verification_steps,
+                "rollbacks": speculative_rollbacks,
+                "native_rollbacks": speculative_native_rollbacks,
+                "checkpoint_rollbacks": speculative_checkpoint_rollbacks,
+                "acceptance_rate": acceptance_rate,
+                **timing_stats,
+                # Keep the pre-existing keys as aliases. Their timing now ends at
+                # the last output token instead of including generator cleanup.
+                "decode_tokens": timing_stats["generation_tokens"],
+                "decode_seconds": timing_stats["generation_seconds"],
+                "decode_tokens_per_second": timing_stats[
+                    "generation_tokens_per_second"
+                ],
+            }
+            if self.verbose and self.speculative is not None and speculative_begun:
+                spec_name = (
+                    self.speculative_config.spec_type.to_str()
+                    if self.speculative_config is not None
+                    else type(self.speculative).__name__
+                )
+                per_position_text = ", ".join(
+                    f"{rate:.1%}" for rate in acceptance_rate_per_position
+                )
+                print(
+                    f"Llama.generate: {spec_name} stats"
+                    f" | calls: begin {speculative_phase_stats['begin_calls']}, "
+                    f"draft {speculative_phase_stats['draft_calls']}, "
+                    f"process {speculative_phase_stats['process_calls']}, "
+                    f"accept {accept_calls}"
+                    f" | draft batches: {speculative_phase_stats['accepted_drafts']} / "
+                    f"{speculative_phase_stats['generated_drafts']} accepted"
+                    f" | draft tokens: {accepted_tokens} / {speculative_drafted} accepted "
+                    f"({draft_token_acceptance_rate:.1%})"
+                    f" | mean accepted length: {mean_accepted_length:.2f}"
+                    f" | acceptance by position: [{per_position_text}]"
+                    f" | phase time: "
+                    f"begin {speculative_phase_stats['begin_seconds'] * 1000.0:.3f} ms, "
+                    f"draft {speculative_phase_stats['draft_seconds'] * 1000.0:.3f} ms, "
+                    f"process {speculative_phase_stats['process_seconds'] * 1000.0:.3f} ms, "
+                    f"accept {speculative_phase_stats['accept_seconds'] * 1000.0:.3f} ms"
+                    f" | rollbacks: {speculative_rollbacks} "
+                    f"(native {speculative_native_rollbacks}, "
+                    f"checkpoint {speculative_checkpoint_rollbacks})"
+                    f" | generation: {timing_stats['generation_tokens']} tokens in "
+                    f"{timing_stats['generation_seconds']:.3f} s "
+                    f"({timing_stats['generation_tokens_per_second']:.2f} tok/s)"
+                    f" | TTFT: {timing_stats['time_to_first_token_seconds'] * 1000.0:.2f} ms"
+                    f" | sustained: {timing_stats['sustained_tokens']} tokens in "
+                    f"{timing_stats['sustained_seconds']:.3f} s "
+                    f"({timing_stats['sustained_tokens_per_second']:.2f} tok/s).",
+                    file=sys.stderr,
+                )
             # Ensure the final state is checkpointed for hybrid models when generation finishes or is interrupted
             if (
                 self.is_hybrid
@@ -3521,6 +4092,7 @@ prompt: The prompt to generate text from.
             chat_handler=self.chat_handler,
             # Speculative Decidng
             draft_model=self.draft_model,
+            speculative=self.speculative_config,
             # KV cache quantization
             type_k=self.context_params.type_k,
             type_v=self.context_params.type_v,

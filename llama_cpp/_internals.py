@@ -1142,6 +1142,7 @@ class LlamaBatch:
         self.verbose = verbose
         self._token_buf = None
         self._owns_token = False
+        self._embd_view = None
         self._exit_stack = ExitStack()
         self.batch = None
 
@@ -1186,12 +1187,24 @@ class LlamaBatch:
                 )()
                 batch.token = self._token_buf
                 self._owns_token = True
+
+            if self.embd > 0:
+                # Keep a 2-D NumPy view over the native embedding buffer. MTP
+                # hidden rows are already contiguous float32 arrays, so assigning
+                # through this view performs one native copy instead of one
+                # Python/ctypes write per hidden element.
+                self._embd_view = np.ctypeslib.as_array(
+                    batch.embd,
+                    shape=(self.n_tokens_capacity * self.embd,),
+                ).reshape(self.n_tokens_capacity, self.embd)
         except BaseException:
             self.close()
             raise
 
     def close(self):
         """Manually free LlamaBatch resources."""
+        # Drop the NumPy view before freeing the native storage it references.
+        self._embd_view = None
         if getattr(self, "batch", None) is not None:
             try:
                 if getattr(self, "_owns_token", False):
@@ -1466,9 +1479,8 @@ class LlamaBatch:
 
         n_seq_id = self._validate_seq_ids(seq_ids, "add_embedding")
 
-        base = idx * self.embd
-        for d, value in enumerate(embedding):
-            self.batch.embd[base + d] = float(value)
+        assert self._embd_view is not None
+        self._embd_view[idx, :] = embedding
 
         self.batch.pos[idx] = pos
         self.batch.n_seq_id[idx] = n_seq_id
@@ -1532,14 +1544,13 @@ class LlamaBatch:
 
         n_seq_id = self._validate_seq_ids(seq_ids, "add_embeddings")
 
+        assert self._embd_view is not None
+        self._embd_view[
+            current_count : current_count + n_tokens, :
+        ] = np.asarray(embeddings, dtype=np.float32).reshape(n_tokens, self.embd)
+
         for i in range(n_tokens):
             j = current_count + i
-
-            src_base = i * self.embd
-            dst_base = j * self.embd
-
-            for d in range(self.embd):
-                self.batch.embd[dst_base + d] = float(embeddings[src_base + d])
 
             self.batch.pos[j] = int(pos_array[i])
             self.batch.n_seq_id[j] = n_seq_id
@@ -1612,9 +1623,8 @@ class LlamaBatch:
 
         self.batch.token[idx] = token
 
-        base = idx * self.embd
-        for d, value in enumerate(embedding):
-            self.batch.embd[base + d] = float(value)
+        assert self._embd_view is not None
+        self._embd_view[idx, :] = embedding
 
         self.batch.pos[idx] = pos
         self.batch.n_seq_id[idx] = n_seq_id
@@ -2051,9 +2061,6 @@ class LlamaSamplingContext:
             )
         self.prev = deque(maxlen=max(self.params.n_prev, 32))
 
-        # Reusable token data array
-        self._cur_p = LlamaTokenDataArray(n_vocab=self.n_vocab)
-
         # Reusable numpy logits view
         self._logits_view = None
         self._logits_ptr_addr = None
@@ -2312,6 +2319,12 @@ class LlamaSamplingContext:
             self._logits_ptr_addr = cur_addr
 
         logits_array = self._logits_view
+        # Backend sampling returns before this point. Allocate the full-vocabulary
+        # CPU candidate array only when a CPU sampler/grammar fallback actually
+        # needs it; this matters for vocabularies with hundreds of thousands of
+        # entries.
+        if self._cur_p is None:
+            self._cur_p = LlamaTokenDataArray(n_vocab=self.n_vocab)
         cur_p = self._cur_p
 
         cur_p.copy_logits(logits_array)
@@ -2408,7 +2421,7 @@ class LlamaSamplingContext:
 
         # Release large token data buffer used during sampling.
         # Important for high-vocab models to avoid memory retention.
-        if hasattr(self, "_cur_p"):
+        if getattr(self, "_cur_p", None) is not None:
             try:
                 self._cur_p.close()
             except Exception:

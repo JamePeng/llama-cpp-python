@@ -9,6 +9,7 @@ from huggingface_hub import hf_hub_download
 import llama_cpp
 import llama_cpp._internals as internals
 from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_speculative import _speculative_generation_timing_stats
 
 from typing import (
     List,
@@ -17,6 +18,37 @@ from typing import (
 
 
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
+
+
+def test_speculative_generation_timing_reports_sustained_throughput():
+    stats = _speculative_generation_timing_stats(
+        generated_tokens=384,
+        time_to_first_token_seconds=0.043,
+        time_to_last_token_seconds=4.081,
+    )
+
+    assert stats["generation_tokens"] == 384
+    assert stats["generation_seconds"] == pytest.approx(4.081)
+    assert stats["generation_tokens_per_second"] == pytest.approx(384 / 4.081)
+    assert stats["time_to_first_token_seconds"] == pytest.approx(0.043)
+    assert stats["sustained_tokens"] == 383
+    assert stats["sustained_seconds"] == pytest.approx(4.038)
+    assert stats["sustained_tokens_per_second"] == pytest.approx(383 / 4.038)
+
+
+@pytest.mark.parametrize("generated_tokens", [0, 1])
+def test_speculative_generation_timing_has_no_sustained_rate_for_short_output(
+    generated_tokens,
+):
+    stats = _speculative_generation_timing_stats(
+        generated_tokens=generated_tokens,
+        time_to_first_token_seconds=0.025,
+        time_to_last_token_seconds=0.025,
+    )
+
+    assert stats["sustained_tokens"] == 0
+    assert stats["sustained_seconds"] == 0.0
+    assert stats["sustained_tokens_per_second"] == 0.0
 
 
 def test_model_init_frees_native_model_when_vocab_lookup_fails(monkeypatch):
@@ -165,7 +197,9 @@ def test_sampling_context_partial_init_can_close_idempotently(monkeypatch):
     sampling_context.close()
     sampling_context.close() # Closing an already closed context must be a no-op.
 
-    assert closed_resources == ["sampler-chain", "token-data"]
+    # Full-vocabulary candidate storage is lazy and was never needed because
+    # sampler-chain construction failed first.
+    assert closed_resources == ["sampler-chain"]
     assert sampling_context.model is None
     assert sampling_context.params is None
     assert sampling_context.vocab is None
@@ -238,6 +272,28 @@ def test_llama_batch_seq_id_error_guidance():
         assert "valid IDs are 0 through 0" in message
         assert "n_seq_max>=2" in message
         assert "LlamaEmbedding" in message
+    finally:
+        batch.close()
+
+
+def test_llama_batch_mixed_embeddings_are_copied_contiguously():
+    batch = internals.LlamaBatch(
+        n_tokens=2,
+        embd=4,
+        n_seq_max=1,
+        mixed=True,
+        verbose=False,
+    )
+    try:
+        first = np.asarray([1.0, 2.0, 3.0, 4.0], dtype=np.float32)
+        second = np.asarray([5.0, 6.0, 7.0, 8.0], dtype=np.float32)
+        batch.add_token_embedding(10, first, 0, [0], False)
+        batch.add_token_embedding(11, second, 1, [0], True)
+
+        actual = np.ctypeslib.as_array(batch.batch.embd, shape=(8,)).copy()
+        np.testing.assert_array_equal(actual, np.concatenate((first, second)))
+        assert batch.batch.n_tokens == 2
+        assert [batch.batch.token[i] for i in range(2)] == [10, 11]
     finally:
         batch.close()
 
