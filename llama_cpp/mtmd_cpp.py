@@ -641,6 +641,15 @@ def mtmd_input_chunk_free(chunk: mtmd_input_chunk_p):
     """
     ...
 
+# // similar to mtmd_input_chunk_copy, but returns a placeholder chunk
+# MTMD_API mtmd_input_chunk * mtmd_input_chunk_get_placeholder(const mtmd_input_chunk * chunk);
+@ctypes_function_mtmd("mtmd_input_chunk_get_placeholder", [mtmd_input_chunk_p_ctypes], mtmd_input_chunk_p_ctypes)
+def mtmd_input_chunk_get_placeholder(chunk: mtmd_input_chunk_p) -> mtmd_input_chunk_p:
+    """
+    similar to mtmd_input_chunk_copy, but returns a placeholder chunk
+    """
+    ...
+
 # // save/load an input chunk to/from a buffer (useful for KV save/load)
 # // important: only chunk's metadata will be saved, the actual image/audio data will not be saved
 # // the loaded chunk will always be a placeholder, cannot be used for mtmd_encode() or mtmd_batch_encode()
@@ -1306,7 +1315,7 @@ def mtmd_helper_bitmap_init_from_file(
 # // note:
 # //   - for now, video input is only supported via C++ helper functions
 # //   - audio files will be auto-detected based on magic bytes
-# //   - output bitmap will have FNV hash as the ID
+# //   - output bitmap will have SHA-256 hash (hex string) as the ID
 # // returns nullptr on failure
 # // this function is thread-safe
 # MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder);
