@@ -3,6 +3,7 @@ import collections
 import ctypes
 import enum
 import sys
+import time
 
 from dataclasses import dataclass, field
 from typing import Any, DefaultDict, Dict, List, Literal, Optional, Sequence, Tuple, Union
@@ -395,18 +396,31 @@ class LlamaDraftModel(abc.ABC):
         raise NotImplementedError()
 
 
-class LlamaSpeculativeEngine(abc.ABC):
-    """Stateful speculative-decoding lifecycle shared by all backends.
+class LlamaSpecEngine(abc.ABC):
+    """Interface for a stateful speculative-decoding backend.
 
-    ``process`` consumes each successfully decoded target batch. ``draft`` then
-    proposes candidates after the last verified token, and ``accept`` feeds the
-    target verification result back into the backend.
+    A generation request normally calls ``begin`` once, then repeats
+    ``process -> draft -> accept``. Rejected verification batches may also use
+    the checkpoint/rollback methods before the next iteration. Implementations
+    may own native resources, but the target model and target context remain
+    owned by :class:`Llama`.
     """
 
     def begin(self, prompt_tokens: Sequence[int], seq_id: int = 0) -> None:
+        """Initialize request state from the already-decoded prompt tokens.
+
+        This hook is called once before the first draft. Implementations should
+        synchronize their token history here and must not mutate target state.
+        """
         _ = prompt_tokens, seq_id
 
     def process(self, batch: Any, seq_id: int = 0) -> None:
+        """Consume a target batch immediately after a successful decode.
+
+        ``batch`` is borrowed from the target context and is only valid for this
+        call. Engines can copy its tokens, positions, or target hidden states to
+        update the state used by the next ``draft`` call.
+        """
         _ = batch, seq_id
 
     @abc.abstractmethod
@@ -419,40 +433,81 @@ class LlamaSpeculativeEngine(abc.ABC):
         n_max: int,
         seq_id: int = 0,
     ) -> npt.NDArray[np.intc]:
+        """Propose up to ``n_max`` tokens following ``id_last``.
+
+        ``input_ids`` is verified history including ``id_last``; ``n_past`` is
+        the target position assigned to ``id_last``. The returned one-dimensional
+        ``np.intc`` array must contain only proposed continuation tokens, never
+        ``id_last`` itself. An empty array means that verification should proceed
+        without a speculative suffix.
+        """
         raise NotImplementedError()
 
     def accept(self, n_accepted: int, seq_id: int = 0) -> None:
+        """Commit the sampled token plus ``n_accepted`` accepted draft tokens."""
         _ = n_accepted, seq_id
 
     def checkpoint(self, seq_id: int = 0) -> Any:
+        """Capture engine state immediately before target verification.
+
+        Stateless engines may return ``None``. Any returned object is opaque to
+        :class:`Llama` and is passed back only to rollback methods.
+        """
         _ = seq_id
         return None
 
+    def take_verification_checkpoint(self, seq_id: int = 0) -> Any:
+        """Return a draft-time checkpoint, capturing one only when necessary.
+
+        This separate hook lets an engine reuse a checkpoint already captured
+        and restored inside ``draft``, avoiding a duplicate device sync or copy.
+        """
+        return self.checkpoint(seq_id)
+
     def restore(self, checkpoint: Any, seq_id: int = 0) -> None:
+        """Restore the exact opaque state returned by ``checkpoint``."""
         _ = checkpoint, seq_id
 
+    def reset_checkpoint_stats(self) -> None:
+        """Reset per-request checkpoint counters and accumulated durations."""
+        pass
+
+    def checkpoint_stats(self) -> Dict[str, Union[int, float]]:
+        """Return per-request checkpoint metrics without resetting them."""
+        return {}
+
     def supports_native_target_rollback(self) -> bool:
+        """Report whether target recurrent snapshots can roll back rejection."""
         return False
 
     def rollback_verified(
         self, checkpoint: Any, n_accepted: int, seq_id: int = 0
     ) -> None:
+        """Keep the sampled token and accepted prefix after target rollback.
+
+        Called only when the target context has already removed the rejected
+        suffix using native recurrent snapshots. Engines must leave their own
+        state positioned after ``1 + n_accepted`` verified tokens.
+        """
         _ = checkpoint, n_accepted, seq_id
         raise NotImplementedError(
             "This speculative engine cannot replay accepted verification rows"
         )
 
     def truncate(self, position: int, seq_id: int = 0) -> None:
+        """Discard engine state at and after an absolute token position."""
         _ = position, seq_id
 
     def clear(self) -> None:
+        """Clear request state while keeping reusable model resources alive."""
         pass
 
     def close(self) -> None:
+        """Release owned resources; repeated calls should be safe."""
         self.clear()
 
 
-class LlamaNGramMapDecoding(LlamaSpeculativeEngine):
+class LlamaNGramMapDecoding(LlamaSpecEngine):
     """
     Fast model-free speculative decoder based on prompt n-gram lookup.
 
@@ -829,7 +884,7 @@ class LlamaNGramMapDecoding(LlamaSpeculativeEngine):
         return np.asarray(draft[: min(n_max, self.num_pred_tokens)], dtype=np.intc)
 
 
-def create_spec_engine(config: SpecConfig) -> LlamaSpeculativeEngine:
+def create_spec_engine(config: SpecConfig) -> LlamaSpecEngine:
     """Create a speculative engine that does not own native model resources.
 
     This factory is for algorithms such as NGram lookup that only consume token
@@ -856,7 +911,7 @@ def create_spec_engine(config: SpecConfig) -> LlamaSpeculativeEngine:
     )
 
 
-class LlamaMTPDecoding(LlamaSpeculativeEngine):
+class LlamaMTPDecoding(LlamaSpecEngine):
     """Python orchestration of llama.cpp's native NextN/MTP graph."""
 
     def __init__(
@@ -968,7 +1023,11 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
                 llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_MTP
             )
             draft_ctx_params.ctx_other = target_context.ctx
-            draft_ctx_params.n_rs_seq = 0
+            # Candidate generation can advance the draft context by at most
+            # draft_n_max positions. Keep native recurrent snapshots so the
+            # speculative branch can normally be discarded without serializing
+            # state through host memory.
+            draft_ctx_params.n_rs_seq = max(0, int(config.draft_n_max))
             # llama.cpp's draft context produces one output per sequence.  Keeping
             # this separate from the target verification limits avoids reserving
             # an unnecessary (1 + n_draft) output buffer in the MTP graph.
@@ -1046,6 +1105,12 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
         self.verify_tokens: List[int] = []
         self.verify_positions: List[int] = []
+        self._use_native_draft_rollback = (
+            not (self.draft_model.is_recurrent() or self.draft_model.is_hybrid())
+            or self.draft_context.n_rs_seq() >= config.draft_n_max
+        )
+        self._pending_verification_checkpoint = None
+        self.reset_checkpoint_stats()
 
         if self.verbose:
             self._print_runtime_configuration(context_params)
@@ -1105,7 +1170,10 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
             "LlamaMTPDecoding: "
             f"target_n_batch={self.target_context.n_batch()}, "
             f"draft_n_batch={self.draft_context.n_batch()}, "
-            f"n_rs_seq={int(target_context_params.n_rs_seq)}, "
+            f"target_n_rs_seq={int(target_context_params.n_rs_seq)}, "
+            f"draft_n_rs_seq={self.draft_context.n_rs_seq()}, "
+            f"draft_checkpoint="
+            f"{'native-rs' if self._use_native_draft_rollback else 'on-device'}, "
             f"outputs={int(target_context_params.n_outputs_max)}/"
             f"{int(target_context_params.n_outputs_max_per_seq)}",
             file=sys.stderr,
@@ -1243,30 +1311,64 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
 
-        position = self.draft_context.memory_seq_pos_max(seq_id)
-        native_state: Optional[bytes] = None
-        if self.draft_model.is_recurrent() or self.draft_model.is_hybrid():
-            from llama_cpp import llama_cpp as llama_cpp_lib
+        started = time.perf_counter()
+        try:
+            position = self.draft_context.memory_seq_pos_max(seq_id)
+            checkpoint: Dict[str, Any] = {
+                "position": position,
+                "mode": "native",
+                "buffer": None,
+                "size": 0,
+                "flags": 0,
+                "pending_h": self.pending_h.copy(),
+            }
+            if not self._use_native_draft_rollback:
+                from llama_cpp import llama_cpp as llama_cpp_lib
 
-            flags = llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
-            size = self.draft_context.get_state_seq_size_ext(seq_id, flags)
-            if size <= 0:
-                raise RuntimeError("MTP draft context returned an empty checkpoint")
-            buffer = (ctypes.c_uint8 * size)()
-            written = self.draft_context.get_state_seq_data_ext(
-                buffer, size, seq_id, flags
-            )
-            if written != size:
-                raise RuntimeError(
-                    f"MTP draft checkpoint write was incomplete: {written}/{size}"
+                # Only one speculative checkpoint per sequence is live. Keep
+                # tensor payloads in llama_context-owned device buffers and
+                # retain just the small serialized metadata buffer in Python.
+                flags = (
+                    llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
+                    | llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
                 )
-            native_state = bytes(buffer)
+                size = self.draft_context.get_state_seq_size_ext(seq_id, flags)
+                if size <= 0:
+                    raise RuntimeError("MTP draft context returned an empty checkpoint")
+                buffer = (ctypes.c_uint8 * size)()
+                written = self.draft_context.get_state_seq_data_ext(
+                    buffer, size, seq_id, flags
+                )
+                if written != size:
+                    raise RuntimeError(
+                        f"MTP draft checkpoint write was incomplete: {written}/{size}"
+                    )
+                checkpoint.update(
+                    mode="on-device",
+                    buffer=buffer,
+                    size=size,
+                    flags=flags,
+                )
+                self._checkpoint_stats["device_captures"] += 1
+                self._checkpoint_stats["buffer_bytes"] += size
+            else:
+                self._checkpoint_stats["native_captures"] += 1
+            return checkpoint
+        finally:
+            self._checkpoint_stats["captures"] += 1
+            self._checkpoint_stats["capture_seconds"] += (
+                time.perf_counter() - started
+            )
 
-        return {
-            "position": position,
-            "native_state": native_state,
-            "pending_h": self.pending_h.copy(),
-        }
+    def take_verification_checkpoint(self, seq_id: int = 0) -> Any:
+        if seq_id != 0:
+            raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
+        checkpoint = self._pending_verification_checkpoint
+        self._pending_verification_checkpoint = None
+        if checkpoint is not None:
+            self._checkpoint_stats["verification_reuses"] += 1
+            return checkpoint
+        return self.checkpoint(seq_id)
 
     def restore(self, checkpoint: Any, seq_id: int = 0) -> None:
         if checkpoint is None:
@@ -1274,28 +1376,52 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
 
-        native_state = checkpoint["native_state"]
-        if native_state is not None:
-            from llama_cpp import llama_cpp as llama_cpp_lib
-
-            flags = llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
-            buffer = (ctypes.c_uint8 * len(native_state)).from_buffer_copy(native_state)
-            read = self.draft_context.set_state_seq_data_ext(
-                buffer, len(native_state), seq_id, flags
-            )
-            if read != len(native_state):
-                raise RuntimeError(
-                    f"MTP draft checkpoint restore was incomplete: {read}/{len(native_state)}"
+        started = time.perf_counter()
+        try:
+            if checkpoint["mode"] == "on-device":
+                size = int(checkpoint["size"])
+                read = self.draft_context.set_state_seq_data_ext(
+                    checkpoint["buffer"], size, seq_id, checkpoint["flags"]
                 )
-        else:
-            self.draft_context.memory_seq_rm(
-                seq_id, int(checkpoint["position"]) + 1, -1
+                if read != size:
+                    raise RuntimeError(
+                        f"MTP draft checkpoint restore was incomplete: {read}/{size}"
+                    )
+                self._checkpoint_stats["device_restores"] += 1
+            else:
+                if not self.draft_context.memory_seq_rm(
+                    seq_id, int(checkpoint["position"]) + 1, -1
+                ):
+                    raise RuntimeError("MTP native draft-context rollback failed")
+                self._checkpoint_stats["native_restores"] += 1
+
+            self.pending_h[:] = checkpoint["pending_h"]
+            self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+            self.verify_tokens.clear()
+            self.verify_positions.clear()
+        finally:
+            self._checkpoint_stats["restores"] += 1
+            self._checkpoint_stats["restore_seconds"] += (
+                time.perf_counter() - started
             )
 
-        self.pending_h[:] = checkpoint["pending_h"]
-        self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
-        self.verify_tokens.clear()
-        self.verify_positions.clear()
+    def reset_checkpoint_stats(self) -> None:
+        self._checkpoint_stats: Dict[str, Union[int, float]] = {
+            "captures": 0,
+            "restores": 0,
+            "verification_reuses": 0,
+            "native_captures": 0,
+            "native_restores": 0,
+            "device_captures": 0,
+            "device_restores": 0,
+            "native_verification_rollbacks": 0,
+            "buffer_bytes": 0,
+            "capture_seconds": 0.0,
+            "restore_seconds": 0.0,
+        }
+
+    def checkpoint_stats(self) -> Dict[str, Union[int, float]]:
+        return dict(self._checkpoint_stats)
 
     def truncate(self, position: int, seq_id: int = 0) -> None:
         if seq_id != 0:
@@ -1309,6 +1435,7 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
     def clear(self) -> None:
         if self._closed:
             return
+        self._pending_verification_checkpoint = None
         self.draft_context.memory_clear(True)
         self.pending_h.fill(0.0)
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
@@ -1321,6 +1448,7 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
         if self._closed:
             return
         self._closed = True
+        self._pending_verification_checkpoint = None
         errors: List[Exception] = []
 
         if self._backend_sampler is not None:
@@ -1434,9 +1562,23 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
         tokens = self.verify_tokens[:count]
         positions = self.verify_positions[:count]
         target_h = self.verify_h[:count].copy()
-        self.restore(checkpoint, seq_id)
-        if tokens:
-            self._process_target_rows(tokens, positions, target_h)
+        if self._use_native_draft_rollback and tokens:
+            # Target verification has already advanced the draft context through
+            # every proposed token. Native snapshots let us discard only the
+            # rejected suffix, avoiding a full restore and accepted-prefix replay.
+            if not self.is_mem_shared and not self.draft_context.memory_seq_rm(
+                seq_id, positions[-1] + 1, -1
+            ):
+                raise RuntimeError("MTP native verification rollback failed")
+            self.pending_h[:] = target_h[-1]
+            self._checkpoint_stats["native_verification_rollbacks"] = (
+                int(self._checkpoint_stats.get("native_verification_rollbacks", 0))
+                + 1
+            )
+        else:
+            self.restore(checkpoint, seq_id)
+            if tokens:
+                self._process_target_rows(tokens, positions, target_h)
 
     def draft(
         self,
@@ -1457,6 +1599,7 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
             return np.empty(0, dtype=np.intc)
 
         result: List[int] = []
+        self._pending_verification_checkpoint = None
         context_checkpoint = self.checkpoint(seq_id)
         chain_h: List[npt.NDArray[np.float32]] = [self.pending_h.copy()]
         self.batch.reset()
@@ -1510,6 +1653,11 @@ class LlamaMTPDecoding(LlamaSpeculativeEngine):
 
         if len(result) < self.config.draft_n_min:
             result.clear()
+        if result:
+            # The draft branch was restored to this exact state above. Reuse the
+            # same checkpoint for the upcoming target verification instead of
+            # capturing an identical state a second time.
+            self._pending_verification_checkpoint = context_checkpoint
         return np.asarray(result, dtype=np.intc)
 
     def accept(self, n_accepted: int, seq_id: int = 0) -> None:
@@ -1529,7 +1677,7 @@ def create_native_spec_engine(
     model_params: Any,
     context_params: Any,
     verbose: bool = True,
-) -> LlamaSpeculativeEngine:
+) -> LlamaSpecEngine:
     """Create a model-backed engine bound to an initialized target context.
 
     ``native`` describes the engine's dependency on llama.cpp model/context

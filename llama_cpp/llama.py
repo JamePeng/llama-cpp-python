@@ -49,7 +49,7 @@ import llama_cpp.llama_multimodal as llama_multimodal
 
 from llama_cpp.llama_speculative import (
     LlamaDraftModel,
-    LlamaSpeculativeEngine,
+    LlamaSpecEngine,
     SpecConfig,
     SpeculativeType,
     create_native_spec_engine,
@@ -81,6 +81,13 @@ from ._logger import (
     reset_log_filters,
 )
 from ._utils import suppress_stdout_stderr
+
+
+def _format_speculative_duration(seconds: float) -> str:
+    """Format speculative phase timings without hiding sub-second costs."""
+    if seconds >= 1.0:
+        return f"{seconds:.3f} s"
+    return f"{seconds * 1000.0:.3f} ms"
 
 
 class AbortCriteria:
@@ -174,7 +181,7 @@ class Llama:
         chat_handler: Optional[llama_chat_format.LlamaChatCompletionHandler] = None,
         # Speculative Decoding
         draft_model: Optional[LlamaDraftModel] = None,
-        speculative: Optional[Union[SpecConfig, LlamaSpeculativeEngine]] = None,
+        speculative: Optional[Union[SpecConfig, LlamaSpecEngine]] = None,
         # Tokenizer Override
         tokenizer: Optional[BaseLlamaTokenizer] = None,
         # KV cache quantization
@@ -625,6 +632,7 @@ class Llama:
             "accept_calls": 0,
             "generated_drafts": 0,
             "accepted_drafts": 0,
+            "draft_batch_acceptance_rate": 0.0,
             "accepted_draft_tokens": 0,
             "draft_token_acceptance_rate": 0.0,
             "mean_accepted_length": 0.0,
@@ -633,6 +641,17 @@ class Llama:
             "draft_seconds": 0.0,
             "process_seconds": 0.0,
             "accept_seconds": 0.0,
+            "checkpoint_captures": 0,
+            "checkpoint_restores": 0,
+            "checkpoint_verification_reuses": 0,
+            "checkpoint_native_captures": 0,
+            "checkpoint_native_restores": 0,
+            "checkpoint_device_captures": 0,
+            "checkpoint_device_restores": 0,
+            "checkpoint_native_verification_rollbacks": 0,
+            "checkpoint_buffer_bytes": 0,
+            "checkpoint_capture_seconds": 0.0,
+            "checkpoint_restore_seconds": 0.0,
             "verification_steps": 0,
             "rollbacks": 0,
             "native_rollbacks": 0,
@@ -821,7 +840,7 @@ class Llama:
                 # Draft-family engines depend on the already initialized native
                 # target model/context. The engine may also create and own a
                 # separate draft model/context, as external MTP does.
-                self.speculative: Optional[LlamaSpeculativeEngine] = (
+                self.speculative: Optional[LlamaSpecEngine] = (
                     create_native_spec_engine(
                         speculative,
                         target_model=self._model,
@@ -2060,6 +2079,7 @@ class Llama:
         }
         if self.speculative is not None:
             self._active_speculative_phase_stats = speculative_phase_stats
+            self.speculative.reset_checkpoint_stats()
 
         def speculative_begin(prompt_tokens: Sequence[int]) -> None:
             assert self.speculative is not None
@@ -2159,7 +2179,9 @@ class Llama:
                 speculative_checkpoint = None
                 use_native_speculative_rollback = False
                 if n_drafted > 0 and self.speculative is not None:
-                    speculative_checkpoint = self.speculative.checkpoint(seq_id=0)
+                    speculative_checkpoint = (
+                        self.speculative.take_verification_checkpoint(seq_id=0)
+                    )
                     if self.is_hybrid:
                         use_native_speculative_rollback = (
                             self._ctx.n_rs_seq() >= n_drafted
@@ -2463,6 +2485,18 @@ class Llama:
                 if speculative_drafted > 0
                 else 0.0
             )
+            generated_drafts = speculative_phase_stats["generated_drafts"]
+            accepted_drafts = speculative_phase_stats["accepted_drafts"]
+            draft_batch_acceptance_rate = (
+                accepted_drafts / generated_drafts
+                if generated_drafts > 0
+                else 0.0
+            )
+            checkpoint_stats = (
+                self.speculative.checkpoint_stats()
+                if self.speculative is not None
+                else {}
+            )
             self.last_speculative_stats = {
                 "drafted": speculative_drafted,
                 "verified": speculative_verified,
@@ -2471,8 +2505,9 @@ class Llama:
                 "draft_calls": speculative_phase_stats["draft_calls"],
                 "process_calls": speculative_phase_stats["process_calls"],
                 "accept_calls": accept_calls,
-                "generated_drafts": speculative_phase_stats["generated_drafts"],
-                "accepted_drafts": speculative_phase_stats["accepted_drafts"],
+                "generated_drafts": generated_drafts,
+                "accepted_drafts": accepted_drafts,
+                "draft_batch_acceptance_rate": draft_batch_acceptance_rate,
                 "accepted_draft_tokens": accepted_tokens,
                 "draft_token_acceptance_rate": draft_token_acceptance_rate,
                 "mean_accepted_length": mean_accepted_length,
@@ -2481,6 +2516,35 @@ class Llama:
                 "draft_seconds": speculative_phase_stats["draft_seconds"],
                 "process_seconds": speculative_phase_stats["process_seconds"],
                 "accept_seconds": speculative_phase_stats["accept_seconds"],
+                "checkpoint_captures": int(checkpoint_stats.get("captures", 0)),
+                "checkpoint_restores": int(checkpoint_stats.get("restores", 0)),
+                "checkpoint_verification_reuses": int(
+                    checkpoint_stats.get("verification_reuses", 0)
+                ),
+                "checkpoint_native_captures": int(
+                    checkpoint_stats.get("native_captures", 0)
+                ),
+                "checkpoint_native_restores": int(
+                    checkpoint_stats.get("native_restores", 0)
+                ),
+                "checkpoint_device_captures": int(
+                    checkpoint_stats.get("device_captures", 0)
+                ),
+                "checkpoint_device_restores": int(
+                    checkpoint_stats.get("device_restores", 0)
+                ),
+                "checkpoint_native_verification_rollbacks": int(
+                    checkpoint_stats.get("native_verification_rollbacks", 0)
+                ),
+                "checkpoint_buffer_bytes": int(
+                    checkpoint_stats.get("buffer_bytes", 0)
+                ),
+                "checkpoint_capture_seconds": float(
+                    checkpoint_stats.get("capture_seconds", 0.0)
+                ),
+                "checkpoint_restore_seconds": float(
+                    checkpoint_stats.get("restore_seconds", 0.0)
+                ),
                 "verification_steps": speculative_verification_steps,
                 "rollbacks": speculative_rollbacks,
                 "native_rollbacks": speculative_native_rollbacks,
@@ -2504,35 +2568,56 @@ class Llama:
                 per_position_text = ", ".join(
                     f"{rate:.1%}" for rate in acceptance_rate_per_position
                 )
-                print(
-                    f"Llama.generate: {spec_name} stats"
-                    f" | calls: begin {speculative_phase_stats['begin_calls']}, "
-                    f"draft {speculative_phase_stats['draft_calls']}, "
-                    f"process {speculative_phase_stats['process_calls']}, "
-                    f"accept {accept_calls}"
-                    f" | draft batches: {speculative_phase_stats['accepted_drafts']} / "
-                    f"{speculative_phase_stats['generated_drafts']} accepted"
-                    f" | draft tokens: {accepted_tokens} / {speculative_drafted} accepted "
-                    f"({draft_token_acceptance_rate:.1%})"
-                    f" | mean accepted length: {mean_accepted_length:.2f}"
-                    f" | acceptance by position: [{per_position_text}]"
-                    f" | phase time: "
-                    f"begin {speculative_phase_stats['begin_seconds'] * 1000.0:.3f} ms, "
-                    f"draft {speculative_phase_stats['draft_seconds'] * 1000.0:.3f} ms, "
-                    f"process {speculative_phase_stats['process_seconds'] * 1000.0:.3f} ms, "
-                    f"accept {speculative_phase_stats['accept_seconds'] * 1000.0:.3f} ms"
-                    f" | rollbacks: {speculative_rollbacks} "
-                    f"(native {speculative_native_rollbacks}, "
-                    f"checkpoint {speculative_checkpoint_rollbacks})"
-                    f" | generation: {timing_stats['generation_tokens']} tokens in "
-                    f"{timing_stats['generation_seconds']:.3f} s "
-                    f"({timing_stats['generation_tokens_per_second']:.2f} tok/s)"
-                    f" | TTFT: {timing_stats['time_to_first_token_seconds'] * 1000.0:.2f} ms"
-                    f" | sustained: {timing_stats['sustained_tokens']} tokens in "
-                    f"{timing_stats['sustained_seconds']:.3f} s "
-                    f"({timing_stats['sustained_tokens_per_second']:.2f} tok/s).",
-                    file=sys.stderr,
-                )
+                native_captures = int(checkpoint_stats.get("native_captures", 0))
+                device_captures = int(checkpoint_stats.get("device_captures", 0))
+                if native_captures and device_captures:
+                    checkpoint_mode = (
+                        f"mixed (native {native_captures:,}, "
+                        f"device {device_captures:,})"
+                    )
+                elif native_captures:
+                    checkpoint_mode = "native-rs"
+                elif device_captures:
+                    checkpoint_mode = "on-device"
+                else:
+                    checkpoint_mode = "none"
+                stats_lines = [
+                    f"Llama.generate: {spec_name} summary",
+                    "  Calls       "
+                    f"begin {speculative_phase_stats['begin_calls']:,} | "
+                    f"draft {speculative_phase_stats['draft_calls']:,} | "
+                    f"process {speculative_phase_stats['process_calls']:,} | "
+                    f"accept {accept_calls:,}",
+                    "  Acceptance  "
+                    f"batches {accepted_drafts:,} / {generated_drafts:,} = "
+                    f"{draft_batch_acceptance_rate:.1%} | "
+                    f"tokens {accepted_tokens:,} / {speculative_drafted:,} = "
+                    f"{draft_token_acceptance_rate:.1%} | "
+                    f"mean step length {mean_accepted_length:.2f} | "
+                    f"by position [{per_position_text}]",
+                    "  Phase time  "
+                    f"begin {_format_speculative_duration(speculative_phase_stats['begin_seconds'])} | "
+                    f"draft {_format_speculative_duration(speculative_phase_stats['draft_seconds'])} | "
+                    f"process {_format_speculative_duration(speculative_phase_stats['process_seconds'])} | "
+                    f"accept {_format_speculative_duration(speculative_phase_stats['accept_seconds'])}",
+                    "  Checkpoint  "
+                    f"capture {int(checkpoint_stats.get('captures', 0)):,} in "
+                    f"{_format_speculative_duration(float(checkpoint_stats.get('capture_seconds', 0.0)))} | "
+                    f"restore {int(checkpoint_stats.get('restores', 0)):,} in "
+                    f"{_format_speculative_duration(float(checkpoint_stats.get('restore_seconds', 0.0)))} | "
+                    f"reuse {int(checkpoint_stats.get('verification_reuses', 0)):,} | "
+                    f"mode {checkpoint_mode}",
+                    "  Output      "
+                    f"{timing_stats['generation_tokens']:,} tokens / "
+                    f"{timing_stats['generation_seconds']:.3f} s = "
+                    f"{timing_stats['generation_tokens_per_second']:.2f} tok/s | "
+                    f"sustained {timing_stats['sustained_tokens_per_second']:.2f} tok/s | "
+                    f"TTFT {timing_stats['time_to_first_token_seconds'] * 1000.0:.2f} ms | "
+                    f"rollbacks {speculative_rollbacks:,} "
+                    f"(native {speculative_native_rollbacks:,}, "
+                    f"checkpoint {speculative_checkpoint_rollbacks:,})",
+                ]
+                print("\n".join(stats_lines), file=sys.stderr)
             # Ensure the final state is checkpointed for hybrid models when generation finishes or is interrupted
             if (
                 self.is_hybrid

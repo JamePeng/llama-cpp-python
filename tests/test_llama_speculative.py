@@ -1,14 +1,25 @@
 import builtins
 
+import numpy as np
 import pytest
+
+import llama_cpp
+from llama_cpp import llama_cpp as llama_cpp_lib
 
 from llama_cpp.llama_speculative import (
     LlamaMTPDecoding,
     LlamaNGramMapDecoding,
+    LlamaSpecEngine,
     SpecConfig,
     SpeculativeType,
     speculative_output_limits,
 )
+
+
+def test_spec_engine_is_the_public_base_class():
+    assert llama_cpp.LlamaSpecEngine is LlamaSpecEngine
+    assert issubclass(LlamaNGramMapDecoding, LlamaSpecEngine)
+    assert issubclass(LlamaMTPDecoding, LlamaSpecEngine)
 
 
 def test_ngram_map_lifecycle_and_acceptance_feedback():
@@ -120,6 +131,111 @@ def test_mtp_vocab_compatibility_rejects_token_mismatch():
         LlamaMTPDecoding._validate_vocab_compatibility(target, draft)
 
 
+class _FakeCheckpointContext:
+    def __init__(self, *, position=7, state_size=8):
+        self.position = position
+        self.state_size = state_size
+        self.removals = []
+        self.get_flags = []
+        self.set_flags = []
+
+    def memory_seq_pos_max(self, seq_id):
+        assert seq_id == 0
+        return self.position
+
+    def memory_seq_rm(self, seq_id, p0, p1):
+        self.removals.append((seq_id, p0, p1))
+        return True
+
+    def get_state_seq_size_ext(self, seq_id, flags):
+        assert seq_id == 0
+        self.get_flags.append(flags)
+        return self.state_size
+
+    def get_state_seq_data_ext(self, buffer, size, seq_id, flags):
+        assert size == self.state_size
+        assert seq_id == 0
+        assert flags == self.get_flags[-1]
+        return size
+
+    def set_state_seq_data_ext(self, buffer, size, seq_id, flags):
+        assert buffer is not None
+        assert size == self.state_size
+        assert seq_id == 0
+        self.set_flags.append(flags)
+        return size
+
+
+def _checkpoint_test_engine(*, native):
+    engine = object.__new__(LlamaMTPDecoding)
+    engine.draft_context = _FakeCheckpointContext()
+    engine.n_embd = 2
+    engine.pending_h = np.asarray([1.0, 2.0], dtype=np.float32)
+    engine.verify_h = np.empty((0, 2), dtype=np.float32)
+    engine.verify_tokens = []
+    engine.verify_positions = []
+    engine._use_native_draft_rollback = native
+    engine._pending_verification_checkpoint = None
+    engine.reset_checkpoint_stats()
+    return engine
+
+
+def test_mtp_native_checkpoint_is_reused_for_verification():
+    engine = _checkpoint_test_engine(native=True)
+    checkpoint = engine.checkpoint()
+    engine.pending_h.fill(0.0)
+    engine.restore(checkpoint)
+    engine._pending_verification_checkpoint = checkpoint
+
+    reused = engine.take_verification_checkpoint()
+    stats = engine.checkpoint_stats()
+
+    assert reused is checkpoint
+    assert engine.draft_context.removals == [(0, 8, -1)]
+    np.testing.assert_array_equal(engine.pending_h, [1.0, 2.0])
+    assert stats["captures"] == 1
+    assert stats["restores"] == 1
+    assert stats["verification_reuses"] == 1
+    assert stats["native_captures"] == 1
+    assert stats["device_captures"] == 0
+
+
+def test_mtp_checkpoint_fallback_keeps_state_on_device():
+    engine = _checkpoint_test_engine(native=False)
+    checkpoint = engine.checkpoint()
+    engine.restore(checkpoint)
+    stats = engine.checkpoint_stats()
+
+    expected_flags = (
+        llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
+        | llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+    )
+    assert checkpoint["mode"] == "on-device"
+    assert engine.draft_context.get_flags == [expected_flags]
+    assert engine.draft_context.set_flags == [expected_flags]
+    assert stats["device_captures"] == 1
+    assert stats["device_restores"] == 1
+    assert stats["buffer_bytes"] == engine.draft_context.state_size
+
+
+def test_mtp_native_verification_rollback_removes_only_rejected_suffix():
+    engine = _checkpoint_test_engine(native=True)
+    engine.is_mem_shared = False
+    engine.verify_tokens = [10, 11, 12]
+    engine.verify_positions = [8, 9, 10]
+    engine.verify_h = np.asarray(
+        [[1.0, 1.0], [2.0, 2.0], [3.0, 3.0]], dtype=np.float32
+    )
+
+    engine.rollback_verified(engine.checkpoint(), n_accepted=1)
+
+    assert engine.draft_context.removals == [(0, 10, -1)]
+    np.testing.assert_array_equal(engine.pending_h, [2.0, 2.0])
+    stats = engine.checkpoint_stats()
+    assert stats["restores"] == 0
+    assert stats["native_verification_rollbacks"] == 1
+
+
 def test_mtp_close_does_not_import_during_interpreter_shutdown():
     class _NativeAPI:
         def __init__(self):
@@ -179,6 +295,9 @@ def test_mtp_runtime_configuration_reports_requested_and_resolved_values(capsys)
         def n_batch(self):
             return self._n_batch
 
+        def n_rs_seq(self):
+            return 4
+
     class _TargetParams:
         n_rs_seq = 4
         n_outputs_max = 5
@@ -200,6 +319,7 @@ def test_mtp_runtime_configuration_reports_requested_and_resolved_values(capsys)
     engine.n_mtp_layers = 2
     engine.is_mem_shared = True
     engine.chain_heads = False
+    engine._use_native_draft_rollback = True
     engine.target_context = _Context(512)
     engine.draft_context = _Context(512)
 
@@ -211,5 +331,6 @@ def test_mtp_runtime_configuration_reports_requested_and_resolved_values(capsys)
     assert "draft_p_min=0.2" in output
     assert "backend_sampling=requested:True/active:True" in output
     assert "mtp_heads=2" in output
-    assert "n_rs_seq=4" in output
+    assert "target_n_rs_seq=4, draft_n_rs_seq=4" in output
+    assert "draft_checkpoint=native-rs" in output
     assert "outputs=5/5" in output
