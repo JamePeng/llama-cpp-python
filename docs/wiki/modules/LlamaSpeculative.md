@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-05-23
+last_updated: 2026-08-19
 version_target: "latest"
 ---
 
@@ -10,406 +10,390 @@ version_target: "latest"
 
 ## Overview
 
-`llama_speculative.py` defines draft-model interfaces and prompt-based speculative decoding helpers for `llama-cpp-python`.
+`llama_cpp.llama_speculative` implements the Python side of the stateful
+speculative-decoding lifecycle used by `llama.cpp`. A speculative engine proposes
+one or more tokens, the target model verifies `[id_last, draft...]` in one batch,
+and the generation loop accepts the matching prefix or rolls rejected state back.
 
-Speculative decoding lets a draft model propose candidate tokens before the main `Llama` model verifies them. In this module, the draft model does not have to be a neural network. It can also be a model-free prompt lookup decoder that predicts future tokens from repeated token patterns in the already verified context.
+New code should pass a `SpecConfig` to `Llama(speculative=...)`. The old
+`Llama(draft_model=...)` callback path and `LlamaDraftModel` are deprecated
+compatibility APIs.
 
-This module currently defines:
+The current engines are text-only and support one sequence (`seq_id=0`).
 
-| Class | Status | Description |
+## Implementation Status
+
+`SpeculativeType` mirrors `common_speculative_type` from `llama.cpp`, so the enum
+contains algorithms that do not yet have Python engines.
+
+| Type | Python engine | Status |
 |---|---|---|
-| `LlamaDraftModel` | public interface | Abstract base class for speculative draft models. |
-| `LlamaNGramMapDecoding` | public | Stateful model-free n-gram lookup decoder with `k` and `k4v` modes. |
-| `LlamaPromptLookupDecoding` | legacy public | Stateless NumPy sliding-window prompt lookup decoder. |
-
-## Role in the Library
-
-This module defines the draft-model side of speculative decoding.
-
-A draft model receives the verified token sequence so far and returns predicted draft token IDs. These tokens are later verified by the main `Llama` model during generation.
-
-The module provides two prompt-based implementations:
-
-- `LlamaNGramMapDecoding`: optimized, stateful, hash-map based n-gram lookup.
-- `LlamaPromptLookupDecoding`: older stateless NumPy sliding-window lookup.
-
-For new usage, prefer `LlamaNGramMapDecoding`. It incrementally maintains an n-gram index, supports memory-oriented lookup modes, and avoids scanning the full token history on every call.
-
-## Choosing Between Related APIs
-
-| API | Recommended Use | Notes |
-|---|---|---|
-| `LlamaNGramMapDecoding` | Default prompt lookup decoder for new usage. | Uses stateful n-gram maps and supports `k` / `k4v` modes. |
-| `LlamaPromptLookupDecoding` | Compatibility with older prompt lookup behavior. | Stateless and simple, but scans token history with NumPy sliding windows. |
-
-## Classes
-
-## `LlamaDraftModel`
-
-```python
-class LlamaDraftModel(abc.ABC)
-```
-
-Abstract base class for speculative draft models.
-
-A draft model must implement `__call__` and return an array of predicted token IDs.
-
-### Method
-
-```python
-def __call__(
-    self,
-    input_ids: npt.NDArray[np.intc],
-    /,
-    **kwargs: Any,
-) -> npt.NDArray[np.intc]
-```
-
-| Parameter | Type | Description |
-|---|---|---|
-| `input_ids` | `npt.NDArray[np.intc]` | Complete verified token sequence so far. |
-| `**kwargs` | `Any` | Additional generation arguments. Implementations may ignore them. |
-
-Returns:
-
-| Type | Description |
-|---|---|
-| `npt.NDArray[np.intc]` | Draft token IDs proposed by the draft model. |
-
-## `LlamaNGramMapDecoding`
-
-```python
-class LlamaNGramMapDecoding(LlamaDraftModel)
-```
-
-Fast model-free speculative decoder based on prompt n-gram lookup.
-
-This decoder maintains internal indexes from historical n-grams to either previous positions or cached continuation tokens. When called with the current verified token sequence, it searches for the final n-gram in the already verified history and returns a continuation from the most recent valid historical match.
-
-It does not own or run a separate draft model. Rejected draft tokens do not require manual rollback inside this class, because the next call receives the verified token history through `input_ids`.
-
-### Constructor
-
-```python
-def __init__(
-    self,
-    ngram_size: int = 3,
-    num_pred_tokens: int = 10,
-    mode: Literal["k", "k4v"] = "k",
-    min_hits: int = 2,
-    max_entries_per_key: Optional[int] = None,
-    sync_check_tokens: int = 16,
-) -> None
-```
-
-| Parameter | Type | Default | Source | Description |
-|---|---|---|---|---|
-| `ngram_size` | `int` | `3` | `__init__` signature | Number of tokens used as the lookup key. Larger values require stricter matches and may reduce hit rate. |
-| `num_pred_tokens` | `int` | `10` | `__init__` signature | Maximum number of draft tokens to return. |
-| `mode` | `Literal["k", "k4v"]` | `"k"` | `__init__` signature | Lookup storage mode. `"k"` stores key-to-position mappings. `"k4v"` stores key-to-continuation mappings. |
-| `min_hits` | `int` | `2` | `__init__` signature | Minimum number of historical matches required before returning a draft. Use `1` for maximum recall; use values greater than `1` to reduce low-confidence drafts. |
-| `max_entries_per_key` | `Optional[int]` | `None` | `__init__` signature and initialization logic | Optional memory cap per n-gram key. If `mode="k4v"` and this is `None`, it is automatically set to `8`. |
-| `sync_check_tokens` | `int` | `16` | `__init__` signature | Number of trailing tokens used to detect whether new input is an incremental append without doing a full prefix comparison. |
-
-### Parameter Validation
-
-The constructor raises `ValueError` when:
-
-| Condition | Error Meaning |
-|---|---|
-| `ngram_size <= 0` | `ngram_size` must be positive. |
-| `num_pred_tokens <= 0` | `num_pred_tokens` must be positive. |
-| `min_hits <= 0` | `min_hits` must be positive. |
-| `max_entries_per_key is not None and max_entries_per_key <= 0` | The memory cap must be `None` or positive. |
-| `sync_check_tokens <= 0` | `sync_check_tokens` must be positive. |
-| `mode` is not `"k"` or `"k4v"` after lowercasing | Only the two supported lookup modes are valid. |
-
-### Lookup Modes
-
-| Mode | Internal Storage | Memory Use | Behavior |
-|---|---|---|---|
-| `"k"` | `key -> [position, position, ...]` | Lower | Stores historical positions and slices continuations from `_history` during lookup. |
-| `"k4v"` | `key -> {position: continuation}` | Higher | Stores continuation tokens directly and returns the latest cached continuation. |
-
-Use `"k"` as the general-purpose default. Use `"k4v"` when faster continuation retrieval is preferred and the extra memory use is acceptable. For `"k4v"`, `max_entries_per_key` defaults to `8` when not specified.
-
-### Important Attributes / State
-
-| Attribute | Type | Source | Description |
-|---|---|---|---|
-| `ngram_size` | `int` | constructor | Number of tokens used as the n-gram lookup key. |
-| `num_pred_tokens` | `int` | constructor | Maximum number of predicted draft tokens to return. |
-| `mode` | `str` | constructor | Active lookup mode: `"k"` or `"k4v"`. |
-| `min_hits` | `int` | constructor | Required number of historical matches before returning a draft. |
-| `max_entries_per_key` | `Optional[int]` | constructor / initialization logic | Optional per-key memory cap. Automatically becomes `8` for `k4v` mode when not provided. |
-| `sync_check_tokens` | `int` | constructor | Trailing-token window used for incremental append detection. |
-| `_history` | `List[int]` | internal state | Verified token history mirrored from `input_ids`. |
-| `_map_k` | `DefaultDict[Tuple[int, ...], List[int]]` | internal state | Key-to-position index used in `"k"` mode. |
-| `_map_k4v` | `DefaultDict[Tuple[int, ...], Dict[int, Tuple[int, ...]]]` | internal state | Key-to-continuation index used in `"k4v"` mode. |
-| `_closed` | `bool` | internal state | Marks the decoder as closed. Calling the decoder after `close()` raises `RuntimeError`. |
-| `_last_draft_len` | `int` | internal state | Length of the most recent returned draft. Currently internal diagnostic state. |
-
-Internal state should not be mutated directly.
-
-### Core Methods
-
-#### `__call__`
-
-```python
-def __call__(
-    self,
-    input_ids: npt.NDArray[np.intc],
-    /,
-    **kwargs: Any,
-) -> npt.NDArray[np.intc]
-```
-
-Generates draft tokens from verified token history.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `input_ids` | `npt.NDArray[np.intc]` | Complete verified token sequence so far. |
-| `**kwargs` | `Any` | Accepted for interface compatibility and ignored by this implementation. |
-
-Returns:
-
-| Type | Description |
-|---|---|
-| `npt.NDArray[np.intc]` | Predicted draft tokens. Returns an empty array when no reliable match is found. |
-
-Raises:
-
-| Exception | Condition |
-|---|---|
-| `RuntimeError` | The decoder has been closed with `close()` and is called again. |
-
-#### `clear`
-
-```python
-def clear(self) -> None
-```
-
-Clears token history and internal indexes while keeping the decoder reusable.
-
-Use this when starting a completely unrelated generation with the same decoder instance.
-
-#### `close`
-
-```python
-def close(self) -> None
-```
-
-Clears internal containers and marks the decoder as closed.
-
-This class does not own native memory, but explicit cleanup can be useful in long-running applications that may otherwise keep large Python containers alive.
-
-#### `accept`
-
-```python
-def accept(self, n_accepted: int) -> None
-```
-
-Compatibility hook for speculative decoding loops.
-
-This implementation is intentionally a no-op. Accepted tokens are reflected by the next `input_ids` passed to `__call__`, so no separate rollback or acceptance state update is required.
-
-### Behavior
-
-When called, `LlamaNGramMapDecoding`:
-
-1. Converts `input_ids` to a flat `np.intc` token list.
-2. Synchronizes internal history with the verified token sequence.
-3. Uses a fast path when the new input is identical to the stored history.
-4. Uses an incremental append path when the trailing tokens indicate that the new input extends the previous input.
-5. Rebuilds the index after rollback, prompt switch, truncation, or unsafe mutation.
-6. Indexes only n-grams with at least one available continuation token, so the current tail n-gram does not match itself.
-7. Looks up the final `ngram_size` tokens as the search key.
-8. Requires at least `min_hits` historical matches before returning a draft.
-9. Returns up to `num_pred_tokens` tokens from the latest valid historical match.
-10. Returns an empty NumPy array if no reliable match is available.
-
-### Example: Direct Prompt Lookup
-
-Use `min_hits=1` in a small standalone example so that one historical match is enough to return a draft.
-
-```python
-import numpy as np
-
-from llama_cpp.llama_speculative import LlamaNGramMapDecoding
-
-draft_model = LlamaNGramMapDecoding(
-    ngram_size=3,
-    num_pred_tokens=2,
-    min_hits=1,
-)
-
-input_ids = np.array([1, 2, 3, 4, 5, 1, 2, 3], dtype=np.intc)
-draft_tokens = draft_model(input_ids)
-
-print(draft_tokens)
-# Expected output:
-# [4 5]
-```
-
-### Example: Use with `Llama`
+| `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP |
+| `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented |
+| `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented |
+| `DRAFT_EAGLE3` | none | Declared, not implemented |
+| `DRAFT_DFLASH` | none | Declared, not implemented |
+| `DRAFT_DSPARK` | none | Declared, not implemented |
+| `DRAFT_SIMPLE` | none | Declared, not implemented |
+| `NGRAM_SIMPLE` | none | Declared, not implemented |
+| `NGRAM_MOD` | none | Declared, not implemented |
+| `NGRAM_CACHE` | none | Declared, not implemented |
+
+Selecting an unimplemented type raises `NotImplementedError` during validation or
+engine creation. Eagle3, DFlash, and DSpark also require `draft_model_path`.
+
+## Recommended Entry Point
 
 ```python
 from llama_cpp import Llama
-from llama_cpp.llama_speculative import LlamaNGramMapDecoding
+from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
 
 llm = Llama(
-    model_path="path/to/model.gguf",
+    model_path="path/to/model-with-mtp.gguf",
     n_ctx=4096,
-    n_gpu_layers=-1,
-    draft_model=LlamaNGramMapDecoding(
-        ngram_size=3,
-        num_pred_tokens=10,
-        mode="k",
-        min_hits=2,
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_MTP,
+        draft_n_max=2,
+        draft_p_min=0.0,
     ),
 )
-
-response = llm.create_chat_completion(
-    messages=[
-        {
-            "role": "user",
-            "content": (
-                "Write five short Python classes with the same CRUD method layout: "
-                "User, Product, Order, Review, and Category."
-            ),
-        }
-    ]
-)
-
-print(response["choices"][0]["message"]["content"])
 ```
 
-### Example: Use `k4v` Mode with a Memory Cap
+`Llama` validates the configuration, reserves enough target output rows for the
+verification batch, creates the correct engine, and closes owned draft resources
+with the target model.
+
+Do not pass both `draft_model` and `speculative`; `Llama` rejects that combination.
+
+## `SpeculativeType`
 
 ```python
-from llama_cpp.llama_speculative import LlamaNGramMapDecoding
-
-draft_model = LlamaNGramMapDecoding(
-    ngram_size=4,
-    num_pred_tokens=8,
-    mode="k4v",
-    min_hits=2,
-    max_entries_per_key=8,
-)
+class SpeculativeType(enum.IntEnum):
+    ...
 ```
 
-## `LlamaPromptLookupDecoding`
+Useful helpers include:
 
-```python
-class LlamaPromptLookupDecoding(LlamaDraftModel)
-```
-
-Legacy speculative decoder based on NumPy sliding-window lookup.
-
-This implementation is stateless. Each call scans the input token sequence to find previous occurrences of the current n-gram and returns the following tokens as draft predictions.
-
-> Warning: This implementation is not recommended for production. It may have high computational overhead for long contexts and may degrade output quality. Prefer `LlamaNGramMapDecoding` for new usage.
-
-### Constructor
-
-```python
-def __init__(
-    self,
-    max_ngram_size: int = 3,
-    num_pred_tokens: int = 10,
-)
-```
-
-| Parameter | Type | Default | Source | Description |
-|---|---|---|---|---|
-| `max_ngram_size` | `int` | `3` | `__init__` signature | Maximum n-gram size to search for. The decoder tries larger n-grams first. |
-| `num_pred_tokens` | `int` | `10` | `__init__` signature | Maximum number of draft tokens to return. |
-
-### Important Attributes / State
-
-| Attribute | Type | Source | Description |
-|---|---|---|---|
-| `max_ngram_size` | `int` | constructor | Maximum n-gram window size used during lookup. |
-| `num_pred_tokens` | `int` | constructor | Maximum number of predicted draft tokens to return. |
-
-### Static Method
-
-```python
-@staticmethod
-def find_candidate_pred_tokens(
-    input_ids: npt.NDArray[np.intc],
-    max_ngram_size: int,
-    num_pred_tokens: int,
-)
-```
-
-Linearly scans `input_ids` using NumPy sliding windows to find matching n-grams.
-
-| Parameter | Type | Description |
-|---|---|---|
-| `input_ids` | `npt.NDArray[np.intc]` | Complete token sequence. |
-| `max_ngram_size` | `int` | Maximum n-gram size to search for. |
-| `num_pred_tokens` | `int` | Maximum number of draft tokens to return. |
-
-Returns:
-
-| Type | Description |
+| Method | Description |
 |---|---|
-| `npt.NDArray[np.intc]` | Candidate draft tokens, or an empty array if no match is found. |
+| `is_draft()` | True for model-backed draft-family types. |
+| `is_ngram()` | True for n-gram-family types. |
+| `is_mtp()` | True only for `DRAFT_MTP`. |
+| `is_none()` | True only for `NONE`. |
+| `to_str()` | Returns the `llama.cpp`-style name, such as `draft-mtp`. |
+| `from_str(value)` | Parses canonical names and aliases such as `mtp`, `ngram-k`, and `ngram-k4v`. |
 
-### Method
+## `SpecConfig`
 
 ```python
-def __call__(
-    self,
-    input_ids: npt.NDArray[np.intc],
-    /,
-    **kwargs: Any,
-) -> npt.NDArray[np.intc]
+@dataclass
+class SpecConfig:
+    ...
 ```
 
-Calls `find_candidate_pred_tokens` with the instance's `max_ngram_size` and `num_pred_tokens`.
+`SpecConfig` mirrors the relevant `llama.cpp --spec-*` settings and contains
+additional Python-engine settings.
 
-## Best Practices & Common Patterns
+### Common draft settings
 
-- Prefer `LlamaNGramMapDecoding` for new usage.
-- Use `mode="k"` as the default memory-efficient mode.
-- Use `mode="k4v"` when cached continuations are useful and the additional memory use is acceptable.
-- Keep `max_entries_per_key` set for `k4v` mode unless you intentionally want an unbounded per-key cache.
-- Use `min_hits=1` for maximum recall in repetitive prompts or benchmarks.
-- Use `min_hits > 1` to reduce low-confidence drafts.
-- Increase `ngram_size` for stricter pattern matching.
-- Increase `num_pred_tokens` to allow longer draft proposals, but remember that the target model still verifies the tokens.
-- Call `clear()` before reusing the same decoder for an unrelated prompt or generation session.
-- Do not call the decoder again after `close()` unless you create a new instance.
-- Do not mutate `_history`, `_map_k`, `_map_k4v`, or other internal state directly.
+| Field | Default | Description |
+|---|---:|---|
+| `spec_type` | `NONE` | Selected speculative algorithm. |
+| `draft_n_max` | `3` | Maximum proposed tokens for draft-family engines. |
+| `draft_n_min` | `0` | Discard a proposal shorter than this value. |
+| `draft_p_split` | `0.1` | Reserved split probability matching `llama.cpp`. |
+| `draft_p_min` | `0.0` | Minimum probability retained by MTP drafting. |
+| `draft_model_path` | `None` | External draft GGUF. Omit it for built-in target MTP heads. |
+| `draft_backend_sampling` | `True` | Let the backend select MTP candidates where supported. |
 
-## Limitations
+### External draft runtime settings
 
-- Prompt lookup only predicts tokens that are already implied by repeated patterns in the verified context.
-- It is most useful for repetitive, structured, or boilerplate-heavy output.
-- It may return an empty draft when the context has too few repeated n-grams or when `min_hits` is too strict.
-- It does not replace target-model verification.
-- `LlamaPromptLookupDecoding` is kept for compatibility and is not recommended for production use.
+| Field | Default | Description |
+|---|---:|---|
+| `draft_n_gpu_layers` | `"auto"` | Draft offload setting: integer, `"auto"`, or `"all"`. |
+| `draft_n_threads` | `None` | Draft generation thread count. |
+| `draft_n_threads_batch` | `None` | Draft prompt/batch thread count. |
+| `draft_cpu_moe` | `False` | Keep all draft MoE expert tensors on CPU. |
+| `draft_n_cpu_moe` | `0` | Keep the first N draft MoE layers on CPU. |
+| `draft_devices` | `[]` | Ordered backend device names for the draft model. |
+| `draft_type_k`, `draft_type_v` | `None` | Optional draft KV-cache data types. |
+| `draft_model_kwargs` | `{}` | Additional native draft model parameters. |
 
-## Deprecated / Changed APIs
+### N-gram settings
 
-`LlamaPromptLookupDecoding` is the legacy NumPy sliding-window implementation. It remains available, but `LlamaNGramMapDecoding` is the preferred prompt lookup implementation for new code.
+| Field | Default | Description |
+|---|---:|---|
+| `ngram_size_n` | `12` | Number of verified tokens in the lookup key. |
+| `ngram_size_m` | `48` | Maximum continuation length. This is independent of `draft_n_max`. |
+| `ngram_min_hits` | `1` | Minimum cached continuations required by K4V. |
+| `ngram_max_entries_per_key` | `None` | Optional Python cache cap. K4V resolves `None` to 4. |
 
-Compared with the older `LlamaNGramMapDecoding` documentation, the current implementation adds:
+`max_draft_tokens()` resolves the active algorithm's real verification length:
+draft-family engines use `draft_n_max`, while K and K4V use `ngram_size_m`.
+The resulting length must not exceed `Llama.n_batch - 1` because `id_last` and
+all draft tokens must remain in one verification batch.
 
-- `mode`
-- `min_hits`
-- `max_entries_per_key`
-- `sync_check_tokens`
-- `clear()`
-- `close()`
-- `accept()`
-- Separate internal indexes for `k` and `k4v` modes
+## `LlamaSpecEngine`
+
+```python
+class LlamaSpecEngine(abc.ABC):
+    ...
+```
+
+This is the public base interface for stateful engines. Applications normally
+provide `SpecConfig` instead of constructing or driving an engine directly.
+
+| Method | Generation-loop role |
+|---|---|
+| `begin(prompt_tokens, seq_id=0)` | Initialize request state after the prompt prefix is decoded. |
+| `process(batch, seq_id=0)` | Consume target tokens and NextN hidden rows after a successful decode. |
+| `draft(input_ids, n_past, id_last, n_max, seq_id=0)` | Return only continuation tokens, never `id_last`. |
+| `accept(n_accepted, seq_id=0)` | Commit acceptance feedback for the last proposal. |
+| `checkpoint(seq_id=0)` | Capture opaque draft-side state before verification. |
+| `take_verification_checkpoint(seq_id=0)` | Reuse a draft-time checkpoint when possible. |
+| `restore(checkpoint, seq_id=0)` | Restore rejected draft-side state. |
+| `rollback_verified(checkpoint, n_accepted, seq_id=0)` | Keep the sampled token and accepted prefix after native target rollback. |
+| `truncate(position, seq_id=0)` | Remove state at and after an absolute position. |
+| `clear()` | Clear request state but keep reusable model resources. |
+| `close()` | Release owned resources. Calls are expected to be idempotent. |
+| `checkpoint_stats()` | Return per-request capture and restore metrics. |
+
+The target model and target context always remain owned by `Llama`.
+
+## MTP Engine
+
+`LlamaMTPDecoding` orchestrates the native NextN/MTP graph while participating in
+the same `LlamaSpecEngine` lifecycle.
+
+The built-in and external MTP paths have currently been tested only with the
+Qwen3.5, Qwen3.6, and Qwen3.8 model families. Other model families may work
+when their GGUF tensors are compatible, but they have not yet been validated.
+
+The engine reads target hidden-state rows, sizes them with the models'
+`n_embd_out`, advances a dedicated MTP context, and uses recurrent snapshots to
+discard rejected speculative branches. Backend sampling avoids copying a full
+vocabulary-sized logits row to Python when the backend exposes compact candidate
+buffers. This is especially important for large vocabularies.
+
+### Built-in target MTP heads
+
+```python
+llm = Llama(
+    model_path="path/to/model-with-mtp.gguf",
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_MTP,
+        draft_n_max=2,
+        draft_p_min=0.0,
+    ),
+)
+```
+
+When `draft_model_path` is absent, `Llama` automatically enables target MTP
+tensor loading. The draft context uses the target model's NextN heads.
+
+### External MTP GGUF
+
+```python
+llm = Llama(
+    model_path="path/to/target.gguf",
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_MTP,
+        draft_model_path="path/to/mtp.gguf",
+        draft_n_max=2,
+        draft_n_gpu_layers="all",
+        draft_backend_sampling=True,
+    ),
+)
+```
+
+The external model owns a separate model and context. Initialization verifies
+vocabulary type, vocabulary size/token compatibility, and `n_embd_out`. Multiple
+NextN layers are chained when the model exposes more than one MTP head.
+
+For Qwen3.8 27B, testing so far suggests `draft_n_max=2` as the best starting
+point. This is not a universal optimum: GPU, backend, quantization, prompt,
+sampling settings, and whether MTP is built in or external can change the
+result. Run `examples.benchmark.benchmark_speculative` in the intended
+deployment environment and choose the fastest stable value.
+
+Larger `draft_n_max` values increase the verification batch and rollback
+exposure and are only useful when later-position acceptance remains high.
+
+## N-gram Map Engines
+
+`LlamaNGramMapDecoding` incrementally indexes verified token history and does not
+load a draft model.
+
+### K mode
+
+`NGRAM_MAP_K` stores `n-gram key -> historical positions`. It drafts from the
+latest valid match and stores acceptance feedback so a previously rejected
+continuation is shortened on later attempts. In this mode, `ngram_min_hits` is
+not used as a confidence gate, matching the current `llama.cpp` K behavior.
+
+K mode retains all matching positions unless `ngram_max_entries_per_key` is set.
+It generally has the highest recall and can benefit from long `M` values on
+highly repetitive content.
+
+### K4V mode
+
+`NGRAM_MAP_K4V` stores `n-gram key -> fixed-size continuation values`. It:
+
+1. keeps at most four recent continuations per key by default, matching
+   `COMMON_NGRAM_MAX_VALUES` in `llama.cpp`;
+2. chooses the most frequent continuation;
+3. skips drafting unless the strongest continuation is at least twice as
+   frequent as all alternatives combined; and
+4. applies `ngram_min_hits` and previous acceptance feedback.
+
+K4V is more selective and uses more token storage per key. Shorter continuation
+lengths may work better because only complete M-token values are indexed.
+
+### Direct construction
+
+Direct construction is useful for custom engines and tests:
+
+```python
+from llama_cpp.llama_speculative import (
+    LlamaNGramMapDecoding,
+    SpeculativeType,
+)
+
+engine = LlamaNGramMapDecoding(
+    ngram_size=8,
+    num_pred_tokens=16,
+    spec_type=SpeculativeType.NGRAM_MAP_K4V,
+    min_hits=1,
+    max_entries_per_key=4,
+    sync_check_tokens=16,
+)
+```
+
+The old string `mode="k"` / `mode="k4v"` argument is not supported. Pass the
+corresponding `SpeculativeType` enum.
+
+### Hybrid and recurrent targets
+
+Transformer targets can usually discard rejected verification rows with native
+KV removal. Hybrid or recurrent targets need checkpoint-backed rollback for
+n-gram speculation:
+
+```python
+llm = Llama(
+    model_path="path/to/hybrid-model.gguf",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.NGRAM_MAP_K,
+        ngram_size_n=8,
+        ngram_size_m=16,
+    ),
+    ctx_checkpoints=16,
+    checkpoint_on_device=True,
+)
+```
+
+On-device checkpoints avoid copying recurrent tensor payloads through host
+memory. Checkpoint count and timing are exposed in `last_speculative_stats`.
+
+## Engine Factories
+
+### `create_spec_engine(config)`
+
+Creates token-history-only engines that do not require initialized native model
+resources. It currently creates K and K4V n-gram engines.
+
+### `create_native_spec_engine(...)`
+
+Creates engines that need an initialized target model/context. It currently
+creates MTP engines and may also own an external draft model/context. The word
+`native` describes those resource dependencies; the lifecycle orchestration is
+still implemented in Python.
+
+Most callers should not invoke either factory directly. `Llama` selects the
+correct one from `SpecConfig`.
+
+## Runtime Statistics
+
+After generation, `Llama.last_speculative_stats` contains the most recent
+request's metrics. Important keys include:
+
+| Key | Meaning |
+|---|---|
+| `drafted`, `verified`, `accepted` | Proposal and verification token counts. |
+| `generated_drafts`, `accepted_drafts` | Draft-batch counts. |
+| `draft_token_acceptance_rate` | Accepted draft tokens divided by proposed tokens. |
+| `mean_accepted_length` | Sampled token plus mean accepted draft prefix. |
+| `acceptance_rate_per_position` | Acceptance probability at each draft position. |
+| `begin_seconds`, `draft_seconds`, `process_seconds`, `accept_seconds` | Engine phase time. |
+| `checkpoint_captures`, `checkpoint_restores` | Checkpoint operations. |
+| `checkpoint_capture_seconds`, `checkpoint_restore_seconds` | Checkpoint overhead. |
+| `rollbacks`, `native_rollbacks`, `checkpoint_rollbacks` | Target rollback paths. |
+| `generation_tokens_per_second` | Delivered-token throughput from speculative-phase start through the last token, including TTFT. |
+| `time_to_first_token_seconds` | Time to first generated token. |
+| `sustained_tokens_per_second` | Throughput after the first token, excluding TTFT. |
+
+With `verbose=True`, the same information is printed in a multi-line summary at
+the end of `Llama.generate`.
+
+## Benchmarking and Tuning
+
+MTP and n-gram draft lengths are independent parameters. The benchmark CLI uses
+`--mtp-draft-tokens` for MTP and `--ngram-draft-tokens` for n-gram methods.
+
+```bash
+# Scan N={6,8,10,12} x M={8,16,32,48} for K and K4V
+python -m examples.benchmark.benchmark_speculative \
+  --model model.gguf \
+  --methods ngram-k ngram-k4v \
+  --ngram-grid
+
+# Compare ordinary, built-in MTP, and external MTP
+python -m examples.high_level_api.high_level_api_mtp_speculative \
+  --model target.gguf \
+  --mtp-mode both \
+  --draft-model mtp.gguf \
+  --draft-tokens 2
+```
+
+N-gram speedups are workload-sensitive. Repetitive structured output can benefit
+substantially, while low-repetition prose can be neutral or slower. MTP acceptance
+also depends on the target, draft tensors, sampling settings, and prompt. Measure
+TTFT, sustained speed, acceptance by position, and rollback cost together.
+
+## Limitations and Lifecycle Notes
+
+* Current stateful engines are text-only. Do not use them with MTMD/multimodal
+  embedding batches or negative placeholder token IDs.
+* Current engines support only `seq_id=0`; parallel sequence decoding is not yet
+  supported.
+* Speculative resets clear target and engine state together. Public prompt-cache
+  state does not currently serialize the speculative engine's context.
+* Speculation still runs target verification. Low acceptance or expensive
+  rollback can make it slower than ordinary decoding.
+* Greedy runs can diverge from ordinary output because different verification
+  batch shapes may change floating-point tie-breaking. Benchmarks report the
+  first divergent token as a diagnostic rather than hiding it.
+* Explicitly call `Llama.close()` in long-running applications so external draft
+  resources are released before interpreter shutdown.
+
+## Deprecated APIs
+
+`LlamaDraftModel` and `Llama(draft_model=...)` remain for legacy stateless
+callbacks. They do not use the stateful engine lifecycle, native recurrent
+rollback, phase statistics, or MTP resource management. New code should use
+`SpecConfig`.
+
+`LlamaPromptLookupDecoding` is no longer part of this module. Use
+`NGRAM_MAP_K` or `NGRAM_MAP_K4V` instead.
 
 ## Related Links
 
 * [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
-* [[Benchmark_Speculative](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/benchmark/benchmark_speculative.py)]
-
+* [[MTP example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_mtp_speculative.py)]
+* [[Speculative benchmark](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/benchmark/benchmark_speculative.py)]
