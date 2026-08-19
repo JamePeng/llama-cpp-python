@@ -1,466 +1,806 @@
+"""Benchmark current stateful speculative-decoding implementations.
+
+The ordinary decoder is always measured first as the deterministic baseline.
+Run with ``-h`` for method descriptions and portable examples.
+"""
+
+from __future__ import annotations
+
+import argparse
 import csv
 import gc
+import hashlib
 import random
 import statistics
 import time
-from dataclasses import dataclass
-from typing import Callable, Dict, List, Optional
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Literal, Optional, Sequence
 
-from llama_cpp import Llama
-from llama_cpp.llama_speculative import (
-    LlamaPromptLookupDecoding,
-    LlamaNGramMapDecoding,
+if TYPE_CHECKING:
+    from llama_cpp import Llama
+    from llama_cpp.llama_speculative import SpecConfig
+
+
+MethodName = Literal["ordinary", "ngram-k", "ngram-k4v", "builtin-mtp", "external-mtp"]
+SPECULATIVE_METHODS: tuple[MethodName, ...] = (
+    "ngram-k",
+    "ngram-k4v",
+    "builtin-mtp",
+    "external-mtp",
 )
+NGRAM_GRID_N = (6, 8, 10, 12)
+NGRAM_GRID_M = (8, 16, 32, 48)
 
-
-# ============================================================
-# Model Configuration
-# ============================================================
-
-MODEL_PATH = r"/path/to/your/model.GGUF"
-
-N_CTX = 4096
-MAX_TOKENS = 1024
-REPEATS = 2
-CSV_OUTPUT = "speculative_benchmark_results.csv"
-
-RANDOMIZE_ENGINE_ORDER = False
-
-
-# ============================================================
-# Benchmark Scenario Definition
-# ============================================================
 
 @dataclass(frozen=True)
 class Scenario:
+    key: str
     name: str
     category: str
-    prompt: str
     expected_behavior: str
+    prompt: str
 
-
-TEST_SCENARIOS: List[Scenario] = [
-    Scenario(
-        name="A1. Medium-High Repetition - CRUD Boilerplate Code",
-        category="code_boilerplate",
-        expected_behavior="Should benefit from n-gram lookup because class and method structures repeat.",
-        prompt="""<|im_start|>system
-You are a senior backend developer. Write highly structured and consistent boilerplate code.<|im_end|>
-<|im_start|>user
-Write a Python script using `sqlite3` to define CRUD operations for a core banking system database.
-
-Create 6 separate classes:
-- Account
-- Transaction
-- Customer
-- Loan
-- Portfolio
-- AuditLog
-
-Each class MUST use the same internal method structure:
-- create
-- get
-- update
-- delete
-- list_all
-
-Do not add extra explanations. Output only code.<|im_end|>
-<|im_start|>assistant
-""",
-    ),
-    Scenario(
-        name="A2. Extreme Repetition - JSONL Trading Logs",
-        category="structured_logs",
-        expected_behavior="Should strongly favor n-gram methods, especially K/K4V.",
-        prompt="""<|im_start|>system
-You are a deterministic data generation script. Output only raw JSON lines.<|im_end|>
-<|im_start|>user
-Continue this algorithmic trading execution log for 40 more lines.
-Only change timestamp seconds, symbol, quantity, price, and execution_time_ms.
-
-{"timestamp":"2026-05-23T09:30:01Z","level":"INFO","module":"exec_engine","event":"trade_filled","symbol":"AAPL","side":"BUY","quantity":100,"price":175.50,"execution_time_ms":12}
-{"timestamp":"2026-05-23T09:30:02Z","level":"INFO","module":"exec_engine","event":"trade_filled","symbol":"MSFT","side":"SELL","quantity":50,"price":410.25,"execution_time_ms":15}
-{"timestamp":"2026-05-23T09:30:03Z","level":"INFO","module":"exec_engine","event":"trade_filled","symbol":"TSLA","side":"BUY","quantity":200,"price":180.10,"execution_time_ms":11}<|im_end|>
-<|im_start|>assistant
-""",
-    ),
-    Scenario(
-        name="A3. Markdown Table - Repetitive Course Catalog",
-        category="markdown_table",
-        expected_behavior="Repeated table columns and row structure should benefit from speculative lookup.",
-        prompt="""<|im_start|>system
-You generate clean Markdown tables with consistent formatting.<|im_end|>
-<|im_start|>user
-Create a Markdown comparison table for 30 university postgraduate courses.
-
-Columns:
-| Course ID | Course Title | Department | Credits | Prerequisites | Grading Basis | Core Objective |
-
-The row format must stay consistent.
-Use concise but realistic academic descriptions.
-Do not add explanation outside the table.<|im_end|>
-<|im_start|>assistant
-| Course ID | Course Title | Department | Credits | Prerequisites | Grading Basis | Core Objective |
-|---:|---|---|---:|---|---|---|
-""",
-    ),
-    Scenario(
-        name="A4. Structured Financial Market Report",
-        category="structured_report",
-        expected_behavior="Heading and bullet patterns repeat; n-gram lookup should help moderately.",
-        prompt="""<|im_start|>system
-You are a quantitative macroeconomic analyst. Output structured, clear, and professional financial reports.<|im_end|>
-<|im_start|>user
-Write a Q3 Macroeconomic & Equity Strategy Outlook Report for institutional investors.
-
-Requirements:
-1. Divide the report into exactly 8 sections.
-2. Each section MUST contain exactly one heading and 3 bullet points.
-3. Repeatedly emphasize the following themes across the sections: interest rate trajectory, inflation stickiness, equity market volatility, supply chain realignment, and fixed-income duration strategies.
-4. Keep the tone highly professional and analytical.<|im_end|>
-<|im_start|>assistant
-""",
-    ),
-    Scenario(
-        name="B1. Low Repetition - Macroeconomic Historical Essay",
-        category="low_repetition_creative",
-        expected_behavior="Should show limited or no speedup; useful as a negative control.",
-        prompt="""<|im_start|>system
-You are an academic historian of economics. Write with varied sentence structures, rich vocabulary, and analytical depth.<|im_end|>
-<|im_start|>user
-Write a comprehensive essay exploring the psychological and sociological impacts of hyperinflation on institutional trust during the Weimar Republic in the 1920s.
-
-Requirements:
-- Use highly academic and varied language.
-- Do NOT use repetitive paragraph structures.
-- Do NOT use bullet points or lists.
-- Avoid parallel phrasing; favor complex, flowing narrative analysis.
-- Make it a long, continuous essay.<|im_end|>
-<|im_start|>assistant
-The catastrophic devaluation of the Papiermark in the early 1920s fundamentally fractured the psychological bedrock of the Weimar Republic. """,
-    ),
-    Scenario(
-        name="B2. Reasoning-Like Explanation - Quantitative Finance",
-        category="reasoning_explanation",
-        expected_behavior="May show smaller speedup because content is less template-like.",
-        prompt="""<|im_start|>system
-You are a careful technical explainer. Avoid repetitive phrasing.<|im_end|>
-<|im_start|>user
-Explain the foundational assumptions and inherent limitations of the Black-Scholes option pricing model.
-
-Discuss the following concepts contextually:
-- Log-normal distribution of asset prices
-- The assumption of constant volatility and risk-free rates
-- Frictionless markets (no transaction costs or taxes)
-- The difference in applicability between European and American options
-
-Write in clear, academic paragraphs. Do not use bullet points or lists.<|im_end|>
-<|im_start|>assistant
-""",
-    ),
-    Scenario(
-        name="C1. Long Context Copy-Edit - High Local Reuse",
-        category="copy_edit",
-        expected_behavior="Prompt contains repeated phrases; n-gram lookup should exploit local reuse.",
-        prompt="""<|im_start|>system
-You are a precise academic editing assistant. Preserve the structure while improving the wording.<|im_end|>
-<|im_start|>user
-Rewrite the following academic grant proposal abstract in a cleaner professional style.
-Keep the same repetitive sentence layout but fix the grammar and flow.
-
-Draft Proposal:
-The proposed research will investigate the efficiency of machine learning in high-frequency trading.
-The proposed research will demonstrate the risk vectors of automated market making.
-The methodology will utilize massive historical limit order book datasets.
-The methodology will require significant computational cluster resources.
-The expected outcomes will provide a new framework for liquidity provisioning.
-The expected outcomes will establish a baseline for regulatory compliance monitoring.
-The budget will allocate funds for data acquisition from major exchanges.
-The budget will allocate funds for two postdoctoral researchers.
-The timeline will span twenty-four months of continuous data analysis.
-The timeline will include three major peer-reviewed journal submissions.
-The significance will address the growing instability in algorithmic flash crashes.
-The significance will ensure safer automated trading environments.<|im_end|>
-<|im_start|>assistant
-""",
-    ),
-]
-
-
-# ============================================================
-# Engine Definition
-# ============================================================
 
 @dataclass(frozen=True)
-class EngineConfig:
-    name: str
-    draft_factory: Callable[[], Optional[object]]
-    note: str
+class BenchmarkCase:
+    method: MethodName
+    draft_tokens: int = 0
+    ngram_size: Optional[int] = None
+
+    @property
+    def key(self) -> str:
+        if self.ngram_size is not None:
+            return f"{self.method}-n{self.ngram_size}-m{self.draft_tokens}"
+        if self.method in {"builtin-mtp", "external-mtp"}:
+            return f"{self.method}-m{self.draft_tokens}"
+        return self.method
 
 
-ENGINE_CONFIGS: List[EngineConfig] = [
-    EngineConfig(
-        name="Baseline",
-        draft_factory=lambda: None,
-        note="No speculative decoding.",
-    ),
-    EngineConfig(
-        name="PromptLookup-Numpy-n10",
-        draft_factory=lambda: LlamaPromptLookupDecoding(
-            max_ngram_size=3,
-            num_pred_tokens=10,
+SCENARIOS: tuple[Scenario, ...] = (
+    Scenario(
+        key="crud",
+        name="CRUD boilerplate",
+        category="code_boilerplate",
+        expected_behavior="Repeated class and method structure should favor n-gram lookup.",
+        prompt=(
+            "Write only Python code using sqlite3. Define Account, Transaction, "
+            "Customer, Loan, Portfolio, and AuditLog classes. Each class must use "
+            "the same create, get, update, delete, and list_all method structure."
         ),
-        note="Legacy sliding-window prompt lookup.",
     ),
-    EngineConfig(
-        name="NGramMap-K-n6",
-        draft_factory=lambda: LlamaNGramMapDecoding(
-            ngram_size=3,
-            num_pred_tokens=6,
-            mode="k",
-            min_hits=1,
+    Scenario(
+        key="jsonl",
+        name="Repetitive JSONL records",
+        category="structured_logs",
+        expected_behavior="Highly regular records should strongly favor n-gram lookup.",
+        prompt=(
+            "Continue this trading log for 40 lines. Return only JSONL and preserve "
+            "the exact field order while changing values:\n"
+            '{"timestamp":"2026-05-23T09:30:01Z","level":"INFO",'
+            '"event":"trade_filled","symbol":"AAPL","side":"BUY",'
+            '"quantity":100,"price":175.50,"execution_time_ms":12}\n'
+            '{"timestamp":"2026-05-23T09:30:02Z","level":"INFO",'
+            '"event":"trade_filled","symbol":"MSFT","side":"SELL",'
+            '"quantity":50,"price":410.25,"execution_time_ms":15}'
         ),
-        note="Key-only n-gram map, shorter draft.",
     ),
-    EngineConfig(
-        name="NGramMap-K-n10",
-        draft_factory=lambda: LlamaNGramMapDecoding(
-            ngram_size=3,
-            num_pred_tokens=10,
-            mode="k",
-            min_hits=1,
+    Scenario(
+        key="table",
+        name="Markdown course table",
+        category="markdown_table",
+        expected_behavior="Repeated columns and row syntax should favor speculation.",
+        prompt=(
+            "Create a 30-row Markdown postgraduate course table. Return only the "
+            "table with these columns: Course ID, Course Title, Department, Credits, "
+            "Prerequisites, Grading Basis, Core Objective. Keep every row concise."
         ),
-        note="Key-only n-gram map, default draft length.",
     ),
-    EngineConfig(
-        name="NGramMap-K4V-n10-cap8",
-        draft_factory=lambda: LlamaNGramMapDecoding(
-            ngram_size=3,
-            num_pred_tokens=10,
-            mode="k4v",
-            min_hits=1,
-            max_entries_per_key=8,
+    Scenario(
+        key="report",
+        name="Structured market report",
+        category="structured_report",
+        expected_behavior="Repeated headings and bullets should provide moderate reuse.",
+        prompt=(
+            "Write a professional Q3 macroeconomic and equity outlook with exactly "
+            "eight sections. Each section must contain one heading and three bullet "
+            "points covering rates, inflation, volatility, supply chains, and duration."
         ),
-        note="K4V with bounded per-key memory.",
     ),
-    EngineConfig(
-        name="NGramMap-K4V-n16-cap8",
-        draft_factory=lambda: LlamaNGramMapDecoding(
-            ngram_size=3,
-            num_pred_tokens=16,
-            mode="k4v",
-            min_hits=1,
-            max_entries_per_key=8,
+    Scenario(
+        key="essay",
+        name="Low-repetition historical essay",
+        category="low_repetition_control",
+        expected_behavior="Varied prose is a negative control for n-gram speculation.",
+        prompt=(
+            "Write a continuous academic essay on how Weimar hyperinflation changed "
+            "institutional trust. Use varied syntax and vocabulary; do not use lists, "
+            "parallel phrasing, or repetitive paragraph structures."
         ),
-        note="Longer K4V draft; can be faster on highly repetitive outputs.",
     ),
-    EngineConfig(
-        name="NGramMap-K-minhits2-n10",
-        draft_factory=lambda: LlamaNGramMapDecoding(
-            ngram_size=3,
-            num_pred_tokens=10,
-            mode="k",
-            min_hits=2,
+    Scenario(
+        key="reasoning",
+        name="Quantitative-finance explanation",
+        category="reasoning_explanation",
+        expected_behavior="Less template-like reasoning may have lower acceptance.",
+        prompt=(
+            "Explain the assumptions and limitations of Black-Scholes in connected "
+            "academic paragraphs. Discuss log-normal prices, constant volatility and "
+            "rates, frictionless markets, and European versus American options."
         ),
-        note="More conservative K mode.",
     ),
-]
+)
+SCENARIO_BY_KEY = {scenario.key: scenario for scenario in SCENARIOS}
 
 
-# ============================================================
-# Measurement Helpers
-# ============================================================
+@dataclass(frozen=True)
+class GenerationResult:
+    tokens: tuple[int, ...]
+    text: str
+    request_seconds: float
+    ttft_seconds: float
+    sustained_seconds: float
+    request_tokens_per_second: float
+    sustained_tokens_per_second: float
+    speculative_stats: dict[str, Any]
 
-def cleanup_model(llm: Optional[Llama]) -> None:
-    if llm is not None:
-        del llm
-    gc.collect()
+
+@dataclass(frozen=True)
+class BenchmarkRecord:
+    scenario: str
+    category: str
+    expected_behavior: str
+    method: str
+    configuration: str
+    ngram_size: Optional[int]
+    draft_tokens: int
+    repeat: int
+    model_load_seconds: float
+    prompt_tokens: int
+    generated_tokens: int
+    request_seconds: float
+    sustained_seconds: float
+    ttft_ms: float
+    request_tokens_per_second: float
+    sustained_tokens_per_second: float
+    drafted_tokens: int
+    accepted_tokens: int
+    draft_acceptance_rate: float
+    verification_steps: int
+    rollbacks: int
+    checkpoint_capture_ms: float
+    checkpoint_restore_ms: float
+    matches_baseline: Optional[bool]
+    first_divergence: Optional[int]
+    output_sha256: str
+    output_preview: str
 
 
-def create_llama(draft_model: Optional[object]) -> Llama:
-    return Llama(
-        model_path=MODEL_PATH,
-        n_ctx=N_CTX,
-        n_gpu_layers=-1,
-        draft_model=draft_model,
-        verbose=False,
+def build_parser() -> argparse.ArgumentParser:
+    scenario_keys = ", ".join(SCENARIO_BY_KEY)
+    parser = argparse.ArgumentParser(
+        description=(
+            "Compare stateful speculative methods with ordinary decoding. Models are "
+            "loaded once per parameter configuration, TTFT is measured separately, "
+            "and sustained speed starts after delivery of the first generated token."
+        ),
+        epilog="""examples:
+  Compare both n-gram map modes:
+    python -m examples.benchmark.benchmark_speculative --model model.gguf --methods ngram-k ngram-k4v
+
+  Benchmark built-in MTP:
+    python -m examples.benchmark.benchmark_speculative --model model-with-mtp.gguf --methods builtin-mtp --mtp-draft-tokens 2
+
+  Compare built-in and external MTP:
+    python -m examples.benchmark.benchmark_speculative --model model.gguf --methods builtin-mtp external-mtp --draft-model mtp-model.gguf
+
+  Scan the recommended n-gram N x M grid:
+    python -m examples.benchmark.benchmark_speculative --model model.gguf --methods ngram-k ngram-k4v --ngram-grid
+""",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument("--model", type=Path, required=True, help="Target GGUF model.")
+    parser.add_argument(
+        "--methods",
+        nargs="+",
+        choices=SPECULATIVE_METHODS,
+        default=["ngram-k", "ngram-k4v"],
+        help=(
+            "Speculative methods measured after the ordinary baseline "
+            "(default: ngram-k ngram-k4v)."
+        ),
+    )
+    parser.add_argument(
+        "--draft-model",
+        type=Path,
+        help="External MTP GGUF; required when external-mtp is selected.",
+    )
+    parser.add_argument(
+        "--scenarios",
+        nargs="+",
+        choices=tuple(SCENARIO_BY_KEY),
+        default=list(SCENARIO_BY_KEY),
+        metavar="SCENARIO",
+        help=f"Scenario keys to run (default: all). Available: {scenario_keys}.",
+    )
+    parser.add_argument(
+        "--max-tokens", type=int, default=256, help="Generated tokens per run."
+    )
+    parser.add_argument(
+        "--repeats", type=int, default=2, help="Measured runs per scenario."
+    )
+    parser.add_argument(
+        "--warmup-tokens",
+        type=int,
+        default=8,
+        help="Untimed warmup tokens generated once per parameter configuration.",
+    )
+    parser.add_argument("--n-ctx", type=int, default=4096, help="Context size.")
+    parser.add_argument("--n-batch", type=int, default=512, help="Logical batch size.")
+    parser.add_argument(
+        "--mtp-draft-tokens",
+        type=int,
+        default=2,
+        help="Maximum proposed tokens for built-in and external MTP (default: 2).",
+    )
+    parser.add_argument(
+        "--draft-p-min",
+        type=float,
+        default=0.0,
+        help="Minimum probability retained by MTP drafting.",
+    )
+    parser.add_argument(
+        "--ngram-sizes",
+        type=int,
+        nargs="+",
+        default=[12],
+        metavar="N",
+        help="N-gram lookup key lengths to scan (default: 12).",
+    )
+    parser.add_argument(
+        "--ngram-draft-tokens",
+        type=int,
+        nargs="+",
+        default=[48],
+        metavar="M",
+        help="N-gram continuation lengths to scan (default: 48).",
+    )
+    parser.add_argument(
+        "--ngram-grid",
+        action="store_true",
+        help="Scan N={6,8,10,12} x M={8,16,32,48} for each n-gram method.",
+    )
+    parser.add_argument(
+        "--ngram-min-hits",
+        type=int,
+        default=1,
+        help="Minimum matching histories required for an n-gram proposal.",
+    )
+    parser.add_argument(
+        "--ngram-max-entries",
+        type=int,
+        default=4,
+        help="Maximum K4V continuations per key (default: 4, matching llama.cpp).",
+    )
+    parser.add_argument(
+        "--ctx-checkpoints",
+        type=int,
+        default=16,
+        help=(
+            "Target checkpoints available to n-gram rollback on hybrid/recurrent "
+            "models (default: 16). MTP uses native recurrent snapshots instead."
+        ),
+    )
+    checkpoint_group = parser.add_mutually_exclusive_group()
+    checkpoint_group.add_argument(
+        "--checkpoint-on-device",
+        dest="checkpoint_on_device",
+        action="store_true",
+        help="Keep hybrid target checkpoint tensor payloads on the device (default).",
+    )
+    checkpoint_group.add_argument(
+        "--checkpoint-on-host",
+        dest="checkpoint_on_device",
+        action="store_false",
+        help="Serialize hybrid target checkpoint tensor payloads through host memory.",
+    )
+    parser.set_defaults(checkpoint_on_device=True)
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature; zero enables deterministic comparison.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Sampling and shuffle seed."
+    )
+    parser.add_argument(
+        "--cpu", action="store_true", help="Run the target model on the CPU."
+    )
+    parser.add_argument(
+        "--draft-cpu",
+        action="store_true",
+        help="Run an external MTP draft model on the CPU.",
+    )
+    parser.add_argument(
+        "--no-backend-sampling",
+        action="store_true",
+        help="Select MTP candidates on the CPU instead of the backend sampler.",
+    )
+    parser.add_argument(
+        "--shuffle-methods",
+        action="store_true",
+        help="Shuffle speculative parameter configurations after the baseline.",
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=Path("speculative_benchmark_results.csv"),
+        help="CSV result path (default: speculative_benchmark_results.csv).",
+    )
+    parser.add_argument(
+        "--no-csv", action="store_true", help="Do not write CSV output."
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", help="Enable detailed llama.cpp logging."
+    )
+    return parser
+
+
+def parse_args() -> argparse.Namespace:
+    parser = build_parser()
+    args = parser.parse_args()
+    validate_args(parser, args)
+    return args
+
+
+def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    args.model = args.model.expanduser().resolve()
+    if not args.model.is_file():
+        parser.error(f"target GGUF model not found: {args.model}")
+
+    args.methods = list(dict.fromkeys(args.methods))
+    args.scenarios = list(dict.fromkeys(args.scenarios))
+    if args.ngram_grid:
+        args.ngram_sizes = list(NGRAM_GRID_N)
+        args.ngram_draft_tokens = list(NGRAM_GRID_M)
+    else:
+        args.ngram_sizes = list(dict.fromkeys(args.ngram_sizes))
+        args.ngram_draft_tokens = list(dict.fromkeys(args.ngram_draft_tokens))
+    if "external-mtp" in args.methods:
+        if args.draft_model is None:
+            parser.error("--draft-model is required for method external-mtp")
+        args.draft_model = args.draft_model.expanduser().resolve()
+        if not args.draft_model.is_file():
+            parser.error(f"external MTP GGUF model not found: {args.draft_model}")
+
+    positive = (
+        "max_tokens",
+        "repeats",
+        "n_ctx",
+        "n_batch",
+        "mtp_draft_tokens",
+        "ngram_min_hits",
+        "ngram_max_entries",
+    )
+    for name in positive:
+        if getattr(args, name) <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be greater than zero")
+    for option, values in (
+        ("--ngram-sizes", args.ngram_sizes),
+        ("--ngram-draft-tokens", args.ngram_draft_tokens),
+    ):
+        if any(value <= 0 for value in values):
+            parser.error(f"all {option} values must be greater than zero")
+    mtp_selected = {"builtin-mtp", "external-mtp"}.intersection(args.methods)
+    ngram_selected = {"ngram-k", "ngram-k4v"}.intersection(args.methods)
+    if mtp_selected and args.mtp_draft_tokens > args.n_batch - 1:
+        parser.error("--mtp-draft-tokens must not exceed --n-batch - 1")
+    if ngram_selected and max(args.ngram_draft_tokens) > args.n_batch - 1:
+        parser.error("all --ngram-draft-tokens values must not exceed --n-batch - 1")
+    if args.warmup_tokens < 0:
+        parser.error("--warmup-tokens must be non-negative")
+    if not 0.0 <= args.draft_p_min <= 1.0:
+        parser.error("--draft-p-min must be between 0 and 1")
+    if args.temperature < 0.0:
+        parser.error("--temperature must be non-negative")
+    if args.ctx_checkpoints < 0:
+        parser.error("--ctx-checkpoints must be non-negative")
+    if ngram_selected and args.ctx_checkpoints == 0:
+        parser.error("n-gram methods require --ctx-checkpoints > 0 on hybrid targets")
+
+    if not args.no_csv:
+        args.csv = args.csv.expanduser().resolve()
+        args.csv.parent.mkdir(parents=True, exist_ok=True)
+
+
+def method_label(case: BenchmarkCase) -> str:
+    label = {
+        "ordinary": "ordinary",
+        "ngram-k": "n-gram map K",
+        "ngram-k4v": "n-gram map K4V",
+        "builtin-mtp": "built-in MTP",
+        "external-mtp": "external MTP",
+    }[case.method]
+    if case.ngram_size is not None:
+        return f"{label} (N={case.ngram_size}, M={case.draft_tokens})"
+    if case.method in {"builtin-mtp", "external-mtp"}:
+        return f"{label} (M={case.draft_tokens})"
+    return label
+
+
+def build_cases(args: argparse.Namespace) -> list[BenchmarkCase]:
+    cases = [BenchmarkCase("ordinary")]
+    for method in args.methods:
+        if method in {"ngram-k", "ngram-k4v"}:
+            cases.extend(
+                BenchmarkCase(method, draft_tokens=m, ngram_size=n)
+                for n in args.ngram_sizes
+                for m in args.ngram_draft_tokens
+            )
+        else:
+            cases.append(BenchmarkCase(method, draft_tokens=args.mtp_draft_tokens))
+    return cases
+
+
+def create_spec_config(
+    case: BenchmarkCase, args: argparse.Namespace
+) -> Optional[SpecConfig]:
+    from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+
+    if case.method == "ordinary":
+        return None
+    if case.method in {"ngram-k", "ngram-k4v"}:
+        spec_type = (
+            SpeculativeType.NGRAM_MAP_K
+            if case.method == "ngram-k"
+            else SpeculativeType.NGRAM_MAP_K4V
+        )
+        assert case.ngram_size is not None
+        return SpecConfig(
+            spec_type=spec_type,
+            ngram_size_n=case.ngram_size,
+            ngram_size_m=case.draft_tokens,
+            ngram_min_hits=args.ngram_min_hits,
+            ngram_max_entries_per_key=args.ngram_max_entries,
+        )
+    return SpecConfig(
+        spec_type=SpeculativeType.DRAFT_MTP,
+        draft_n_max=case.draft_tokens,
+        draft_p_min=args.draft_p_min,
+        draft_model_path=(
+            str(args.draft_model) if case.method == "external-mtp" else None
+        ),
+        draft_n_gpu_layers=0 if args.draft_cpu else "all",
+        draft_backend_sampling=not args.no_backend_sampling,
     )
 
 
-def measure_once(
-    scenario: Scenario,
-    engine: EngineConfig,
-    repeat_idx: int,
-) -> Dict[str, object]:
-    draft_model = engine.draft_factory()
+def load_model(case: BenchmarkCase, args: argparse.Namespace) -> tuple[Llama, float]:
+    from llama_cpp import Llama
 
-    print(f"\n⏳ [{scenario.name}] Engine={engine.name} | Repeat={repeat_idx + 1}")
-    print(f"   Note: {engine.note}")
+    uses_target_checkpoints = case.method in {"ngram-k", "ngram-k4v"}
+    started = time.perf_counter()
+    llm = Llama(
+        model_path=str(args.model),
+        n_ctx=args.n_ctx,
+        n_batch=args.n_batch,
+        n_gpu_layers=0 if args.cpu else "all",
+        load_mtp=case.method == "builtin-mtp",
+        ctx_checkpoints=args.ctx_checkpoints if uses_target_checkpoints else 0,
+        checkpoint_on_device=(
+            args.checkpoint_on_device if uses_target_checkpoints else False
+        ),
+        speculative=create_spec_config(case, args),
+        verbose=args.verbose,
+    )
+    return llm, time.perf_counter() - started
 
-    llm: Optional[Llama] = None
 
+def generate_once(
+    llm: Llama,
+    prompt_tokens: Sequence[int],
+    *,
+    max_tokens: int,
+    temperature: float,
+    seed: int,
+) -> GenerationResult:
+    llm.reset()
+    generated: list[int] = []
+    stream = llm.generate(
+        prompt_tokens,
+        temp=temperature,
+        top_k=1 if temperature <= 0.0 else 40,
+        top_p=1.0 if temperature <= 0.0 else 0.95,
+        min_p=0.0,
+        repeat_penalty=1.0,
+        seed=seed,
+        reset=True,
+    )
+    started = time.perf_counter()
+    first_token_at: Optional[float] = None
+    last_token_at: Optional[float] = None
     try:
-        llm = create_llama(draft_model)
-
-        # Warmup: force backend initialization and first-token path.
-        llm.create_completion(
-            prompt=scenario.prompt,
-            max_tokens=1,
-            temperature=0.0,
-            echo=False,
-        )
-
-        start = time.perf_counter()
-
-        response = llm.create_completion(
-            prompt=scenario.prompt,
-            max_tokens=MAX_TOKENS,
-            temperature=0.0,
-            top_p=1.0,
-            top_k=1,
-            repeat_penalty=1.0,
-            echo=False,
-        )
-
-        end = time.perf_counter()
-
-        duration = end - start
-        usage = response.get("usage", {})
-        completion_tokens = int(usage.get("completion_tokens", 0))
-        total_tokens = int(usage.get("total_tokens", 0))
-        prompt_tokens = int(usage.get("prompt_tokens", 0))
-
-        text = response["choices"][0]["text"]
-        tps = completion_tokens / duration if duration > 0 else 0.0
-
-        print(
-            f"✅ {engine.name:<28} "
-            f"{tps:8.2f} tok/s | "
-            f"time={duration:7.2f}s | "
-            f"gen={completion_tokens:4d} | "
-            f"prompt={prompt_tokens:4d}"
-        )
-        print(f"   Snippet: {text[:120].replace(chr(10), ' ')}...")
-
-        return {
-            "scenario": scenario.name,
-            "category": scenario.category,
-            "expected_behavior": scenario.expected_behavior,
-            "engine": engine.name,
-            "engine_note": engine.note,
-            "repeat": repeat_idx + 1,
-            "duration_sec": duration,
-            "completion_tokens": completion_tokens,
-            "prompt_tokens": prompt_tokens,
-            "total_tokens": total_tokens,
-            "tokens_per_sec": tps,
-            "snippet": text[:160].replace("\n", "\\n"),
-        }
-
+        for token in stream:
+            delivered_at = time.perf_counter()
+            if token == llm.token_eos():
+                break
+            if first_token_at is None:
+                first_token_at = delivered_at
+            last_token_at = delivered_at
+            generated.append(int(token))
+            if len(generated) >= max_tokens:
+                break
     finally:
-        if hasattr(draft_model, "close"):
-            draft_model.close()
-        cleanup_model(llm)
+        stream.close()
+
+    finished = last_token_at if last_token_at is not None else time.perf_counter()
+    request_seconds = max(0.0, finished - started)
+    ttft_seconds = (
+        max(0.0, first_token_at - started) if first_token_at is not None else 0.0
+    )
+    sustained_seconds = (
+        max(0.0, last_token_at - first_token_at)
+        if first_token_at is not None and last_token_at is not None
+        else 0.0
+    )
+    sustained_tokens = max(0, len(generated) - 1)
+    text = llm.detokenize(generated, prev_tokens=list(prompt_tokens)).decode(
+        "utf-8", errors="replace"
+    )
+    return GenerationResult(
+        tokens=tuple(generated),
+        text=text,
+        request_seconds=request_seconds,
+        ttft_seconds=ttft_seconds,
+        sustained_seconds=sustained_seconds,
+        request_tokens_per_second=(
+            len(generated) / request_seconds if request_seconds > 0.0 else 0.0
+        ),
+        sustained_tokens_per_second=(
+            sustained_tokens / sustained_seconds if sustained_seconds > 0.0 else 0.0
+        ),
+        speculative_stats=dict(llm.last_speculative_stats),
+    )
 
 
-# ============================================================
-# Reporting
-# ============================================================
+def first_divergence(
+    baseline: Sequence[int], candidate: Sequence[int]
+) -> Optional[int]:
+    for index, (left, right) in enumerate(zip(baseline, candidate)):
+        if left != right:
+            return index + 1
+    if len(baseline) != len(candidate):
+        return min(len(baseline), len(candidate)) + 1
+    return None
 
-def summarize_results(rows: List[Dict[str, object]]) -> None:
-    print("\n\n" + "=" * 90)
-    print("📊 Benchmark Summary")
-    print("=" * 90)
 
-    by_scenario: Dict[str, List[Dict[str, object]]] = {}
-    for row in rows:
-        by_scenario.setdefault(str(row["scenario"]), []).append(row)
+def output_hash(tokens: Sequence[int]) -> str:
+    payload = ",".join(str(token) for token in tokens).encode("ascii")
+    return hashlib.sha256(payload).hexdigest()
 
-    for scenario_name, scenario_rows in by_scenario.items():
-        print(f"\n📂 {scenario_name}")
-        print("-" * 90)
 
-        grouped: Dict[str, List[float]] = {}
-        for row in scenario_rows:
-            grouped.setdefault(str(row["engine"]), []).append(float(row["tokens_per_sec"]))
+def make_record(
+    scenario: Scenario,
+    case: BenchmarkCase,
+    repeat: int,
+    load_seconds: float,
+    prompt_tokens: Sequence[int],
+    result: GenerationResult,
+    baseline_tokens: Optional[Sequence[int]],
+) -> BenchmarkRecord:
+    stats = result.speculative_stats
+    drafted = int(stats.get("drafted", 0))
+    accepted = int(stats.get("accepted", 0))
+    divergence = (
+        first_divergence(baseline_tokens, result.tokens)
+        if baseline_tokens is not None
+        else None
+    )
+    return BenchmarkRecord(
+        scenario=scenario.key,
+        category=scenario.category,
+        expected_behavior=scenario.expected_behavior,
+        method=case.method,
+        configuration=case.key,
+        ngram_size=case.ngram_size,
+        draft_tokens=case.draft_tokens,
+        repeat=repeat + 1,
+        model_load_seconds=load_seconds,
+        prompt_tokens=len(prompt_tokens),
+        generated_tokens=len(result.tokens),
+        request_seconds=result.request_seconds,
+        sustained_seconds=result.sustained_seconds,
+        ttft_ms=result.ttft_seconds * 1000.0,
+        request_tokens_per_second=result.request_tokens_per_second,
+        sustained_tokens_per_second=result.sustained_tokens_per_second,
+        drafted_tokens=drafted,
+        accepted_tokens=accepted,
+        draft_acceptance_rate=accepted / drafted if drafted > 0 else 0.0,
+        verification_steps=int(stats.get("verification_steps", 0)),
+        rollbacks=int(stats.get("rollbacks", 0)),
+        checkpoint_capture_ms=(
+            float(stats.get("checkpoint_capture_seconds", 0.0)) * 1000.0
+        ),
+        checkpoint_restore_ms=(
+            float(stats.get("checkpoint_restore_seconds", 0.0)) * 1000.0
+        ),
+        matches_baseline=divergence is None if baseline_tokens is not None else None,
+        first_divergence=divergence,
+        output_sha256=output_hash(result.tokens),
+        output_preview=result.text[:160].replace("\n", "\\n"),
+    )
 
-        baseline_avg = statistics.mean(grouped.get("Baseline", [0.0]))
 
-        print(
-            f"{'Engine':<32} | {'Avg tok/s':>10} | {'Best':>10} | "
-            f"{'Worst':>10} | {'Speedup':>8}"
-        )
-        print("-" * 90)
-
-        for engine_name, speeds in grouped.items():
-            avg = statistics.mean(speeds)
-            best = max(speeds)
-            worst = min(speeds)
-            speedup = avg / baseline_avg if baseline_avg > 0 else 1.0
-
-            print(
-                f"{engine_name:<32} | "
-                f"{avg:10.2f} | "
-                f"{best:10.2f} | "
-                f"{worst:10.2f} | "
-                f"{speedup:8.2f}x"
+def run_case(
+    case: BenchmarkCase,
+    scenarios: Sequence[Scenario],
+    args: argparse.Namespace,
+    baseline_outputs: dict[tuple[str, int], tuple[int, ...]],
+) -> list[BenchmarkRecord]:
+    print(f"\n[{method_label(case)}] loading model")
+    llm: Optional[Llama] = None
+    records: list[BenchmarkRecord] = []
+    try:
+        llm, load_seconds = load_model(case, args)
+        print(f"  model loaded in {load_seconds:.3f} s")
+        if args.warmup_tokens > 0:
+            warmup = llm.tokenize(b"Continue the sequence: 1, 2, 3,", add_bos=True)
+            generate_once(
+                llm,
+                warmup,
+                max_tokens=args.warmup_tokens,
+                temperature=0.0,
+                seed=args.seed,
             )
 
+        for scenario in scenarios:
+            prompt_tokens = llm.tokenize(
+                scenario.prompt.encode("utf-8"), add_bos=True, special=True
+            )
+            for repeat in range(args.repeats):
+                result = generate_once(
+                    llm,
+                    prompt_tokens,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    seed=args.seed,
+                )
+                key = (scenario.key, repeat)
+                baseline = baseline_outputs.get(key)
+                if case.method == "ordinary":
+                    baseline_outputs[key] = result.tokens
+                record = make_record(
+                    scenario,
+                    case,
+                    repeat,
+                    load_seconds,
+                    prompt_tokens,
+                    result,
+                    baseline,
+                )
+                records.append(record)
+                acceptance = (
+                    f" | accept {record.draft_acceptance_rate:.1%}"
+                    if record.drafted_tokens > 0
+                    else ""
+                )
+                match = (
+                    " | output exact"
+                    if record.matches_baseline is True
+                    else (
+                        f" | output diverged at token {record.first_divergence}"
+                        if record.matches_baseline is False
+                        else ""
+                    )
+                )
+                print(
+                    f"  {scenario.key:<10} run {repeat + 1:<2} | "
+                    f"TTFT {record.ttft_ms:8.2f} ms | "
+                    f"sustained {record.sustained_tokens_per_second:8.2f} tok/s"
+                    f"{acceptance}{match}"
+                )
+    finally:
+        if llm is not None:
+            llm.close()
+        del llm
+        gc.collect()
+    return records
 
-def save_csv(rows: List[Dict[str, object]], path: str) -> None:
-    if not rows:
+
+def summarize(records: Sequence[BenchmarkRecord]) -> None:
+    print("\n[summary: sustained generation speed]")
+    for scenario in SCENARIOS:
+        scenario_records = [row for row in records if row.scenario == scenario.key]
+        if not scenario_records:
+            continue
+        grouped: dict[str, list[BenchmarkRecord]] = {}
+        for row in scenario_records:
+            grouped.setdefault(row.configuration, []).append(row)
+        baseline = statistics.mean(
+            row.sustained_tokens_per_second for row in grouped["ordinary"]
+        )
+        print(f"\n  {scenario.key}: {scenario.name}")
+        print(
+            f"    {'configuration':<24} {'mean tok/s':>12} {'min':>10} {'max':>10} "
+            f"{'speedup':>10} {'output':>12}"
+        )
+        for configuration, method_records in grouped.items():
+            speeds = [row.sustained_tokens_per_second for row in method_records]
+            mean = statistics.mean(speeds)
+            minimum = min(speeds)
+            maximum = max(speeds)
+            speedup = mean / baseline if baseline > 0.0 else 0.0
+            divergences = [
+                row.first_divergence
+                for row in method_records
+                if row.first_divergence is not None
+            ]
+            if configuration == "ordinary":
+                output_text = "reference"
+            elif not divergences:
+                output_text = "exact"
+            else:
+                output_text = f"div@{min(divergences)}"
+            print(
+                f"    {configuration:<24} {mean:12.2f} {minimum:10.2f} {maximum:10.2f} "
+                f"{speedup:9.3f}x {output_text:>12}"
+            )
+    print(
+        "\n  Output is diagnostic only: div@N is the first token that differs "
+        "from ordinary decoding. It does not invalidate the measured throughput."
+    )
+
+
+def save_csv(records: Sequence[BenchmarkRecord], path: Path) -> None:
+    if not records:
         return
-
-    fieldnames = list(rows[0].keys())
-
-    with open(path, "w", newline="", encoding="utf-8-sig") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
+    rows = [asdict(record) for record in records]
+    with path.open("w", newline="", encoding="utf-8") as output:
+        writer = csv.DictWriter(output, fieldnames=list(rows[0]))
         writer.writeheader()
         writer.writerows(rows)
+    print(f"\nCSV saved to {path}")
 
-    print(f"\n💾 CSV saved to: {path}")
 
+def main() -> None:
+    args = parse_args()
+    scenarios = tuple(SCENARIO_BY_KEY[key] for key in args.scenarios)
+    cases = build_cases(args)
+    if args.shuffle_methods:
+        speculative_cases = cases[1:]
+        random.Random(args.seed).shuffle(speculative_cases)
+        cases = [cases[0], *speculative_cases]
 
-# ============================================================
-# Main Benchmark Flow
-# ============================================================
+    print("llama-cpp-python speculative decoding benchmark")
+    print(f"  target model : {args.model}")
+    if args.draft_model is not None:
+        print(f"  draft model  : {args.draft_model}")
+    print(f"  methods      : ordinary, {', '.join(args.methods)}")
+    print(f"  cases        : {len(cases)} total")
+    if {"ngram-k", "ngram-k4v"}.intersection(args.methods):
+        print(f"  n-gram grid  : N={args.ngram_sizes}, " f"M={args.ngram_draft_tokens}")
+    if {"builtin-mtp", "external-mtp"}.intersection(args.methods):
+        print(f"  MTP draft    : M={args.mtp_draft_tokens}")
+    print(f"  scenarios    : {', '.join(args.scenarios)}")
+    print(f"  workload     : {args.repeats} x {args.max_tokens} tokens per scenario")
+    print("  timing       : TTFT includes prompt eval; sustained excludes first token")
+    if {"ngram-k", "ngram-k4v"}.intersection(args.methods):
+        checkpoint_location = "device" if args.checkpoint_on_device else "host"
+        print(
+            f"  n-gram undo  : {args.ctx_checkpoints} target checkpoints on "
+            f"{checkpoint_location}"
+        )
 
-def run_benchmark() -> None:
-    print("=" * 90)
-    print("🏆 llama-cpp-python Speculative Decoding Benchmark")
-    print("=" * 90)
-    print(f"Model: {MODEL_PATH}")
-    print(f"n_ctx={N_CTX}, max_tokens={MAX_TOKENS}, repeats={REPEATS}")
-    print("=" * 90)
+    baseline_outputs: dict[tuple[str, int], tuple[int, ...]] = {}
+    records: list[BenchmarkRecord] = []
+    for case in cases:
+        records.extend(run_case(case, scenarios, args, baseline_outputs))
 
-    rows: List[Dict[str, object]] = []
-
-    for scenario in TEST_SCENARIOS:
-        print("\n\n" + "#" * 90)
-        print(f"📂 Scenario: {scenario.name}")
-        print(f"📌 Category: {scenario.category}")
-        print(f"🧠 Expected: {scenario.expected_behavior}")
-        print("#" * 90)
-
-        engines = list(ENGINE_CONFIGS)
-        if RANDOMIZE_ENGINE_ORDER:
-            baseline = [e for e in engines if e.name == "Baseline"]
-            others = [e for e in engines if e.name != "Baseline"]
-            random.shuffle(others)
-            engines = baseline + others
-
-        for engine in engines:
-            for repeat_idx in range(REPEATS):
-                row = measure_once(
-                    scenario=scenario,
-                    engine=engine,
-                    repeat_idx=repeat_idx,
-                )
-                rows.append(row)
-
-    summarize_results(rows)
-    save_csv(rows, CSV_OUTPUT)
+    summarize(records)
+    if not args.no_csv:
+        save_csv(records, args.csv)
 
 
 if __name__ == "__main__":
-    run_benchmark()
+    main()

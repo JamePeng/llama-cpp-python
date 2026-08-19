@@ -39,6 +39,16 @@ def test_ngram_map_lifecycle_and_acceptance_feedback():
     assert draft.tolist() == [7]
 
 
+def test_ngram_map_k4v_uses_vendor_continuation_limit_by_default():
+    decoder = LlamaNGramMapDecoding(
+        ngram_size=3,
+        num_pred_tokens=8,
+        spec_type=SpeculativeType.NGRAM_MAP_K4V,
+    )
+
+    assert decoder.max_entries_per_key == 4
+
+
 def test_spec_config_requires_draft_model_for_external_architectures():
     for spec_type in (
         SpeculativeType.DRAFT_EAGLE3,

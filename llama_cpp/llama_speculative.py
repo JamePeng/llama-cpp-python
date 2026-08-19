@@ -557,9 +557,8 @@ class LlamaNGramMapDecoding(LlamaSpecEngine):
                 Use 1 for maximum recall. Use >1 to reduce low-confidence drafts.
 
             max_entries_per_key:
-                Optional memory cap per n-gram key.
-                When set, only the most recent entries are kept.
-                For k4v mode, setting max_entries_per_key is strongly recommended.
+                Optional memory cap per n-gram key. K4V defaults to four
+                continuations, matching ``COMMON_NGRAM_MAX_VALUES`` in llama.cpp.
 
             sync_check_tokens:
                 Number of trailing tokens used to verify whether the new input is an
@@ -595,7 +594,7 @@ class LlamaNGramMapDecoding(LlamaSpecEngine):
         self.sync_check_tokens = int(sync_check_tokens)
 
         if spec_type == SpeculativeType.NGRAM_MAP_K4V and max_entries_per_key is None:
-            max_entries_per_key = 8
+            max_entries_per_key = 4
         self.max_entries_per_key = max_entries_per_key
 
         self._history: List[int] = []
