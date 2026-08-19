@@ -172,7 +172,7 @@ class SpeculativeType(enum.IntEnum):
         }.get(self, "unknown")
 
     @classmethod
-    def from_str(cls, spec: str) -> SpeculativeType:
+    def from_str(cls, spec: str) -> "SpeculativeType":
         spec = spec.lower().strip()
         spec = spec.replace("_", "-")
         aliases = {
