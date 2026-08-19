@@ -38,6 +38,8 @@ This package provides:
         - [2. Reranking (Cross-Encoder Scoring)](https://github.com/JamePeng/llama-cpp-python#2-reranking-cross-encoder-scoring)
         - [3. Normalization](https://github.com/JamePeng/llama-cpp-python#3-normalization)
     - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
+        - [MTP speculative decoding](https://github.com/JamePeng/llama-cpp-python#mtp-speculative-decoding)
+        - [N-gram speculative decoding](https://github.com/JamePeng/llama-cpp-python#n-gram-speculative-decoding)
 - [FAQ](https://github.com/JamePeng/llama-cpp-python#faq)
 
 The new documentation will be maintained in the [docs/wiki](https://github.com/JamePeng/llama-cpp-python/tree/main/docs/wiki) directory based on the LLM Wiki approach. Interested volunteers are welcome to participate in its maintenance and updates :)
@@ -1796,7 +1798,7 @@ vectors = llm.embed(["query", "document"], normalize=2)
 
 ## Speculative Decoding
 
-`llama-cpp-python` provides a stateful speculative-decoding path aligned with
+[`llama-cpp-python`](https://github.com/JamePeng/llama-cpp-python) provides a stateful speculative-decoding path aligned with
 the `begin -> process -> draft -> accept` lifecycle used by `llama.cpp`.
 Configure it with `speculative=SpecConfig(...)`; the older `draft_model=` API is
 deprecated and is kept only for compatibility with stateless draft callbacks.
@@ -1813,6 +1815,8 @@ and provides three usable modes:
 Eagle3, DFlash, DSpark, draft-simple, and the other n-gram variants appear in
 `SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
 engines.
+
+More Information see wiki: [Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md) 
 
 ### MTP speculative decoding
 
