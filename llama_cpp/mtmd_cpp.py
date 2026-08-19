@@ -379,9 +379,13 @@ def mtmd_get_marker(ctx: mtmd_context_p) -> c_char_p:
 # // if bitmap is image:
 # //     length of data must be nx * ny * 3
 # //     the data is in RGBRGBRGB... format
+# //     note: some video-capable models (i.e. qwen-vl) can merge consecutive bitmaps
+# //           into one chunk; mtmd_tokenize() handles this, but remember to set
+# //           mtmd_bitmap_set_mergeable(true) for every frame
 # // if bitmap is audio:
 # //     length of data must be n_samples * sizeof(float)
 # //     the data is in float format (PCM F32)
+# //
 # // if data == nullptr:
 # //     the bitmap is considered "empty", and will be treated as a placeholder for counting tokens
 # //     you can pass the bitmap via mtmd_tokenize(), then call mtmd_*_get_n_tokens() to count the tokens
@@ -473,6 +477,24 @@ def mtmd_bitmap_set_id(
     id: c_char_p,
     /,
 ):
+    ...
+
+
+# // if true, this bitmap can be merged (temporal merge) with an adjacent mergeable bitmap by certain video input models
+# MTMD_API void         mtmd_bitmap_set_mergeable(mtmd_bitmap * bitmap, bool mergeable);
+@ctypes_function_mtmd(
+    "mtmd_bitmap_set_mergeable", [
+        mtmd_bitmap_p_ctypes,
+        c_bool,
+    ], None)
+def mtmd_bitmap_set_mergeable(
+    bitmap: mtmd_bitmap_p,
+    mergeable: bool,
+    /,
+):
+    """
+    if true, this bitmap can be merged (temporal merge) with an adjacent mergeable bitmap by certain video input models
+    """
     ...
 
 
