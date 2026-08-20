@@ -37,7 +37,6 @@ from llama_cpp._ctypes_extensions import (
 from llama_cpp._ggml import (
     ggml_backend_sched_eval_callback,
     ggml_log_callback,
-    ggml_backend_dev_t,
 )
 
 if TYPE_CHECKING:
@@ -257,7 +256,7 @@ class clip_context_params(Structure):
 class mtmd_context_params(Structure):
     _fields_ = [
         ("use_gpu", c_bool),
-        ("device", ggml_backend_dev_t),
+        ("device", c_void_p),
         ("print_timings", c_bool),
         ("n_threads", c_int),
         ("image_marker", c_char_p),
@@ -398,14 +397,14 @@ def mtmd_get_marker(ctx: mtmd_context_p) -> c_char_p:
     "mtmd_bitmap_init", [
         c_uint32,
         c_uint32,
-        c_char_p,
+        POINTER(c_uint8),
     ],
     mtmd_bitmap_p_ctypes,
 )
 def mtmd_bitmap_init(
     nx: c_uint32,
     ny: c_uint32,
-    data: c_char_p,
+    data: POINTER(c_uint8), # type: ignore
     /,
 ) -> mtmd_bitmap_p:
     ...
@@ -438,8 +437,8 @@ def mtmd_bitmap_get_ny(bitmap: mtmd_bitmap_p) -> c_uint32:
     ...
 
 # MTMD_API const unsigned char * mtmd_bitmap_get_data   (const mtmd_bitmap * bitmap);
-@ctypes_function_mtmd("mtmd_bitmap_get_data", [mtmd_bitmap_p_ctypes], c_char_p)
-def mtmd_bitmap_get_data(bitmap: mtmd_bitmap_p) -> c_char_p:
+@ctypes_function_mtmd("mtmd_bitmap_get_data", [mtmd_bitmap_p_ctypes], POINTER(c_uint8))
+def mtmd_bitmap_get_data(bitmap: mtmd_bitmap_p) -> POINTER(c_uint8):  # type: ignore
     ...
 
 # MTMD_API size_t                mtmd_bitmap_get_n_bytes(const mtmd_bitmap * bitmap);
