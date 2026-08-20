@@ -344,3 +344,125 @@ def test_mtp_runtime_configuration_reports_requested_and_resolved_values(capsys)
     assert "target_n_rs_seq=4, draft_n_rs_seq=4" in output
     assert "draft_checkpoint=native-rs" in output
     assert "outputs=5/5" in output
+
+
+class _FakeEvalBatch:
+    def __init__(self):
+        self.batch = self
+        self.n_tokens = 0
+
+
+class _FakeEvalContext:
+    def __init__(self, statuses, events):
+        self.statuses = list(statuses)
+        self.events = events
+        self.decode_sizes = []
+
+    def decode(self, batch):
+        self.decode_sizes.append(batch.batch.n_tokens)
+        self.events.append("target-decode")
+        return self.statuses.pop(0)
+
+    def synchronize(self):
+        self.events.append("target-sync")
+
+
+class _FakeSpecEngine:
+    def __init__(self, events):
+        self.events = events
+
+    def process(self, batch, seq_id=0):
+        assert batch is not None
+        assert seq_id == 0
+        self.events.append("spec-process")
+
+
+def _eval_test_llama(*, statuses, verifying, speculative=True):
+    events = []
+    llm = object.__new__(llama_cpp.Llama)
+    llm._batch = _FakeEvalBatch()
+    llm._ctx = _FakeEvalContext(statuses, events)
+    llm._speculative_verifying = verifying
+    llm.speculative = _FakeSpecEngine(events) if speculative else None
+    llm._active_speculative_phase_stats = {
+        "target_decode_seconds": 0.0,
+        "target_sync_seconds": 0.0,
+        "process_calls": 0,
+        "process_seconds": 0.0,
+    }
+    llm.n_tokens = 0
+    llm.verbose = False
+    return llm, events
+
+
+def test_speculative_target_sync_precedes_process_and_has_separate_timing():
+    llm, events = _eval_test_llama(statuses=[0], verifying=True)
+
+    assert llm._decode_eval_batch([1, 2, 3], 3) == 3
+    llm._process_speculative_batch()
+
+    assert events == ["target-decode", "target-sync", "spec-process"]
+    stats = llm._active_speculative_phase_stats
+    assert stats["target_decode_seconds"] >= 0.0
+    assert stats["target_sync_seconds"] >= 0.0
+    assert stats["process_seconds"] >= 0.0
+    assert stats["process_calls"] == 1
+
+
+def test_speculative_verification_batch_is_not_dynamically_split():
+    llm, _ = _eval_test_llama(statuses=[1, 0], verifying=True)
+
+    with pytest.raises(RuntimeError, match="verification batch cannot be split"):
+        llm._decode_eval_batch([1, 2, 3, 4], 4)
+
+    assert llm._ctx.decode_sizes == [4]
+
+
+def test_ordinary_eval_batch_can_still_retry_at_a_smaller_size():
+    llm, _ = _eval_test_llama(
+        statuses=[1, 0], verifying=False, speculative=False
+    )
+
+    assert llm._decode_eval_batch([1, 2, 3, 4], 4) == 2
+    assert llm._ctx.decode_sizes == [4, 2]
+
+
+def test_speculative_verification_batch_must_fit_n_batch():
+    llm = object.__new__(llama_cpp.Llama)
+    llm._speculative_verifying = True
+    llm.n_batch = 3
+
+    with pytest.raises(RuntimeError, match="verification batch exceeds n_batch"):
+        llm.eval([1, 2, 3, 4], copy_logits=False)
+
+
+def test_llama_memory_removal_failure_is_fatal():
+    class _Context:
+        def memory_seq_rm(self, seq_id, p0, p1):
+            return False
+
+    llm = object.__new__(llama_cpp.Llama)
+    llm._ctx = _Context()
+
+    with pytest.raises(RuntimeError, match="test rollback"):
+        llm._memory_seq_rm_or_raise(0, 12, -1, "test rollback")
+
+
+def test_mtp_truncate_fails_when_native_memory_removal_fails():
+    class _Model:
+        def is_recurrent(self):
+            return False
+
+        def is_hybrid(self):
+            return False
+
+    class _Context:
+        def memory_seq_rm(self, seq_id, p0, p1):
+            return False
+
+    engine = object.__new__(LlamaMTPDecoding)
+    engine.draft_model = _Model()
+    engine.draft_context = _Context()
+
+    with pytest.raises(RuntimeError, match="draft-context truncation failed"):
+        engine.truncate(12)

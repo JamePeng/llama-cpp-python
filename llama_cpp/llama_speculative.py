@@ -1429,7 +1429,8 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             raise RuntimeError(
                 "Recurrent MTP draft contexts must be restored from a checkpoint"
             )
-        self.draft_context.memory_seq_rm(seq_id, position, -1)
+        if not self.draft_context.memory_seq_rm(seq_id, position, -1):
+            raise RuntimeError("MTP draft-context truncation failed")
 
     def clear(self) -> None:
         if self._closed:
@@ -1534,7 +1535,12 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             try:
                 for head in range(self.n_mtp_layers):
                     if self.chain_heads:
-                        self.draft_context.memory_seq_rm(0, positions[0], -1)
+                        if not self.draft_context.memory_seq_rm(
+                            0, positions[0], -1
+                        ):
+                            raise RuntimeError(
+                                "MTP chained-head catch-up rollback failed"
+                            )
                         self.draft_context.set_nextn_layer_offset(head)
                     status = self.draft_context.decode(self.batch)
                     if status != 0:
@@ -1608,7 +1614,8 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         try:
             for step in range(limit):
                 if self.chain_heads:
-                    self.draft_context.memory_seq_rm(0, n_past, -1)
+                    if not self.draft_context.memory_seq_rm(0, n_past, -1):
+                        raise RuntimeError("MTP chained-head draft rollback failed")
                     self.draft_context.set_nextn_layer_offset(step)
 
                 status = self.draft_context.decode(self.batch)

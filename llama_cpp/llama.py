@@ -639,6 +639,8 @@ class Llama:
             "acceptance_rate_per_position": [],
             "begin_seconds": 0.0,
             "draft_seconds": 0.0,
+            "target_decode_seconds": 0.0,
+            "target_sync_seconds": 0.0,
             "process_seconds": 0.0,
             "accept_seconds": 0.0,
             "checkpoint_captures": 0,
@@ -1310,6 +1312,98 @@ class Llama:
                     f"{tok} >= n_vocab({self._n_vocab})"
                 )
 
+    def _memory_seq_rm_or_raise(
+        self, seq_id: int, p0: int, p1: int, operation: str
+    ) -> None:
+        """Remove a native memory range or stop before state can diverge."""
+        if not self._ctx.memory_seq_rm(seq_id, p0, p1):
+            raise RuntimeError(
+                f"{operation}: failed to remove sequence {seq_id} "
+                f"memory range [{p0}, {p1})"
+            )
+
+    def _decode_eval_batch(
+        self, chunk: Sequence[int], initial_batch_size: int
+    ) -> int:
+        """Decode one batch, keeping speculative verification atomic."""
+        current_batch_size = initial_batch_size
+
+        while current_batch_size > 0:
+            self._batch.batch.n_tokens = current_batch_size
+            phase_stats = self._active_speculative_phase_stats
+            decode_started = time.perf_counter()
+            try:
+                status = self._ctx.decode(self._batch)
+            except Exception as exc:
+                min_pos = min(current_batch_size, 128)
+                preview = chunk[:min_pos]
+                raise RuntimeError(
+                    "Llama.eval(decode): Fatal Decode Error at Pos "
+                    f"{self.n_tokens}, Batch size {current_batch_size}, "
+                    f"chunk[:{min_pos}]={preview}: {exc}"
+                ) from exc
+            finally:
+                if phase_stats is not None:
+                    phase_stats["target_decode_seconds"] += (
+                        time.perf_counter() - decode_started
+                    )
+
+            if status == 0:
+                if self.speculative is not None:
+                    # Match llama.cpp server: synchronize target verification
+                    # before timing speculative hidden-state processing.
+                    sync_started = time.perf_counter()
+                    try:
+                        self._ctx.synchronize()
+                    finally:
+                        if phase_stats is not None:
+                            phase_stats["target_sync_seconds"] += (
+                                time.perf_counter() - sync_started
+                            )
+                return current_batch_size
+
+            if status == 1:
+                if self._speculative_verifying:
+                    raise RuntimeError(
+                        "Llama.eval: speculative verification batch cannot be "
+                        "split after the backend reported no KV slot; increase "
+                        "n_batch/n_ctx or reduce the speculative draft length"
+                    )
+                if current_batch_size == 1:
+                    break
+                if self.verbose:
+                    print(
+                        "Llama.eval: KV slots full (Code 1). Halving batch size "
+                        f"from {current_batch_size} to {current_batch_size // 2}...",
+                        file=sys.stderr,
+                    )
+                current_batch_size //= 2
+                continue
+
+            raise RuntimeError(
+                "Llama.eval(decode): backend returned fatal status "
+                f"{status} at position {self.n_tokens}"
+            )
+
+        raise RuntimeError(
+            "Llama.eval(decode): Failed completely even with batch size 1."
+        )
+
+    def _process_speculative_batch(self) -> None:
+        """Process synchronized target outputs and account only engine work."""
+        if self.speculative is None:
+            return
+        phase_stats = self._active_speculative_phase_stats
+        process_started = time.perf_counter()
+        try:
+            self.speculative.process(self._batch.batch, seq_id=0)
+        finally:
+            if phase_stats is not None:
+                phase_stats["process_calls"] += 1
+                phase_stats["process_seconds"] += (
+                    time.perf_counter() - process_started
+                )
+
     def eval(
             self,
             tokens: Sequence[int],
@@ -1333,6 +1427,11 @@ class Llama:
         n_eval = len(tokens)
         if n_eval == 0:
             return
+        if self._speculative_verifying and n_eval > self.n_batch:
+            raise RuntimeError(
+                "Llama.eval: speculative verification batch exceeds n_batch "
+                f"({n_eval} > {self.n_batch}); reduce the speculative draft length"
+            )
 
         # Validate token ids before any context shifting, batch construction, or
         # native llama_decode call. Invalid ids may otherwise reach the C/C++ backend
@@ -1377,7 +1476,12 @@ class Llama:
 
                 try:
                     # Remove the specified block of tokens from the physical KV cache
-                    self._ctx.memory_seq_rm(0, _n_keep, _n_keep + _n_discard)
+                    self._memory_seq_rm_or_raise(
+                        0,
+                        _n_keep,
+                        _n_keep + _n_discard,
+                        "Llama.eval context shift",
+                    )
 
                     # Shift the positional IDs of all subsequent tokens to the left to close the gap
                     self._ctx.memory_seq_add(0, _n_keep + _n_discard, self.n_tokens, -_n_discard)
@@ -1465,62 +1569,16 @@ class Llama:
                 # Ensure the control vector is cleared for a clean state
                 self._ctx.clear_cvec()
 
-            # Dynamic Batch Downgrade: Attempt to decode, reduce batch size if KV cache is fragmented
-            current_batch_size = n_chunk
-            success = False
-
-            while current_batch_size > 0:
-                # Tell the C++ backend to only process up to `current_batch_size` tokens
-                self._batch.batch.n_tokens = current_batch_size
-
-                try:
-                    status = self._ctx.decode(self._batch)
-
-                    # 0: Success
-                    if status == 0:
-                        success = True
-                        # If we successfully decoded after a downgrade,
-                        # update current_max_batch to prevent repeated failures in next iterations.
-                        if current_batch_size < current_max_batch:
-                            current_max_batch = current_batch_size
-                        break
-
-                    # 1: No KV slot available (Recoverable)
-                    elif status == 1:
-                        if current_batch_size == 1:
-                            if self.verbose:
-                                print("Llama.eval: KV slots completely full. "
-                                      "Cannot reduce batch size below 1. Aborting...", file=sys.stderr)
-                            break
-                        if self.verbose:
-                            print(f"Llama.eval: KV slots full (Code 1). Halving batch size "
-                                  f"from {current_batch_size} to {current_batch_size // 2}...", file=sys.stderr)
-                        current_batch_size //= 2
-
-                except Exception as e:
-                    min_pos = min(current_batch_size, 128)
-                    preview = chunk[:min_pos]
-                    # Catch fatal backend failures (e.g., Code -2, -3)
-                    raise RuntimeError(f"Llama.eval(decode): Fatal Decode Error at Pos {self.n_tokens}, "
-                                       f"Batch size {current_batch_size}, chunk[:{min_pos}]={preview}: {str(e)}") from e
-
-            if not success:
-                raise RuntimeError("Llama.eval(decode): Failed completely even with batch size 1.")
+            # Ordinary prefill may retry with a smaller batch. A speculative
+            # [id_last, draft...] verification batch must remain atomic.
+            current_batch_size = self._decode_eval_batch(chunk, n_chunk)
+            if current_batch_size < current_max_batch:
+                current_max_batch = current_batch_size
 
             self._last_eval_output_start = n_past
             self._last_eval_output_count = current_batch_size
 
-            if self.speculative is not None:
-                phase_stats = self._active_speculative_phase_stats
-                process_started = time.perf_counter()
-                try:
-                    self.speculative.process(self._batch.batch, seq_id=0)
-                finally:
-                    if phase_stats is not None:
-                        phase_stats["process_calls"] += 1
-                        phase_stats["process_seconds"] += (
-                            time.perf_counter() - process_started
-                        )
+            self._process_speculative_batch()
 
             # Save successfully processed tokens into the Python-side ledger
             self.input_ids[n_past : n_past + current_batch_size] = chunk[:current_batch_size]
@@ -1927,7 +1985,12 @@ class Llama:
                         else:
                             if self.verbose:
                                 print(f"Llama.generate: Truncating KV cache size from {self.n_tokens} to {longest_prefix}", file=sys.stderr)
-                            self._ctx.memory_seq_rm(0, longest_prefix, -1)
+                            self._memory_seq_rm_or_raise(
+                                0,
+                                longest_prefix,
+                                -1,
+                                "Llama.generate prefix truncation",
+                            )
 
                             # Adjust the tokens array and cursor to reuse the matched cache
                             self.n_tokens = longest_prefix
@@ -2074,6 +2137,8 @@ class Llama:
             "accepted_tokens_per_position": [],
             "begin_seconds": 0.0,
             "draft_seconds": 0.0,
+            "target_decode_seconds": 0.0,
+            "target_sync_seconds": 0.0,
             "process_seconds": 0.0,
             "accept_seconds": 0.0,
         }
@@ -2387,7 +2452,12 @@ class Llama:
                                 print(f"Llama.generate: Draft token rejected. Truncating context to {self.n_tokens}.", file=sys.stderr)
                             if self.speculative is not None:
                                 speculative_native_rollbacks += 1
-                            self._ctx.memory_seq_rm(0, self.n_tokens, -1)
+                            self._memory_seq_rm_or_raise(
+                                0,
+                                self.n_tokens,
+                                -1,
+                                "Llama.generate speculative rollback",
+                            )
                             if self.speculative is not None:
                                 time_speculative_accept(
                                     lambda: self.speculative.truncate(
@@ -2514,6 +2584,12 @@ class Llama:
                 "acceptance_rate_per_position": acceptance_rate_per_position,
                 "begin_seconds": speculative_phase_stats["begin_seconds"],
                 "draft_seconds": speculative_phase_stats["draft_seconds"],
+                "target_decode_seconds": speculative_phase_stats[
+                    "target_decode_seconds"
+                ],
+                "target_sync_seconds": speculative_phase_stats[
+                    "target_sync_seconds"
+                ],
                 "process_seconds": speculative_phase_stats["process_seconds"],
                 "accept_seconds": speculative_phase_stats["accept_seconds"],
                 "checkpoint_captures": int(checkpoint_stats.get("captures", 0)),
@@ -2598,6 +2674,8 @@ class Llama:
                     "  Phase time  "
                     f"begin {_format_speculative_duration(speculative_phase_stats['begin_seconds'])} | "
                     f"draft {_format_speculative_duration(speculative_phase_stats['draft_seconds'])} | "
+                    f"target decode {_format_speculative_duration(speculative_phase_stats['target_decode_seconds'])} | "
+                    f"target sync {_format_speculative_duration(speculative_phase_stats['target_sync_seconds'])} | "
                     f"process {_format_speculative_duration(speculative_phase_stats['process_seconds'])} | "
                     f"accept {_format_speculative_duration(speculative_phase_stats['accept_seconds'])}",
                     "  Checkpoint  "

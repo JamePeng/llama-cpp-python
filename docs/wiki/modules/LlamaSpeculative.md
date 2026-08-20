@@ -329,7 +329,10 @@ request's metrics. Important keys include:
 | `draft_token_acceptance_rate` | Accepted draft tokens divided by proposed tokens. |
 | `mean_accepted_length` | Sampled token plus mean accepted draft prefix. |
 | `acceptance_rate_per_position` | Acceptance probability at each draft position. |
-| `begin_seconds`, `draft_seconds`, `process_seconds`, `accept_seconds` | Engine phase time. |
+| `begin_seconds`, `draft_seconds`, `accept_seconds` | Speculative engine lifecycle time outside target verification. |
+| `target_decode_seconds` | Host time spent submitting target decode work. |
+| `target_sync_seconds` | Time spent waiting for target decode/verification to complete. |
+| `process_seconds` | Hidden-state processing and draft-context catch-up after the target synchronization boundary. |
 | `checkpoint_captures`, `checkpoint_restores` | Checkpoint operations. |
 | `checkpoint_capture_seconds`, `checkpoint_restore_seconds` | Checkpoint overhead. |
 | `rollbacks`, `native_rollbacks`, `checkpoint_rollbacks` | Target rollback paths. |
