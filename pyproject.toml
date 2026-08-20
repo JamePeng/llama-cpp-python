@@ -5,11 +5,15 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "llama_cpp_python"
 dynamic = ["version"]
-description = "Python bindings for the llama.cpp library"
+description = "Efficient Python bindings for the llama.cpp library"
 readme = "README.md"
 license = { text = "MIT" }
 authors = [
     { name = "Andrei Betlen", email = "abetlen@gmail.com" },
+    { name = "JamePeng", email = "jame_peng@sina.com" },
+]
+maintainers = [
+    { name = "JamePeng", email = "jame_peng@sina.com" },
 ]
 dependencies = [
     "typing-extensions>=4.8.0",

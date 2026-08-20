@@ -2,7 +2,7 @@
   <img src="docs/icon.png" alt="llama-cpp-python logo" width="300">
 </p>
 
-#  Python Bindings for [`llama.cpp`](https://github.com/ggml-org/llama.cpp)
+# Efficient Python Bindings for [`llama.cpp`](https://github.com/ggml-org/llama.cpp) library
 
 [![Tests](https://github.com/JamePeng/llama-cpp-python/actions/workflows/test.yaml/badge.svg?branch=main)](https://github.com/JamePeng/llama-cpp-python/actions/workflows/test.yaml)
 ![GitHub Tag](https://img.shields.io/github/v/tag/JamePeng/llama-cpp-python)
@@ -10,7 +10,7 @@
 [![PyPI - Downloads](https://static.pepy.tech/badge/llama-cpp-python/month)](https://pepy.tech/projects/llama-cpp-python)
 [![Github All Releases](https://img.shields.io/github/downloads/abetlen/llama-cpp-python/total.svg?label=Github%20Downloads)]()
 
-Efficiency Python bindings for **ggml-org's** [`llama.cpp`](https://github.com/ggml-org/llama.cpp) library.
+Efficient Python bindings for **ggml-org's** [`llama.cpp`](https://github.com/ggml-org/llama.cpp) library.
 This package provides:
 
 - Low-level access to C API via `ctypes` interface.
