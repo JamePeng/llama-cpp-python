@@ -37,6 +37,7 @@ from llama_cpp._ctypes_extensions import (
 from llama_cpp._ggml import (
     ggml_backend_sched_eval_callback,
     ggml_log_callback,
+    ggml_backend_dev_t,
 )
 
 if TYPE_CHECKING:
@@ -226,6 +227,7 @@ class clip_context_params(Structure):
 
 # struct mtmd_context_params {
 #     bool use_gpu;
+#     ggml_backend_dev_t device;
 #     bool print_timings;
 #     int n_threads;
 #     const char * image_marker; // deprecated, use media_marker instead
@@ -255,6 +257,7 @@ class clip_context_params(Structure):
 class mtmd_context_params(Structure):
     _fields_ = [
         ("use_gpu", c_bool),
+        ("device", ggml_backend_dev_t),
         ("print_timings", c_bool),
         ("n_threads", c_int),
         ("image_marker", c_char_p),

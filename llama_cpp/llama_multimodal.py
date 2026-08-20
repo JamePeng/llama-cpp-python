@@ -197,6 +197,7 @@ class MTMDChatHandler:
         # Get default parameters
         self.mctx_params = self._mtmd_cpp.mtmd_context_params_default()
         self.mctx_params.use_gpu = self.use_gpu
+        self.mctx_params.device = None
         self.mctx_params.print_timings = self.verbose
         self.mctx_params.n_threads = llama_model.n_threads
         self.mctx_params.flash_attn_type = self._mtmd_cpp.clip_flash_attn_type.CLIP_FLASH_ATTN_TYPE_AUTO
