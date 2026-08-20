@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-08-10
+last_updated: 2026-08-20
 version_target: "latest"
 ---
 
@@ -40,6 +40,7 @@ Initialize the model and context. Note that model loading will immediately alloc
 | `main_gpu` | `int` | `0` | The primary GPU to use for intermediate results or the entire model. |
 | `tensor_split` | `List[float]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
 | `kv_overrides` | `Dict` | `None` | Key-value overrides for the model metadata (supports bool, int, float, str). |
+| `load_mtp` | `bool` | `False` | Load the target model's NextN/MTP tensors. This is enabled automatically for built-in MTP through `speculative`; normally it should not be set manually. |
 | `numa` | `Union[bool, int]` | `False` | NUMA strategy (e.g., `GGML_NUMA_STRATEGY_DISTRIBUTE`). |
 
 #### Model Load Modes
@@ -113,7 +114,8 @@ mapping:
 | :--- | :--- | :--- | :--- |
 | `chat_format` | `str` | `None` | String specifying the chat template (e.g., `"llama-2"`, `"chatml"`). Guessed from GGUF if None. |
 | `chat_handler` | `LlamaChatCompletionHandler` | `None` | Optional custom handler. See [[ChatHandlers]]. |
-| `draft_model` | `LlamaDraftModel` | `None` | Optional draft model for speculative decoding. |
+| `draft_model` | `LlamaDraftModel` | `None` | Deprecated stateless draft callback kept for compatibility. New code should use `speculative`. |
+| `speculative` | `Union[SpecConfig, LlamaSpecEngine]` | `None` | Stateful speculative configuration or engine. Supports the complete begin/draft/process/accept lifecycle; it cannot be combined with `draft_model`. |
 | `ctx_checkpoints` | `int` | `16` | Max hybrid/recurrent context checkpoints to keep. Set to `0` to disable checkpointing for single-turn fast paths. |
 | `checkpoint_interval` | `int` | `4096` | Token interval for saving periodic Hybrid/Recurrent checkpoints during long prompt evaluation. |
 | `checkpoint_on_device` | `bool` | `False` | Store Hybrid/Recurrent checkpoint tensor payloads in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Reduces device-to-host copy overhead, but only one active checkpoint per `seq_id` is safe. |
@@ -264,26 +266,64 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
 3. **Speculative Decoding**:
 
-    Accelerates generation by using a small "draft" model to predict tokens, which the larger model then validates in parallel.
-    The fastest way to use speculative decoding is through the `LlamaNGramMapDecoding`(**Recommend**) or `LlamaPromptLookupDecoding` class.
+    New code should pass `SpecConfig` through the `speculative` argument. This enables the stateful begin/draft/process/accept lifecycle, including verification batches, acceptance feedback, recurrent-state rollback, and per-run statistics.
+
+    The current implementation is text-only and uses sequence ID `0`. It supports built-in and external MTP plus the `NGRAM_MAP_K` and `NGRAM_MAP_K4V` lookup engines. Multimodal pseudo-tokens, which may use negative token IDs, are not yet supported by this path.
+
+    **Built-in MTP heads**
+
     ```python
     from llama_cpp import Llama
-    from llama_cpp.llama_speculative import LlamaNGramMapDecoding
+    from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
 
-    llama = Llama(
-        model_path="path/to/qwen-3.6-27b.gguf",
+    llm = Llama(
+        model_path="path/to/model-with-mtp.gguf",
         n_ctx=4096,
+        n_batch=512,
         n_gpu_layers=-1,
-        draft_model=LlamaNGramMapDecoding(
-            ngram_size=3,
-            num_pred_tokens=10
-        )
+        speculative=SpecConfig(
+            spec_type=SpeculativeType.DRAFT_MTP,
+            draft_n_max=2,
+            draft_p_min=0.0,
+        ),
     )
-
-    for chunk in main_llm.create_completion("Explain quantum physics", stream=True):
-        print(chunk["choices"][0]["text"], end="")
     ```
-    Note: `LlamaPromptLookupDecoding.num_pred_tokens` is the number of tokens to predict 10 is the default and generally good for gpu, 2 performs better for cpu-only machines. Now, `LlamaNGramMapDecoding` with the new Hash Map algorithm, draft generation becomes instantaneous $O(1)$, and the time consumption is almost 0 regardless of whether you set the prediction to 2 or 10 words.
+
+    Omitting `draft_model_path` makes `Llama` enable target MTP tensor loading automatically. MTP has currently been tested with built-in and external MTP models from the Qwen3.5, Qwen3.6, and Qwen3.8 families. For Qwen3.8 27B, `draft_n_max=2` is a good starting point, but the best value depends on the backend, GPU, quantization, prompt, and sampling settings. Use `examples.benchmark.benchmark_speculative` to tune it in the deployment environment.
+
+    **External MTP model**
+
+    ```python
+    llm = Llama(
+        model_path="path/to/target.gguf",
+        n_batch=512,
+        n_gpu_layers=-1,
+        speculative=SpecConfig(
+            spec_type=SpeculativeType.DRAFT_MTP,
+            draft_model_path="path/to/mtp.gguf",
+            draft_n_max=2,
+            draft_n_gpu_layers="all",
+        ),
+    )
+    ```
+
+    **N-gram lookup**
+
+    ```python
+    llm = Llama(
+        model_path="path/to/model.gguf",
+        n_batch=512,
+        speculative=SpecConfig(
+            spec_type=SpeculativeType.NGRAM_MAP_K,
+            ngram_size_n=8,
+            ngram_size_m=16,
+        ),
+    )
+    ```
+
+    MTP and n-gram draft lengths are independent: draft-family engines use `draft_n_max`, while K/K4V use `ngram_size_m`. The implementation keeps the complete `[last_verified_token, draft...]` verification batch together and limits the effective draft length to `n_batch - 1`.
+
+    After a generation, `llm.last_speculative_stats` exposes acceptance, phase timing, checkpoint, rollback, TTFT, and sustained-generation measurements. See [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] for configuration details, supported engines, benchmark commands, and the exact meaning of each statistic.
 
 4. **Dynamic LoRA Routing**:
 
@@ -319,7 +359,9 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
    - **Host checkpoint mode** (`checkpoint_on_device=False`, default): checkpoint payloads are serialized into Python-owned bytes. This supports multiple historical checkpoints per `seq_id`, which is useful for multi-turn reuse and deeper rollback history.
    - **Device checkpoint mode** (`checkpoint_on_device=True`): checkpoint tensor payloads are stored in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Python only keeps the host-visible serialized portion. This reduces device-to-host tensor copy overhead, but only one active checkpoint per `seq_id` is safe because device payloads are keyed by `seq_id`.
 
-   *Tips*: If you are using a hybrid multimodal model for ComfyUI nodes or single-turn API wrappers where you do not need multi-turn state rollback, initialize your `Llama` instance with `ctx_checkpoints=0`:
+   These prompt-cache checkpoints are distinct from the native recurrent snapshots used by MTP speculative decoding. MTP reserves recurrent snapshot slots from `draft_n_max`. N-gram engines do not own a native draft context, so rejection on a Hybrid/Recurrent target depends on `HybridCheckpointCache`; keep `ctx_checkpoints` greater than zero for that combination, preferably with on-device storage.
+
+   *Tips*: If you are using a hybrid multimodal model for ComfyUI nodes or single-turn API wrappers without stateful speculative decoding or multi-turn rollback, initialize your `Llama` instance with `ctx_checkpoints=0`:
 
    ```python
    llm = Llama(
@@ -343,7 +385,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     )
     ```
 
-    Use `checkpoint_on_device=False` if you need multiple historical checkpoints for the same `seq_id`. Use `checkpoint_on_device=True` when fast rollback/checkpointing is more important than keeping many historical checkpoint payloads.
+    Use `checkpoint_on_device=False` if you need multiple historical checkpoints for the same `seq_id`. Use `checkpoint_on_device=True` when fast rollback/checkpointing is more important than keeping many historical checkpoint payloads. Do not disable checkpoints when combining n-gram speculation with a Hybrid/Recurrent target.
 
 6.  **Assistant Prefill**:
 
@@ -630,5 +672,5 @@ for formatting query/document pairs.
 * [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
 * [[Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
-* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Provides draft model interfaces and prompt-based speculative decoding helpers.
+* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP and n-gram speculative engines, rollback, statistics, and benchmarks.
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).
