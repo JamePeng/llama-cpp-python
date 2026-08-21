@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.48] Stateful MTP Speculative Decoding Arrives
+
+- feat(speculative): introduce text-only stateful MTP decoding
+    - add `SpecConfig` and `SpeculativeType` definitions aligned with llama.cpp
+    speculative decoding arguments
+    - introduce a stateful speculative engine lifecycle covering begin, process,
+    draft, accept, checkpoint, rollback, clear, and close
+    - add separate factories for model-free and native model-backed speculative
+    engines
+    - implement text-only MTP decoding with target-internal NextN heads or an
+    external MTP draft model
+    - validate target and draft vocabulary compatibility before generation
+    - configure speculative output limits and recurrent-state capacity from the
+    draft window
+    - integrate batched target verification, acceptance feedback, native
+    recurrent-state rollback, and checkpoint fallback into Llama.generate
+    - migrate NGram map decoding to the stateful speculative lifecycle
+    - remove the legacy prompt lookup implementation and retain the deprecated
+    stateless draft_model path for compatibility
+    - make MTP cleanup safe during interpreter shutdown and release owned draft
+    contexts and models deterministically
+    - bulk-copy mixed token embeddings and target NextN rows instead of performing
+    per-float ctypes writes
+    - lazily allocate full-vocabulary CPU sampling candidates and remove the
+    duplicate unused candidate buffer
+    - reduce memory and Python overhead for large vocabularies such as Qwen3.8's
+    248320-token vocabulary
+    - replace per-rejection rollback logging with aggregated rollback statistics
+    - report draft calls, acceptance by position, phase timings, TTFT, active
+    generation throughput, and sustained generation throughput
+    - retain decode_* statistics as compatibility aliases
+    - add coverage for configuration validation, output sizing, vocabulary
+    compatibility, lifecycle cleanup, mixed embedding copies, and timing metrics
+    - fix(speculative): avoid Python 3.9 forward reference error
+        - Quote the SpeculativeType return annotation in from_str() so it is not
+        evaluated before the enum class has finished being defined.
+        - This fixes a NameError when importing llama_cpp on Python 3.9.
+    - **BREAKING CHANGE**: remove `LlamaPromptLookupDecoding` and replace the legacy
+    NGram mode argument with `SpecConfig` and `SpeculativeType`.
+
+- perf(speculative): optimize MTP checkpoints and rollback
+    - rename the stateful speculative backend interface to `LlamaSpecEngine`
+    - document the engine lifecycle, drafting, acceptance, and rollback contracts
+    - enable recurrent snapshots for MTP draft contexts
+    - reuse draft-time checkpoints during target verification
+    - keep fallback checkpoint state on device to avoid host transfers
+    - truncate rejected suffixes directly when native snapshots are available
+    - validate native draft-context rollback results
+    - collect checkpoint capture, restore, reuse, and rollback timings
+    - expose batch acceptance and checkpoint metrics through last_speculative_stats
+    - print grouped MTP acceptance, phase timing, checkpoint, and throughput summaries
+    - test native checkpoint reuse, on-device fallback, and suffix-only rollback
+
+- feat(examples): support built-in and external MTP benchmarks
+    - require the target model path through the command line
+    - support built-in, external, and combined MTP benchmark modes
+    - accept an external MTP draft model and minimum draft probability
+    - compare each MTP mode against ordinary decoding
+    - validate model paths and numeric benchmark parameters
+    - add detailed -h usage instructions and portable examples
+    - delay llama.cpp imports so help and validation do not load native libraries
+
+- feat(speculative): separate MTP and n-gram benchmark tuning parameters
+    - split MTP draft length into the dedicated --mtp-draft-tokens option
+    - add independent --ngram-sizes and --ngram-draft-tokens parameters
+    - add --ngram-grid to scan N={6,8,10,12} and M={8,16,32,48}
+    - execute and report every n-gram N/M combination as a separate benchmark case
+    - include method configuration, n-gram size, and draft length in CSV records
+    - keep ordinary decoding as the deterministic performance baseline
+    - validate MTP and n-gram batch limits independently
+    - change the Python K4V continuation limit from 8 to 4 to match llama.cpp
+    - add coverage for the vendor-aligned K4V default
+    - improve benchmark help, configuration logging, and per-case summaries
+
+- docs(readme): document stateful speculative decoding
+    - make MTP the primary speculative decoding workflow
+    - document built-in and external MTP configuration
+    - note validation coverage for Qwen3.5, Qwen3.6, and Qwen3.8
+    - recommend draft_n_max=2 as a starting point for Qwen3.8 27B
+    - clarify that optimal draft length depends on hardware and workload
+    - add current n-gram configuration and benchmark guidance
+    - replace deprecated draft_model examples with SpecConfig
+    - document runtime statistics and text-only limitations
+    - Update README.md Table of Contents and Index
+
+- docs(speculative): rewrite the speculative decoding reference
+    - document SpeculativeType, SpecConfig, and LlamaSpecEngine
+    - describe the stateful begin, process, draft, accept, and rollback lifecycle
+    - prioritize built-in and external MTP usage
+    - record tested MTP coverage for Qwen3.5, Qwen3.6, and Qwen3.8
+    - recommend benchmarking around draft_n_max=2 for Qwen3.8 27B
+    - explain MTP hidden-state processing and recurrent checkpoints
+    - document n-gram K and K4V behavior and tuning parameters
+    - describe runtime statistics, engine factories, and current limitations
+    - remove obsolete prompt lookup and string mode documentation
+
+- docs(llama): update speculative decoding documentation
+    - document the new SpecConfig and LlamaSpecEngine interface
+    - prioritize built-in and external MTP usage examples
+    - mark the legacy draft_model callback as deprecated
+    - document automatic target MTP tensor loading
+    - clarify current text-only and single-sequence limitations
+    - note tested Qwen3.5, Qwen3.6, and Qwen3.8 MTP support
+    - recommend draft_n_max=2 as a Qwen3.8 27B benchmark baseline
+    - add stateful n-gram lookup configuration
+    - distinguish MTP and n-gram draft length parameters
+    - explain MTP recurrent snapshots and hybrid checkpoint rollback
+    - warn against disabling checkpoints for hybrid n-gram decoding
+    - update links to the speculative decoding reference
+
+- fix(speculative): preserve verification batches and correct phase timing
+    - synchronize target decoding before speculative hidden-state processing
+    - track target decode, target sync, and speculative process time separately
+    - keep speculative verification batches atomic on decode retries
+    - retain adaptive batch fallback for ordinary prompt evaluation
+    - reject verification batches that exceed the configured batch size
+    - fail fast when native sequence memory removal or rollback fails
+    - validate MTP truncation and chained-head rollback operations
+    - consolidate tests for timing boundaries, batch atomicity, and rollback failures
+    - document the new target decode and synchronization timing metrics
+
+- fix(mtmd): correct ctypes pointer bindings
+    - use a ctypes-compatible pointer type for the MTMD device field
+    - fix `unsigned char *` from c_char_p to POINTER(c_uint8)
+
+- test(mtmd): add minimal binding import coverage
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/bb4caa7540188872173c44d161602d9271386413](https://github.com/ggml-org/llama.cpp/commit/bb4caa7540188872173c44d161602d9271386413)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260820
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/4854c7d305650b6bc9cf2dc805931a5bf2e40dd0...85913abc4f4b9191b28bc6bc482ae9369e0ba624
+
 ## [0.3.47] Multi-Output Sampling, Pocket TTS and audio helper API Bindings, and Llama State Reset Improvements
 
 - feat(mtmd): sync Pocket TTS and audio helper API bindings
