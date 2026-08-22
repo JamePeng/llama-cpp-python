@@ -3021,6 +3021,7 @@ class Llama:
         reasoning_budget_message: Optional[str] = None,
         reasoning_start_in_prompt: bool = False,
         reasoning_start_max_tokens: Optional[int] = 32,
+        ignore_eos: bool = False,
     ) -> Union[
         Iterator[CreateCompletionResponse], Iterator[CreateCompletionStreamResponse]
     ]:
@@ -3202,6 +3203,7 @@ class Llama:
             adaptive_target=adaptive_target,
             adaptive_decay=adaptive_decay,
             use_infill=use_infill,
+            ignore_eos=ignore_eos,
             logit_bias=logit_bias,
             logits_processor=logits_processor,
             grammar=grammar,
@@ -3216,7 +3218,10 @@ class Llama:
             reasoning_start_in_prompt=reasoning_start_in_prompt,
             reasoning_start_max_tokens=reasoning_start_max_tokens,
         ):
-            if llama_cpp_lib.llama_token_is_eog(self._model.vocab, token):
+            if (
+                not ignore_eos
+                and llama_cpp_lib.llama_token_is_eog(self._model.vocab, token)
+            ):
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
                 finish_reason = "stop"
                 break
@@ -3686,6 +3691,7 @@ class Llama:
         reasoning_budget_message: Optional[str] = None,
         reasoning_start_in_prompt: bool = False,
         reasoning_start_max_tokens: Optional[int] = 32,
+        ignore_eos: bool = False,
     ) -> Union[CreateCompletionResponse, Iterator[CreateCompletionStreamResponse]]:
         """Generate text from a prompt.
 
@@ -3724,6 +3730,7 @@ prompt: The prompt to generate text from.
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
             use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
+            ignore_eos: If True, suppress end-of-generation tokens and continue until another stopping condition is reached.
             model: The name to use for the model in the completion object.
             stopping_criteria: A list of stopping criteria to use.
             logit_bias: A logit bias to use.
@@ -3789,6 +3796,7 @@ prompt: The prompt to generate text from.
             adaptive_target=adaptive_target,
             adaptive_decay=adaptive_decay,
             use_infill=use_infill,
+            ignore_eos=ignore_eos,
             model=model,
             stopping_criteria=stopping_criteria,
             logit_bias=logit_bias,
@@ -3861,6 +3869,7 @@ prompt: The prompt to generate text from.
         reasoning_budget_message: Optional[str] = None,
         reasoning_start_in_prompt: bool = False,
         reasoning_start_max_tokens: Optional[int] = 32,
+        ignore_eos: bool = False,
     ) -> Union[CreateCompletionResponse, Iterator[CreateCompletionStreamResponse]]:
         """Generate text from a prompt.
 
@@ -3899,6 +3908,7 @@ prompt: The prompt to generate text from.
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
             use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
+            ignore_eos: If True, suppress end-of-generation tokens and continue until another stopping condition is reached.
             model: The name to use for the model in the completion object.
             stopping_criteria: A list of stopping criteria to use.
             logit_bias: A logit bias to use.
@@ -3964,6 +3974,7 @@ prompt: The prompt to generate text from.
             adaptive_target=adaptive_target,
             adaptive_decay=adaptive_decay,
             use_infill=use_infill,
+            ignore_eos=ignore_eos,
             model=model,
             stopping_criteria=stopping_criteria,
             logit_bias=logit_bias,

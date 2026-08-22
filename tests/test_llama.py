@@ -1,6 +1,8 @@
 import ctypes
 import multiprocessing
 import os
+import threading
+from types import SimpleNamespace
 import pytest
 import numpy as np
 from scipy.special import log_softmax
@@ -34,6 +36,88 @@ def test_speculative_generation_timing_reports_sustained_throughput():
     assert stats["sustained_tokens"] == 383
     assert stats["sustained_seconds"] == pytest.approx(4.038)
     assert stats["sustained_tokens_per_second"] == pytest.approx(383 / 4.038)
+
+
+def test_completion_public_apis_forward_ignore_eos():
+    llm = object.__new__(llama_cpp.Llama)
+    private_calls = []
+
+    def fake_private(**kwargs):
+        private_calls.append(kwargs)
+        yield {"choices": [{"text": "", "finish_reason": "length"}]}
+
+    llm._create_completion = fake_private
+    llama_cpp.Llama.create_completion(llm, [1], ignore_eos=True)
+    assert private_calls[0]["ignore_eos"] is True
+
+    public_calls = []
+
+    def fake_public(**kwargs):
+        public_calls.append(kwargs)
+        return {"choices": [{"text": "", "finish_reason": "length"}]}
+
+    llm.create_completion = fake_public
+    llama_cpp.Llama.__call__(llm, "prompt", ignore_eos=True)
+    assert public_calls[0]["ignore_eos"] is True
+
+
+@pytest.mark.parametrize(
+    ("ignore_eos", "expected_text", "expected_finish_reason"),
+    [(False, "", "stop"), (True, "<eog>", "length")],
+)
+def test_private_completion_respects_ignore_eos_at_eog_boundary(
+    monkeypatch, ignore_eos, expected_text, expected_finish_reason
+):
+    llm = object.__new__(llama_cpp.Llama)
+    forwarded = []
+
+    def fake_generate(tokens, **kwargs):
+        assert tokens == [1]
+        forwarded.append(kwargs["ignore_eos"])
+        yield 2
+
+    llm._model = SimpleNamespace(
+        vocab=object(),
+        token_bos=lambda: 1,
+        token_eos=lambda: 2,
+        token_sep=lambda: -1,
+        token_fim_pre=lambda: -1,
+        token_fim_mid=lambda: -1,
+        token_fim_suf=lambda: -1,
+        get_add_sep=lambda: False,
+    )
+    llm._abort_event = threading.Event()
+    llm.metadata = {}
+    llm.spm_infill = False
+    llm.verbose = False
+    llm._n_ctx = 8
+    llm._logits_all = False
+    llm._seed = 0
+    llm.cache = None
+    llm.model_path = "fake.gguf"
+    llm.input_ids = np.zeros(8, dtype=np.intc)
+    llm.n_tokens = 1
+    llm.scores = np.zeros((1, 4), dtype=np.float32)
+    llm.generate = fake_generate
+    llm.detokenize = (
+        lambda tokens, prev_tokens=None, **kwargs: b"".join(
+            b"<eog>" if token == 2 else b"x" for token in tokens
+        )
+    )
+    monkeypatch.setattr(
+        "llama_cpp.llama.llama_cpp_lib.llama_token_is_eog",
+        lambda vocab, token: token == 2,
+    )
+
+    result = next(
+        llm._create_completion(
+            prompt=[1], max_tokens=1, ignore_eos=ignore_eos
+        )
+    )
+
+    assert forwarded == [ignore_eos]
+    assert result["choices"][0]["text"] == expected_text
+    assert result["choices"][0]["finish_reason"] == expected_finish_reason
 
 
 @pytest.mark.parametrize("generated_tokens", [0, 1])
