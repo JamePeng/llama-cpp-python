@@ -1017,7 +1017,7 @@ class MTMDChatHandler:
         dry_multiplier: float = 0.0,
         dry_base: float = 1.75,
         dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = 0,
+        dry_penalty_last_n:int = 64,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,

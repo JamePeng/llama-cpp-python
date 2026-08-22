@@ -1665,7 +1665,7 @@ class Llama:
         dry_multiplier: float = 0.0,  # 0.0 = disabled;      DRY repetition penalty for tokens extending repetition:
         dry_base: float = 1.75,       # 0.0 = disabled;      multiplier * base ^ (length of sequence before token - allowed length)
         dry_allowed_length: int = 2,  # tokens extending repetitions beyond this receive penalty
-        dry_penalty_last_n:int = -1,  # how many tokens to scan for repetitions (0 = disable penalty, -1 = context size)
+        dry_penalty_last_n:int = 64,  # how many tokens to scan for repetitions (0 = disable penalty, -1 = context size)
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"], # default sequence breakers for DRY
         # Adaptive
         adaptive_target : float = -1.0, # select tokens near this probability (valid range 0.0 to 1.0; negative = disabled)
@@ -1814,7 +1814,7 @@ class Llama:
         dry_multiplier: float = 0.0,
         dry_base: float = 1.75,
         dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = -1,
+        dry_penalty_last_n:int = 64,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
@@ -3000,7 +3000,7 @@ class Llama:
         dry_multiplier: float = 0.0,
         dry_base: float = 1.75,
         dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = 0,
+        dry_penalty_last_n:int = 64,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
@@ -3671,7 +3671,7 @@ class Llama:
         dry_multiplier: float = 0.0,
         dry_base: float = 1.75,
         dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = 0,
+        dry_penalty_last_n:int = 64,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
@@ -3725,7 +3725,7 @@ prompt: The prompt to generate text from.
             dry_multiplier: Set the DRY (Don't Repeat Yourself) repetition penalty multiplier. Default: `0.0`, which is disabled.
             dry_base`: Set the DRY repetition penalty base value. Default: `1.75`
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
-            dry_penalty_last_n: How many tokens to scan for repetitions. Default: `0`, where `0` is disabled and `-1` is context size.
+            dry_penalty_last_n: How many tokens to scan for repetitions. Default: `64`; `0` disables scanning and `-1` uses the context size.
             dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
@@ -3849,7 +3849,7 @@ prompt: The prompt to generate text from.
         dry_multiplier: float = 0.0,
         dry_base: float = 1.75,
         dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = 0,
+        dry_penalty_last_n:int = 64,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
@@ -3903,7 +3903,7 @@ prompt: The prompt to generate text from.
             dry_multiplier: Set the DRY (Don't Repeat Yourself) repetition penalty multiplier. Default: `0.0`, which is disabled.
             dry_base`: Set the DRY repetition penalty base value. Default: `1.75`
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
-            dry_penalty_last_n: How many tokens to scan for repetitions. Default: `0`, where `0` is disabled and `-1` is context size.
+            dry_penalty_last_n: How many tokens to scan for repetitions. Default: `64`; `0` disables scanning and `-1` uses the context size.
             dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
@@ -4024,7 +4024,7 @@ prompt: The prompt to generate text from.
         dry_multiplier: float = 0.0,
         dry_base: float = 1.75,
         dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = 0,
+        dry_penalty_last_n:int = 64,
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
         adaptive_target : float = -1.0,
         adaptive_decay : float = 0.9,
@@ -4084,7 +4084,7 @@ prompt: The prompt to generate text from.
             dry_multiplier: Set the DRY (Don't Repeat Yourself) repetition penalty multiplier. Default: `0.0`, which is disabled.
             dry_base`: Set the DRY repetition penalty base value. Default: `1.75`
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
-            dry_penalty_last_n: How many tokens to scan for repetitions. Default: `0`, where `0` is disabled and `-1` is context size.
+            dry_penalty_last_n: How many tokens to scan for repetitions. Default: `64`; `0` disables scanning and `-1` uses the context size.
             dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)

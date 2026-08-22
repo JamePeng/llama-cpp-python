@@ -902,7 +902,7 @@ Mirostat actively maintains a target entropy (`tau`) during generation to preven
 * **`dry_multiplier`** (`float`, default: `0.0`): The multiplier for the penalty. `0.0` disables DRY.
 * **`dry_base`** (`float`, default: `1.75`): The base value for the exponential penalty.
 * **`dry_allowed_length`** (`int`, default: `2`): Sequences extending beyond this length receive the penalty.
-* **`dry_penalty_last_n`** (`int`, default: `0`): Tokens to scan for repetitions. `0` = disabled, `-1` = context size.
+* **`dry_penalty_last_n`** (`int`, default: `64`): Tokens to scan for repetitions. `0` = disabled, `-1` = context size.
 * **`dry_seq_breakers`** (`list[str]`, default: `["\n", ":", "\"", "*"]`): Tokens that reset the DRY sequence matching.
 
 

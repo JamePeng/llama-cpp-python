@@ -38,7 +38,7 @@ class GptParams:
     dry_multiplier: float = 0.0
     dry_base: float = 1.75
     dry_allowed_length: int = 2
-    dry_penalty_last_n:int = 0
+    dry_penalty_last_n:int = 64
     dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"]
     model: str = "./models/llama-7B/ggml-model.bin"
     prompt: str = ""
@@ -252,8 +252,8 @@ def gpt_params_parse(argv=None):
     parser.add_argument(
         "--dry_penalty_last_n",
         type=int,
-        default=0,
-        help="How many tokens to scan for repetitions. Default is 0, where 0 is disabled and -1 is context size",
+        default=64,
+        help="How many tokens to scan for repetitions. Default is 64; 0 disables scanning and -1 uses the context size",
         dest="dry_penalty_last_n",
     )
 
