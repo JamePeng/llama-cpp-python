@@ -1,4 +1,5 @@
 import builtins
+import ctypes
 
 import numpy as np
 import pytest
@@ -7,11 +8,13 @@ import llama_cpp
 from llama_cpp import llama_cpp as llama_cpp_lib
 
 from llama_cpp.llama_speculative import (
+    LlamaDFlashDecoding,
     LlamaMTPDecoding,
     LlamaNGramMapDecoding,
     LlamaSpecEngine,
     SpecConfig,
     SpeculativeType,
+    create_native_spec_engine,
     speculative_output_limits,
 )
 
@@ -20,6 +23,12 @@ def test_spec_engine_is_the_public_base_class():
     assert llama_cpp.LlamaSpecEngine is LlamaSpecEngine
     assert issubclass(LlamaNGramMapDecoding, LlamaSpecEngine)
     assert issubclass(LlamaMTPDecoding, LlamaSpecEngine)
+    assert issubclass(LlamaDFlashDecoding, LlamaSpecEngine)
+    assert LlamaMTPDecoding.__bases__ == LlamaDFlashDecoding.__bases__
+    assert LlamaMTPDecoding._copy_rows is LlamaDFlashDecoding._copy_rows
+    assert LlamaMTPDecoding._candidate is LlamaDFlashDecoding._candidate
+    assert "_copy_rows" not in LlamaDFlashDecoding.__dict__
+    assert "_candidate" not in LlamaDFlashDecoding.__dict__
 
 
 def test_ngram_map_lifecycle_and_acceptance_feedback():
@@ -59,6 +68,40 @@ def test_spec_config_requires_draft_model_for_external_architectures():
             SpecConfig(spec_type=spec_type).validate()
 
 
+@pytest.mark.parametrize(
+    "spec_type",
+    [SpeculativeType.DRAFT_DFLASH, SpeculativeType.DRAFT_DSPARK],
+)
+def test_native_factory_routes_dflash_family_to_shared_engine(
+    monkeypatch, spec_type
+):
+    created = []
+
+    def fake_engine(config, **kwargs):
+        created.append((config, kwargs))
+        return "dflash-engine"
+
+    monkeypatch.setattr(
+        "llama_cpp.llama_speculative.LlamaDFlashDecoding", fake_engine
+    )
+    config = SpecConfig(
+        spec_type=spec_type,
+        draft_model_path="draft.gguf",
+    )
+    result = create_native_spec_engine(
+        config,
+        target_model="target-model",
+        target_context="target-context",
+        model_params="model-params",
+        context_params="context-params",
+        verbose=False,
+    )
+
+    assert result == "dflash-engine"
+    assert created[0][0] is config
+    assert created[0][1]["target_model"] == "target-model"
+
+
 def test_mtp_allows_target_internal_heads():
     SpecConfig(spec_type=SpeculativeType.DRAFT_MTP).validate()
 
@@ -67,6 +110,21 @@ def test_speculative_output_limits_match_llama_cpp():
     assert speculative_output_limits(32, 1, 3) == (4, 4)
     assert speculative_output_limits(32, 4, 3) == (16, 4)
     assert speculative_output_limits(3, 4, 8) == (3, 3)
+
+
+def test_draft_context_does_not_inherit_target_embedding_mode():
+    target = llama_cpp_lib.llama_context_default_params()
+    target.embeddings = True
+    target.pooling_type = llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN
+
+    draft = LlamaMTPDecoding._copy_draft_context_params(
+        target, llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
+    )
+
+    assert target.embeddings is True
+    assert target.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN
+    assert draft.embeddings is False
+    assert draft.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
 
 
 def test_spec_config_selects_algorithm_specific_draft_limit():
@@ -132,13 +190,15 @@ class _FakeVocabModel:
         return self.tokens[token]
 
 
-def test_mtp_vocab_compatibility_rejects_token_mismatch():
+def test_speculative_vocab_compatibility_rejects_token_mismatch():
     target = _FakeVocabModel([str(i) for i in range(8)])
     draft = _FakeVocabModel([str(i) for i in range(8)])
     draft.tokens[6] = "different"
 
     with pytest.raises(ValueError, match="token 6"):
-        LlamaMTPDecoding._validate_vocab_compatibility(target, draft)
+        LlamaMTPDecoding._validate_speculative_vocab_compatibility(
+            target, draft
+        )
 
 
 class _FakeCheckpointContext:
@@ -466,3 +526,310 @@ def test_mtp_truncate_fails_when_native_memory_removal_fails():
 
     with pytest.raises(RuntimeError, match="draft-context truncation failed"):
         engine.truncate(12)
+
+
+class _FakeDFlashBatch:
+    def __init__(self):
+        self.tokens = []
+        self.positions = []
+        self.embeddings = None
+        self.logits = []
+
+    def reset(self):
+        self.tokens = []
+        self.positions = []
+        self.embeddings = None
+        self.logits = []
+
+    def add_sequence(
+        self, token_array, pos_array, seq_ids, logits_array
+    ):
+        assert seq_ids == [0]
+        assert len(token_array) == len(pos_array) == len(logits_array)
+        self.tokens = list(token_array)
+        self.positions = list(pos_array)
+
+    def add_embeddings(
+        self, embeddings, *, pos_array, seq_ids, logits_array=None
+    ):
+        assert seq_ids == [0]
+        self.embeddings = np.asarray(embeddings, dtype=np.float32).copy()
+        self.positions = list(pos_array)
+        self.logits = list(logits_array or [])
+
+
+class _FakeDFlashDraftContext:
+    def __init__(self, *, fused=None, confidence=None):
+        self.fused = fused
+        self.confidence = confidence
+        self.decoded = []
+        self.encoded = []
+        self.synchronized = False
+        self.removals = []
+
+    def n_ubatch(self):
+        return 8
+
+    def encode(self, batch):
+        self.encoded.append(batch.embeddings.copy())
+
+    def decode(self, batch):
+        self.decoded.append(
+            (list(batch.tokens), list(batch.positions), batch.embeddings)
+        )
+        return 0
+
+    def get_embeddings_nextn(self):
+        values = self.confidence if self.confidence is not None else self.fused
+        return values.ctypes.data_as(
+            ctypes.POINTER(ctypes.c_float)
+        )
+
+    def synchronize(self):
+        self.synchronized = True
+
+    def memory_seq_rm(self, seq_id, p0, p1):
+        self.removals.append((seq_id, p0, p1))
+        return True
+
+
+def _draft_test_dflash_engine(*, dspark, sample_from_anchor, p_min=0.0):
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.config = SpecConfig(
+        spec_type=(
+            SpeculativeType.DRAFT_DSPARK
+            if dspark
+            else SpeculativeType.DRAFT_DFLASH
+        ),
+        draft_model_path="draft.gguf",
+        draft_n_max=3,
+        draft_p_min=p_min,
+    )
+    engine.is_dspark = dspark
+    engine.sample_from_anchor = sample_from_anchor
+    engine.draft_limit = 3
+    engine.mask_token_id = 99
+    engine.n_embd_dec = 2
+    engine.noise_batch = _FakeDFlashBatch()
+    engine._pending_verification_checkpoint = None
+    engine._candidate = lambda output_index: (100 + output_index, 0.9)
+    engine.checkpoint = lambda seq_id=0: {"position": 5}
+    engine.restore = lambda checkpoint, seq_id=0: None
+    return engine
+
+
+def test_dflash_builds_anchor_plus_mask_block_and_reads_mask_outputs():
+    engine = _draft_test_dflash_engine(
+        dspark=False, sample_from_anchor=True, p_min=0.1
+    )
+    engine.draft_context = _FakeDFlashDraftContext()
+
+    result = engine.draft([], n_past=7, id_last=42, n_max=3)
+
+    assert engine.noise_batch.tokens == [42, 99, 99, 99]
+    assert engine.noise_batch.positions == [7, 8, 9, 10]
+    assert result.tolist() == [101, 102, 103]
+    assert engine._pending_verification_checkpoint == {"position": 5}
+
+
+def test_dspark_anchor_layout_uses_confidence_to_truncate_block():
+    engine = _draft_test_dflash_engine(
+        dspark=True, sample_from_anchor=True, p_min=0.5
+    )
+    confidence = np.asarray(
+        [[0.9, 0.9], [0.4, 0.4], [0.8, 0.8]], dtype=np.float32
+    )
+    engine.draft_context = _FakeDFlashDraftContext(confidence=confidence)
+
+    result = engine.draft([], n_past=7, id_last=42, n_max=3)
+
+    assert engine.noise_batch.tokens == [42, 99, 99]
+    assert result.tolist() == [100]
+
+
+def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.target_layer_ids = [1, 3]
+    engine.n_embd_tgt = 2
+    engine.n_embd_enc = 4
+    engine.n_embd_dec = 3
+    layer_1 = np.asarray([[1, 2], [3, 4]], dtype=np.float32)
+    layer_3 = np.asarray([[10, 20], [30, 40]], dtype=np.float32)
+
+    class _TargetContext:
+        def get_embeddings_layer_inp(self, layer_id):
+            values = {1: layer_1, 3: layer_3}[layer_id]
+            return values.ctypes.data_as(
+                ctypes.POINTER(ctypes.c_float)
+            )
+
+    fused = np.asarray([[5, 6, 7], [8, 9, 10]], dtype=np.float32)
+    engine.target_context = _TargetContext()
+    engine.draft_context = _FakeDFlashDraftContext(fused=fused)
+    engine.encoder_batch = _FakeDFlashBatch()
+    engine.inject_batch = _FakeDFlashBatch()
+    engine.verify_positions = []
+
+    class _TargetBatch:
+        n_tokens = 2
+        token = [11, 12]
+        embd = None
+        pos = [4, 5]
+        n_seq_id = [1, 1]
+        seq_id = [[0], [0]]
+
+    engine.process(_TargetBatch())
+
+    np.testing.assert_array_equal(
+        engine.draft_context.encoded[0].reshape(2, 4),
+        [[1, 2, 10, 20], [3, 4, 30, 40]],
+    )
+    np.testing.assert_array_equal(
+        engine.draft_context.decoded[0][2].reshape(2, 3), fused
+    )
+    assert engine.draft_context.decoded[0][1] == [4, 5]
+    assert engine.draft_context.synchronized
+    assert engine.verify_positions == [4, 5]
+    assert engine.encoder_batch.logits == [True, True]
+    assert engine.inject_batch.logits == []
+
+
+def test_dflash_rejects_multimodal_embedding_batches_until_positions_are_mapped():
+    engine = object.__new__(LlamaDFlashDecoding)
+
+    class _EmbeddingBatch:
+        n_tokens = 1
+        token = None
+        embd = [0.0]
+
+    with pytest.raises(NotImplementedError, match="text-only"):
+        engine.process(_EmbeddingBatch())
+
+
+def test_dflash_accepts_final_target_layer_input_tap_for_nemotron():
+    LlamaDFlashDecoding._validate_target_layer_ids([0, 17, 52], 52)
+
+    with pytest.raises(ValueError, match=r"53 not in \[0, 52\]"):
+        LlamaDFlashDecoding._validate_target_layer_ids([53], 52)
+
+
+def test_dflash_native_verification_rollback_checks_memory_removal():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine._use_native_draft_rollback = True
+    engine.verify_positions = [8, 9, 10]
+    engine._checkpoint_stats = {"native_verification_rollbacks": 0}
+
+    class _Context:
+        def memory_seq_rm(self, seq_id, p0, p1):
+            return False
+
+    engine.draft_context = _Context()
+    with pytest.raises(RuntimeError, match="verification rollback failed"):
+        engine.rollback_verified({"position": 7}, n_accepted=1)
+
+
+def test_dflash_native_checkpoint_uses_suffix_removal_without_state_buffer():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.draft_context = _FakeCheckpointContext(position=7, state_size=8)
+    engine._use_native_draft_rollback = True
+    engine.n_embd_dec = 2
+    engine.verify_positions = [8, 9]
+    engine.verify_fused = np.ones((2, 2), dtype=np.float32)
+    engine._active_verification_checkpoint = None
+    engine.reset_checkpoint_stats()
+
+    checkpoint = engine.checkpoint()
+    engine.restore(checkpoint)
+    stats = engine.checkpoint_stats()
+
+    assert checkpoint["mode"] == "native"
+    assert checkpoint["buffer"] is None
+    assert engine.draft_context.get_flags == []
+    assert engine.draft_context.set_flags == []
+    assert engine.draft_context.removals == [(0, 8, -1)]
+    assert stats["native_captures"] == 1
+    assert stats["native_restores"] == 1
+    assert stats["device_captures"] == 0
+    assert stats["device_restores"] == 0
+
+
+def test_dflash_can_follow_target_rollback_with_device_draft_checkpoints():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine._use_native_draft_rollback = False
+
+    assert engine.can_follow_target_native_rollback()
+
+
+def test_dflash_device_checkpoint_restore_reclaims_noise_suffix():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.draft_context = _FakeCheckpointContext(position=7, state_size=8)
+    engine.n_embd_dec = 2
+    engine.verify_positions = [8, 9]
+    engine.verify_fused = np.ones((2, 2), dtype=np.float32)
+    engine._active_verification_checkpoint = {"position": 7}
+    engine.reset_checkpoint_stats()
+    checkpoint = {
+        "position": 7,
+        "mode": "on-device",
+        "buffer": (ctypes.c_uint8 * 8)(),
+        "size": 8,
+        "flags": llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
+        | llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE,
+    }
+
+    engine.restore(checkpoint)
+
+    assert engine.draft_context.removals == [(0, 8, -1)]
+    assert engine.checkpoint_stats()["device_restores"] == 1
+
+
+def test_dflash_device_checkpoint_rollback_replays_accepted_fused_prefix():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine._use_native_draft_rollback = False
+    engine.verify_positions = [8, 9, 10]
+    engine.verify_fused = np.asarray(
+        [[1, 2], [3, 4], [5, 6]], dtype=np.float32
+    )
+    engine.n_embd_dec = 2
+    engine.inject_batch = _FakeDFlashBatch()
+    engine.draft_context = _FakeDFlashDraftContext()
+    restored = []
+
+    def restore(checkpoint, seq_id=0):
+        restored.append(checkpoint)
+        engine.verify_positions.clear()
+        engine.verify_fused = np.empty((0, 2), dtype=np.float32)
+
+    engine.restore = restore
+    engine.rollback_verified({"position": 7}, n_accepted=1)
+
+    assert restored == [{"position": 7}]
+    np.testing.assert_array_equal(
+        engine.draft_context.decoded[0][2].reshape(2, 2), [[1, 2], [3, 4]]
+    )
+    assert engine.draft_context.decoded[0][1] == [8, 9]
+    assert engine.draft_context.synchronized
+
+
+def test_dflash_checkpoint_truncation_replays_only_the_accepted_prefix():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine._use_native_draft_rollback = False
+    engine._active_verification_checkpoint = {"position": 7}
+    engine.verify_positions = [8, 9, 10]
+    engine.verify_fused = np.asarray(
+        [[1, 2], [3, 4], [5, 6]], dtype=np.float32
+    )
+    engine.n_embd_dec = 2
+    engine.inject_batch = _FakeDFlashBatch()
+    engine.draft_context = _FakeDFlashDraftContext()
+    restored = []
+    engine.restore = lambda checkpoint, seq_id=0: restored.append(checkpoint)
+
+    engine.truncate(10)
+
+    assert restored == [{"position": 7}]
+    np.testing.assert_array_equal(
+        engine.draft_context.decoded[0][2].reshape(2, 2), [[1, 2], [3, 4]]
+    )
+    assert engine.draft_context.decoded[0][1] == [8, 9]
+    assert engine.draft_context.synchronized

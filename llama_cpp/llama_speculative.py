@@ -476,8 +476,13 @@ class LlamaSpecEngine(abc.ABC):
         """Return per-request checkpoint metrics without resetting them."""
         return {}
 
-    def supports_native_target_rollback(self) -> bool:
-        """Report whether target recurrent snapshots can roll back rejection."""
+    def can_follow_target_native_rollback(self) -> bool:
+        """Return whether this engine can realign after target ``seq_rm``.
+
+        This is an engine capability, not a probe of the target context.  The
+        caller separately checks that the target has enough recurrent-state
+        snapshots for the rejected verification suffix.
+        """
         return False
 
     def rollback_verified(
@@ -910,8 +915,461 @@ def create_spec_engine(config: SpecConfig) -> LlamaSpecEngine:
     )
 
 
-class LlamaMTPDecoding(LlamaSpecEngine):
-    """Python orchestration of llama.cpp's native NextN/MTP graph."""
+class _LlamaModelDraftEngine(LlamaSpecEngine):
+    """Infrastructure shared by model-backed speculative-decoding engines.
+
+    This private base class centralizes the native plumbing used by MTP,
+    DFlash, and DSpark: draft model parameters, target/draft compatibility,
+    context defaults, backend candidate sampling, ctypes buffer lifetimes, and
+    resource cleanup. It intentionally does not implement an algorithm's graph
+    inputs, checkpoint semantics, draft layout, or acceptance state. Those
+    responsibilities remain in the concrete :class:`LlamaSpecEngine` subclass.
+
+    To adapt another model-backed algorithm, its constructor should:
+
+    1. validate its algorithm-specific :class:`SpecConfig` requirements and
+       call :meth:`_init_model_draft_engine` before allocating native objects;
+    2. load an external sidecar with :meth:`_load_draft_model`, or explicitly
+       assign a borrowed model when the target contains the draft heads;
+    3. start with :meth:`_build_draft_context_params`, then set only the graph-
+       specific context fields before constructing its context and batches;
+    4. optionally call :meth:`_enable_backend_sampling` after ``draft_context``
+       exists, and implement the abstract request hooks inherited from
+       :class:`LlamaSpecEngine`;
+    5. implement idempotent ``close()`` using :meth:`_close_draft_resources`,
+       passing ``close_model=False`` for a target-owned model.
+
+    The target model and context are always borrowed and must never be closed
+    here. Concrete engines own their draft context and batches. An external
+    draft model is owned by its engine, whereas internal MTP heads borrow the
+    target model. Keeping this ownership boundary explicit is essential because
+    ``close()`` may also run while the Python interpreter is shutting down.
+    """
+
+    @staticmethod
+    def _validate_speculative_vocab_compatibility(
+        target_model: Any, draft_model: Any
+    ) -> None:
+        """Reject target/draft vocabularies that cannot share token IDs.
+
+        The checks mirror llama.cpp's speculative model validation: vocabulary
+        type and enabled BOS/EOS behavior must match, vocabulary sizes may only
+        differ by the small allowed tail, and every shared normal token must
+        decode to identical text. A mismatch raises :class:`ValueError` before
+        a draft context is created.
+        """
+        if target_model.vocab_type() != draft_model.vocab_type():
+            raise ValueError(
+                "Draft and target models use different vocabulary types"
+            )
+
+        for add_name, token_name in (
+            ("get_add_bos", "token_bos"),
+            ("get_add_eos", "token_eos"),
+        ):
+            target_add = bool(getattr(target_model, add_name)())
+            draft_add = bool(getattr(draft_model, add_name)())
+            if target_add != draft_add:
+                raise ValueError(
+                    f"Draft and target models disagree on {add_name}"
+                )
+            if target_add and getattr(target_model, token_name)() != getattr(
+                draft_model, token_name
+            )():
+                raise ValueError(
+                    f"Draft and target models use different {token_name}"
+                )
+
+        target_size = target_model.n_vocab()
+        draft_size = draft_model.n_vocab()
+        if abs(target_size - draft_size) > SPEC_VOCAB_MAX_SIZE_DIFFERENCE:
+            raise ValueError(
+                "Draft and target vocabulary sizes differ too much: "
+                f"{draft_size} != {target_size}"
+            )
+
+        for token in range(
+            SPEC_VOCAB_CHECK_START_TOKEN_ID, min(target_size, draft_size)
+        ):
+            if target_model.token_get_text(token) != draft_model.token_get_text(
+                token
+            ):
+                raise ValueError(
+                    f"Draft and target vocabularies differ at token {token}"
+                )
+
+    @staticmethod
+    def _copy_draft_context_params(
+        context_params: Any, pooling_type_unspecified: int
+    ) -> Any:
+        """Copy target parameters without inheriting embedding or pooling mode.
+
+        This mirrors ``common_base_params_to_speculative`` in llama.cpp. Draft
+        contexts configure hidden-state extraction themselves and must not
+        inherit a target embedding request or its pooling behavior.
+        """
+        params = type(context_params).from_buffer_copy(context_params)
+        params.embeddings = False
+        params.pooling_type = pooling_type_unspecified
+        return params
+
+    def _init_model_draft_engine(
+        self,
+        config: SpecConfig,
+        *,
+        target_model: Any,
+        target_context: Any,
+        llama_cpp_lib: Any,
+        verbose: bool,
+    ) -> None:
+        """Initialize shared Python state before allocating draft resources.
+
+        ``target_model`` and ``target_context`` are borrowed. ``llama_cpp_lib``
+        is retained so cleanup never needs a lazy import during interpreter
+        shutdown. The retained ctypes arrays are initialized here because model
+        parameter pointers may continue referencing them after model loading.
+        """
+        self.config = config
+        # close() can run during interpreter shutdown. Retain the already
+        # imported module instead of relying on Python's disabled importer.
+        self._llama_cpp_lib = llama_cpp_lib
+        self.target_model = target_model
+        self.target_context = target_context
+        self.verbose = verbose
+        self._closed = False
+        self._backend_sampler = None
+        self._backend_sampling = False
+        # ctypes arrays and their pattern bytes must outlive model loading.
+        self._draft_devices = None
+        self._draft_buft_patterns = None
+        self._draft_buft_overrides = None
+
+    def _build_draft_model_params(
+        self, model_params: Any, *, load_mtp: bool
+    ) -> Any:
+        """Build sidecar model parameters from target loading defaults.
+
+        The returned ctypes structure applies draft GPU placement, explicit
+        devices, CPU MoE tensor overrides, user-supplied parameter overrides,
+        and the algorithm-specific ``load_mtp`` flag. Device and buffer-override
+        arrays are stored on ``self`` so their native pointers remain valid.
+        Unknown device names or parameter fields raise :class:`ValueError`.
+        """
+        draft_params = type(model_params).from_buffer_copy(model_params)
+        draft_params.n_gpu_layers = self.config.resolved_draft_n_gpu_layers()
+        draft_params.load_mtp = load_mtp
+
+        if self.config.draft_devices:
+            from llama_cpp._ggml import ggml_backend_dev_by_name
+
+            DeviceArray = ctypes.c_void_p * (len(self.config.draft_devices) + 1)
+            self._draft_devices = DeviceArray()
+            for i, name in enumerate(self.config.draft_devices):
+                device = ggml_backend_dev_by_name(name.encode("utf-8"))
+                if not device:
+                    raise ValueError(f"Unknown draft backend device: {name}")
+                self._draft_devices[i] = device
+            self._draft_devices[-1] = None
+            draft_params.devices = self._draft_devices
+
+        if (
+            self.config.draft_cpu_moe
+            or self.config.draft_n_cpu_moe > 0
+            or self.config.draft_tensor_buft_overrides
+        ):
+            from llama_cpp._ggml import ggml_backend_cpu_buffer_type
+
+            override_values = list(
+                self.config.draft_tensor_buft_overrides or []
+            )
+            if self.config.draft_cpu_moe:
+                patterns = [rb"\.ffn_(up|down|gate|gate_up)_(ch|)exps"]
+            else:
+                patterns = [
+                    f"blk\\.{i}".encode("utf-8")
+                    + rb"\.ffn_(up|down|gate|gate_up)_(ch|)exps"
+                    for i in range(self.config.draft_n_cpu_moe)
+                ]
+            self._draft_buft_patterns = patterns
+            cpu_buft = ggml_backend_cpu_buffer_type()
+            override_type = self._llama_cpp_lib.llama_model_tensor_buft_override
+            OverrideArray = override_type * (
+                len(override_values) + len(patterns) + 1
+            )
+            self._draft_buft_overrides = OverrideArray()
+            out = 0
+            for value in override_values:
+                self._draft_buft_overrides[out].pattern = value.pattern
+                self._draft_buft_overrides[out].buft = value.buft
+                out += 1
+            for pattern in patterns:
+                self._draft_buft_overrides[out].pattern = pattern
+                self._draft_buft_overrides[out].buft = cpu_buft
+                out += 1
+            self._draft_buft_overrides[out].pattern = None
+            self._draft_buft_overrides[out].buft = None
+            draft_params.tensor_buft_overrides = self._draft_buft_overrides
+
+        for name, value in self.config.draft_model_kwargs.items():
+            if not hasattr(draft_params, name):
+                raise ValueError(f"Unknown draft model parameter: {name}")
+            setattr(draft_params, name, value)
+        return draft_params
+
+    def _load_draft_model(
+        self,
+        internals: Any,
+        model_params: Any,
+        *,
+        load_mtp: bool,
+    ) -> Any:
+        """Load and validate an engine-owned external draft model.
+
+        Compatibility is checked immediately after native loading. If checking
+        fails, the newly created model is closed before the original exception
+        is propagated. The caller owns the returned model and must eventually
+        pass ``close_model=True`` to :meth:`_close_draft_resources`.
+        """
+        draft_model = internals.LlamaModel(
+            path_model=self.config.draft_model_path,
+            params=self._build_draft_model_params(
+                model_params, load_mtp=load_mtp
+            ),
+            verbose=self.verbose,
+        )
+        try:
+            self._validate_speculative_vocab_compatibility(
+                self.target_model, draft_model
+            )
+        except BaseException:
+            draft_model.close()
+            raise
+        return draft_model
+
+    def _build_draft_context_params(self, context_params: Any) -> Any:
+        """Create common draft context parameters from target parameters.
+
+        Embedding mode and pooling are reset first, matching llama.cpp's
+        speculative context conversion. Draft-specific thread counts and KV
+        cache types are then applied. The concrete engine must set fields such
+        as ``ctx_type``, ``ctx_other``, batch capacity, outputs, attention mode,
+        and recurrent snapshot count before constructing ``LlamaContext``.
+        """
+        params = self._copy_draft_context_params(
+            context_params, self._llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
+        )
+        if self.config.draft_n_threads is not None:
+            params.n_threads = int(self.config.draft_n_threads)
+        if self.config.draft_n_threads_batch is not None:
+            params.n_threads_batch = int(self.config.draft_n_threads_batch)
+        elif self.config.draft_n_threads is not None:
+            params.n_threads_batch = int(self.config.draft_n_threads)
+        if self.config.draft_type_k is not None:
+            params.type_k = self.config.draft_type_k
+        if self.config.draft_type_v is not None:
+            params.type_v = self.config.draft_type_v
+        return params
+
+    def _enable_backend_sampling(self, internals: Any) -> None:
+        """Attach the shared top-k sampler to the initialized draft context.
+
+        This is a best-effort optimization requested by
+        ``draft_backend_sampling``. A backend that accepts the sampler can
+        expose compact candidates, probabilities, or logits; otherwise the
+        temporary sampler is closed and :meth:`_candidate` uses full CPU logits.
+        """
+        if not self.config.draft_backend_sampling:
+            return
+        backend_sampler = internals.LlamaSampler()
+        backend_sampler.add_top_k(10)
+        if self._llama_cpp_lib.llama_set_sampler(
+            self.draft_context.ctx, 0, backend_sampler.sampler
+        ):
+            self._backend_sampler = backend_sampler
+            self._backend_sampling = True
+        else:
+            backend_sampler.close()
+
+    def _reset_backend_sampler(self) -> None:
+        """Reset request-local sampler state without detaching the sampler."""
+        if self._backend_sampler is not None:
+            self._backend_sampler.reset()
+
+    def _close_backend_sampler(self, errors: List[Exception]) -> None:
+        """Detach and close the sampler while preserving cleanup failures.
+
+        Cleanup remains non-short-circuiting: detach and close exceptions are
+        appended to ``errors`` so callers can release every remaining resource
+        and raise the first failure afterward.
+        """
+        backend_sampler = self._backend_sampler
+        self._backend_sampler = None
+        self._backend_sampling = False
+        if backend_sampler is None:
+            return
+        if getattr(self, "draft_context", None) is not None:
+            try:
+                self._llama_cpp_lib.llama_set_sampler(
+                    self.draft_context.ctx, 0, None
+                )
+            except Exception as exc:
+                errors.append(exc)
+        try:
+            backend_sampler.close()
+        except Exception as exc:
+            errors.append(exc)
+
+    def _close_draft_resources(
+        self,
+        errors: List[Exception],
+        *,
+        batch_names: Sequence[str],
+        close_model: bool,
+    ) -> None:
+        """Release draft resources in sampler, batch, context, model order.
+
+        ``batch_names`` lets each algorithm declare its owned batch attributes.
+        ``close_model`` must be true only for an external engine-owned model.
+        Attributes are cleared before closing to keep repeated or shutdown-time
+        cleanup idempotent. All exceptions are collected in ``errors`` rather
+        than preventing later native resources from being released.
+        """
+        self._close_backend_sampler(errors)
+        for name in batch_names:
+            batch = getattr(self, name, None)
+            setattr(self, name, None)
+            if batch is not None:
+                try:
+                    batch.close()
+                except Exception as exc:
+                    errors.append(exc)
+
+        draft_context = getattr(self, "draft_context", None)
+        self.draft_context = None
+        if draft_context is not None:
+            try:
+                draft_context.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        draft_model = getattr(self, "draft_model", None)
+        self.draft_model = None
+        if close_model and draft_model is not None:
+            try:
+                draft_model.close()
+            except Exception as exc:
+                errors.append(exc)
+
+    @staticmethod
+    def _copy_rows(
+        pointer: Any, rows: int, width: int
+    ) -> npt.NDArray[np.float32]:
+        """Copy a contiguous native float matrix into an owned NumPy array.
+
+        Native embedding pointers are only valid until the context performs
+        more work. Returning a copy prevents later decode/encode calls from
+        mutating hidden states retained for drafting, verification, or replay.
+        A null output pointer is treated as a graph/configuration error.
+        """
+        if not pointer:
+            raise RuntimeError("speculative embedding output is unavailable")
+        return np.ctypeslib.as_array(pointer, shape=(rows * width,)).reshape(
+            rows, width
+        ).copy()
+
+    def _candidate(self, output_index: int) -> Tuple[int, float]:
+        """Return the most likely token and approximate top-k probability.
+
+        Backend sampling is preferred because it avoids transferring or
+        scanning the full vocabulary, which is particularly important for very
+        large vocabularies. The method accepts the compact formats exposed by
+        llama.cpp: selected token plus probabilities, filter-only candidates
+        plus logits, or a selected token without probabilities when ``p_min``
+        is disabled. If no usable compact output exists, it selects from the
+        top ten entries of the full logits row on the CPU.
+        """
+        if self._backend_sampling:
+            token = int(
+                self._llama_cpp_lib.llama_get_sampled_token_ith(
+                    self.draft_context.ctx, output_index
+                )
+            )
+            candidates_count = int(
+                self._llama_cpp_lib.llama_get_sampled_candidates_count_ith(
+                    self.draft_context.ctx, output_index
+                )
+            )
+            probs_count = int(
+                self._llama_cpp_lib.llama_get_sampled_probs_count_ith(
+                    self.draft_context.ctx, output_index
+                )
+            )
+            logits_count = int(
+                self._llama_cpp_lib.llama_get_sampled_logits_count_ith(
+                    self.draft_context.ctx, output_index
+                )
+            )
+            candidates_ptr = self._llama_cpp_lib.llama_get_sampled_candidates_ith(
+                self.draft_context.ctx, output_index
+            )
+            probs_ptr = self._llama_cpp_lib.llama_get_sampled_probs_ith(
+                self.draft_context.ctx, output_index
+            )
+            logits_ptr = self._llama_cpp_lib.llama_get_sampled_logits_ith(
+                self.draft_context.ctx, output_index
+            )
+
+            if candidates_count > 0 and candidates_ptr:
+                candidates = np.ctypeslib.as_array(
+                    candidates_ptr, shape=(candidates_count,)
+                )
+                if probs_count > 0 and probs_ptr:
+                    count = min(candidates_count, probs_count)
+                    probs = np.ctypeslib.as_array(probs_ptr, shape=(count,))
+                    if token == self._llama_cpp_lib.LLAMA_TOKEN_NULL:
+                        selected = int(np.argmax(probs))
+                        return int(candidates[selected]), float(probs[selected])
+                    matches = np.flatnonzero(candidates[:count] == token)
+                    if matches.size:
+                        return token, float(probs[int(matches[0])])
+                if logits_count > 0 and logits_ptr:
+                    count = min(candidates_count, logits_count)
+                    logits = np.ctypeslib.as_array(logits_ptr, shape=(count,))
+                    selected = int(np.argmax(logits))
+                    shifted = logits.astype(np.float64) - float(np.max(logits))
+                    probs = np.exp(shifted)
+                    probability = float(probs[selected] / probs.sum())
+                    selected_token = int(candidates[selected])
+                    if token != self._llama_cpp_lib.LLAMA_TOKEN_NULL:
+                        selected_token = token
+                    return selected_token, probability
+            if (
+                token != self._llama_cpp_lib.LLAMA_TOKEN_NULL
+                and self.config.draft_p_min <= 0.0
+            ):
+                return token, 1.0
+
+        logits_ptr = self.draft_context.get_logits_ith(output_index)
+        logits = np.ctypeslib.as_array(logits_ptr, shape=(self.n_vocab,))
+        k = min(10, self.n_vocab)
+        top_indices = np.argpartition(logits, -k)[-k:]
+        top_logits = logits[top_indices].astype(np.float64)
+        best_local = int(np.argmax(top_logits))
+        token = int(top_indices[best_local])
+        shifted = top_logits - float(np.max(top_logits))
+        probability = float(np.exp(shifted[best_local]) / np.exp(shifted).sum())
+        return token, probability
+
+
+class LlamaMTPDecoding(_LlamaModelDraftEngine):
+    """Orchestrate llama.cpp's stateful NextN/MTP speculative-decoding graph.
+
+    The engine can use NextN heads embedded in the target GGUF or load an
+    external MTP sidecar with ``load_mtp=True``. Both modes create a dedicated
+    MTP context linked to the target context through ``ctx_other``. The target
+    context owns normal autoregressive verification; this engine owns the
+    hidden-state handoff and the speculative draft branch.
+    """
 
     def __init__(
         self,
@@ -923,6 +1381,7 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         context_params: Any,
         verbose: bool = True,
     ) -> None:
+        """Create an internal-head or external-sidecar MTP draft context."""
         from llama_cpp import _internals as internals
         from llama_cpp import llama_cpp as llama_cpp_lib
 
@@ -930,94 +1389,24 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             raise ValueError("LlamaMTPDecoding requires spec_type=DRAFT_MTP")
         config.validate()
 
-        self.config = config
-        # close() can be reached from Llama.__del__ after Python has disabled
-        # the import machinery. Keep the module imported during construction
-        # instead of importing it lazily while tearing the engine down.
-        self._llama_cpp_lib = llama_cpp_lib
-        self.target_model = target_model
-        self.target_context = target_context
-        self.verbose = verbose
-        self._closed = False
+        self._init_model_draft_engine(
+            config,
+            target_model=target_model,
+            target_context=target_context,
+            llama_cpp_lib=llama_cpp_lib,
+            verbose=verbose,
+        )
         self._owns_model = bool(config.draft_model_path)
-        self._backend_sampler = None
-        self._backend_sampling = False
-        self._draft_devices = None
-        self._draft_buft_patterns = None
-        self._draft_buft_overrides = None
 
         if self._owns_model:
-            draft_params = type(model_params).from_buffer_copy(model_params)
-            draft_params.n_gpu_layers = config.resolved_draft_n_gpu_layers()
-            draft_params.load_mtp = True
-
-            if config.draft_devices:
-                from llama_cpp._ggml import ggml_backend_dev_by_name
-
-                DeviceArray = ctypes.c_void_p * (len(config.draft_devices) + 1)
-                self._draft_devices = DeviceArray()
-                for i, name in enumerate(config.draft_devices):
-                    device = ggml_backend_dev_by_name(name.encode("utf-8"))
-                    if not device:
-                        raise ValueError(f"Unknown draft backend device: {name}")
-                    self._draft_devices[i] = device
-                self._draft_devices[-1] = None
-                draft_params.devices = self._draft_devices
-
-            if (
-                config.draft_cpu_moe
-                or config.draft_n_cpu_moe > 0
-                or config.draft_tensor_buft_overrides
-            ):
-                from llama_cpp._ggml import ggml_backend_cpu_buffer_type
-
-                override_values = list(config.draft_tensor_buft_overrides or [])
-                if config.draft_cpu_moe:
-                    patterns = [rb"\.ffn_(up|down|gate|gate_up)_(ch|)exps"]
-                else:
-                    patterns = [
-                        f"blk\\.{i}".encode("utf-8")
-                        + rb"\.ffn_(up|down|gate|gate_up)_(ch|)exps"
-                        for i in range(config.draft_n_cpu_moe)
-                    ]
-                self._draft_buft_patterns = patterns
-                cpu_buft = ggml_backend_cpu_buffer_type()
-                override_type = llama_cpp_lib.llama_model_tensor_buft_override
-                OverrideArray = override_type * (
-                    len(override_values) + len(patterns) + 1
-                )
-                self._draft_buft_overrides = OverrideArray()
-                out = 0
-                for value in override_values:
-                    self._draft_buft_overrides[out].pattern = value.pattern
-                    self._draft_buft_overrides[out].buft = value.buft
-                    out += 1
-                for pattern in patterns:
-                    self._draft_buft_overrides[out].pattern = pattern
-                    self._draft_buft_overrides[out].buft = cpu_buft
-                    out += 1
-                self._draft_buft_overrides[out].pattern = None
-                self._draft_buft_overrides[out].buft = None
-                draft_params.tensor_buft_overrides = self._draft_buft_overrides
-            for name, value in config.draft_model_kwargs.items():
-                if not hasattr(draft_params, name):
-                    raise ValueError(f"Unknown draft model parameter: {name}")
-                setattr(draft_params, name, value)
-            self.draft_model = internals.LlamaModel(
-                path_model=config.draft_model_path,
-                params=draft_params,
-                verbose=verbose,
+            self.draft_model = self._load_draft_model(
+                internals, model_params, load_mtp=True
             )
-            try:
-                self._validate_vocab_compatibility(target_model, self.draft_model)
-            except BaseException:
-                self.draft_model.close()
-                raise
         else:
             self.draft_model = target_model
 
         try:
-            draft_ctx_params = type(context_params).from_buffer_copy(context_params)
+            draft_ctx_params = self._build_draft_context_params(context_params)
             draft_ctx_params.ctx_type = (
                 llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_MTP
             )
@@ -1032,19 +1421,6 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             # an unnecessary (1 + n_draft) output buffer in the MTP graph.
             draft_ctx_params.n_outputs_max = max(1, int(draft_ctx_params.n_seq_max))
             draft_ctx_params.n_outputs_max_per_seq = 1
-            if config.draft_n_threads is not None:
-                draft_ctx_params.n_threads = int(config.draft_n_threads)
-            if config.draft_n_threads_batch is not None:
-                draft_ctx_params.n_threads_batch = int(
-                    config.draft_n_threads_batch
-                )
-            elif config.draft_n_threads is not None:
-                draft_ctx_params.n_threads_batch = int(config.draft_n_threads)
-            if config.draft_type_k is not None:
-                draft_ctx_params.type_k = config.draft_type_k
-            if config.draft_type_v is not None:
-                draft_ctx_params.type_v = config.draft_type_v
-
             self.draft_context = internals.LlamaContext(
                 model=self.draft_model,
                 params=draft_ctx_params,
@@ -1073,29 +1449,11 @@ class LlamaMTPDecoding(LlamaSpecEngine):
                 verbose=verbose,
             )
 
-            if config.draft_backend_sampling:
-                backend_sampler = internals.LlamaSampler()
-                backend_sampler.add_top_k(10)
-                if llama_cpp_lib.llama_set_sampler(
-                    self.draft_context.ctx, 0, backend_sampler.sampler
-                ):
-                    self._backend_sampler = backend_sampler
-                    self._backend_sampling = True
-                else:
-                    backend_sampler.close()
+            self._enable_backend_sampling(internals)
         except BaseException:
-            if self._backend_sampler is not None:
-                if getattr(self, "draft_context", None) is not None:
-                    llama_cpp_lib.llama_set_sampler(
-                        self.draft_context.ctx, 0, None
-                    )
-                self._backend_sampler.close()
-                self._backend_sampler = None
-                self._backend_sampling = False
-            if getattr(self, "draft_context", None) is not None:
-                self.draft_context.close()
-            if self._owns_model:
-                self.draft_model.close()
+            self._close_draft_resources(
+                [], batch_names=("batch",), close_model=self._owns_model
+            )
             raise
 
         self.target_context.set_embeddings_nextn(True, masked=False)
@@ -1178,135 +1536,8 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             file=sys.stderr,
         )
 
-    @staticmethod
-    def _validate_vocab_compatibility(target_model: Any, draft_model: Any) -> None:
-        """Mirror common_speculative_are_compatible vocab checks."""
-        if target_model.vocab_type() != draft_model.vocab_type():
-            raise ValueError("Draft and target models use different vocabulary types")
-
-        for add_name, token_name in (
-            ("get_add_bos", "token_bos"),
-            ("get_add_eos", "token_eos"),
-        ):
-            target_add = bool(getattr(target_model, add_name)())
-            draft_add = bool(getattr(draft_model, add_name)())
-            if target_add != draft_add:
-                raise ValueError(f"Draft and target models disagree on {add_name}")
-            if target_add and getattr(target_model, token_name)() != getattr(
-                draft_model, token_name
-            )():
-                raise ValueError(f"Draft and target models use different {token_name}")
-
-        target_size = target_model.n_vocab()
-        draft_size = draft_model.n_vocab()
-        if abs(target_size - draft_size) > SPEC_VOCAB_MAX_SIZE_DIFFERENCE:
-            raise ValueError(
-                "Draft and target vocabulary sizes differ too much: "
-                f"{draft_size} != {target_size}"
-            )
-
-        for token in range(
-            SPEC_VOCAB_CHECK_START_TOKEN_ID, min(target_size, draft_size)
-        ):
-            if target_model.token_get_text(token) != draft_model.token_get_text(token):
-                raise ValueError(
-                    f"Draft and target vocabularies differ at token {token}"
-                )
-
-    @staticmethod
-    def _copy_rows(pointer: Any, rows: int, width: int) -> npt.NDArray[np.float32]:
-        if not pointer:
-            raise RuntimeError("speculative embedding output is unavailable")
-        return np.ctypeslib.as_array(pointer, shape=(rows * width,)).reshape(
-            rows, width
-        ).copy()
-
-    def _candidate(self, output_index: int) -> Tuple[int, float]:
-        if self._backend_sampling:
-            from llama_cpp import llama_cpp as llama_cpp_lib
-
-            token = int(
-                llama_cpp_lib.llama_get_sampled_token_ith(
-                    self.draft_context.ctx, output_index
-                )
-            )
-            candidates_count = int(
-                llama_cpp_lib.llama_get_sampled_candidates_count_ith(
-                    self.draft_context.ctx, output_index
-                )
-            )
-            probs_count = int(
-                llama_cpp_lib.llama_get_sampled_probs_count_ith(
-                    self.draft_context.ctx, output_index
-                )
-            )
-            logits_count = int(
-                llama_cpp_lib.llama_get_sampled_logits_count_ith(
-                    self.draft_context.ctx, output_index
-                )
-            )
-            candidates_ptr = llama_cpp_lib.llama_get_sampled_candidates_ith(
-                self.draft_context.ctx, output_index
-            )
-            probs_ptr = llama_cpp_lib.llama_get_sampled_probs_ith(
-                self.draft_context.ctx, output_index
-            )
-            logits_ptr = llama_cpp_lib.llama_get_sampled_logits_ith(
-                self.draft_context.ctx, output_index
-            )
-
-            if candidates_count > 0 and candidates_ptr:
-                candidates = np.ctypeslib.as_array(
-                    candidates_ptr, shape=(candidates_count,)
-                )
-
-                if probs_count > 0 and probs_ptr:
-                    count = min(candidates_count, probs_count)
-                    probs = np.ctypeslib.as_array(probs_ptr, shape=(count,))
-                    if token == llama_cpp_lib.LLAMA_TOKEN_NULL:
-                        selected = int(np.argmax(probs))
-                        return int(candidates[selected]), float(probs[selected])
-                    matches = np.flatnonzero(candidates[:count] == token)
-                    if matches.size:
-                        return token, float(probs[int(matches[0])])
-
-                # A filter-only backend chain such as top-k returns compact
-                # candidates/logits but no selected token or probabilities.
-                # common_sampler_sample() finishes this selection on the CPU;
-                # mirror that behavior instead of treating the compact logits
-                # buffer as a full n_vocab row.
-                if logits_count > 0 and logits_ptr:
-                    count = min(candidates_count, logits_count)
-                    logits = np.ctypeslib.as_array(logits_ptr, shape=(count,))
-                    selected = int(np.argmax(logits))
-                    shifted = logits.astype(np.float64) - float(np.max(logits))
-                    probs = np.exp(shifted)
-                    probability = float(probs[selected] / probs.sum())
-                    selected_token = int(candidates[selected])
-                    if token != llama_cpp_lib.LLAMA_TOKEN_NULL:
-                        selected_token = token
-                    return selected_token, probability
-
-                # A backend may return only the selected token. This is enough
-                # when p_min is disabled, otherwise use the CPU probability path.
-            if (
-                token != llama_cpp_lib.LLAMA_TOKEN_NULL
-                and self.config.draft_p_min <= 0.0
-            ):
-                return token, 1.0
-
-        logits_ptr = self.draft_context.get_logits_ith(output_index)
-        logits = np.ctypeslib.as_array(logits_ptr, shape=(self.n_vocab,))
-        k = min(10, self.n_vocab)
-        top_indices = np.argpartition(logits, -k)[-k:]
-        top_logits = logits[top_indices].astype(np.float64)
-        best_local = int(np.argmax(top_logits))
-        token = int(top_indices[best_local])
-        shifted = top_logits - float(np.max(top_logits))
-        probability = float(np.exp(shifted[best_local]) / np.exp(shifted).sum())
-        return token, probability
-
     def checkpoint(self, seq_id: int = 0) -> Any:
+        """Capture the draft position, pending hidden row, and recurrent state."""
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
 
@@ -1360,6 +1591,7 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             )
 
     def take_verification_checkpoint(self, seq_id: int = 0) -> Any:
+        """Reuse the checkpoint restored after drafting, or capture a new one."""
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
         checkpoint = self._pending_verification_checkpoint
@@ -1370,6 +1602,7 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         return self.checkpoint(seq_id)
 
     def restore(self, checkpoint: Any, seq_id: int = 0) -> None:
+        """Restore draft recurrent/KV state and the pending hidden row."""
         if checkpoint is None:
             return
         if seq_id != 0:
@@ -1405,6 +1638,7 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             )
 
     def reset_checkpoint_stats(self) -> None:
+        """Reset MTP checkpoint, restore, and rollback counters."""
         self._checkpoint_stats: Dict[str, Union[int, float]] = {
             "captures": 0,
             "restores": 0,
@@ -1420,9 +1654,11 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         }
 
     def checkpoint_stats(self) -> Dict[str, Union[int, float]]:
+        """Return a snapshot of the current MTP checkpoint counters."""
         return dict(self._checkpoint_stats)
 
     def truncate(self, position: int, seq_id: int = 0) -> None:
+        """Remove a non-recurrent draft-cache suffix from ``position`` onward."""
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
         if self.draft_model.is_recurrent() or self.draft_model.is_hybrid():
@@ -1433,6 +1669,7 @@ class LlamaMTPDecoding(LlamaSpecEngine):
             raise RuntimeError("MTP draft-context truncation failed")
 
     def clear(self) -> None:
+        """Clear request-local MTP state while keeping native resources loaded."""
         if self._closed:
             return
         self._pending_verification_checkpoint = None
@@ -1441,60 +1678,25 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
         self.verify_tokens.clear()
         self.verify_positions.clear()
-        if self._backend_sampler is not None:
-            self._backend_sampler.reset()
+        self._reset_backend_sampler()
 
     def close(self) -> None:
+        """Idempotently release MTP batches, context, sampler, and owned model."""
         if self._closed:
             return
         self._closed = True
         self._pending_verification_checkpoint = None
         errors: List[Exception] = []
 
-        if self._backend_sampler is not None:
-            backend_sampler = self._backend_sampler
-            self._backend_sampler = None
-            self._backend_sampling = False
-            if getattr(self, "draft_context", None) is not None:
-                try:
-                    self._llama_cpp_lib.llama_set_sampler(
-                        self.draft_context.ctx, 0, None
-                    )
-                except Exception as exc:
-                    errors.append(exc)
-            try:
-                backend_sampler.close()
-            except Exception as exc:
-                errors.append(exc)
-
-        if getattr(self, "batch", None) is not None:
-            batch = self.batch
-            self.batch = None
-            try:
-                batch.close()
-            except Exception as exc:
-                errors.append(exc)
-
-        if getattr(self, "draft_context", None) is not None:
-            draft_context = self.draft_context
-            self.draft_context = None
-            try:
-                draft_context.close()
-            except Exception as exc:
-                errors.append(exc)
-
-        if self._owns_model and getattr(self, "draft_model", None) is not None:
-            draft_model = self.draft_model
-            try:
-                draft_model.close()
-            except Exception as exc:
-                errors.append(exc)
-        self.draft_model = None
+        self._close_draft_resources(
+            errors, batch_names=("batch",), close_model=self._owns_model
+        )
 
         if errors:
             raise errors[0]
 
     def process(self, batch: Any, seq_id: int = 0) -> None:
+        """Consume target token rows and their already-computed NextN states."""
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
         n_tokens = int(batch.n_tokens)
@@ -1556,7 +1758,8 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         self.verify_positions = list(positions)
         self.pending_h[:] = target_h[-1]
 
-    def supports_native_target_rollback(self) -> bool:
+    def can_follow_target_native_rollback(self) -> bool:
+        """Report that MTP can realign after target recurrent-state rollback."""
         return True
 
     def rollback_verified(
@@ -1594,6 +1797,7 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         n_max: int,
         seq_id: int = 0,
     ) -> npt.NDArray[np.intc]:
+        """Generate and then roll back an MTP continuation of up to ``n_max``."""
         _ = input_ids
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
@@ -1667,12 +1871,665 @@ class LlamaMTPDecoding(LlamaSpecEngine):
         return np.asarray(result, dtype=np.intc)
 
     def accept(self, n_accepted: int, seq_id: int = 0) -> None:
+        """Advance the pending hidden row to the accepted verification prefix."""
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
         if self.verify_h.shape[0] == 0:
             return
         row = min(max(0, int(n_accepted)), self.verify_h.shape[0] - 1)
         self.pending_h[:] = self.verify_h[row]
+
+
+class LlamaDFlashDecoding(_LlamaModelDraftEngine):
+    """Python orchestration for llama.cpp's DFlash and DSpark draft graphs.
+
+    Both algorithms extract configured target-layer inputs, fuse them with the
+    draft encoder, inject the fused rows into the draft KV cache, and decode a
+    non-causal mask block in one pass.  DSpark reuses the same graph and cache
+    path but reads its Markov/confidence outputs differently.
+
+    This initial implementation intentionally accepts token batches only.  An
+    MTMD target uses M-RoPE position tuples while the current DFlash draft
+    context uses scalar positions, so silently forwarding embedding batches
+    would leave the draft cache incomplete or invalid.
+    """
+
+    def __init__(
+        self,
+        config: SpecConfig,
+        *,
+        target_model: Any,
+        target_context: Any,
+        model_params: Any,
+        context_params: Any,
+        verbose: bool = True,
+    ) -> None:
+        """Load a DFlash/DSpark sidecar and create its three-stage draft graph."""
+        from llama_cpp import _internals as internals
+        from llama_cpp import llama_cpp as llama_cpp_lib
+
+        if config.spec_type not in {
+            SpeculativeType.DRAFT_DFLASH,
+            SpeculativeType.DRAFT_DSPARK,
+        }:
+            raise ValueError(
+                "LlamaDFlashDecoding requires DRAFT_DFLASH or DRAFT_DSPARK"
+            )
+        config.validate()
+
+        self._init_model_draft_engine(
+            config,
+            target_model=target_model,
+            target_context=target_context,
+            llama_cpp_lib=llama_cpp_lib,
+            verbose=verbose,
+        )
+        self.is_dspark = config.spec_type == SpeculativeType.DRAFT_DSPARK
+        self.draft_model = None
+        self.draft_context = None
+        self.noise_batch = None
+        self.encoder_batch = None
+        self.inject_batch = None
+
+        self.draft_model = self._load_draft_model(
+            internals, model_params, load_mtp=False
+        )
+        try:
+            self.target_layer_ids = self.draft_model.target_layer_ids()
+            if not self.target_layer_ids:
+                raise ValueError("DFlash draft model has no target_layer_ids")
+            self._validate_target_layer_ids(
+                self.target_layer_ids, self.target_model.n_layer()
+            )
+
+            self.n_embd_tgt = self.target_model.n_embd()
+            self.n_embd_dec = self.draft_model.n_embd()
+            self.n_embd_enc = len(self.target_layer_ids) * self.n_embd_tgt
+            self.n_vocab = self.draft_model.n_vocab()
+            self.mask_token_id = self.draft_model.token_mask()
+            if self.mask_token_id == llama_cpp_lib.LLAMA_TOKEN_NULL:
+                raise ValueError("DFlash draft model has no mask token")
+
+            metadata = self.draft_model.metadata()
+            self.block_size = self._metadata_int(
+                metadata, "dflash.block_size", 16
+            )
+            if self.block_size <= 1:
+                raise ValueError(
+                    f"DFlash block size must be greater than one: {self.block_size}"
+                )
+            self.sample_from_anchor = self._metadata_bool(
+                metadata, "dflash.sample_from_anchor", True
+            )
+            trained_limit = (
+                self.block_size
+                if self.is_dspark and self.sample_from_anchor
+                else self.block_size - 1
+            )
+            self.draft_limit = min(config.draft_n_max, trained_limit)
+            if self.draft_limit <= 0:
+                raise ValueError("DFlash resolved draft length must be positive")
+
+            block_capacity = self.draft_limit + 1
+            draft_ctx_params = self._build_draft_context_params(context_params)
+            draft_ctx_params.ctx_other = target_context.ctx
+            draft_ctx_params.n_ctx = target_context.n_ctx()
+            draft_ctx_params.n_seq_max = 1
+            # Recurrent/hybrid sidecars need one native snapshot per possible
+            # speculative position.  Non-recurrent DFlash sidecars clamp this
+            # request to zero and use ordinary native KV/SWA suffix removal.
+            draft_ctx_params.n_rs_seq = max(0, int(self.draft_limit))
+            draft_ctx_params.n_batch = max(
+                int(draft_ctx_params.n_batch), block_capacity
+            )
+            draft_ctx_params.n_ubatch = max(
+                int(draft_ctx_params.n_ubatch), block_capacity
+            )
+            draft_ctx_params.n_outputs_max = block_capacity
+            # Keeping a complete block in one sequence prevents the backend
+            # from splitting the non-causal DFlash verification graph.
+            draft_ctx_params.n_outputs_max_per_seq = block_capacity
+            self.draft_context = internals.LlamaContext(
+                model=self.draft_model,
+                params=draft_ctx_params,
+                verbose=verbose,
+            )
+            self.noise_batch = internals.LlamaBatch(
+                n_tokens=block_capacity,
+                embd=0,
+                n_seq_max=1,
+                verbose=verbose,
+            )
+            self.encoder_batch = internals.LlamaBatch(
+                n_tokens=self.draft_context.n_ubatch(),
+                embd=self.n_embd_enc,
+                n_seq_max=1,
+                verbose=verbose,
+            )
+            self.inject_batch = internals.LlamaBatch(
+                n_tokens=self.draft_context.n_ubatch(),
+                embd=self.n_embd_dec,
+                n_seq_max=1,
+                verbose=verbose,
+            )
+
+            self._enable_backend_sampling(internals)
+
+            for layer_id in self.target_layer_ids:
+                self.target_context.set_embeddings_layer_inp(layer_id, True)
+            self.draft_context.set_embeddings_nextn(True, masked=True)
+            self.draft_context.set_causal_attn(False)
+
+            self._use_native_draft_rollback = (
+                not (
+                    self.draft_model.is_recurrent()
+                    or self.draft_model.is_hybrid()
+                )
+                or self.draft_context.n_rs_seq() >= self.draft_limit
+            )
+            self._pending_verification_checkpoint = None
+            self._active_verification_checkpoint = None
+            self.verify_positions: List[int] = []
+            self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+            self.reset_checkpoint_stats()
+        except BaseException:
+            self.close()
+            raise
+
+        if self.verbose:
+            self._print_runtime_configuration()
+
+    @staticmethod
+    def _metadata_int(metadata: Dict[str, str], key: str, default: int) -> int:
+        """Read an integer GGUF metadata value with a fallback default."""
+        value = metadata.get(key)
+        return default if value is None else int(value)
+
+    @staticmethod
+    def _validate_target_layer_ids(
+        layer_ids: Sequence[int], n_layers: int
+    ) -> None:
+        """Validate target taps, including the final head-input tap at n_layers."""
+        for layer_id in layer_ids:
+            if layer_id < 0 or layer_id > n_layers:
+                raise ValueError(
+                    "DFlash target layer is outside the target model: "
+                    f"{layer_id} not in [0, {n_layers}]"
+                )
+
+    @staticmethod
+    def _metadata_bool(metadata: Dict[str, str], key: str, default: bool) -> bool:
+        """Read and strictly validate a boolean GGUF metadata value."""
+        value = metadata.get(key)
+        if value is None:
+            return default
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError(f"Invalid boolean GGUF metadata {key}={value!r}")
+
+    def _print_runtime_configuration(self) -> None:
+        """Print resolved DFlash/DSpark model, block, and context settings."""
+        algorithm = "DSpark" if self.is_dspark else "DFlash"
+        devices = ",".join(self.config.draft_devices) or "auto"
+        print(
+            f"LlamaDFlashDecoding: {algorithm} speculative decoding enabled",
+            file=sys.stderr,
+        )
+        print(
+            "LlamaDFlashDecoding: "
+            f"type={self.config.spec_type.to_str()}, "
+            f"model={self.config.draft_model_path!r}, "
+            f"draft_n_min={self.config.draft_n_min}, "
+            f"draft_n_max={self.config.draft_n_max}, "
+            f"resolved_n_max={self.draft_limit}, "
+            f"draft_p_min={self.config.draft_p_min:g}",
+            file=sys.stderr,
+        )
+        print(
+            "LlamaDFlashDecoding: "
+            f"block_size={self.block_size}, mask_token={self.mask_token_id}, "
+            f"sample_from_anchor={self.sample_from_anchor}, "
+            f"target_layers={self.target_layer_ids}, "
+            f"feature_width={self.n_embd_enc}",
+            file=sys.stderr,
+        )
+        print(
+            "LlamaDFlashDecoding: "
+            f"backend_sampling=requested:{self.config.draft_backend_sampling}/"
+            f"active:{self._backend_sampling}, devices={devices}, "
+            f"draft_n_ctx={self.draft_context.n_ctx()}, "
+            f"draft_n_batch={self.draft_context.n_batch()}, "
+            f"draft_n_ubatch={self.draft_context.n_ubatch()}, "
+            f"draft_n_rs_seq={self.draft_context.n_rs_seq()}, "
+            f"draft_checkpoint="
+            f"{'native' if self._use_native_draft_rollback else 'on-device'}, "
+            "multimodal=text-only",
+            file=sys.stderr,
+        )
+
+    def begin(self, prompt_tokens: Sequence[int], seq_id: int = 0) -> None:
+        """Verify that target processing populated the complete draft prompt."""
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        if prompt_tokens:
+            pos_max = self.draft_context.memory_seq_pos_max(seq_id)
+            if pos_max < len(prompt_tokens) - 1:
+                raise RuntimeError(
+                    "DFlash draft cache did not process the complete prompt: "
+                    f"pos_max={pos_max}, expected at least {len(prompt_tokens) - 1}"
+                )
+
+    def _gather_target_features(
+        self, *, batch_rows: int, offset: int, count: int
+    ) -> npt.NDArray[np.float32]:
+        """Concatenate configured target-layer inputs for a batch slice."""
+        features = np.empty((count, self.n_embd_enc), dtype=np.float32)
+        for layer_index, layer_id in enumerate(self.target_layer_ids):
+            pointer = self.target_context.get_embeddings_layer_inp(layer_id)
+            rows = np.ctypeslib.as_array(
+                pointer, shape=(batch_rows * self.n_embd_tgt,)
+            ).reshape(batch_rows, self.n_embd_tgt)
+            column = layer_index * self.n_embd_tgt
+            features[:, column : column + self.n_embd_tgt] = rows[
+                offset : offset + count
+            ]
+        return features
+
+    def process(self, batch: Any, seq_id: int = 0) -> None:
+        """Fuse target-layer rows and inject them into the draft context cache."""
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        n_tokens = int(batch.n_tokens)
+        if n_tokens <= 0:
+            return
+        if bool(batch.embd):
+            raise NotImplementedError(
+                "DFlash/DSpark speculative decoding is currently text-only; "
+                "MTMD embedding batches require scalar draft-position remapping"
+            )
+        if not bool(batch.token):
+            return
+
+        for i in range(n_tokens):
+            if int(batch.n_seq_id[i]) != 1 or int(batch.seq_id[i][0]) != seq_id:
+                raise NotImplementedError(
+                    "DFlash speculative decoding currently supports one sequence"
+                )
+
+        chunk_size = self.draft_context.n_ubatch()
+        fused_chunks: List[npt.NDArray[np.float32]] = []
+        for offset in range(0, n_tokens, chunk_size):
+            count = min(chunk_size, n_tokens - offset)
+            features = self._gather_target_features(
+                batch_rows=n_tokens, offset=offset, count=count
+            )
+
+            self.encoder_batch.reset()
+            self.encoder_batch.add_embeddings(
+                features.reshape(-1),
+                pos_array=list(range(count)),
+                seq_ids=[0],
+                logits_array=[True] * count,
+            )
+            self.draft_context.encode(self.encoder_batch)
+            fused = self._copy_rows(
+                self.draft_context.get_embeddings_nextn(),
+                count,
+                self.n_embd_dec,
+            )
+            fused_chunks.append(fused)
+
+            positions = [int(batch.pos[offset + i]) for i in range(count)]
+            self._inject_fused_rows(fused, positions, seq_id=seq_id)
+
+        # Match the server's context-switch boundary: all injected rows must be
+        # complete before draft() reads the cache on a potentially other backend.
+        self.draft_context.synchronize()
+        self.verify_positions = [int(batch.pos[i]) for i in range(n_tokens)]
+        self.verify_fused = np.concatenate(fused_chunks, axis=0)
+
+    def _inject_fused_rows(
+        self,
+        fused: npt.NDArray[np.float32],
+        positions: Sequence[int],
+        *,
+        seq_id: int,
+    ) -> None:
+        """Inject already-fused target rows, chunking at the draft ubatch."""
+        if len(positions) != len(fused):
+            raise ValueError(
+                "DFlash fused row/position mismatch: "
+                f"{len(fused)} != {len(positions)}"
+            )
+        chunk_size = self.draft_context.n_ubatch()
+        for offset in range(0, len(positions), chunk_size):
+            count = min(chunk_size, len(positions) - offset)
+            self.inject_batch.reset()
+            self.inject_batch.add_embeddings(
+                fused[offset : offset + count].reshape(-1),
+                pos_array=positions[offset : offset + count],
+                seq_ids=[seq_id],
+            )
+            status = self.draft_context.decode(self.inject_batch)
+            if status != 0:
+                raise RuntimeError(
+                    "DFlash KV injection failed with status "
+                    f"{status} at fused row offset {offset}"
+                )
+
+    def checkpoint(self, seq_id: int = 0) -> Any:
+        """Capture the draft position and recurrent state before a noise block."""
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        started = time.perf_counter()
+        try:
+            checkpoint: Dict[str, Any] = {
+                "position": self.draft_context.memory_seq_pos_max(seq_id),
+                "mode": "native",
+                "buffer": None,
+                "size": 0,
+                "flags": 0,
+            }
+            if self._use_native_draft_rollback:
+                self._checkpoint_stats["native_captures"] += 1
+            else:
+                flags = (
+                    self._llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY
+                    | self._llama_cpp_lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE
+                )
+                size = self.draft_context.get_state_seq_size_ext(seq_id, flags)
+                if size <= 0:
+                    raise RuntimeError(
+                        "DFlash draft context returned an empty checkpoint"
+                    )
+                buffer = (ctypes.c_uint8 * size)()
+                written = self.draft_context.get_state_seq_data_ext(
+                    buffer, size, seq_id, flags
+                )
+                if written != size:
+                    raise RuntimeError(
+                        "DFlash draft checkpoint write was incomplete: "
+                        f"{written}/{size}"
+                    )
+                checkpoint.update(
+                    mode="on-device", buffer=buffer, size=size, flags=flags
+                )
+                self._checkpoint_stats["device_captures"] += 1
+                self._checkpoint_stats["buffer_bytes"] += size
+            return checkpoint
+        finally:
+            self._checkpoint_stats["captures"] += 1
+            self._checkpoint_stats["capture_seconds"] += (
+                time.perf_counter() - started
+            )
+
+    def take_verification_checkpoint(self, seq_id: int = 0) -> Any:
+        """Select and retain the checkpoint used by target verification."""
+        checkpoint = self._pending_verification_checkpoint
+        self._pending_verification_checkpoint = None
+        if checkpoint is not None:
+            self._checkpoint_stats["verification_reuses"] += 1
+        else:
+            checkpoint = self.checkpoint(seq_id)
+        self._active_verification_checkpoint = checkpoint
+        return checkpoint
+
+    def restore(self, checkpoint: Any, seq_id: int = 0) -> None:
+        """Restore draft state and reclaim transient noise-block cache cells."""
+        if checkpoint is None:
+            return
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        started = time.perf_counter()
+        try:
+            if checkpoint["mode"] == "on-device":
+                size = int(checkpoint["size"])
+                read = self.draft_context.set_state_seq_data_ext(
+                    checkpoint["buffer"], size, seq_id, checkpoint["flags"]
+                )
+                if read != size:
+                    raise RuntimeError(
+                        "DFlash draft checkpoint restore was incomplete: "
+                        f"{read}/{size}"
+                    )
+                # A partial state restore does not reclaim transient SWA/KV
+                # cells created by the noise block.  Match llama.cpp server:
+                # restore the saved state first, then remove its draft suffix.
+                if not self.draft_context.memory_seq_rm(
+                    seq_id, int(checkpoint["position"]) + 1, -1
+                ):
+                    raise RuntimeError(
+                        "DFlash device-checkpoint suffix cleanup failed"
+                    )
+                self._checkpoint_stats["device_restores"] += 1
+            else:
+                if not self.draft_context.memory_seq_rm(
+                    seq_id, int(checkpoint["position"]) + 1, -1
+                ):
+                    raise RuntimeError("DFlash native draft-context rollback failed")
+                self._checkpoint_stats["native_restores"] += 1
+            self.verify_positions.clear()
+            self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+            self._active_verification_checkpoint = None
+        finally:
+            self._checkpoint_stats["restores"] += 1
+            self._checkpoint_stats["restore_seconds"] += (
+                time.perf_counter() - started
+            )
+
+    def reset_checkpoint_stats(self) -> None:
+        """Reset DFlash/DSpark checkpoint and rollback counters."""
+        self._checkpoint_stats: Dict[str, Union[int, float]] = {
+            "captures": 0,
+            "restores": 0,
+            "verification_reuses": 0,
+            "native_captures": 0,
+            "native_restores": 0,
+            "device_captures": 0,
+            "device_restores": 0,
+            "native_verification_rollbacks": 0,
+            "buffer_bytes": 0,
+            "capture_seconds": 0.0,
+            "restore_seconds": 0.0,
+        }
+
+    def checkpoint_stats(self) -> Dict[str, Union[int, float]]:
+        """Return a snapshot of DFlash/DSpark checkpoint counters."""
+        return dict(self._checkpoint_stats)
+
+    def can_follow_target_native_rollback(self) -> bool:
+        """Report support for realignment after target native rollback."""
+        # Target and draft rollback capabilities are independent.  The target
+        # context has recurrent snapshots sized by Llama for draft_n_max, while
+        # a recurrent DFlash draft can restore its much smaller on-device
+        # checkpoint and replay the accepted fused prefix.
+        return True
+
+    def rollback_verified(
+        self, checkpoint: Any, n_accepted: int, seq_id: int = 0
+    ) -> None:
+        """Discard rejected rows or restore and replay the accepted fused prefix."""
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        count = min(1 + max(0, int(n_accepted)), len(self.verify_positions))
+        if count <= 0:
+            self.restore(checkpoint, seq_id)
+            return
+        if not self._use_native_draft_rollback:
+            accepted_positions = self.verify_positions[:count]
+            accepted_fused = self.verify_fused[:count].copy()
+            self.restore(checkpoint, seq_id)
+            self._inject_fused_rows(
+                accepted_fused, accepted_positions, seq_id=seq_id
+            )
+            self.draft_context.synchronize()
+            return
+        position = self.verify_positions[count - 1] + 1
+        if not self.draft_context.memory_seq_rm(seq_id, position, -1):
+            raise RuntimeError("DFlash native verification rollback failed")
+        self.verify_positions.clear()
+        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self._active_verification_checkpoint = None
+        self._checkpoint_stats["native_verification_rollbacks"] += 1
+
+    def truncate(self, position: int, seq_id: int = 0) -> None:
+        """Truncate native cache state or rebuild a checkpointed accepted prefix."""
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        if self._use_native_draft_rollback:
+            if not self.draft_context.memory_seq_rm(seq_id, position, -1):
+                raise RuntimeError("DFlash draft-context truncation failed")
+        else:
+            checkpoint = self._active_verification_checkpoint
+            if checkpoint is None:
+                raise RuntimeError(
+                    "DFlash draft-context truncation has no verification checkpoint"
+                )
+            keep = sum(pos < position for pos in self.verify_positions)
+            accepted_positions = self.verify_positions[:keep]
+            accepted_fused = self.verify_fused[:keep].copy()
+            self.restore(checkpoint, seq_id)
+            if keep:
+                self._inject_fused_rows(
+                    accepted_fused, accepted_positions, seq_id=seq_id
+                )
+                self.draft_context.synchronize()
+        self.verify_positions.clear()
+        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self._active_verification_checkpoint = None
+
+    def draft(
+        self,
+        input_ids: Sequence[int],
+        *,
+        n_past: int,
+        id_last: int,
+        n_max: int,
+        seq_id: int = 0,
+    ) -> npt.NDArray[np.intc]:
+        """Decode one masked block and return its confidence-filtered proposals."""
+        _ = input_ids
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        limit = min(max(0, int(n_max)), self.draft_limit)
+        if limit <= 0:
+            return np.empty(0, dtype=np.intc)
+
+        n_block_tokens = limit + (
+            0 if self.is_dspark and self.sample_from_anchor else 1
+        )
+        self.noise_batch.reset()
+        tokens = [id_last] + [self.mask_token_id] * (n_block_tokens - 1)
+        self.noise_batch.add_sequence(
+            token_array=tokens,
+            pos_array=[n_past + i for i in range(n_block_tokens)],
+            seq_ids=[seq_id],
+            logits_array=[True] * n_block_tokens,
+        )
+
+        self._pending_verification_checkpoint = None
+        checkpoint = self.checkpoint(seq_id)
+        result: List[int] = []
+        try:
+            status = self.draft_context.decode(self.noise_batch)
+            if status != 0:
+                pos_max = self.draft_context.memory_seq_pos_max(seq_id)
+                raise RuntimeError(
+                    "DFlash block decode failed with status "
+                    f"{status}: n_past={n_past}, block_tokens={n_block_tokens}, "
+                    f"draft_pos_max={pos_max}, draft_n_ctx="
+                    f"{self.draft_context.n_ctx()}"
+                )
+
+            first_output = (
+                0 if self.is_dspark and self.sample_from_anchor else 1
+            )
+            confidence = None
+            if self.is_dspark and self.config.draft_p_min > 0.0:
+                confidence = self._copy_rows(
+                    self.draft_context.get_embeddings_nextn(),
+                    n_block_tokens,
+                    self.n_embd_dec,
+                )[:, 0]
+
+            for output_index in range(first_output, n_block_tokens):
+                if (
+                    confidence is not None
+                    and float(confidence[output_index])
+                    < self.config.draft_p_min
+                ):
+                    break
+                token, probability = self._candidate(output_index)
+                if (
+                    not self.is_dspark
+                    and probability < self.config.draft_p_min
+                ):
+                    break
+                result.append(token)
+        finally:
+            self.restore(checkpoint, seq_id)
+
+        if len(result) < self.config.draft_n_min:
+            result.clear()
+        if result:
+            self._pending_verification_checkpoint = checkpoint
+        return np.asarray(result, dtype=np.intc)
+
+    def accept(self, n_accepted: int, seq_id: int = 0) -> None:
+        """Finish verification and discard temporary fused-row bookkeeping."""
+        _ = n_accepted
+        if seq_id != 0:
+            raise NotImplementedError(
+                "DFlash speculative decoding currently supports seq_id=0"
+            )
+        self.verify_positions.clear()
+        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self._active_verification_checkpoint = None
+
+    def clear(self) -> None:
+        """Clear request-local draft cache and verification bookkeeping."""
+        if self._closed:
+            return
+        self._pending_verification_checkpoint = None
+        self._active_verification_checkpoint = None
+        self.verify_positions.clear()
+        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        if self.draft_context is not None:
+            self.draft_context.memory_clear(True)
+        self._reset_backend_sampler()
+
+    def close(self) -> None:
+        """Idempotently release all DFlash/DSpark native resources."""
+        if self._closed:
+            return
+        self._closed = True
+        errors: List[Exception] = []
+
+        self._close_draft_resources(
+            errors,
+            batch_names=("noise_batch", "encoder_batch", "inject_batch"),
+            close_model=True,
+        )
+
+        if errors:
+            raise errors[0]
 
 
 def create_native_spec_engine(
@@ -1687,10 +2544,10 @@ def create_native_spec_engine(
     """Create a model-backed engine bound to an initialized target context.
 
     ``native`` describes the engine's dependency on llama.cpp model/context
-    objects; orchestration may still be implemented in Python. For MTP, the
-    engine reads target hidden states and either uses the target model's internal
-    NextN heads or creates and owns a separate draft model/context when
-    ``config.draft_model_path`` is set.
+    objects; orchestration may still be implemented in Python. MTP reads target
+    hidden states and either uses internal NextN heads or owns an external draft
+    model/context. DFlash and DSpark own an external context that fuses selected
+    target-layer inputs and generates a non-causal draft block.
 
     The caller retains ownership of ``target_model`` and ``target_context``.
     Any additional draft-side native resources created by the returned engine
@@ -1698,6 +2555,18 @@ def create_native_spec_engine(
     """
     if config.spec_type == SpeculativeType.DRAFT_MTP:
         return LlamaMTPDecoding(
+            config,
+            target_model=target_model,
+            target_context=target_context,
+            model_params=model_params,
+            context_params=context_params,
+            verbose=verbose,
+        )
+    if config.spec_type in {
+        SpeculativeType.DRAFT_DFLASH,
+        SpeculativeType.DRAFT_DSPARK,
+    }:
+        return LlamaDFlashDecoding(
             config,
             target_model=target_model,
             target_context=target_context,

@@ -2250,7 +2250,9 @@ class Llama:
                     if self.is_hybrid:
                         use_native_speculative_rollback = (
                             self._ctx.n_rs_seq() >= n_drafted
-                            and self.speculative.supports_native_target_rollback()
+                            # The target capacity check above and the engine's
+                            # ability to realign its own state are independent.
+                            and self.speculative.can_follow_target_native_rollback()
                         )
                         if not use_native_speculative_rollback:
                             if (
