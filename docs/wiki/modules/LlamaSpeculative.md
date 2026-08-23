@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-08-19
+last_updated: 2026-08-23
 version_target: "latest"
 ---
 
@@ -29,18 +29,18 @@ contains algorithms that do not yet have Python engines.
 | Type | Python engine | Status |
 |---|---|---|
 | `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP |
+| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash GGUFs (text-only) |
+| `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs (text-only) |
 | `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented |
 | `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented |
 | `DRAFT_EAGLE3` | none | Declared, not implemented |
-| `DRAFT_DFLASH` | none | Declared, not implemented |
-| `DRAFT_DSPARK` | none | Declared, not implemented |
 | `DRAFT_SIMPLE` | none | Declared, not implemented |
 | `NGRAM_SIMPLE` | none | Declared, not implemented |
 | `NGRAM_MOD` | none | Declared, not implemented |
 | `NGRAM_CACHE` | none | Declared, not implemented |
 
 Selecting an unimplemented type raises `NotImplementedError` during validation or
-engine creation. Eagle3, DFlash, and DSpark also require `draft_model_path`.
+engine creation. Eagle3, DFlash, and DSpark require `draft_model_path`.
 
 ## Recommended Entry Point
 
@@ -104,9 +104,9 @@ additional Python-engine settings.
 | `draft_n_max` | `3` | Maximum proposed tokens for draft-family engines. |
 | `draft_n_min` | `0` | Discard a proposal shorter than this value. |
 | `draft_p_split` | `0.1` | Reserved split probability matching `llama.cpp`. |
-| `draft_p_min` | `0.0` | Minimum probability retained by MTP drafting. |
+| `draft_p_min` | `0.0` | MTP/DFlash token-probability threshold or DSpark predicted acceptance-confidence threshold. |
 | `draft_model_path` | `None` | External draft GGUF. Omit it for built-in target MTP heads. |
-| `draft_backend_sampling` | `True` | Let the backend select MTP candidates where supported. |
+| `draft_backend_sampling` | `True` | Let supported model-backed engines select compact candidates on the backend instead of copying full logits rows to Python. |
 
 ### External draft runtime settings
 
@@ -167,9 +167,11 @@ The target model and target context always remain owned by `Llama`.
 `LlamaMTPDecoding` orchestrates the native NextN/MTP graph while participating in
 the same `LlamaSpecEngine` lifecycle.
 
-The built-in and external MTP paths have currently been tested only with the
-Qwen3.5, Qwen3.6, and Qwen3.8 model families. Other model families may work
-when their GGUF tensors are compatible, but they have not yet been validated.
+The built-in and external MTP paths have been tested with the Qwen3.5,
+Qwen3.6, and Qwen3.8 model families. External MTP has also been tested with a
+`gemma4` target paired with a compatible `gemma4-assistant` GGUF. Other model
+families may work when their GGUF tensors are compatible, but they have not yet
+been validated.
 
 The engine reads target hidden-state rows, sizes them with the models'
 `n_embd_out`, advances a dedicated MTP context, and uses recurrent snapshots to
@@ -216,6 +218,15 @@ The external model owns a separate model and context. Initialization verifies
 vocabulary type, vocabulary size/token compatibility, and `n_embd_out`. Multiple
 NextN layers are chained when the model exposes more than one MTP head.
 
+The `gemma4-assistant` architecture is a special external-MTP case: its context
+is linked to the `gemma4` target through `ctx_other`, it consumes target hidden
+states and target token embeddings, and its attention memory shares selected
+target KV layers. `LlamaMTPDecoding` detects this shared-memory relationship and
+automatically skips ordinary draft-context catch-up while using the same target
+position for successive draft proposals. No architecture-specific user option
+is required beyond supplying the compatible assistant GGUF. This tested path is
+currently text-only.
+
 For Qwen3.8 27B, testing so far suggests `draft_n_max=2` as the best starting
 point. This is not a universal optimum: GPU, backend, quantization, prompt,
 sampling settings, and whether MTP is built in or external can change the
@@ -224,6 +235,49 @@ deployment environment and choose the fastest stable value.
 
 Larger `draft_n_max` values increase the verification batch and rollback
 exposure and are only useful when later-position acceptance remains high.
+
+## DFlash and DSpark Engine
+
+`LlamaDFlashDecoding` implements both block-diffusion draft paths. It extracts
+the target layers requested by the draft GGUF, runs the draft encoder, injects
+the fused rows into the draft KV cache, and decodes the complete non-causal mask
+block in one call. DSpark uses the same cache and block path with its additional
+Markov and confidence heads.
+
+Both modes currently require an external draft GGUF and are text-only:
+
+```python
+llm = Llama(
+    model_path="path/to/target.gguf",
+    n_ctx=8192,
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
+        draft_model_path="path/to/dflash-or-dspark.gguf",
+        draft_n_max=7,
+        draft_p_min=0.0,
+        draft_n_gpu_layers="all",
+        draft_backend_sampling=True,
+    ),
+)
+```
+
+Testing so far covers compatible Qwen3.6 DFlash and Qwen3.8 DSpark target/draft
+pairs. Other GGUF pairs may work when their vocabulary, target-layer metadata,
+and embedding dimensions are compatible, but they have not yet been validated.
+
+The requested draft length is clamped to the GGUF's `dflash.block_size`.
+DFlash can produce at most `block_size - 1` tokens. DSpark can produce
+`block_size` tokens when `dflash.sample_from_anchor=true`; otherwise it also
+uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected top-k
+probability. For DSpark, it filters the model's predicted acceptance confidence.
+
+The engine keeps verification blocks atomic, checks every draft-memory removal,
+and falls back to an on-device checkpoint plus accepted-prefix replay when the
+draft memory cannot remove a partial range. MTMD embedding batches are rejected
+until the target's M-RoPE positions can be mapped safely into the scalar draft
+position space.
 
 ## N-gram Map Engines
 
@@ -310,9 +364,9 @@ resources. It currently creates K and K4V n-gram engines.
 ### `create_native_spec_engine(...)`
 
 Creates engines that need an initialized target model/context. It currently
-creates MTP engines and may also own an external draft model/context. The word
-`native` describes those resource dependencies; the lifecycle orchestration is
-still implemented in Python.
+creates MTP, DFlash, and DSpark engines and may own an external draft
+model/context. The word `native` describes those resource dependencies; the
+lifecycle orchestration is still implemented in Python.
 
 Most callers should not invoke either factory directly. `Llama` selects the
 correct one from `SpecConfig`.
@@ -345,8 +399,9 @@ the end of `Llama.generate`.
 
 ## Benchmarking and Tuning
 
-MTP and n-gram draft lengths are independent parameters. The benchmark CLI uses
-`--mtp-draft-tokens` for MTP and `--ngram-draft-tokens` for n-gram methods.
+MTP and n-gram draft lengths are independent parameters. The general benchmark
+CLI uses `--mtp-draft-tokens` for MTP and `--ngram-draft-tokens` for n-gram
+methods. DFlash and DSpark use `--draft-tokens` in their dedicated example.
 
 ```bash
 # Scan N={6,8,10,12} x M={8,16,32,48} for K and K4V
@@ -361,12 +416,21 @@ python -m examples.high_level_api.high_level_api_mtp_speculative \
   --mtp-mode both \
   --draft-model mtp.gguf \
   --draft-tokens 2
+
+# Compare ordinary decoding with external DFlash or DSpark
+python -m examples.high_level_api.high_level_api_dflash_dspark_speculative \
+  --algorithm dflash \
+  --model target.gguf \
+  --draft-model dflash.gguf \
+  --draft-tokens 7
 ```
 
 N-gram speedups are workload-sensitive. Repetitive structured output can benefit
-substantially, while low-repetition prose can be neutral or slower. MTP acceptance
-also depends on the target, draft tensors, sampling settings, and prompt. Measure
-TTFT, sustained speed, acceptance by position, and rollback cost together.
+substantially, while low-repetition prose can be neutral or slower. Model-backed
+acceptance also depends on the target, draft tensors, sampling settings, prompt,
+and configured draft length. Measure TTFT, sustained speed, acceptance by
+position, target decode/sync time, and rollback cost together. For large
+vocabularies, keep backend sampling enabled unless profiling shows otherwise.
 
 ## Limitations and Lifecycle Notes
 
@@ -399,4 +463,5 @@ rollback, phase statistics, or MTP resource management. New code should use
 * [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
 * [[MTP example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_mtp_speculative.py)]
+* [[DFlash/DSpark example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_dflash_dspark_speculative.py)]
 * [[Speculative benchmark](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/benchmark/benchmark_speculative.py)]

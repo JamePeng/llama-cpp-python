@@ -27,6 +27,9 @@ This package provides:
         - [Control Vector Injection (Representation Engineering)](https://github.com/JamePeng/llama-cpp-python#control-vector-injection-representation-engineering)
     - [Sampling Configuration & Usage (LlamaSamplingParams)](https://github.com/JamePeng/llama-cpp-python#sampling-configuration--usage-llamasamplingparams)
         - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
+    - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
+        - [MTP speculative decoding](https://github.com/JamePeng/llama-cpp-python#mtp-speculative-decoding)
+        - [N-gram speculative decoding](https://github.com/JamePeng/llama-cpp-python#n-gram-speculative-decoding)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
         - [Introducing Generic MTMD Chat Handler](https://github.com/JamePeng/llama-cpp-python#generic-mtmd-chat-handler)
@@ -37,9 +40,6 @@ This package provides:
         - [1. Text Embeddings (Vector Search)](https://github.com/JamePeng/llama-cpp-python#1-text-embeddings-vector-search)
         - [2. Reranking (Cross-Encoder Scoring)](https://github.com/JamePeng/llama-cpp-python#2-reranking-cross-encoder-scoring)
         - [3. Normalization](https://github.com/JamePeng/llama-cpp-python#3-normalization)
-    - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
-        - [MTP speculative decoding](https://github.com/JamePeng/llama-cpp-python#mtp-speculative-decoding)
-        - [N-gram speculative decoding](https://github.com/JamePeng/llama-cpp-python#n-gram-speculative-decoding)
 - [FAQ](https://github.com/JamePeng/llama-cpp-python#faq)
 
 The new documentation will be maintained in the [docs/wiki](https://github.com/JamePeng/llama-cpp-python/tree/main/docs/wiki) directory based on the LLM Wiki approach. Interested volunteers are welcome to participate in its maintenance and updates :)
@@ -1023,6 +1023,240 @@ print(response["choices"][0]["text"])
 
 ---
 
+## Speculative Decoding
+
+[`llama-cpp-python`](https://github.com/JamePeng/llama-cpp-python) provides a stateful speculative-decoding path aligned with
+the `begin -> process -> draft -> accept` lifecycle used by `llama.cpp`.
+Configure it with `speculative=SpecConfig(...)`; the older `draft_model=` API is
+deprecated and is kept only for compatibility with stateless draft callbacks.
+
+The current implementation is text-only, supports one sequence (`seq_id=0`),
+and provides five usable modes:
+
+| Mode | `SpeculativeType` | Draft source |
+|---|---|---|
+| MTP | `DRAFT_MTP` | Target model NextN/MTP heads or an external MTP GGUF |
+| DFlash | `DRAFT_DFLASH` | External block-diffusion draft GGUF |
+| DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads |
+| N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history |
+| N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key, matching `llama.cpp` |
+
+Eagle3, draft-simple, and the other n-gram variants appear in
+`SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
+engines.
+
+DFlash and DSpark share `LlamaDFlashDecoding`: target-layer features are fused
+and injected into the draft KV cache before one non-causal mask-block decode.
+Both require `draft_model_path`. The requested `draft_n_max` is clamped to the
+draft GGUF's trained block size; benchmark several values on the deployment
+hardware because a longer block is not always faster.
+
+More Information see wiki: [Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)
+
+### MTP speculative decoding
+
+The built-in and external MTP paths have been tested with the Qwen3.5,
+Qwen3.6, and Qwen3.8 model families. External MTP has also been tested with a
+`gemma4` target paired with a compatible `gemma4-assistant` GGUF. Other model
+families may work when their GGUF tensors are compatible, but they have not yet
+been validated.
+
+#### Built-in MTP
+
+When the target GGUF contains compatible NextN/MTP tensors, omit
+`draft_model_path`. `Llama` automatically enables loading the target MTP
+layers.
+
+```python
+from llama_cpp import Llama
+from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+
+llm = Llama(
+    model_path="path/to/model-with-mtp.gguf",
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_MTP,
+        draft_n_max=2,
+        draft_p_min=0.0,
+    ),
+)
+```
+
+#### External MTP model
+
+Set `draft_model_path` when the MTP tensors are stored in a separate compatible
+GGUF. Target and draft vocabularies and output embedding dimensions must match.
+For a `gemma4 + gemma4-assistant` pair, the engine automatically links the
+assistant to the target context and follows its shared-KV, same-position draft
+workflow. This tested path is currently text-only, like the other stateful MTP
+modes.
+
+```python
+llm = Llama(
+    model_path="path/to/target.gguf",
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_MTP,
+        draft_model_path="path/to/mtp.gguf",
+        draft_n_max=2,
+        draft_n_gpu_layers="all",
+        draft_backend_sampling=True,
+    ),
+)
+```
+
+For Qwen3.8 27B, testing so far suggests `draft_n_max=2` as the best starting
+point. This is not a universal optimum: GPU, backend, quantization, prompt,
+sampling settings, and whether MTP is built in or external can change the
+result. Run the included benchmark and choose the fastest stable value for the
+actual deployment environment.
+
+The verification batch contains `[id_last, draft...]`, so the maximum draft
+length must not exceed `n_batch - 1`. Longer drafts only help when their
+additional acceptance outweighs verification and rollback cost.
+
+### DFlash and DSpark speculative decoding
+
+DFlash and DSpark require a compatible external draft GGUF. DFlash generates a
+non-causal mask block, while DSpark uses the same block path with additional
+Markov and acceptance-confidence heads.
+
+```python
+llm = Llama(
+    model_path="path/to/target.gguf",
+    n_ctx=8192,
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
+        draft_model_path="path/to/dflash-or-dspark.gguf",
+        draft_n_max=7,
+        draft_p_min=0.0,
+        draft_n_gpu_layers="all",
+        draft_backend_sampling=True,
+    ),
+)
+```
+
+The effective draft length is clamped to the block size recorded in the draft
+GGUF. For DFlash, `draft_p_min` filters draft-token probability; for DSpark, it
+filters predicted acceptance confidence. Backend sampling is recommended for
+large vocabularies because it avoids copying complete logits rows to Python.
+Testing so far covers compatible Qwen3.6 DFlash and Qwen3.8 DSpark target/draft
+pairs; other compatible GGUFs may work but have not yet been validated here.
+
+Treat `draft_n_max=7` as a benchmark starting point rather than a universal
+default. Compare several draft lengths with the supplied example and inspect
+acceptance, target decode/sync time, rollback count, and final throughput
+together.
+
+### N-gram speculative decoding
+
+N-gram decoding is model-free and works best for repeated JSON, tables, code,
+templates, and boilerplate. It does not require a second GGUF model.
+
+```python
+from llama_cpp import Llama
+from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+
+llm = Llama(
+    model_path="path/to/model.gguf",
+    n_ctx=4096,
+    n_batch=512,
+    n_gpu_layers="all",
+    speculative=SpecConfig(
+        spec_type=SpeculativeType.NGRAM_MAP_K,
+        ngram_size_n=8,
+        ngram_size_m=16,
+        ngram_min_hits=1,
+    ),
+)
+
+response = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "user",
+            "content": "Write a Python script using sqlite3 with repeated CRUD classes.",
+        }
+    ]
+)
+```
+
+Use `SpeculativeType.NGRAM_MAP_K4V` to cache continuations directly:
+
+```python
+speculative = SpecConfig(
+    spec_type=SpeculativeType.NGRAM_MAP_K4V,
+    ngram_size_n=8,
+    ngram_size_m=16,
+    ngram_min_hits=1,
+    ngram_max_entries_per_key=4,
+)
+```
+
+`SpecConfig` follows the `llama.cpp` n-gram defaults (`N=12`, `M=48`). The
+best values are workload-dependent. `N=8, M=16` is a conservative starting
+point; longer drafts such as `M=32` or `M=48` can be faster for highly
+repetitive output. Always benchmark against ordinary decoding.
+
+For hybrid or recurrent targets, n-gram rejection needs target checkpoints:
+
+```python
+llm = Llama(
+    model_path="path/to/hybrid-model.gguf",
+    speculative=speculative,
+    ctx_checkpoints=16,
+    checkpoint_on_device=True,
+)
+```
+
+### Runtime statistics
+
+With `verbose=True`, `Llama.generate` prints calls, acceptance, phase timings,
+checkpoint activity, rollbacks, TTFT, and sustained generation speed. The same
+values are available programmatically after a generation:
+
+```python
+stats = llm.last_speculative_stats
+print(stats["draft_token_acceptance_rate"])
+print(stats["mean_accepted_length"])
+print(stats["generation_tokens_per_second"])
+print(stats["checkpoint_restore_seconds"])
+```
+
+Use the included examples for repeatable comparisons:
+
+```bash
+# Ordinary vs built-in/external MTP
+python -m examples.high_level_api.high_level_api_mtp_speculative -h
+
+# Ordinary vs external DFlash or DSpark
+python -m examples.high_level_api.high_level_api_dflash_dspark_speculative -h
+
+# N-gram N x M scans and cross-method benchmarks
+python -m examples.benchmark.benchmark_speculative -h
+```
+
+### Notes and limitations
+
+* Speculative decoding does not skip target-model verification. Low acceptance
+  can make it slower than ordinary decoding.
+* Greedy speculative and ordinary runs can diverge because verification uses a
+  different batch shape and may change floating-point tie-breaking. The
+  DFlash/DSpark benchmark reports the first divergent generated token.
+* The current stateful engines are text-only and single-sequence. Do not enable
+  them for MTMD/multimodal embedding batches or parallel sequence decoding.
+* A speculative reset clears target and draft state together; public prompt
+  cache restoration does not currently persist the speculative engine state.
+* `draft_model=` and `LlamaDraftModel` are legacy compatibility APIs. New code
+  should use `speculative=SpecConfig(...)`.
+* Close `Llama` explicitly in long-running applications to release an external
+  draft model and its context deterministically.
+
+---
+
 ## Multi-modal Models
 
 `llama-cpp-python` supports such as llava1.5 which allow the language model to read information from both text and images.
@@ -1793,185 +2027,6 @@ response = llm.create_embedding(["query", "document"], normalize=True)
 # Raw vectors. Integer normalization modes are also supported.
 vectors = llm.embed(["query", "document"], normalize=2)
 ```
-
----
-
-## Speculative Decoding
-
-[`llama-cpp-python`](https://github.com/JamePeng/llama-cpp-python) provides a stateful speculative-decoding path aligned with
-the `begin -> process -> draft -> accept` lifecycle used by `llama.cpp`.
-Configure it with `speculative=SpecConfig(...)`; the older `draft_model=` API is
-deprecated and is kept only for compatibility with stateless draft callbacks.
-
-The current implementation is text-only, supports one sequence (`seq_id=0`),
-and provides three usable modes:
-
-| Mode | `SpeculativeType` | Draft source |
-|---|---|---|
-| MTP | `DRAFT_MTP` | Target model NextN/MTP heads or an external MTP GGUF |
-| N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history |
-| N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key, matching `llama.cpp` |
-
-Eagle3, DFlash, DSpark, draft-simple, and the other n-gram variants appear in
-`SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
-engines.
-
-More Information see wiki: [Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md) 
-
-### MTP speculative decoding
-
-The built-in and external MTP paths have currently been tested only with the
-Qwen3.5, Qwen3.6, and Qwen3.8 model families. Other model families may work
-when their GGUF tensors are compatible, but they have not yet been validated.
-
-#### Built-in MTP
-
-When the target GGUF contains compatible NextN/MTP tensors, omit
-`draft_model_path`. `Llama` automatically enables loading the target MTP
-layers.
-
-```python
-from llama_cpp import Llama
-from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
-
-llm = Llama(
-    model_path="path/to/model-with-mtp.gguf",
-    n_batch=512,
-    n_gpu_layers="all",
-    speculative=SpecConfig(
-        spec_type=SpeculativeType.DRAFT_MTP,
-        draft_n_max=2,
-        draft_p_min=0.0,
-    ),
-)
-```
-
-#### External MTP model
-
-Set `draft_model_path` when the MTP tensors are stored in a separate compatible
-GGUF. Target and draft vocabularies and output embedding dimensions must match.
-
-```python
-llm = Llama(
-    model_path="path/to/target.gguf",
-    n_batch=512,
-    n_gpu_layers="all",
-    speculative=SpecConfig(
-        spec_type=SpeculativeType.DRAFT_MTP,
-        draft_model_path="path/to/mtp.gguf",
-        draft_n_max=2,
-        draft_n_gpu_layers="all",
-        draft_backend_sampling=True,
-    ),
-)
-```
-
-For Qwen3.8 27B, testing so far suggests `draft_n_max=2` as the best starting
-point. This is not a universal optimum: GPU, backend, quantization, prompt,
-sampling settings, and whether MTP is built in or external can change the
-result. Run the included benchmark and choose the fastest stable value for the
-actual deployment environment.
-
-The verification batch contains `[id_last, draft...]`, so the maximum draft
-length must not exceed `n_batch - 1`. Longer drafts only help when their
-additional acceptance outweighs verification and rollback cost.
-
-### N-gram speculative decoding
-
-N-gram decoding is model-free and works best for repeated JSON, tables, code,
-templates, and boilerplate. It does not require a second GGUF model.
-
-```python
-from llama_cpp import Llama
-from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
-
-llm = Llama(
-    model_path="path/to/model.gguf",
-    n_ctx=4096,
-    n_batch=512,
-    n_gpu_layers="all",
-    speculative=SpecConfig(
-        spec_type=SpeculativeType.NGRAM_MAP_K,
-        ngram_size_n=8,
-        ngram_size_m=16,
-        ngram_min_hits=1,
-    ),
-)
-
-response = llm.create_chat_completion(
-    messages=[
-        {
-            "role": "user",
-            "content": "Write a Python script using sqlite3 with repeated CRUD classes.",
-        }
-    ]
-)
-```
-
-Use `SpeculativeType.NGRAM_MAP_K4V` to cache continuations directly:
-
-```python
-speculative = SpecConfig(
-    spec_type=SpeculativeType.NGRAM_MAP_K4V,
-    ngram_size_n=8,
-    ngram_size_m=16,
-    ngram_min_hits=1,
-    ngram_max_entries_per_key=4,
-)
-```
-
-`SpecConfig` follows the `llama.cpp` n-gram defaults (`N=12`, `M=48`). The
-best values are workload-dependent. `N=8, M=16` is a conservative starting
-point; longer drafts such as `M=32` or `M=48` can be faster for highly
-repetitive output. Always benchmark against ordinary decoding.
-
-For hybrid or recurrent targets, n-gram rejection needs target checkpoints:
-
-```python
-llm = Llama(
-    model_path="path/to/hybrid-model.gguf",
-    speculative=speculative,
-    ctx_checkpoints=16,
-    checkpoint_on_device=True,
-)
-```
-
-### Runtime statistics
-
-With `verbose=True`, `Llama.generate` prints calls, acceptance, phase timings,
-checkpoint activity, rollbacks, TTFT, and sustained generation speed. The same
-values are available programmatically after a generation:
-
-```python
-stats = llm.last_speculative_stats
-print(stats["draft_token_acceptance_rate"])
-print(stats["mean_accepted_length"])
-print(stats["generation_tokens_per_second"])
-print(stats["checkpoint_restore_seconds"])
-```
-
-Use the included examples for repeatable comparisons:
-
-```bash
-# Ordinary vs built-in/external MTP
-python -m examples.high_level_api.high_level_api_mtp_speculative -h
-
-# N-gram N x M scans and cross-method benchmarks
-python -m examples.benchmark.benchmark_speculative -h
-```
-
-### Notes and limitations
-
-* Speculative decoding does not skip target-model verification. Low acceptance
-  can make it slower than ordinary decoding.
-* The current stateful engines are text-only and single-sequence. Do not enable
-  them for MTMD/multimodal embedding batches or parallel sequence decoding.
-* A speculative reset clears target and draft state together; public prompt
-  cache restoration does not currently persist the speculative engine state.
-* `draft_model=` and `LlamaDraftModel` are legacy compatibility APIs. New code
-  should use `speculative=SpecConfig(...)`.
-* Close `Llama` explicitly in long-running applications to release an external
-  draft model and its context deterministically.
 
 ---
 

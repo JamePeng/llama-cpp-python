@@ -268,7 +268,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
     New code should pass `SpecConfig` through the `speculative` argument. This enables the stateful begin/draft/process/accept lifecycle, including verification batches, acceptance feedback, recurrent-state rollback, and per-run statistics.
 
-    The current implementation is text-only and uses sequence ID `0`. It supports built-in and external MTP plus the `NGRAM_MAP_K` and `NGRAM_MAP_K4V` lookup engines. Multimodal pseudo-tokens, which may use negative token IDs, are not yet supported by this path.
+    The current implementation is text-only and uses sequence ID `0`. It supports built-in and external MTP, external DFlash and DSpark drafts, plus the `NGRAM_MAP_K` and `NGRAM_MAP_K4V` lookup engines. Multimodal pseudo-tokens and MTMD embedding batches are not yet supported by this path.
 
     **Built-in MTP heads**
 
@@ -289,7 +289,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     )
     ```
 
-    Omitting `draft_model_path` makes `Llama` enable target MTP tensor loading automatically. MTP has currently been tested with built-in and external MTP models from the Qwen3.5, Qwen3.6, and Qwen3.8 families. For Qwen3.8 27B, `draft_n_max=2` is a good starting point, but the best value depends on the backend, GPU, quantization, prompt, and sampling settings. Use `examples.benchmark.benchmark_speculative` to tune it in the deployment environment.
+    Omitting `draft_model_path` makes `Llama` enable target MTP tensor loading automatically. MTP has been tested with built-in and external MTP models from the Qwen3.5, Qwen3.6, and Qwen3.8 families. A `gemma4` target paired with an external, compatible `gemma4-assistant` GGUF has also been tested; the engine handles its target-context and shared-KV workflow automatically. All of these stateful MTP paths are currently text-only. For Qwen3.8 27B, `draft_n_max=2` is a good starting point, but the best value depends on the backend, GPU, quantization, prompt, and sampling settings. Use `examples.benchmark.benchmark_speculative` to tune it in the deployment environment.
 
     **External MTP model**
 
@@ -306,6 +306,31 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
         ),
     )
     ```
+
+    **External DFlash or DSpark model**
+
+    ```python
+    llm = Llama(
+        model_path="path/to/target.gguf",
+        n_ctx=8192,
+        n_batch=512,
+        n_gpu_layers="all",
+        speculative=SpecConfig(
+            spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
+            draft_model_path="path/to/dflash-or-dspark.gguf",
+            draft_n_max=7,
+            draft_p_min=0.0,
+            draft_n_gpu_layers="all",
+            draft_backend_sampling=True,
+        ),
+    )
+    ```
+
+    DFlash and DSpark require a compatible external draft GGUF. Their effective
+    draft length is limited by the GGUF's trained block size. `draft_p_min`
+    filters token probability for DFlash and predicted acceptance confidence for
+    DSpark. Benchmark draft length and threshold together; longer blocks only
+    help when their additional accepted tokens outweigh verification cost.
 
     **N-gram lookup**
 
@@ -672,5 +697,5 @@ for formatting query/document pairs.
 * [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
 * [[Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
-* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP and n-gram speculative engines, rollback, statistics, and benchmarks.
+* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP, DFlash, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).
