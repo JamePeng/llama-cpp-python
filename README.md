@@ -29,6 +29,7 @@ This package provides:
         - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
     - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
         - [MTP speculative decoding](https://github.com/JamePeng/llama-cpp-python#mtp-speculative-decoding)
+        - [DFlash and DSpark speculative decoding](https://github.com/JamePeng/llama-cpp-python#dflash-and-dspark-speculative-decoding)
         - [N-gram speculative decoding](https://github.com/JamePeng/llama-cpp-python#n-gram-speculative-decoding)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
