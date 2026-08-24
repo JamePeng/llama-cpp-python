@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-08-23
+last_updated: 2026-08-24
 version_target: "latest"
 ---
 
@@ -26,21 +26,33 @@ The current engines are text-only and support one sequence (`seq_id=0`).
 `SpeculativeType` mirrors `common_speculative_type` from `llama.cpp`, so the enum
 contains algorithms that do not yet have Python engines.
 
-| Type | Python engine | Status |
-|---|---|---|
-| `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP |
-| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash GGUFs (text-only) |
-| `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs (text-only) |
-| `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented |
-| `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented |
-| `DRAFT_EAGLE3` | none | Declared, not implemented |
-| `DRAFT_SIMPLE` | none | Declared, not implemented |
-| `NGRAM_SIMPLE` | none | Declared, not implemented |
-| `NGRAM_MOD` | none | Declared, not implemented |
-| `NGRAM_CACHE` | none | Declared, not implemented |
+| Type | Python engine | Status | Availability |
+|---|---|---|---|
+| `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP | Since `0.3.48` |
+| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash GGUFs (text-only) | `0.3.49-preview` |
+| `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs (text-only) | `0.3.49-preview` |
+| `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
+| `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
+| `DRAFT_EAGLE3` | none | Declared, not implemented | — |
+| `DRAFT_SIMPLE` | none | Declared, not implemented | — |
+| `NGRAM_SIMPLE` | none | Declared, not implemented | — |
+| `NGRAM_MOD` | none | Declared, not implemented | — |
+| `NGRAM_CACHE` | none | Declared, not implemented | — |
 
 Selecting an unimplemented type raises `NotImplementedError` during validation or
-engine creation. Eagle3, DFlash, and DSpark require `draft_model_path`.
+engine creation. Eagle3, DFlash, and DSpark require `draft_model_path`; Eagle3
+is accepted by configuration validation but does not yet have a native Python
+engine.
+
+### Version availability
+
+- `0.3.48` introduced the stateful, text-only MTP path for both target-internal
+  NextN heads and compatible external MTP GGUFs. The K and K4V n-gram engines
+  were also available in this release.
+- `0.3.49-preview` adds the first text-only external DFlash and DSpark support
+  through `LlamaDFlashDecoding`. This is preview functionality and was not part
+  of the `0.3.48` release; its supported models and tuning guidance may continue
+  to evolve before the final `0.3.49` release.
 
 ## Recommended Entry Point
 
@@ -80,7 +92,10 @@ Useful helpers include:
 |---|---|
 | `is_draft()` | True for model-backed draft-family types. |
 | `is_ngram()` | True for n-gram-family types. |
+| `is_eagle3()` | True only for `DRAFT_EAGLE3`. |
 | `is_mtp()` | True only for `DRAFT_MTP`. |
+| `is_dflash()` | True only for `DRAFT_DFLASH`. |
+| `is_dspark()` | True only for `DRAFT_DSPARK`. |
 | `is_none()` | True only for `NONE`. |
 | `to_str()` | Returns the `llama.cpp`-style name, such as `draft-mtp`. |
 | `from_str(value)` | Parses canonical names and aliases such as `mtp`, `ngram-k`, and `ngram-k4v`. |
@@ -114,10 +129,11 @@ additional Python-engine settings.
 |---|---:|---|
 | `draft_n_gpu_layers` | `"auto"` | Draft offload setting: integer, `"auto"`, or `"all"`. |
 | `draft_n_threads` | `None` | Draft generation thread count. |
-| `draft_n_threads_batch` | `None` | Draft prompt/batch thread count. |
+| `draft_n_threads_batch` | `None` | Draft prompt/batch thread count. When omitted, it follows `draft_n_threads` if that field is set; otherwise it inherits the target default. |
 | `draft_cpu_moe` | `False` | Keep all draft MoE expert tensors on CPU. |
 | `draft_n_cpu_moe` | `0` | Keep the first N draft MoE layers on CPU. |
 | `draft_devices` | `[]` | Ordered backend device names for the draft model. |
+| `draft_tensor_buft_overrides` | `None` | Native tensor buffer-type overrides retained for the lifetime of the external draft model. |
 | `draft_type_k`, `draft_type_v` | `None` | Optional draft KV-cache data types. |
 | `draft_model_kwargs` | `{}` | Additional native draft model parameters. |
 
@@ -135,6 +151,32 @@ draft-family engines use `draft_n_max`, while K and K4V use `ngram_size_m`.
 The resulting length must not exceed `Llama.n_batch - 1` because `id_last` and
 all draft tokens must remain in one verification batch.
 
+Other configuration helpers are `enabled()`, which tests for a non-`NONE`
+algorithm; `resolved_draft_n_gpu_layers()`, which maps `"auto"` and `"all"` to
+their native values; and `validate()`, which checks implementation status,
+ranges, and required sidecar paths before model loading.
+
+`ngram_mod_n_match`, `ngram_mod_n_max`, `ngram_mod_n_min`,
+`lookup_cache_dynamic`, and `lookup_cache_static` are retained for alignment
+with the corresponding `llama.cpp` algorithm families. Their Python engines are
+not implemented, so these fields are not currently actionable.
+
+## `speculative_output_limits()`
+
+```python
+total_outputs, outputs_per_sequence = speculative_output_limits(
+    n_batch, n_parallel, n_draft
+)
+```
+
+This public helper mirrors `common_speculative_get_output_limits()` from
+`llama.cpp`. It reserves at most `1 + n_draft` target outputs per sequence for
+the complete `[id_last, draft...]` verification block, capped by `n_batch`, and
+then caps the combined capacity for all configured sequences. `Llama` uses the
+result while constructing its target context; callers normally do not need to
+invoke it themselves. Non-positive `n_batch` or `n_parallel` values raise
+`ValueError`.
+
 ## `LlamaSpecEngine`
 
 ```python
@@ -148,12 +190,14 @@ provide `SpecConfig` instead of constructing or driving an engine directly.
 | Method | Generation-loop role |
 |---|---|
 | `begin(prompt_tokens, seq_id=0)` | Initialize request state after the prompt prefix is decoded. |
-| `process(batch, seq_id=0)` | Consume target tokens and NextN hidden rows after a successful decode. |
+| `process(batch, seq_id=0)` | Consume target tokens and hidden rows after target decode has completed and synchronized. |
 | `draft(input_ids, n_past, id_last, n_max, seq_id=0)` | Return only continuation tokens, never `id_last`. |
 | `accept(n_accepted, seq_id=0)` | Commit acceptance feedback for the last proposal. |
 | `checkpoint(seq_id=0)` | Capture opaque draft-side state before verification. |
 | `take_verification_checkpoint(seq_id=0)` | Reuse a draft-time checkpoint when possible. |
 | `restore(checkpoint, seq_id=0)` | Restore rejected draft-side state. |
+| `reset_checkpoint_stats()` | Reset per-request checkpoint counters and accumulated durations. |
+| `can_follow_target_native_rollback()` | Report whether the engine can realign its own state after target native rollback. This does not test target snapshot capacity. |
 | `rollback_verified(checkpoint, n_accepted, seq_id=0)` | Keep the sampled token and accepted prefix after native target rollback. |
 | `truncate(position, seq_id=0)` | Remove state at and after an absolute position. |
 | `clear()` | Clear request state but keep reusable model resources. |
@@ -161,6 +205,43 @@ provide `SpecConfig` instead of constructing or driving an engine directly.
 | `checkpoint_stats()` | Return per-request capture and restore metrics. |
 
 The target model and target context always remain owned by `Llama`.
+
+## `_LlamaModelDraftEngine`
+
+```python
+class _LlamaModelDraftEngine(LlamaSpecEngine):
+    ...
+```
+
+This private base class contains the native plumbing shared by
+`LlamaMTPDecoding` and `LlamaDFlashDecoding`. It is an implementation extension
+point, not a public engine that applications should instantiate. It deliberately
+does not define graph inputs, draft layout, checkpoint semantics, or acceptance
+state; concrete engines continue to implement those algorithm-specific parts.
+
+Its shared responsibilities are:
+
+| Helper area | Responsibility |
+|---|---|
+| Model compatibility | Check vocabulary type, enabled BOS/EOS behavior, vocabulary-size tolerance, shared token text, and close a rejected sidecar safely. |
+| Model parameters | Apply draft GPU layers, devices, CPU MoE placement, tensor buffer overrides, arbitrary model parameter overrides, and the algorithm-specific `load_mtp` flag. |
+| Context parameters | Copy target defaults while forcing `embeddings=False` and unspecified pooling, then apply draft threads and KV types. |
+| Candidate selection | Prefer backend top-k candidate buffers; fall back to selecting from the top ten entries of the full CPU logits row. |
+| Native buffers | Copy transient ctypes embedding rows into owned NumPy arrays before another graph execution invalidates their pointers. |
+| Lifecycle | Retain ctypes arrays, detach samplers, and close batches, draft context, and an engine-owned model in a shutdown-safe, idempotent order. |
+
+To add another model-backed algorithm, subclass `_LlamaModelDraftEngine`, call
+`_init_model_draft_engine()` before allocating native resources, load and
+validate an external sidecar with `_load_draft_model()` when needed, derive its
+context from `_build_draft_context_params()`, and enable backend sampling only
+after `draft_context` exists. The subclass must still implement the
+`LlamaSpecEngine` request hooks and call `_close_draft_resources()` from an
+idempotent `close()`.
+
+Ownership is intentionally asymmetric: the target model and context are always
+borrowed from `Llama`; every concrete engine owns its draft context and batches;
+an external draft model is engine-owned, while built-in MTP borrows the target
+model containing its NextN heads.
 
 ## MTP Engine
 
@@ -174,10 +255,34 @@ families may work when their GGUF tensors are compatible, but they have not yet
 been validated.
 
 The engine reads target hidden-state rows, sizes them with the models'
-`n_embd_out`, advances a dedicated MTP context, and uses recurrent snapshots to
-discard rejected speculative branches. Backend sampling avoids copying a full
-vocabulary-sized logits row to Python when the backend exposes compact candidate
-buffers. This is especially important for large vocabularies.
+`n_embd_out`, and advances a dedicated MTP context. Native recurrent snapshots
+are used when the draft context provides enough slots; otherwise the engine
+uses a partial on-device checkpoint. The checkpoint captured and restored while
+drafting is reused for target verification instead of being captured twice.
+Backend sampling avoids copying a full vocabulary-sized logits row to Python
+when the backend exposes compact candidate buffers. This is especially
+important for large vocabularies.
+
+### Lifecycle
+
+1. **Initialize:** borrow the target model for built-in heads or load an
+   external MTP sidecar, create an MTP context linked through `ctx_other`, and
+   enable target/draft NextN hidden outputs. `begin()` is currently the base
+   no-op because MTP state is initialized from decoded target rows.
+2. **Process:** after each synchronized target decode, `process()` copies the
+   target NextN rows and advances the draft context. Shared-memory assistants
+   such as `gemma4-assistant` skip the ordinary catch-up decode.
+3. **Draft:** `draft()` checkpoints the draft context, predicts up to
+   `draft_n_max` continuation tokens from `id_last` and the pending hidden row,
+   then restores the speculative branch. That same checkpoint is retained for
+   the upcoming target verification.
+4. **Verify and commit:** the target verifies `[id_last, draft...]`. `accept()`
+   advances the pending hidden row after a fully handled step; rejection uses
+   `rollback_verified()` or `restore()` to discard the rejected suffix while
+   retaining the sampled token and accepted prefix.
+5. **Reset or close:** `clear()` removes request-local memory and sampler state;
+   `close()` additionally releases the draft batch/context and an externally
+   owned sidecar model.
 
 ### Built-in target MTP heads
 
@@ -214,9 +319,11 @@ llm = Llama(
 )
 ```
 
-The external model owns a separate model and context. Initialization verifies
-vocabulary type, vocabulary size/token compatibility, and `n_embd_out`. Multiple
-NextN layers are chained when the model exposes more than one MTP head.
+The engine owns a separate external model and draft context. Initialization
+verifies vocabulary type, vocabulary size/token compatibility, and `n_embd_out`.
+Multiple NextN heads are chained only when the model exposes more than one head
+and its memory is not shared with the target. Shared-memory assistants execute
+their layers through their native graph instead.
 
 The `gemma4-assistant` architecture is a special external-MTP case: its context
 is linked to the `gemma4` target through `ctx_other`, it consumes target hidden
@@ -243,6 +350,29 @@ the target layers requested by the draft GGUF, runs the draft encoder, injects
 the fused rows into the draft KV cache, and decodes the complete non-causal mask
 block in one call. DSpark uses the same cache and block path with its additional
 Markov and confidence heads.
+
+### Lifecycle
+
+1. **Initialize:** load and validate the external sidecar, read its target-layer
+   and block metadata, create encoder/injection/noise batches, enable selected
+   target input taps, and configure the draft context for non-causal decoding.
+2. **Process prompt and begin:** each synchronized target decode calls
+   `process()`, which gathers the configured target-layer rows, fuses them
+   through the draft encoder, injects them into the draft cache, and
+   synchronizes that context. After prompt evaluation, `begin()` verifies that
+   this processing populated the complete draft prompt; later target decodes
+   continue through the same `process()` path.
+3. **Draft:** `draft()` captures a native or partial on-device checkpoint,
+   decodes one anchor-plus-mask block, applies DFlash probability or DSpark
+   confidence filtering, restores the transient noise branch, and retains the
+   checkpoint for verification.
+4. **Verify and commit:** the target verifies `[id_last, draft...]`. `accept()`
+   clears temporary fused-row bookkeeping; rejection either removes the draft
+   suffix natively or restores the checkpoint and replays only the sampled
+   token plus accepted fused rows.
+5. **Reset or close:** `clear()` empties request-local cache and sampler state;
+   `close()` releases all three batches, the draft context, sampler, and
+   external sidecar model.
 
 Both modes currently require an external draft GGUF and are text-only:
 
@@ -273,11 +403,19 @@ DFlash can produce at most `block_size - 1` tokens. DSpark can produce
 uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected top-k
 probability. For DSpark, it filters the model's predicted acceptance confidence.
 
-The engine keeps verification blocks atomic, checks every draft-memory removal,
-and falls back to an on-device checkpoint plus accepted-prefix replay when the
-draft memory cannot remove a partial range. MTMD embedding batches are rejected
-until the target's M-RoPE positions can be mapped safely into the scalar draft
-position space.
+The engine keeps verification blocks atomic and checks every draft-memory
+removal. Transformer drafts and recurrent/hybrid drafts with enough native
+snapshot slots use suffix removal; other recurrent/hybrid drafts use a partial
+on-device checkpoint plus accepted-prefix replay. A failed native removal is a
+fatal state-alignment error rather than a runtime fallback trigger. MTMD
+embedding batches are rejected until the target's M-RoPE positions can be
+mapped safely into the scalar draft position space.
+
+Target layer IDs come from the sidecar GGUF. Values from `0` through
+`target_model.n_layer()` are valid: the inclusive final value denotes the final
+head-input tap required by architectures such as Nemotron DFlash. Target rows
+are fused and injected in draft-`n_ubatch` chunks, followed by an explicit draft
+context synchronization before block generation.
 
 ## N-gram Map Engines
 
@@ -379,7 +517,10 @@ request's metrics. Important keys include:
 | Key | Meaning |
 |---|---|
 | `drafted`, `verified`, `accepted` | Proposal and verification token counts. |
+| `begin_calls`, `draft_calls`, `process_calls`, `accept_calls` | Speculative lifecycle call counts. |
 | `generated_drafts`, `accepted_drafts` | Draft-batch counts. |
+| `draft_batch_acceptance_rate` | Draft batches with at least one accepted token divided by generated draft batches. |
+| `accepted_draft_tokens` | Number of proposed draft tokens accepted by target verification. |
 | `draft_token_acceptance_rate` | Accepted draft tokens divided by proposed tokens. |
 | `mean_accepted_length` | Sampled token plus mean accepted draft prefix. |
 | `acceptance_rate_per_position` | Acceptance probability at each draft position. |
@@ -387,12 +528,21 @@ request's metrics. Important keys include:
 | `target_decode_seconds` | Host time spent submitting target decode work. |
 | `target_sync_seconds` | Time spent waiting for target decode/verification to complete. |
 | `process_seconds` | Hidden-state processing and draft-context catch-up after the target synchronization boundary. |
-| `checkpoint_captures`, `checkpoint_restores` | Checkpoint operations. |
+| `checkpoint_captures`, `checkpoint_restores`, `checkpoint_verification_reuses` | Checkpoint operations and draft-time checkpoints reused for verification. |
+| `checkpoint_native_captures`, `checkpoint_native_restores` | Native suffix-removal checkpoint operations. |
+| `checkpoint_device_captures`, `checkpoint_device_restores` | Partial on-device state checkpoint operations. |
+| `checkpoint_native_verification_rollbacks` | Draft contexts realigned directly after target native rollback. |
+| `checkpoint_buffer_bytes` | Total serialized metadata buffer bytes allocated for on-device checkpoints. |
 | `checkpoint_capture_seconds`, `checkpoint_restore_seconds` | Checkpoint overhead. |
+| `verification_steps` | Target verification batches that contained draft tokens. |
 | `rollbacks`, `native_rollbacks`, `checkpoint_rollbacks` | Target rollback paths. |
-| `generation_tokens_per_second` | Delivered-token throughput from speculative-phase start through the last token, including TTFT. |
+| `acceptance_rate` | Accepted draft tokens divided by target-verified draft tokens. |
+| `generation_tokens`, `generation_seconds`, `generation_tokens_per_second` | Delivered-token throughput from speculative-phase start through the last token, including TTFT. |
 | `time_to_first_token_seconds` | Time to first generated token. |
-| `sustained_tokens_per_second` | Throughput after the first token, excluding TTFT. |
+| `sustained_tokens`, `sustained_seconds`, `sustained_tokens_per_second` | Throughput after the first token, excluding TTFT. |
+
+`decode_tokens`, `decode_seconds`, and `decode_tokens_per_second` remain aliases
+for the corresponding generation measurements.
 
 With `verbose=True`, the same information is printed in a multi-line summary at
 the end of `Llama.generate`.
@@ -460,8 +610,8 @@ rollback, phase statistics, or MTP resource management. New code should use
 
 ## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
-* [[MTP example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_mtp_speculative.py)]
-* [[DFlash/DSpark example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_dflash_dspark_speculative.py)]
-* [[Speculative benchmark](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/benchmark/benchmark_speculative.py)]
+* [Index/Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)
+* [Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)
+* [MTP example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_mtp_speculative.py)
+* [DFlash/DSpark example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_dflash_dspark_speculative.py)
+* [Speculative benchmark](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/benchmark/benchmark_speculative.py)
