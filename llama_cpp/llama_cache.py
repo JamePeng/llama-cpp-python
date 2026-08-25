@@ -361,11 +361,13 @@ class HybridCheckpoint:
           serialized state. The tensor payload is stored in llama_context-owned
           device buffers by llama.cpp, keyed by seq_id.
     """
-    pos: int        # The token position (cursor) where this snapshot was taken.
-    data: bytes     # The raw binary RNN state data.
-    hash_val: str   # SHA-256 hash of the token prefix to ensure exact sequence matching.
-    size: int       # Number of bytes written by llama_state_seq_get_data_ext().
-    seq_id: int     # Sequence id used by llama.cpp state APIs.
+    pos: int                       # The token position (cursor) where this snapshot was taken.
+    data: bytes                    # The raw binary RNN state data.
+    hash_val: str                  # SHA-256 hash of the token prefix to ensure exact sequence matching.
+    size: int                      # Number of bytes written by llama_state_seq_get_data_ext().
+    seq_id: int                    # Sequence id used by llama.cpp state APIs.
+    pos_min: int = -1              # Minimum backend memory position covered by the snapshot.
+    pos_max: Optional[int] = None  # Maximum backend memory position covered by the snapshot.
 
 class HybridCheckpointCache(BaseLlamaCache):
     """
@@ -459,6 +461,10 @@ class HybridCheckpointCache(BaseLlamaCache):
         self._get_size_ext = llama_cpp_lib.llama_state_seq_get_size_ext
         self._get_data_ext = llama_cpp_lib.llama_state_seq_get_data_ext
         self._set_data_ext = llama_cpp_lib.llama_state_seq_set_data_ext
+        self._get_memory = llama_cpp_lib.llama_get_memory
+        self._memory_seq_pos_min = llama_cpp_lib.llama_memory_seq_pos_min
+        self._memory_seq_pos_max = llama_cpp_lib.llama_memory_seq_pos_max
+        self._memory_seq_rm = llama_cpp_lib.llama_memory_seq_rm
 
         # State serialization flags forwarded to llama.cpp.
         #
@@ -519,6 +525,10 @@ class HybridCheckpointCache(BaseLlamaCache):
         self._get_size_ext = None
         self._get_data_ext = None
         self._set_data_ext = None
+        self._get_memory = None
+        self._memory_seq_pos_min = None
+        self._memory_seq_pos_max = None
+        self._memory_seq_rm = None
 
     def __del__(self) -> None:
         self.close()
@@ -669,13 +679,22 @@ class HybridCheckpointCache(BaseLlamaCache):
         data_bytes = bytes(buffer[:n_written])
         hash_val = self._hash_prefix(tokens, current_pos)
 
+        # Token count and backend memory positions are not interchangeable for all
+        # models. Multimodal inputs, custom position IDs, and SWA can make pos_max
+        # differ from current_pos - 1, so retain the native range with the snapshot.
+        memory = self._get_memory(self._ctx)
+        pos_min = self._memory_seq_pos_min(memory, seq_id)
+        pos_max = self._memory_seq_pos_max(memory, seq_id)
+
         # 3. Store the newly extracted checkpoint
         self.checkpoints.append(HybridCheckpoint(
             pos=current_pos,
             data=data_bytes,
             hash_val=hash_val,
             size=n_written,
-            seq_id=seq_id)
+            seq_id=seq_id,
+            pos_min=pos_min,
+            pos_max=pos_max)
         )
         self._current_size += n_written
 
@@ -740,6 +759,22 @@ class HybridCheckpointCache(BaseLlamaCache):
             self._ctx, buffer, cp.size, seq_id, flags
         )
         success = (ret == cp.size)
+
+        # PARTIAL_ONLY restores only the non-truncatable part of hybrid/SWA
+        # memory. Remove the suffix from the remaining attention memory before
+        # callers replay tokens. New checkpoints always carry pos_max; the
+        # token-based fallback keeps manually-created legacy checkpoints usable.
+        if success:
+            suffix_start = cp.pos_max + 1 if cp.pos_max is not None else cp.pos
+            memory = self._get_memory(self._ctx)
+            success = bool(self._memory_seq_rm(memory, seq_id, suffix_start, -1))
+
+            if not success and self.verbose:
+                print(
+                    "HybridCheckpointCache(restore_checkpoint): [Error] "
+                    f"failed to remove memory suffix from position {suffix_start}",
+                    file=sys.stderr,
+                )
 
         if self.verbose:
             mode = "device" if self.on_device else "host"

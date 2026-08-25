@@ -922,7 +922,7 @@ Defined in: `llama_cpp/llama_cache.py`
 
 Hybrid or recurrent models may require sequence-state rollback rather than standard KV-cache truncation.
 
-`HybridCheckpoint` stores the checkpoint position, prefix verification hash, sequence id, and the serialized checkpoint payload visible to Python.
+`HybridCheckpoint` stores the Python token position, native backend memory-position range, prefix verification hash, sequence id, and the serialized checkpoint payload visible to Python.
 
 Its `data` field has different ownership semantics depending on the cache mode:
 
@@ -941,6 +941,8 @@ class HybridCheckpoint:
     hash_val: str
     size: int
     seq_id: int
+    pos_min: int = -1
+    pos_max: Optional[int] = None
 ````
 
 ---
@@ -954,6 +956,8 @@ class HybridCheckpoint:
 | `hash_val` | `str`   | SHA-256 hash prefix used to verify exact token-prefix matching.                                                                             |
 | `size`     | `int`   | Number of bytes written by `llama_state_seq_get_data_ext`.                                                                                  |
 | `seq_id`   | `int`   | Sequence id used by llama.cpp sequence-state APIs.                                                                                          |
+| `pos_min`  | `int`   | Minimum native backend memory position covered by the checkpoint.                                                                           |
+| `pos_max`  | `Optional[int]` | Maximum native backend memory position covered by the checkpoint. `None` is reserved for manually created legacy checkpoints.       |
 
 ---
 
@@ -1294,6 +1298,7 @@ Returns `False` if:
 * `on_device=True` and the checkpoint object is no longer tracked by this cache.
 * The current backend state size differs from the checkpoint size.
 * The backend does not report the expected number of restored bytes.
+* The backend cannot remove the memory suffix after the restored native `pos_max`.
 
 ### Behavior
 
@@ -1303,7 +1308,12 @@ Returns `False` if:
 4. Verifies it matches `cp.size`.
 5. Copies checkpoint bytes into a ctypes buffer.
 6. Calls `_set_data_ext` to restore the state.
-7. Returns whether the number of restored bytes equals `cp.size`.
+7. Removes the remaining attention-memory suffix beginning at `cp.pos_max + 1`.
+8. Returns whether both state restoration and suffix removal succeeded.
+
+The native memory range is stored separately from `pos` because token counts do not
+always map one-to-one to backend positions, notably for multimodal inputs, custom
+position IDs, and SWA models.
 
 ### Stale Checkpoint Guard
 
@@ -1426,7 +1436,7 @@ Only one active checkpoint per `seq_id` is safe.
 
 * Use `HybridCheckpointCache` only for Hybrid or recurrent model workflows that require hidden-state rollback.
 * Keep `on_device=False` when you need multiple historical checkpoints for the same `seq_id`.
-* Use `on_device=True` when reducing device-to-host checkpoint copy overhead is more important than keeping many historical checkpoint payloads. Only store the checkpoint seq_id and pos.
+* Use `on_device=True` when reducing device-to-host checkpoint copy overhead is more important than keeping many historical checkpoint payloads. Retain the checkpoint object so its sequence id and native memory-position range remain available for restoration.
 * Set `max_checkpoints=0` for single-turn workflows where rollback is not needed.
 * Keep `max_checkpoints` small if checkpoint states are large.
 * Use `find_best_checkpoint` before calling `restore_checkpoint`.
