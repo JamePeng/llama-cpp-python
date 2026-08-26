@@ -1408,6 +1408,107 @@ class Llama:
                     time.perf_counter() - process_started
                 )
 
+    def _recover_interrupted_speculation(
+        self,
+        *,
+        verification_start: int,
+        evaluated_tokens: Sequence[int],
+        delivered_accepted: int,
+        speculative_checkpoint: Any,
+        use_native_rollback: bool,
+        active_loras: Optional[List[Dict[str, Union[str, float]]]],
+        control_vector: Optional[Dict[str, Any]],
+    ) -> str:
+        """Align target and draft state after speculative verification is interrupted.
+
+        Keep ``id_last`` and accepted draft tokens already delivered by ``yield``;
+        discard all uncommitted speculative tokens. Hybrid contexts use native
+        rollback when available, otherwise restore checkpoints and replay the
+        committed inputs. Transformer contexts truncate both caches directly.
+
+        Args:
+            verification_start: Token count before the verification batch.
+            evaluated_tokens: ``id_last`` followed by proposed draft tokens.
+            delivered_accepted: Accepted draft tokens already delivered by ``yield``.
+            speculative_checkpoint: Draft state saved before verification.
+            use_native_rollback: Whether native hybrid rollback is available.
+            active_loras: LoRA configuration used when replay is required.
+            control_vector: Control vector used when replay is required.
+
+        Returns:
+            Recovery strategy: ``"native"``, ``"checkpoint"``, or ``"truncate"``.
+
+        Raises:
+            RuntimeError: If target and draft state cannot be aligned. The caller
+                resets the model on this failure.
+        """
+        if self.speculative is None:
+            raise RuntimeError("Interrupted verification has no speculative engine")
+
+        # memory_seq_rm uses an exclusive boundary. Keep id_last and only the
+        # accepted draft tokens already delivered to the caller.
+        committed_position = verification_start + 1 + delivered_accepted
+
+        if self.is_hybrid:
+            if use_native_rollback:
+                # Roll back target and draft to the same committed boundary.
+                if not self._ctx.memory_seq_rm(0, committed_position, -1):
+                    raise RuntimeError(
+                        "Interrupted native recurrent-state rollback failed"
+                    )
+                self.speculative.rollback_verified(
+                    speculative_checkpoint,
+                    delivered_accepted,
+                    seq_id=0,
+                )
+                self.n_tokens = committed_position
+                self._last_eval_output_count = max(
+                    0, committed_position - self._last_eval_output_start
+                )
+                return "native"
+
+            # Hybrid state requires checkpoint restore plus committed-input replay.
+            if self._hybrid_cache_mgr is None:
+                raise RuntimeError(
+                    "Interrupted hybrid verification has no checkpoint cache"
+                )
+            best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(
+                self.input_ids[:verification_start].tolist(), 0
+            )
+            if (
+                best_ckpt is None
+                or best_ckpt.pos != verification_start
+                or not self._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0)
+            ):
+                raise RuntimeError(
+                    "Failed to restore interrupted hybrid verification checkpoint"
+                )
+            self.speculative.restore(speculative_checkpoint, seq_id=0)
+            self.n_tokens = verification_start
+            accepted_inputs = list(evaluated_tokens[: 1 + delivered_accepted])
+            if accepted_inputs:
+                self.eval(
+                    accepted_inputs,
+                    active_loras=active_loras,
+                    control_vector=control_vector,
+                    copy_logits=False,
+                )
+            return "checkpoint"
+
+        # Transformer target and draft caches both support direct truncation.
+        self._memory_seq_rm_or_raise(
+            0,
+            committed_position,
+            -1,
+            "Llama.generate interrupted speculative rollback",
+        )
+        self.speculative.truncate(committed_position, seq_id=0)
+        self.n_tokens = committed_position
+        self._last_eval_output_count = max(
+            0, committed_position - self._last_eval_output_start
+        )
+        return "truncate"
+
     def eval(
             self,
             tokens: Sequence[int],
@@ -2130,6 +2231,13 @@ class Llama:
         speculative_decode_started: Optional[float] = None
         speculative_ttft_seconds = 0.0
         speculative_time_to_last_token_seconds = 0.0
+        verification_active = False
+        verification_start = 0
+        verification_checkpoint = None
+        verification_use_native_rollback = False
+        verification_evaluated_tokens: List[int] = []
+        verification_delivered_accepted = 0
+        interrupted_verification_reconciled = True
         speculative_phase_stats: Dict[str, Any] = {
             "begin_calls": 0,
             "draft_calls": 0,
@@ -2245,6 +2353,7 @@ class Llama:
                     speculative_verified += n_drafted
                     speculative_verification_steps += 1
                 n_accepted = 0
+                verification_delivered_accepted = 0
                 accept_handled = False
                 evaluated_tokens = list(tokens)
                 verification_start = self.n_tokens
@@ -2328,6 +2437,16 @@ class Llama:
                     speculative_begun = True
                     speculative_decode_started = time.perf_counter()
 
+                if n_drafted > 0 and self.speculative is not None:
+                    # From this point until accept/rollback completes, the target
+                    # and speculative contexts contain a verification transaction.
+                    # A return, exception, or GeneratorExit at yield must reconcile
+                    # the uncommitted suffix before the context can be reused.
+                    verification_active = True
+                    verification_checkpoint = speculative_checkpoint
+                    verification_use_native_rollback = use_native_speculative_rollback
+                    verification_evaluated_tokens = evaluated_tokens
+
                 # Sample loop
                 while sample_idx < self.n_tokens:
                     if self._abort_event.is_set():
@@ -2378,6 +2497,10 @@ class Llama:
                         speculative_time_to_last_token_seconds = (
                             speculative_decode_seconds
                         )
+                    # Record only accepted draft tokens whose output has actually
+                    # crossed the generator boundary. stopping_criteria returns
+                    # above this point and therefore must not commit this token.
+                    verification_delivered_accepted = n_accepted
                     tokens_or_none = yield token
                     if self.speculative is not None:
                         speculative_decode_started = time.perf_counter()
@@ -2444,6 +2567,7 @@ class Llama:
                                             copy_logits=False,
                                         )
                                 accept_handled = True
+                                verification_active = False
                             else:
                                 best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(
                                     self._input_ids[:self.n_tokens].tolist(), 0
@@ -2482,6 +2606,7 @@ class Llama:
                         time_speculative_accept(
                             lambda: self.speculative.accept(n_accepted, seq_id=0)
                         )
+                        verification_active = False
 
                     if n_drafted > 0:
                         speculative_phase_stats["accept_calls"] += 1
@@ -2530,6 +2655,44 @@ class Llama:
                         )
         finally:
             self._speculative_verifying = False
+            if verification_active and self.speculative is not None:
+                try:
+                    rollback_mode = (
+                        self._recover_interrupted_speculation(
+                            verification_start=verification_start,
+                            evaluated_tokens=verification_evaluated_tokens,
+                            delivered_accepted=verification_delivered_accepted,
+                            speculative_checkpoint=verification_checkpoint,
+                            use_native_rollback=verification_use_native_rollback,
+                            active_loras=active_loras,
+                            control_vector=control_vector,
+                        )
+                    )
+                    if rollback_mode == "checkpoint":
+                        speculative_checkpoint_rollbacks += 1
+                    else:
+                        speculative_native_rollbacks += 1
+
+                    speculative_rollbacks += 1
+                except Exception as exc:
+                    interrupted_verification_reconciled = False
+                    if self.verbose:
+                        print(
+                            "Llama.generate: failed to reconcile interrupted "
+                            f"speculative verification; resetting context: {exc}",
+                            file=sys.stderr,
+                        )
+                    try:
+                        self.reset()
+                    except Exception as reset_exc:
+                        if self.verbose:
+                            print(
+                                "Llama.generate: failed to reset after interrupted "
+                                f"verification cleanup error: {reset_exc}",
+                                file=sys.stderr,
+                            )
+                finally:
+                    verification_active = False
             if self._active_speculative_phase_stats is speculative_phase_stats:
                 self._active_speculative_phase_stats = None
             # Throughput ends at delivery of the last output token. In
@@ -2710,6 +2873,7 @@ class Llama:
                 self.is_hybrid
                 and self._hybrid_cache_mgr is not None
                 and self._hybrid_cache_mgr.max_checkpoints > 0
+                and interrupted_verification_reconciled
             ):
                 current_history = self._input_ids[:self.n_tokens].tolist()
 

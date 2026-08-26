@@ -508,6 +508,159 @@ def test_llama_memory_removal_failure_is_fatal():
         llm._memory_seq_rm_or_raise(0, 12, -1, "test rollback")
 
 
+def test_interrupted_hybrid_speculation_uses_native_rollback():
+    class _Context:
+        def __init__(self):
+            self.removals = []
+
+        def memory_seq_rm(self, seq_id, p0, p1):
+            self.removals.append((seq_id, p0, p1))
+            return True
+
+    class _Speculative:
+        def __init__(self):
+            self.rollbacks = []
+
+        def rollback_verified(self, checkpoint, n_accepted, seq_id=0):
+            self.rollbacks.append((checkpoint, n_accepted, seq_id))
+
+    llm = object.__new__(llama_cpp.Llama)
+    llm._ctx = _Context()
+    llm.speculative = _Speculative()
+    llm.is_hybrid = True
+    llm.n_tokens = 9
+    llm._last_eval_output_start = 6
+    llm._last_eval_output_count = 3
+
+    mode = llm._recover_interrupted_speculation(
+        verification_start=6,
+        evaluated_tokens=[10, 11, 12],
+        delivered_accepted=1,
+        speculative_checkpoint="draft-checkpoint",
+        use_native_rollback=True,
+        active_loras=None,
+        control_vector=None,
+    )
+
+    assert mode == "native"
+    assert llm._ctx.removals == [(0, 8, -1)]
+    assert llm.speculative.rollbacks == [("draft-checkpoint", 1, 0)]
+    assert llm.n_tokens == 8
+    assert llm._last_eval_output_start == 6
+    assert llm._last_eval_output_count == 2
+
+
+def test_interrupted_hybrid_speculation_restores_checkpoint_and_replays():
+    class _Checkpoint:
+        pos = 6
+
+    class _Cache:
+        def __init__(self):
+            self.checkpoint = _Checkpoint()
+            self.lookups = []
+            self.restores = []
+
+        def find_best_checkpoint(self, tokens, seq_id=0):
+            self.lookups.append((tokens, seq_id))
+            return self.checkpoint
+
+        def restore_checkpoint(self, checkpoint, seq_id=0):
+            self.restores.append((checkpoint, seq_id))
+            return True
+
+    class _Speculative:
+        def __init__(self):
+            self.restores = []
+
+        def restore(self, checkpoint, seq_id=0):
+            self.restores.append((checkpoint, seq_id))
+
+    llm = object.__new__(llama_cpp.Llama)
+    llm.speculative = _Speculative()
+    llm._hybrid_cache_mgr = _Cache()
+    llm.is_hybrid = True
+    llm.input_ids = np.asarray([1, 2, 3, 4, 5, 6, 10, 11, 12], dtype=np.intc)
+    llm.n_tokens = 9
+    replayed = []
+
+    def eval_tokens(tokens, **kwargs):
+        replayed.append((list(tokens), kwargs))
+        llm.n_tokens += len(tokens)
+
+    llm.eval = eval_tokens
+    active_loras = [{"name": "test", "scale": 0.5}]
+    control_vector = {"data": [1.0]}
+
+    mode = llm._recover_interrupted_speculation(
+        verification_start=6,
+        evaluated_tokens=[10, 11, 12],
+        delivered_accepted=1,
+        speculative_checkpoint="draft-checkpoint",
+        use_native_rollback=False,
+        active_loras=active_loras,
+        control_vector=control_vector,
+    )
+
+    assert mode == "checkpoint"
+    assert llm._hybrid_cache_mgr.lookups == [([1, 2, 3, 4, 5, 6], 0)]
+    assert llm._hybrid_cache_mgr.restores == [
+        (llm._hybrid_cache_mgr.checkpoint, 0)
+    ]
+    assert llm.speculative.restores == [("draft-checkpoint", 0)]
+    assert replayed == [
+        (
+            [10, 11],
+            {
+                "active_loras": active_loras,
+                "control_vector": control_vector,
+                "copy_logits": False,
+            },
+        )
+    ]
+    assert llm.n_tokens == 8
+
+
+def test_interrupted_non_hybrid_speculation_truncates_both_contexts():
+    class _Context:
+        def __init__(self):
+            self.removals = []
+
+        def memory_seq_rm(self, seq_id, p0, p1):
+            self.removals.append((seq_id, p0, p1))
+            return True
+
+    class _Speculative:
+        def __init__(self):
+            self.truncations = []
+
+        def truncate(self, position, seq_id=0):
+            self.truncations.append((position, seq_id))
+
+    llm = object.__new__(llama_cpp.Llama)
+    llm._ctx = _Context()
+    llm.speculative = _Speculative()
+    llm.is_hybrid = False
+    llm.n_tokens = 9
+    llm._last_eval_output_start = 6
+    llm._last_eval_output_count = 3
+
+    mode = llm._recover_interrupted_speculation(
+        verification_start=6,
+        evaluated_tokens=[10, 11, 12],
+        delivered_accepted=0,
+        speculative_checkpoint=None,
+        use_native_rollback=False,
+        active_loras=None,
+        control_vector=None,
+    )
+
+    assert mode == "truncate"
+    assert llm._ctx.removals == [(0, 7, -1)]
+    assert llm.speculative.truncations == [(7, 0)]
+    assert llm.n_tokens == 7
+    assert llm._last_eval_output_count == 1
+
+
 def test_mtp_truncate_fails_when_native_memory_removal_fails():
     class _Model:
         def is_recurrent(self):
