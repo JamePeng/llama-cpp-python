@@ -1146,18 +1146,24 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
             raise
         return draft_model
 
-    def _build_draft_context_params(self, context_params: Any) -> Any:
+    def _build_draft_context_params(
+        self, context_params: Any, target_context: Any
+    ) -> Any:
         """Create common draft context parameters from target parameters.
 
         Embedding mode and pooling are reset first, matching llama.cpp's
         speculative context conversion. Draft-specific thread counts and KV
-        cache types are then applied. The concrete engine must set fields such
-        as ``ctx_type``, ``ctx_other``, batch capacity, outputs, attention mode,
-        and recurrent snapshot count before constructing ``LlamaContext``.
+        cache types are then applied. The draft context follows the initialized
+        target context's actual size, which may differ from the originally
+        requested ``n_ctx`` after model-dependent resolution. The concrete
+        engine must set fields such as ``ctx_type``, ``ctx_other``, batch
+        capacity, outputs, attention mode, and recurrent snapshot count before
+        constructing ``LlamaContext``.
         """
         params = self._copy_draft_context_params(
             context_params, self._llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
         )
+        params.n_ctx = target_context.n_ctx()
         if self.config.draft_n_threads is not None:
             params.n_threads = int(self.config.draft_n_threads)
         if self.config.draft_n_threads_batch is not None:
@@ -1406,7 +1412,9 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.draft_model = target_model
 
         try:
-            draft_ctx_params = self._build_draft_context_params(context_params)
+            draft_ctx_params = self._build_draft_context_params(
+                context_params, target_context
+            )
             draft_ctx_params.ctx_type = (
                 llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_MTP
             )
@@ -1471,6 +1479,24 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 
         if self.verbose:
             self._print_runtime_configuration(context_params)
+
+    def begin(self, prompt_tokens: Sequence[int], seq_id: int = 0) -> None:
+        """Warn when prompt processing did not fully populate the MTP cache."""
+        if seq_id != 0:
+            raise NotImplementedError(
+                "MTP speculative decoding currently supports seq_id=0"
+            )
+        if not prompt_tokens or self.is_mem_shared:
+            return
+        pos_max = self.draft_context.memory_seq_pos_max(seq_id)
+        expected = len(prompt_tokens) - 1
+        if pos_max < expected and self.verbose:
+            print(
+                "LlamaMTPDecoding: draft context prompt cache is incomplete: "
+                f"pos_max={pos_max}, expected at least {expected}; process() may "
+                "not have run for every prompt ubatch and draft quality may degrade",
+                file=sys.stderr,
+            )
 
     def _print_runtime_configuration(self, target_context_params: Any) -> None:
         """Print requested MTP options together with their resolved runtime state."""
@@ -1971,9 +1997,10 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 raise ValueError("DFlash resolved draft length must be positive")
 
             block_capacity = self.draft_limit + 1
-            draft_ctx_params = self._build_draft_context_params(context_params)
+            draft_ctx_params = self._build_draft_context_params(
+                context_params, target_context
+            )
             draft_ctx_params.ctx_other = target_context.ctx
-            draft_ctx_params.n_ctx = target_context.n_ctx()
             draft_ctx_params.n_seq_max = 1
             # Recurrent/hybrid sidecars need one native snapshot per possible
             # speculative position.  Non-recurrent DFlash sidecars clamp this
