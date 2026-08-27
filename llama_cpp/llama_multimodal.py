@@ -70,6 +70,8 @@ class MTMDChatHandler:
                             "{% endif %}"
                         "{% elif content.type == 'video_url' %}"
                             "{{ content.video_url if content.video_url is string else content.video_url.url }}"
+                        "{% elif content.type == 'video' %}"
+                            "{{ content.video if content.video is string else content.video.url }}"
                         "{% elif content.type == 'text' %}"
                             "{{ content.text }}"
                         "{% endif %}"
