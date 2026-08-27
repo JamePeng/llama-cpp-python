@@ -103,6 +103,10 @@ class MTMDChatHandler:
         chat_template_override: Optional[str] = None,
         batch_max_tokens: int = 1024,
         extra_template_arguments: Optional[Dict[str, Any]] = None,
+        mtmd_helper_init_opt: Optional[Any] = None,
+        video_fps_target: Optional[float] = None,
+        video_ffmpeg_bin_dir: Optional[Union[str, os.PathLike[str]]] = None,
+        video_timestamp_interval_ms: Optional[int] = None,
         **kwargs
     ):
 
@@ -149,6 +153,73 @@ class MTMDChatHandler:
         import llama_cpp.mtmd_cpp as mtmd_cpp
         self._mtmd_cpp = mtmd_cpp
         self.mtmd_ctx: Optional[mtmd_cpp.mtmd_context_p] = None
+
+        video_overrides = (
+            video_fps_target,
+            video_ffmpeg_bin_dir,
+            video_timestamp_interval_ms,
+        )
+        if mtmd_helper_init_opt is not None and any(
+            value is not None for value in video_overrides
+        ):
+            raise ValueError(
+                f"{self.log_prefix}(__init__): `mtmd_helper_init_opt` cannot be "
+                "combined with individual `video_*` options."
+            )
+
+        if mtmd_helper_init_opt is not None:
+            if not isinstance(mtmd_helper_init_opt, mtmd_cpp.mtmd_helper_init_opt):
+                raise TypeError(
+                    f"{self.log_prefix}(__init__): `mtmd_helper_init_opt` must be "
+                    "an instance of mtmd_cpp.mtmd_helper_init_opt."
+                )
+            self._mtmd_helper_init_opt = mtmd_helper_init_opt
+            self._video_ffmpeg_bin_dir_bytes: Optional[bytes] = None
+        else:
+            self._mtmd_helper_init_opt = mtmd_cpp.mtmd_helper_init_opt_default()
+            self._video_ffmpeg_bin_dir_bytes = None
+            if video_fps_target is not None:
+                self._mtmd_helper_init_opt.video_params.fps_target = video_fps_target
+            if video_ffmpeg_bin_dir is not None:
+                ffmpeg_bin_dir = os.path.abspath(
+                    os.fspath(video_ffmpeg_bin_dir)
+                )
+                if not os.path.isdir(ffmpeg_bin_dir):
+                    raise ValueError(
+                        f"{self.log_prefix}(__init__): `video_ffmpeg_bin_dir` "
+                        f"is not an existing directory: {ffmpeg_bin_dir}"
+                    )
+
+                executable_suffix = ".exe" if os.name == "nt" else ""
+                invalid_executables = []
+                for executable_name in ("ffmpeg", "ffprobe"):
+                    executable_path = os.path.join(
+                        ffmpeg_bin_dir,
+                        executable_name + executable_suffix,
+                    )
+                    is_valid = os.path.isfile(executable_path)
+                    if os.name != "nt":
+                        is_valid = is_valid and os.access(executable_path, os.X_OK)
+                    if not is_valid:
+                        invalid_executables.append(executable_path)
+
+                if invalid_executables:
+                    raise ValueError(
+                        f"{self.log_prefix}(__init__): `video_ffmpeg_bin_dir` must "
+                        "contain usable ffmpeg and ffprobe executables; missing or "
+                        f"not executable: {', '.join(invalid_executables)}"
+                    )
+
+                self._video_ffmpeg_bin_dir_bytes = os.fsencode(
+                    ffmpeg_bin_dir
+                )
+                self._mtmd_helper_init_opt.video_params.ffmpeg_bin_dir = (
+                    self._video_ffmpeg_bin_dir_bytes
+                )
+            if video_timestamp_interval_ms is not None:
+                self._mtmd_helper_init_opt.video_params.timestamp_interval_ms = (
+                    video_timestamp_interval_ms
+                )
 
         if extra_template_arguments is not None and not isinstance(extra_template_arguments, dict):
             raise TypeError(
@@ -501,6 +572,7 @@ class MTMDChatHandler:
             buf,
             len(media_bytes),
             False,
+            self._mtmd_helper_init_opt,
         )
 
         if not wrapper.bitmap:

@@ -1269,6 +1269,54 @@ def mtmd_test_create_input_chunks() -> mtmd_input_chunks_p:
 mtmd_helper_video_p = NewType("mtmd_helper_video_p", int)
 mtmd_helper_video_p_ctypes = c_void_p
 
+
+# struct mtmd_helper_video_init_params {
+#     float fps_target;            // desired output fps; <= 0 means use the video's native fps, defaulted to 4.0f
+#     const char * ffmpeg_bin_dir; // directory containing ffmpeg/ffprobe binaries; NULL means search PATH
+#     int64_t timestamp_interval_ms; // interval for adding timestamp as text chunk (example: "[10m50.5s]"); <= 0 means no timestamp, defaulted to 5000ms
+#     // TODO @ngxson : allow "placeholder" bitmap output for counting tokens
+# };
+class mtmd_helper_video_init_params(Structure):
+    _fields_ = [
+        ("fps_target", c_float),
+        ("ffmpeg_bin_dir", c_char_p),
+        ("timestamp_interval_ms", c_int64),
+    ]
+mtmd_helper_video_init_params_p_ctypes = POINTER(mtmd_helper_video_init_params)
+
+
+# MTMD_API struct mtmd_helper_video_init_params mtmd_helper_video_init_params_default(void);
+@ctypes_function_mtmd(
+    "mtmd_helper_video_init_params_default",
+    [],
+    mtmd_helper_video_init_params,
+)
+def mtmd_helper_video_init_params_default() -> mtmd_helper_video_init_params:
+    """Get the default initialization parameters for mtmd_helper_video."""
+    ...
+
+
+# struct mtmd_helper_init_opt {
+#     struct mtmd_helper_video_init_params video_params;
+# };
+class mtmd_helper_init_opt(Structure):
+    _fields_ = [
+        ("video_params", mtmd_helper_video_init_params),
+    ]
+mtmd_helper_init_opt_p_ctypes = POINTER(mtmd_helper_init_opt)
+
+
+# MTMD_API struct mtmd_helper_init_opt mtmd_helper_init_opt_default(void);
+@ctypes_function_mtmd(
+    "mtmd_helper_init_opt_default",
+    [],
+    mtmd_helper_init_opt,
+)
+def mtmd_helper_init_opt_default() -> mtmd_helper_init_opt:
+    """Get the default options for mtmd_helper_bitmap_init_from_*()."""
+    ...
+
+
 # // Set callback for all future logging events.
 # // If this is not called, or NULL is supplied, everything is output on stderr.
 # // Note: this also call mtmd_log_set() internally
@@ -1308,13 +1356,18 @@ mtmd_helper_bitmap_wrapper_p_ctypes = POINTER(mtmd_helper_bitmap_wrapper)
 # // it calls mtmd_helper_bitmap_init_from_buf() internally
 # // returns nullptr on failure
 # // this function is thread-safe
-# MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(mtmd_context * ctx, const char * fname, bool placeholder);
+# MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_file(
+#                     mtmd_context * ctx,
+#                     const char * fname,
+#                     bool placeholder,
+#                     struct mtmd_helper_init_opt opt);
 
 @ctypes_function_mtmd(
     "mtmd_helper_bitmap_init_from_file", [
         mtmd_context_p_ctypes,
         c_char_p,
         c_bool,
+        mtmd_helper_init_opt,
     ],
     mtmd_helper_bitmap_wrapper
 )
@@ -1322,6 +1375,7 @@ def mtmd_helper_bitmap_init_from_file(
     ctx: mtmd_context_p,
     fname: c_char_p,
     placeholder: c_bool,
+    opt: mtmd_helper_init_opt,
     /,
 ) -> mtmd_helper_bitmap_wrapper:
     """
@@ -1343,13 +1397,18 @@ def mtmd_helper_bitmap_init_from_file(
 # //   - output bitmap will have SHA-256 hash (hex string) as the ID
 # // returns nullptr on failure
 # // this function is thread-safe
-# MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(mtmd_context * ctx, const unsigned char * buf, size_t len, bool placeholder);
+# MTMD_API struct mtmd_helper_bitmap_wrapper mtmd_helper_bitmap_init_from_buf(
+#                     mtmd_context * ctx,
+#                     const unsigned char * buf, size_t len,
+#                     bool placeholder,
+#                     struct mtmd_helper_init_opt opt);
 @ctypes_function_mtmd(
     "mtmd_helper_bitmap_init_from_buf", [
         mtmd_context_p_ctypes,
         POINTER(c_uint8),
         c_size_t,
         c_bool,
+        mtmd_helper_init_opt,
     ],
     mtmd_helper_bitmap_wrapper
 )
@@ -1358,6 +1417,7 @@ def mtmd_helper_bitmap_init_from_buf(
     buf: CtypesArray[c_uint8],
     len: c_size_t,
     placeholder: c_bool,
+    opt: mtmd_helper_init_opt,
     /,
 ) -> mtmd_helper_bitmap_wrapper:
     """
@@ -1368,7 +1428,7 @@ def mtmd_helper_bitmap_init_from_buf(
     note:
         - for now, video input is only supported via C++ helper functions
         - audio files will be auto-detected based on magic bytes
-        - output bitmap will have FNV hash as the ID
+        - output bitmap will have SHA-256 hash as the ID
     returns nullptr on failure
     """
     ...
@@ -1584,34 +1644,6 @@ class mtmd_helper_video_info(Structure):
 mtmd_helper_video_info_p_ctypes = POINTER(mtmd_helper_video_info)
 
 
-# struct mtmd_helper_video_init_params {
-#     float fps_target;            // desired output fps; <= 0 means use the video's native fps, defaulted to 4.0f
-#     const char * ffmpeg_bin_dir; // directory containing ffmpeg/ffprobe binaries; NULL means search PATH
-#     int64_t timestamp_interval_ms; // interval for adding timestamp as text chunk (example: "[10m50.5s]"); <= 0 means no timestamp, defaulted to 5000ms
-#     // TODO @ngxson : allow "placeholder" bitmap output for counting tokens
-# };
-class mtmd_helper_video_init_params(Structure):
-    _fields_ = [
-        ("fps_target", c_float),
-        ("ffmpeg_bin_dir", c_char_p),
-        ("timestamp_interval_ms", c_int64),
-    ]
-mtmd_helper_video_init_params_p_ctypes = POINTER(mtmd_helper_video_init_params)
-
-
-# MTMD_API struct mtmd_helper_video_init_params mtmd_helper_video_init_params_default(void);
-@ctypes_function_mtmd(
-    "mtmd_helper_video_init_params_default",
-    [],
-    mtmd_helper_video_init_params,
-)
-def mtmd_helper_video_init_params_default() -> mtmd_helper_video_init_params:
-    """
-    get default init params for mtmd_helper_video
-    """
-    ...
-
-
 # // returns NULL on failure (ffprobe not found, file unreadable, etc.)
 # MTMD_API mtmd_helper_video * mtmd_helper_video_init(
 #                     struct mtmd_context * mctx,
@@ -1623,7 +1655,7 @@ def mtmd_helper_video_init_params_default() -> mtmd_helper_video_init_params:
         c_char_p,
         mtmd_helper_video_init_params,
     ],
-    mtmd_helper_video_p)
+    mtmd_helper_video_p_ctypes)
 def mtmd_helper_video_init(
     mctx: mtmd_context_p,
     path: c_char_p,
@@ -1649,7 +1681,7 @@ def mtmd_helper_video_init(
     "mtmd_helper_video_init_from_buf",
     [
         mtmd_context_p_ctypes,
-        c_char_p,
+        POINTER(c_uint8),
         c_size_t,
         mtmd_helper_video_init_params,
     ],
@@ -1657,8 +1689,8 @@ def mtmd_helper_video_init(
 )
 def mtmd_helper_video_init_from_buf(
     mctx: mtmd_context_p,
-    buf: c_char_p,
-    len: int,
+    buf: CtypesArray[c_uint8],
+    len: c_size_t,
     params: mtmd_helper_video_init_params,
     /,
 ) -> mtmd_helper_video_p:
