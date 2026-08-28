@@ -1914,10 +1914,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     non-causal mask block in one pass.  DSpark reuses the same graph and cache
     path but reads its Markov/confidence outputs differently.
 
-    This initial implementation intentionally accepts token batches only.  An
-    MTMD target uses M-RoPE position tuples while the current DFlash draft
-    context uses scalar positions, so silently forwarding embedding batches
-    would leave the draft cache incomplete or invalid.
+    Target token batches support both scalar and M-RoPE draft positions. Direct
+    MTMD embedding batches remain unsupported until their four-dimensional
+    target positions can be mapped into the speculative process hook.
     """
 
     def __init__(
@@ -1963,6 +1962,10 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         try:
             self.selector_top_k = self.draft_model.dflash_selector_top_k()
             self.is_dflash2 = self.selector_top_k > 0
+            self.is_mrope = (
+                self.draft_model.rope_type()
+                == llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE
+            )
             self.target_layer_ids = self.draft_model.target_layer_ids()
             if not self.target_layer_ids:
                 raise ValueError("DFlash draft model has no target_layer_ids")
@@ -2041,13 +2044,11 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 n_seq_max=1,
                 verbose=verbose,
             )
+            if self.is_mrope:
+                self.encoder_batch.enable_mrope_positions()
+                self.inject_batch.enable_mrope_positions()
 
-            self._enable_backend_sampling(internals)
-
-            for layer_id in self.target_layer_ids:
-                self.target_context.set_embeddings_layer_inp(layer_id, True)
-            self.draft_context.set_embeddings_nextn(True, masked=True)
-            self.draft_context.set_causal_attn(False)
+            self._configure_draft_execution(internals)
 
             self._use_native_draft_rollback = (
                 not (
@@ -2073,6 +2074,21 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         """Read an integer GGUF metadata value with a fallback default."""
         value = metadata.get(key)
         return default if value is None else int(value)
+
+    def _configure_draft_execution(self, internals: Any) -> None:
+        """Configure outputs and sampling for the resolved DFlash variant."""
+        # DFlash2 consumes the selector lattice from h_nextn and does not read
+        # sampled draft logits. Attaching a backend sampler would do needless
+        # vocabulary work and expose outputs belonging to the wrong algorithm.
+        if not self.is_dflash2:
+            self._enable_backend_sampling(internals)
+
+        for layer_id in self.target_layer_ids:
+            self.target_context.set_embeddings_layer_inp(layer_id, True)
+        self.draft_context.set_embeddings_nextn(
+            True, masked=not self.is_dflash2
+        )
+        self.draft_context.set_causal_attn(False)
 
     @staticmethod
     def _validate_target_layer_ids(
@@ -2101,7 +2117,12 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
     def _print_runtime_configuration(self) -> None:
         """Print resolved DFlash/DSpark model, block, and context settings."""
-        algorithm = "DSpark" if self.is_dspark else "DFlash"
+        if self.is_dspark:
+            algorithm = "DSpark"
+        elif self.is_dflash2:
+            algorithm = "DFlash2"
+        else:
+            algorithm = "DFlash"
         devices = ",".join(self.config.draft_devices) or "auto"
         print(
             f"LlamaDFlashDecoding: {algorithm} speculative decoding enabled",
@@ -2121,6 +2142,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             "LlamaDFlashDecoding: "
             f"block_size={self.block_size}, mask_token={self.mask_token_id}, "
             f"sample_from_anchor={self.sample_from_anchor}, "
+            f"selector_top_k={self.selector_top_k}, "
+            f"mrope={self.is_mrope}, "
             f"target_layers={self.target_layer_ids}, "
             f"feature_width={self.n_embd_enc}",
             file=sys.stderr,
@@ -2181,7 +2204,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         if bool(batch.embd):
             raise NotImplementedError(
                 "DFlash/DSpark speculative decoding is currently text-only; "
-                "MTMD embedding batches require scalar draft-position remapping"
+                "MTMD embedding batches require four-dimensional position mapping"
             )
         if not bool(batch.token):
             return
@@ -2196,17 +2219,31 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         fused_chunks: List[npt.NDArray[np.float32]] = []
         for offset in range(0, n_tokens, chunk_size):
             count = min(chunk_size, n_tokens - offset)
+            positions = [int(batch.pos[offset + i]) for i in range(count)]
             features = self._gather_target_features(
                 batch_rows=n_tokens, offset=offset, count=count
             )
 
             self.encoder_batch.reset()
-            self.encoder_batch.add_embeddings(
-                features.reshape(-1),
-                pos_array=list(range(count)),
-                seq_ids=[0],
-                logits_array=[True] * count,
-            )
+            if self.is_mrope:
+                self.encoder_batch.add_embeddings_mrope(
+                    features.reshape(-1),
+                    pos_array=[
+                        positions,
+                        positions,
+                        positions,
+                        [0] * count,
+                    ],
+                    seq_ids=[0],
+                    logits_array=[True] * count,
+                )
+            else:
+                self.encoder_batch.add_embeddings(
+                    features.reshape(-1),
+                    pos_array=list(range(count)),
+                    seq_ids=[0],
+                    logits_array=[True] * count,
+                )
             self.draft_context.encode(self.encoder_batch)
             fused = self._copy_rows(
                 self.draft_context.get_embeddings_nextn(),
@@ -2215,7 +2252,6 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             )
             fused_chunks.append(fused)
 
-            positions = [int(batch.pos[offset + i]) for i in range(count)]
             self._inject_fused_rows(fused, positions, seq_id=seq_id)
 
         # Match the server's context-switch boundary: all injected rows must be
@@ -2241,11 +2277,24 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         for offset in range(0, len(positions), chunk_size):
             count = min(chunk_size, len(positions) - offset)
             self.inject_batch.reset()
-            self.inject_batch.add_embeddings(
-                fused[offset : offset + count].reshape(-1),
-                pos_array=positions[offset : offset + count],
-                seq_ids=[seq_id],
-            )
+            chunk_positions = positions[offset : offset + count]
+            if getattr(self, "is_mrope", False):
+                self.inject_batch.add_embeddings_mrope(
+                    fused[offset : offset + count].reshape(-1),
+                    pos_array=[
+                        chunk_positions,
+                        chunk_positions,
+                        chunk_positions,
+                        [0] * count,
+                    ],
+                    seq_ids=[seq_id],
+                )
+            else:
+                self.inject_batch.add_embeddings(
+                    fused[offset : offset + count].reshape(-1),
+                    pos_array=chunk_positions,
+                    seq_ids=[seq_id],
+                )
             status = self.draft_context.decode(self.inject_batch)
             if status != 0:
                 raise RuntimeError(
@@ -2470,7 +2519,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             token_array=tokens,
             pos_array=[n_past + i for i in range(n_block_tokens)],
             seq_ids=[seq_id],
-            logits_array=[True] * n_block_tokens,
+            logits_array=[not self.is_dflash2] * n_block_tokens,
         )
 
         self._pending_verification_checkpoint = None
@@ -2487,31 +2536,34 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     f"{self.draft_context.n_ctx()}"
                 )
 
-            first_output = (
-                0 if self.is_dspark and self.sample_from_anchor else 1
-            )
-            confidence = None
-            if self.is_dspark and self.config.draft_p_min > 0.0:
-                confidence = self._copy_rows(
-                    self.draft_context.get_embeddings_nextn(),
-                    n_block_tokens,
-                    self.n_embd_dec,
-                )[:, 0]
+            if self.is_dflash2:
+                result.extend(self._select_dflash2_path(n_block_tokens))
+            else:
+                first_output = (
+                    0 if self.is_dspark and self.sample_from_anchor else 1
+                )
+                confidence = None
+                if self.is_dspark and self.config.draft_p_min > 0.0:
+                    confidence = self._copy_rows(
+                        self.draft_context.get_embeddings_nextn(),
+                        n_block_tokens,
+                        self.n_embd_dec,
+                    )[:, 0]
 
-            for output_index in range(first_output, n_block_tokens):
-                if (
-                    confidence is not None
-                    and float(confidence[output_index])
-                    < self.config.draft_p_min
-                ):
-                    break
-                token, probability = self._candidate(output_index)
-                if (
-                    not self.is_dspark
-                    and probability < self.config.draft_p_min
-                ):
-                    break
-                result.append(token)
+                for output_index in range(first_output, n_block_tokens):
+                    if (
+                        confidence is not None
+                        and float(confidence[output_index])
+                        < self.config.draft_p_min
+                    ):
+                        break
+                    token, probability = self._candidate(output_index)
+                    if (
+                        not self.is_dspark
+                        and probability < self.config.draft_p_min
+                    ):
+                        break
+                    result.append(token)
         finally:
             self.restore(checkpoint, seq_id)
 
@@ -2520,6 +2572,41 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         if result:
             self._pending_verification_checkpoint = checkpoint
         return np.asarray(result, dtype=np.intc)
+
+    def _select_dflash2_path(self, n_block_tokens: int) -> List[int]:
+        """Walk llama.cpp's packed DFlash2 selector lattice greedily."""
+        top_k = int(self.selector_top_k)
+        row_used = top_k + top_k * top_k
+        if top_k <= 0 or row_used > self.n_embd_dec:
+            raise RuntimeError(
+                "DFlash2 selector lattice does not fit the draft hidden size: "
+                f"top_k={top_k}, row_used={row_used}, n_embd={self.n_embd_dec}"
+            )
+
+        lattice = self._copy_rows(
+            self.draft_context.get_embeddings_nextn(),
+            n_block_tokens,
+            self.n_embd_dec,
+        )
+        result: List[int] = []
+        predecessor = 0
+        for output_index in range(1, n_block_tokens):
+            row = lattice[output_index]
+            score_beg = top_k + predecessor * top_k
+            scores = row[score_beg : score_beg + top_k]
+            predecessor = int(np.argmax(scores))
+
+            if self.config.draft_p_min > 0.0:
+                selected_score = float(scores[predecessor])
+                denominator = float(
+                    np.exp(scores.astype(np.float64) - selected_score).sum()
+                )
+                probability = 1.0 / denominator
+                if probability < self.config.draft_p_min:
+                    break
+
+            result.append(int(row[predecessor]))
+        return result
 
     def accept(self, n_accepted: int, seq_id: int = 0) -> None:
         """Finish verification and discard temporary fused-row bookkeeping."""

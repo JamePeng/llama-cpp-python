@@ -687,12 +687,14 @@ class _FakeDFlashBatch:
         self.positions = []
         self.embeddings = None
         self.logits = []
+        self.mrope_positions = None
 
     def reset(self):
         self.tokens = []
         self.positions = []
         self.embeddings = None
         self.logits = []
+        self.mrope_positions = None
 
     def add_sequence(
         self, token_array, pos_array, seq_ids, logits_array
@@ -701,6 +703,7 @@ class _FakeDFlashBatch:
         assert len(token_array) == len(pos_array) == len(logits_array)
         self.tokens = list(token_array)
         self.positions = list(pos_array)
+        self.logits = list(logits_array)
 
     def add_embeddings(
         self, embeddings, *, pos_array, seq_ids, logits_array=None
@@ -709,6 +712,17 @@ class _FakeDFlashBatch:
         self.embeddings = np.asarray(embeddings, dtype=np.float32).copy()
         self.positions = list(pos_array)
         self.logits = list(logits_array or [])
+
+    def add_embeddings_mrope(
+        self, embeddings, *, pos_array, seq_ids, logits_array=None
+    ):
+        self.add_embeddings(
+            embeddings,
+            pos_array=pos_array[0],
+            seq_ids=seq_ids,
+            logits_array=logits_array,
+        )
+        self.mrope_positions = [list(plane) for plane in pos_array]
 
 
 class _FakeDFlashDraftContext:
@@ -759,6 +773,8 @@ def _draft_test_dflash_engine(*, dspark, sample_from_anchor, p_min=0.0):
         draft_p_min=p_min,
     )
     engine.is_dspark = dspark
+    engine.is_dflash2 = False
+    engine.selector_top_k = 0
     engine.sample_from_anchor = sample_from_anchor
     engine.draft_limit = 3
     engine.mask_token_id = 99
@@ -781,6 +797,7 @@ def test_dflash_builds_anchor_plus_mask_block_and_reads_mask_outputs():
 
     assert engine.noise_batch.tokens == [42, 99, 99, 99]
     assert engine.noise_batch.positions == [7, 8, 9, 10]
+    assert engine.noise_batch.logits == [True, True, True, True]
     assert result.tolist() == [101, 102, 103]
     assert engine._pending_verification_checkpoint == {"position": 5}
 
@@ -798,6 +815,100 @@ def test_dspark_anchor_layout_uses_confidence_to_truncate_block():
 
     assert engine.noise_batch.tokens == [42, 99, 99]
     assert result.tolist() == [100]
+
+
+def test_dflash2_walks_selector_lattice_without_requesting_logits():
+    engine = _draft_test_dflash_engine(
+        dspark=False, sample_from_anchor=True, p_min=0.0
+    )
+    engine.is_dflash2 = True
+    engine.selector_top_k = 2
+    engine.n_embd_dec = 6
+    lattice = np.asarray(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [101, 102, 0, 2, 0, 2],
+            [201, 202, 0, 0, 3, 1],
+            [301, 302, 0, 4, 0, 0],
+        ],
+        dtype=np.float32,
+    )
+    engine.draft_context = _FakeDFlashDraftContext(confidence=lattice)
+
+    result = engine.draft([], n_past=7, id_last=42, n_max=3)
+
+    assert engine.noise_batch.tokens == [42, 99, 99, 99]
+    assert engine.noise_batch.logits == [False, False, False, False]
+    assert result.tolist() == [102, 201, 302]
+    assert engine._pending_verification_checkpoint == {"position": 5}
+
+
+def test_dflash2_selector_probability_truncates_before_low_confidence_token():
+    engine = _draft_test_dflash_engine(
+        dspark=False, sample_from_anchor=True, p_min=0.8
+    )
+    engine.is_dflash2 = True
+    engine.selector_top_k = 2
+    engine.n_embd_dec = 6
+    lattice = np.asarray(
+        [
+            [0, 0, 0, 0, 0, 0],
+            [101, 102, 0, 3, 0, 3],
+            [201, 202, 0, 0, 0, 1],
+            [301, 302, 0, 0, 0, 0],
+        ],
+        dtype=np.float32,
+    )
+    engine.draft_context = _FakeDFlashDraftContext(confidence=lattice)
+
+    result = engine.draft([], n_past=7, id_last=42, n_max=3)
+
+    assert result.tolist() == [102]
+
+
+@pytest.mark.parametrize(
+    ("is_dflash2", "expected_masked", "expected_backend_calls"),
+    [(False, True, 1), (True, False, 0)],
+)
+def test_dflash2_configures_unmasked_nextn_without_backend_sampling(
+    is_dflash2, expected_masked, expected_backend_calls
+):
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.is_dflash2 = is_dflash2
+    engine.target_layer_ids = [2, 5]
+    backend_calls = []
+    engine._enable_backend_sampling = lambda internals: backend_calls.append(
+        internals
+    )
+
+    class _TargetContext:
+        def __init__(self):
+            self.layers = []
+
+        def set_embeddings_layer_inp(self, layer_id, enabled):
+            self.layers.append((layer_id, enabled))
+
+    class _DraftContext:
+        def __init__(self):
+            self.nextn = []
+            self.causal = []
+
+        def set_embeddings_nextn(self, enabled, masked):
+            self.nextn.append((enabled, masked))
+
+        def set_causal_attn(self, enabled):
+            self.causal.append(enabled)
+
+    engine.target_context = _TargetContext()
+    engine.draft_context = _DraftContext()
+    internals = object()
+
+    engine._configure_draft_execution(internals)
+
+    assert len(backend_calls) == expected_backend_calls
+    assert engine.target_context.layers == [(2, True), (5, True)]
+    assert engine.draft_context.nextn == [(True, expected_masked)]
+    assert engine.draft_context.causal == [False]
 
 
 def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
@@ -822,6 +933,7 @@ def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
     engine.encoder_batch = _FakeDFlashBatch()
     engine.inject_batch = _FakeDFlashBatch()
     engine.verify_positions = []
+    engine.is_mrope = False
 
     class _TargetBatch:
         n_tokens = 2
@@ -845,6 +957,45 @@ def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
     assert engine.verify_positions == [4, 5]
     assert engine.encoder_batch.logits == [True, True]
     assert engine.inject_batch.logits == []
+
+
+def test_dflash_mrope_process_uses_target_positions_for_encoder_and_injection():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.target_layer_ids = [1]
+    engine.n_embd_tgt = 2
+    engine.n_embd_enc = 2
+    engine.n_embd_dec = 2
+    engine.is_mrope = True
+    target_rows = np.asarray([[1, 2], [3, 4]], dtype=np.float32)
+
+    class _TargetContext:
+        def get_embeddings_layer_inp(self, layer_id):
+            assert layer_id == 1
+            return target_rows.ctypes.data_as(
+                ctypes.POINTER(ctypes.c_float)
+            )
+
+    fused = np.asarray([[5, 6], [7, 8]], dtype=np.float32)
+    engine.target_context = _TargetContext()
+    engine.draft_context = _FakeDFlashDraftContext(fused=fused)
+    engine.encoder_batch = _FakeDFlashBatch()
+    engine.inject_batch = _FakeDFlashBatch()
+    engine.verify_positions = []
+
+    class _TargetBatch:
+        n_tokens = 2
+        token = [11, 12]
+        embd = None
+        pos = [4, 5]
+        n_seq_id = [1, 1]
+        seq_id = [[0], [0]]
+
+    engine.process(_TargetBatch())
+
+    expected = [[4, 5], [4, 5], [4, 5], [0, 0]]
+    assert engine.encoder_batch.mrope_positions == expected
+    assert engine.inject_batch.mrope_positions == expected
+    assert engine.verify_positions == [4, 5]
 
 
 def test_dflash_rejects_multimodal_embedding_batches_until_positions_are_mapped():

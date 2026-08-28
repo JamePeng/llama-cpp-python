@@ -382,6 +382,34 @@ def test_llama_batch_mixed_embeddings_are_copied_contiguously():
         batch.close()
 
 
+def test_llama_batch_mrope_embeddings_use_four_position_planes():
+    batch = internals.LlamaBatch(
+        n_tokens=3,
+        embd=2,
+        n_seq_max=1,
+        verbose=False,
+    )
+    try:
+        original_pos = ctypes.cast(batch.batch.pos, ctypes.c_void_p).value
+        batch.enable_mrope_positions()
+        expanded_pos = ctypes.cast(batch.batch.pos, ctypes.c_void_p).value
+        batch.add_embeddings_mrope(
+            [1.0, 2.0, 3.0, 4.0],
+            pos_array=[[4, 5], [4, 5], [4, 5], [0, 0]],
+            seq_ids=[0],
+            logits_array=[False, True],
+        )
+
+        assert expanded_pos != original_pos
+        assert [batch.batch.pos[i] for i in range(8)] == [
+            4, 5, 4, 5, 4, 5, 0, 0
+        ]
+        assert [batch.batch.logits[i] for i in range(2)] == [0, 1]
+        assert batch.batch.n_tokens == 2
+    finally:
+        batch.close()
+
+
 @pytest.fixture
 def llama_cpp_model_path():
     """Fixture to download a real GGUF model for integration tests."""

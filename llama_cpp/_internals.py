@@ -147,6 +147,9 @@ class LlamaModel:
     def n_swa(self) -> int:
         return llama_cpp.llama_model_n_swa(self.model)
 
+    def rope_type(self) -> int:
+        return llama_cpp.llama_model_rope_type(self.model)
+
     def dflash_selector_top_k(self) -> int:
         """Return the DFlash2 selector width, or zero for DFlash v1/DSpark."""
         return llama_cpp.llama_model_dflash_selector_top_k(self.model)
@@ -1147,6 +1150,8 @@ class LlamaBatch:
         self._token_buf = None
         self._owns_token = False
         self._embd_view = None
+        self._native_pos = None
+        self._mrope_pos_buf = None
         self._exit_stack = ExitStack()
         self.batch = None
 
@@ -1215,6 +1220,12 @@ class LlamaBatch:
                     # batch.token points to a Python-owned ctypes buffer in mixed mode.
                     # llama_batch_free() would call free(batch.token), so clear it first.
                     self.batch.token = None
+                if getattr(self, "_native_pos", None) is not None:
+                    # Restore the malloc-owned pointer before llama_batch_free().
+                    self.batch.pos = ctypes.cast(
+                        ctypes.c_void_p(self._native_pos),
+                        ctypes.POINTER(llama_cpp.llama_pos),
+                    )
                 llama_cpp.llama_batch_free(self.batch)
             except Exception:
                 pass
@@ -1222,6 +1233,8 @@ class LlamaBatch:
 
         self._token_buf = None
         self._owns_token = False
+        self._native_pos = None
+        self._mrope_pos_buf = None
 
         if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
             self._exit_stack.close()
@@ -1515,8 +1528,8 @@ class LlamaBatch:
             batch.token == NULL
             batch.embd  != NULL
 
-        It only supports one logical position per embedding row. M-RoPE media
-        embedding batches should continue to use MTMD helper APIs.
+        It only supports one logical position per embedding row. Use
+        add_embeddings_mrope for four-plane M-RoPE positions.
         """
         self._require_embedding_buffer("add_embeddings")
 
@@ -1565,6 +1578,88 @@ class LlamaBatch:
             self.batch.logits[j] = int(logits_array[i])
 
         self.batch.n_tokens += n_tokens
+
+    def enable_mrope_positions(self) -> None:
+        """Replace the scalar position view with four Python-owned RoPE planes."""
+        self._require_embedding_buffer("enable_mrope_positions")
+        if self._mrope_pos_buf is not None:
+            return
+
+        self._native_pos = ctypes.cast(
+            self.batch.pos, ctypes.c_void_p
+        ).value
+        self._mrope_pos_buf = (
+            llama_cpp.llama_pos * (4 * self.n_tokens_capacity)
+        )()
+        self.batch.pos = ctypes.cast(
+            self._mrope_pos_buf,
+            ctypes.POINTER(llama_cpp.llama_pos),
+        )
+
+    def add_embeddings_mrope(
+        self,
+        embeddings: Sequence[float],
+        *,
+        pos_array: Sequence[Sequence[int]],
+        seq_ids: Sequence[int],
+        logits_array: Optional[Sequence[bool]] = None,
+    ) -> None:
+        """Add an embedding batch with four plane-major M-RoPE positions."""
+        self._require_embedding_buffer("add_embeddings_mrope")
+        if self.batch.n_tokens != 0:
+            raise RuntimeError(
+                "LlamaBatch.add_embeddings_mrope requires an empty batch"
+            )
+
+        positions = np.asarray(pos_array, dtype=np.int32)
+        if positions.ndim != 2 or positions.shape[0] != 4:
+            raise ValueError(
+                "LlamaBatch.add_embeddings_mrope: pos_array must have shape "
+                "[4, n_tokens]"
+            )
+        n_tokens = int(positions.shape[1])
+        if n_tokens <= 0:
+            raise ValueError(
+                "LlamaBatch.add_embeddings_mrope: pos_array must not be empty."
+            )
+        if n_tokens > self.n_tokens_capacity:
+            raise IndexError(
+                f"LlamaBatch overflow[add_embeddings_mrope]: cannot add {n_tokens} rows. "
+                f"Capacity: {self.n_tokens_capacity}."
+            )
+        if logits_array is None:
+            logits_array = [False] * n_tokens
+        elif len(logits_array) != n_tokens:
+            raise ValueError(
+                "LlamaBatch.add_embeddings_mrope: logits_array length mismatch: "
+                f"{len(logits_array)} != {n_tokens}."
+            )
+
+        expected = n_tokens * self.embd
+        if len(embeddings) != expected:
+            raise ValueError(
+                "LlamaBatch.add_embeddings_mrope: embeddings length mismatch: "
+                f"{len(embeddings)} != n_tokens({n_tokens}) * embd({self.embd}) = {expected}."
+            )
+        n_seq_id = self._validate_seq_ids(seq_ids, "add_embeddings_mrope")
+        self.enable_mrope_positions()
+
+        assert self._embd_view is not None
+        self._embd_view[:n_tokens, :] = np.asarray(
+            embeddings, dtype=np.float32
+        ).reshape(n_tokens, self.embd)
+        pos_view = np.ctypeslib.as_array(
+            self.batch.pos,
+            shape=(4 * self.n_tokens_capacity,),
+        )
+        pos_view[: 4 * n_tokens] = positions.reshape(-1)
+
+        for i in range(n_tokens):
+            self.batch.n_seq_id[i] = n_seq_id
+            for k, seq_id in enumerate(seq_ids):
+                self.batch.seq_id[i][k] = int(seq_id)
+            self.batch.logits[i] = int(logits_array[i])
+        self.batch.n_tokens = n_tokens
 
     def _require_mixed_buffer(self, where: str) -> None:
         self._require_open(where)
