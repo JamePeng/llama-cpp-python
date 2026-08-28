@@ -121,7 +121,7 @@ class Llama:
         n_cpu_moe: int = 0,
         split_mode: int = llama_cpp_lib.llama_split_mode.LLAMA_SPLIT_MODE_LAYER,
         load_mode: int = llama_cpp_lib.llama_load_mode.LLAMA_LOAD_MODE_AUTO,
-        tensor_read_lazy: int = llama_cpp_lib.llama_tensor_read_lazy.LLAMA_TENSOR_READ_LAZY_AUTO,
+        lazy_mode: int = llama_cpp_lib.llama_lazy_mode.LLAMA_LAZY_MODE_AUTO,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
         kv_overrides: Optional[Dict[str, Union[bool, int, float, str]]] = None,
@@ -409,7 +409,7 @@ class Llama:
         self.model_params.n_gpu_layers = self._parse_n_gpu_layers(n_gpu_layers)
         self.model_params.split_mode = split_mode
         self.model_params.load_mode = load_mode
-        self.model_params.tensor_read_lazy = tensor_read_lazy
+        self.model_params.lazy_mode = lazy_mode
         self.model_params.main_gpu = main_gpu
         self.tensor_split = tensor_split
         self._c_tensor_split = None
@@ -4393,7 +4393,7 @@ prompt: The prompt to generate text from.
             n_cpu_moe=self.n_cpu_moe,
             split_mode=self.model_params.split_mode,
             load_mode=self.model_params.load_mode,
-            tensor_read_lazy=self.model_params.tensor_read_lazy,
+            lazy_mode=self.model_params.lazy_mode,
             main_gpu=self.model_params.main_gpu,
             tensor_split=self.tensor_split,
             kv_overrides=self.kv_overrides,

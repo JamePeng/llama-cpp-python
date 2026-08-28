@@ -536,15 +536,15 @@ def llama_load_mode_name(load_mode: int) -> bytes:
 def llama_load_mode_from_str(str: ctypes.c_char_p) -> int:
     ...
 
-# enum llama_tensor_read_lazy {
-#     LLAMA_TENSOR_READ_LAZY_OFF  = 0, // always read the whole tensor up front
-#     LLAMA_TENSOR_READ_LAZY_AUTO = 1, // lazy only for marked tensors larger than 4 GiB (requires mmap)
-#     LLAMA_TENSOR_READ_LAZY_ON   = 2, // read the rows of tensors marked by the arch on demand (requires mmap)
+# enum llama_lazy_mode {
+#     LLAMA_LAZY_MODE_OFF  = 0, // always read the whole tensor up front
+#     LLAMA_LAZY_MODE_AUTO = 1, // lazy only for marked tensors larger than 4 GiB (requires mmap)
+#     LLAMA_LAZY_MODE_ON   = 2, // read the rows of tensors marked by the arch on demand (requires mmap)
 # };
-class llama_tensor_read_lazy(enum.IntEnum):
-    LLAMA_TENSOR_READ_LAZY_OFF  = 0  # always read the whole tensor up front
-    LLAMA_TENSOR_READ_LAZY_AUTO = 1  # lazy only for marked tensors larger than 4 GiB (requires mmap)
-    LLAMA_TENSOR_READ_LAZY_ON   = 2  # read the rows of tensors marked by the arch on demand (requires mmap)
+class llama_lazy_mode(enum.IntEnum):
+    LLAMA_LAZY_MODE_OFF  = 0  # always read the whole tensor up front
+    LLAMA_LAZY_MODE_AUTO = 1  # lazy only for marked tensors larger than 4 GiB (requires mmap)
+    LLAMA_LAZY_MODE_ON   = 2  # read the rows of tensors marked by the arch on demand (requires mmap)
 
 # enum llama_context_type {
 #     LLAMA_CONTEXT_TYPE_DEFAULT = 0,
@@ -793,7 +793,7 @@ class llama_model_tensor_buft_override(ctypes.Structure):
 #     enum llama_split_mode split_mode; // how to split the model across multiple GPUs
 #     enum llama_load_mode  load_mode;  // how to load the model
 
-#     enum llama_tensor_read_lazy tensor_read_lazy; // on-demand reading of tensors marked by the arch
+#     enum llama_lazy_mode lazy_mode; // on-demand reading of tensors marked by the arch
 
 #     // the GPU that is used for the entire model when split_mode is LLAMA_SPLIT_MODE_NONE
 #     int32_t main_gpu;
@@ -829,7 +829,7 @@ class llama_model_params(ctypes.Structure):
         n_gpu_layers (int): number of layers to store in VRAM, a negative value means all layers
         split_mode (int): how to split the model across multiple GPUs
         load_mode (int): how to load the model
-        tensor_read_lazy (int): on-demand reading of tensors marked by the arch
+        lazy_mode (int): on-demand reading of tensors marked by the arch
         main_gpu (int): the GPU that is used for the entire model. main_gpu interpretation depends on split_mode: LLAMA_SPLIT_NONE: the GPU that is used for the entire model LLAMA_SPLIT_ROW: the GPU that is used for small tensors and intermediate results LLAMA_SPLIT_LAYER: ignored
         tensor_split (ctypes.Array[ctypes.ctypes.c_float]): proportion of the model (layers or rows) to offload to each GPU, size: llama_max_devices()
         progress_callback (llama_progress_callback): called with a progress value between 0.0 and 1.0. Pass NULL to disable. If the provided progress_callback returns true, model loading continues. If it returns false, model loading is immediately aborted.
@@ -848,7 +848,7 @@ class llama_model_params(ctypes.Structure):
         n_gpu_layers: int
         split_mode: int
         load_mode: int
-        tensor_read_lazy: int
+        lazy_mode: int
         main_gpu: int
         tensor_split: CtypesArray[ctypes.c_float]
         progress_callback: Callable[[float, ctypes.c_void_p], bool]
@@ -867,7 +867,7 @@ class llama_model_params(ctypes.Structure):
         ("n_gpu_layers", ctypes.c_int32),
         ("split_mode", ctypes.c_int),
         ("load_mode", ctypes.c_int),
-        ("tensor_read_lazy", ctypes.c_int),
+        ("lazy_mode", ctypes.c_int),
         ("main_gpu", ctypes.c_int32),
         ("tensor_split", ctypes.POINTER(ctypes.c_float)),
         ("progress_callback", llama_progress_callback),
