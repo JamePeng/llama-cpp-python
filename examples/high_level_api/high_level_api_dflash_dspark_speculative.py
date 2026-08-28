@@ -1,4 +1,4 @@
-"""Compare ordinary decoding with an external DFlash or DSpark draft model.
+"""Compare ordinary decoding with an external DFlash, DFlash2, or DSpark model.
 
 Run with ``-h`` for portable command examples and tuning options.
 
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
     from llama_cpp import Llama
 
 
-DecodeMode = Literal["ordinary", "dflash", "dspark"]
+DecodeMode = Literal["ordinary", "dflash", "dflash2", "dspark"]
 
 
 @dataclass(frozen=True)
@@ -41,6 +41,7 @@ class BenchmarkResult:
     load_seconds: float
     prompt_tokens: int
     runs: tuple[GenerationResult, ...]
+    runtime_config: Optional[dict[str, Any]] = None
 
     @property
     def aggregate_tokens_per_second(self) -> float:
@@ -52,12 +53,15 @@ class BenchmarkResult:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Benchmark ordinary decoding against an external DFlash or DSpark "
+            "Benchmark ordinary decoding against an external DFlash, DFlash2, or DSpark "
             "draft model. The ordinary baseline is always measured."
         ),
         epilog="""examples:
   DFlash:
     python -m examples.high_level_api.high_level_api_dflash_dspark_speculative --algorithm dflash --model target.gguf --draft-model dflash.gguf
+
+  DFlash2 (requires selector metadata in the sidecar):
+    python -m examples.high_level_api.high_level_api_dflash_dspark_speculative --algorithm dflash2 --model target.gguf --draft-model dflash2.gguf --draft-tokens 7 --draft-p-min 0
 
   DSpark with a shorter draft:
     python -m examples.high_level_api.high_level_api_dflash_dspark_speculative --algorithm dspark --model target.gguf --draft-model dspark.gguf --draft-tokens 3 --runs 3
@@ -69,9 +73,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--algorithm",
-        choices=("dflash", "dspark"),
+        choices=("dflash", "dflash2", "dspark"),
         default="dflash",
-        help="Draft algorithm described by the external GGUF (default: dflash).",
+        help=(
+            "Draft algorithm described by the external GGUF. 'dflash' also "
+            "auto-detects and labels DFlash2; 'dflash2' requires selector metadata "
+            "(default: dflash)."
+        ),
     )
     parser.add_argument(
         "--model", type=Path, required=True, help="Path to the target GGUF model."
@@ -80,7 +88,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--draft-model",
         type=Path,
         required=True,
-        help="Path to the compatible DFlash or DSpark GGUF sidecar.",
+        help="Path to the compatible DFlash, DFlash2, or DSpark GGUF sidecar.",
     )
     parser.add_argument(
         "--prompt",
@@ -129,12 +137,21 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--draft-n-min",
+        type=int,
+        default=0,
+        help=(
+            "Minimum number of proposals required to use a speculative block "
+            "(default: 0)."
+        ),
+    )
+    parser.add_argument(
         "--draft-p-min",
         type=float,
         default=0.0,
         help=(
-            "DFlash top-token or DSpark acceptance-confidence threshold "
-            "(default: 0)."
+            "DFlash top-token, DFlash2 selector-path, or DSpark confidence "
+            "threshold (default: 0)."
         ),
     )
     parser.add_argument(
@@ -199,6 +216,10 @@ def validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> 
             parser.error(f"--{name.replace('_', '-')} must be greater than zero")
     if args.warmup_tokens < 0:
         parser.error("--warmup-tokens must be non-negative")
+    if args.draft_n_min < 0:
+        parser.error("--draft-n-min must be non-negative")
+    if args.draft_n_min > args.draft_tokens:
+        parser.error("--draft-n-min must not exceed --draft-tokens")
     if args.n_ubatch > args.n_batch:
         parser.error("--n-ubatch must not exceed --n-batch")
     if args.draft_tokens > args.n_batch - 1:
@@ -268,6 +289,7 @@ def benchmark_mode(args: argparse.Namespace, mode: DecodeMode) -> BenchmarkResul
             spec_type=spec_type,
             draft_model_path=str(args.draft_model),
             draft_n_max=args.draft_tokens,
+            draft_n_min=args.draft_n_min,
             draft_p_min=args.draft_p_min,
             draft_n_gpu_layers=0 if args.draft_cpu else "all",
             draft_backend_sampling=not args.no_backend_sampling,
@@ -285,7 +307,34 @@ def benchmark_mode(args: argparse.Namespace, mode: DecodeMode) -> BenchmarkResul
         verbose=args.verbose,
     )
     load_seconds = time.perf_counter() - load_started
+    runtime_config: Optional[dict[str, Any]] = None
     try:
+        label = mode
+        if mode != "ordinary":
+            engine = llm.speculative
+            is_dflash2 = bool(getattr(engine, "is_dflash2", False))
+            if mode == "dflash2" and not is_dflash2:
+                raise ValueError(
+                    "--algorithm dflash2 requires a sidecar with a non-zero "
+                    "DFlash2 selector_top_k"
+                )
+            if mode in {"dflash", "dflash2"} and is_dflash2:
+                label = "DFlash2"
+            elif mode == "dflash":
+                label = "DFlash"
+            elif mode == "dspark":
+                label = "DSpark"
+            runtime_config = {
+                "selector_top_k": int(getattr(engine, "selector_top_k", 0)),
+                "nextn_masked": not is_dflash2,
+                "backend_requested": not args.no_backend_sampling,
+                "backend_active": bool(getattr(engine, "_backend_sampling", False)),
+                "mrope": bool(getattr(engine, "is_mrope", False)),
+                "block_size": int(getattr(engine, "block_size", 0)),
+                "draft_n_min": args.draft_n_min,
+                "draft_n_max": int(getattr(engine, "draft_limit", args.draft_tokens)),
+                "draft_p_min": args.draft_p_min,
+            }
         prompt_tokens = llm.tokenize(
             args.prompt.encode("utf-8"), add_bos=True, special=True
         )
@@ -309,7 +358,9 @@ def benchmark_mode(args: argparse.Namespace, mode: DecodeMode) -> BenchmarkResul
         )
     finally:
         llm.close()
-    return BenchmarkResult(mode, load_seconds, len(prompt_tokens), results)
+    return BenchmarkResult(
+        label, load_seconds, len(prompt_tokens), results, runtime_config
+    )
 
 
 def stat_total(result: BenchmarkResult, name: str) -> float:
@@ -327,6 +378,26 @@ def print_mode(result: BenchmarkResult) -> None:
         )
     print(f"  aggregate           : {result.aggregate_tokens_per_second:.2f} token/s")
     print(f"  median run          : {statistics.median(rates):.2f} token/s")
+
+    config = result.runtime_config
+    if config is not None:
+        print(
+            "  draft range         : "
+            f"{config['draft_n_min']}..{config['draft_n_max']}, "
+            f"p_min={config['draft_p_min']:g}"
+        )
+        print(f"  block size          : {config['block_size']}")
+        print(f"  selector top-k      : {config['selector_top_k']}")
+        print(
+            "  nextn output        : "
+            + ("masked" if config["nextn_masked"] else "unmasked")
+        )
+        print(
+            "  backend sampling    : "
+            f"requested={config['backend_requested']}, "
+            f"active={config['backend_active']}"
+        )
+        print(f"  M-RoPE              : {config['mrope']}")
 
     verified = int(stat_total(result, "verified"))
     if not verified:
@@ -391,7 +462,11 @@ def main() -> None:
     print(f"Prompt         : {args.prompt!r}")
     print(f"Measured runs  : {args.runs} x {args.max_tokens} tokens per mode")
     print(f"Warmup         : {args.warmup_tokens} tokens per mode")
-    print(f"Draft settings : max={args.draft_tokens}, p_min={args.draft_p_min:g}")
+    print(
+        "Draft settings : "
+        f"min={args.draft_n_min}, max={args.draft_tokens}, "
+        f"p_min={args.draft_p_min:g}"
+    )
     print(
         "Backend sample : "
         + ("disabled (CPU)" if args.no_backend_sampling else "enabled")
