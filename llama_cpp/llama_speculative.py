@@ -1961,6 +1961,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             internals, model_params, load_mtp=False
         )
         try:
+            self.selector_top_k = self.draft_model.dflash_selector_top_k()
+            self.is_dflash2 = self.selector_top_k > 0
             self.target_layer_ids = self.draft_model.target_layer_ids()
             if not self.target_layer_ids:
                 raise ValueError("DFlash draft model has no target_layer_ids")

@@ -5470,6 +5470,24 @@ def llama_get_ctx_other(
 
 # // model/context data extraction
 
+# LLAMA_API int32_t llama_model_dflash_selector_top_k(const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_dflash_selector_top_k",
+        "?llama_model_dflash_selector_top_k@@YAHPEBUllama_model@@@Z",
+        "__Z33llama_model_dflash_selector_top_kPK11llama_model",
+        "_Z33llama_model_dflash_selector_top_kPK11llama_model",
+    ],
+    [llama_model_p_ctypes],
+    ctypes.c_int32,
+    required=False,
+)
+def llama_model_dflash_selector_top_k(
+    model: llama_model_p
+) -> int:
+    """return the DFlash2 selector width, or zero for DFlash v1/DSpark."""
+    ...
+
 # // returns pointer to the target-model layer indices
 # LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
 @ctypes_function_llama_ext(

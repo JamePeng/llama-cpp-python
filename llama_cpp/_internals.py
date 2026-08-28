@@ -147,6 +147,10 @@ class LlamaModel:
     def n_swa(self) -> int:
         return llama_cpp.llama_model_n_swa(self.model)
 
+    def dflash_selector_top_k(self) -> int:
+        """Return the DFlash2 selector width, or zero for DFlash v1/DSpark."""
+        return llama_cpp.llama_model_dflash_selector_top_k(self.model)
+
     def target_layer_ids_n(self) -> int:
         """Return the number of target-model layers extracted by this model."""
         return llama_cpp.llama_model_target_layer_ids_n(self.model)
