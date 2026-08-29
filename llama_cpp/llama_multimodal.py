@@ -1170,6 +1170,20 @@ class MTMDChatHandler:
 
             n_past = llama.n_tokens
 
+            # MTMD evaluates prompt chunks before create_completion() starts
+            # its own timing interval. Settle any earlier asynchronous work and
+            # measure this prefill phase separately so that the completion reset
+            # cannot discard or misattribute its context timings.
+            perf_enabled = not llama.context_params.no_perf
+            has_prompt_work = any(
+                end_idx > n_past
+                for _, end_idx, _, _, _ in chunk_token_spans
+            )
+            prompt_evaluated = False
+            if perf_enabled and has_prompt_work:
+                llama._ctx.synchronize()
+                llama._ctx.reset_timings()
+
             for start_idx, end_idx, chunk_ptr, chunk_type, media_id in chunk_token_spans:
                 # Skip previously matched chunks
                 if end_idx <= n_past:
@@ -1194,6 +1208,7 @@ class MTMDChatHandler:
 
                             # Text evaluation delegates shift and chunking to native llama.eval
                             llama.eval(tokens_to_eval)
+                            prompt_evaluated = True
                             n_past = llama.n_tokens
 
                 elif self._is_image_chunk(chunk_type) or self._is_audio_chunk(chunk_type):
@@ -1256,6 +1271,18 @@ class MTMDChatHandler:
                     llama.input_ids[n_past : new_n_past.value] = media_id
                     n_past = new_n_past.value
                     llama.n_tokens = n_past
+                    prompt_evaluated = True
+
+            if perf_enabled and prompt_evaluated:
+                # mtmd_helper_eval_chunk_single() bypasses LlamaContext.decode(),
+                # so explicitly settle its queued timing data at this boundary.
+                llama._ctx.synchronize()
+                if llama.verbose:
+                    print(
+                        f"{self.log_prefix}(__call__): Multimodal prompt timings:",
+                        file=sys.stderr,
+                    )
+                    llama._ctx.print_timings()
 
             # Extract the final, perfectly synchronized prompt sequence
             prompt = llama.input_ids[: llama.n_tokens].tolist()
