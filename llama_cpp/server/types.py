@@ -75,6 +75,13 @@ present_penalty_field = Field(
     description="Positive values penalize new tokens based on whether they appear in the text so far, increasing the model's likelihood to talk about new topics.",
 )
 
+presence_penalty_field = Field(
+    default=None,
+    ge=-2.0,
+    le=2.0,
+    description="Compatibility alias for present_penalty. It is used only when present_penalty remains at its default value.",
+)
+
 frequency_penalty_field = Field(
     default=0.0,
     ge=-2.0,
@@ -133,6 +140,7 @@ class CreateCompletionRequest(BaseModel):
         description="The number of logprobs to generate. If None, no logprobs are generated.",
     )
     present_penalty: Optional[float] = present_penalty_field
+    presence_penalty: Optional[float] = presence_penalty_field
     frequency_penalty: Optional[float] = frequency_penalty_field
     logit_bias: Optional[Dict[str, float]] = Field(None)
     seed: Optional[int] = Field(None)
@@ -229,6 +237,7 @@ class CreateChatCompletionRequest(BaseModel):
     stop: Optional[Union[str, List[str]]] = stop_field
     stream: bool = stream_field
     present_penalty: Optional[float] = present_penalty_field
+    presence_penalty: Optional[float] = presence_penalty_field
     frequency_penalty: Optional[float] = frequency_penalty_field
     logit_bias: Optional[Dict[str, float]] = Field(None)
     seed: Optional[int] = Field(None)

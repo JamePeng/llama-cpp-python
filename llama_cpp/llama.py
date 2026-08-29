@@ -3829,6 +3829,7 @@ class Llama:
         stop: Optional[Union[str, List[str]]] = [],
         frequency_penalty: float = 0.0,
         present_penalty: float = 0.0,
+        presence_penalty: Optional[float] = None,
         repeat_penalty: float = 1.0,
         penalty_last_n: int = 64,
         top_k: int = 40,
@@ -3883,6 +3884,7 @@ prompt: The prompt to generate text from.
             stop: A list of strings to stop generation when encountered.
             frequency_penalty: The penalty to apply to tokens based on their frequency in the prompt.
             present_penalty: The penalty to controls whether to apply a penalty to tokens that are already present in the current context, helping to reduce repetition and encourage more diverse generation.
+            presence_penalty: Compatibility alias for `present_penalty`. It is used only when `present_penalty` remains at its default value.
             repeat_penalty: The penalty to apply to repeated tokens.
             penalty_last_n: last n tokens to penalize (0 = disable penalty, -1 = context size).
             top_k: The top-k value to use for sampling. Top-K sampling described in academic paper "The Curious Case of Neural Text Degeneration" https://arxiv.org/abs/1904.09751
@@ -3936,6 +3938,9 @@ prompt: The prompt to generate text from.
         Returns:
             Response object containing the generated text.
         """
+        if presence_penalty is not None and present_penalty == 0.0:
+            present_penalty = presence_penalty
+
         completion_or_chunks = self._create_completion(
             prompt=prompt,
             suffix=suffix,
@@ -4007,6 +4012,7 @@ prompt: The prompt to generate text from.
         stop: Optional[Union[str, List[str]]] = [],
         frequency_penalty: float = 0.0,
         present_penalty: float = 0.0,
+        presence_penalty: Optional[float] = None,
         repeat_penalty: float = 1.0,
         penalty_last_n: int = 64,
         top_k: int = 40,
@@ -4061,6 +4067,7 @@ prompt: The prompt to generate text from.
             stop: A list of strings to stop generation when encountered.
             frequency_penalty: The penalty to apply to tokens based on their frequency in the prompt.
             present_penalty: The penalty to controls whether to apply a penalty to tokens that are already present in the current context, helping to reduce repetition and encourage more diverse generation.
+            presence_penalty: Compatibility alias for `present_penalty`. It is used only when `present_penalty` remains at its default value.
             repeat_penalty: The penalty to apply to repeated tokens.
             penalty_last_n: last n tokens to penalize (0 = disable penalty, -1 = context size).
             top_k: The top-k value to use for sampling. Top-K sampling described in academic paper "The Curious Case of Neural Text Degeneration" https://arxiv.org/abs/1904.09751
@@ -4164,6 +4171,7 @@ prompt: The prompt to generate text from.
             reasoning_budget_message=reasoning_budget_message,
             reasoning_start_in_prompt=reasoning_start_in_prompt,
             reasoning_start_max_tokens=reasoning_start_max_tokens,
+            presence_penalty=presence_penalty,
         )
 
     def create_chat_completion(
@@ -4185,6 +4193,7 @@ prompt: The prompt to generate text from.
         response_format: Optional[ChatCompletionRequestResponseFormat] = None,
         max_tokens: Optional[int] = None,
         present_penalty: float = 0.0,
+        presence_penalty: Optional[float] = None,
         frequency_penalty: float = 0.0,
         repeat_penalty: float = 1.0,
         penalty_last_n: int = 64,
@@ -4246,6 +4255,7 @@ prompt: The prompt to generate text from.
             max_tokens: The maximum number of tokens to generate. If max_tokens <= 0 or None, the maximum number of tokens to generate is unlimited and depends on n_ctx.
             frequency_penalty: The penalty to apply to tokens based on their frequency in the prompt.
             present_penalty: The penalty to controls whether to apply a penalty to tokens that are already present in the current context, helping to reduce repetition and encourage more diverse generation.
+            presence_penalty: Compatibility alias for `present_penalty`. It is used only when `present_penalty` remains at its default value.
             repeat_penalty: The penalty to apply to repeated tokens.
             penalty_last_n: last n tokens to penalize (0 = disable penalty, -1 = context size).
             mirostat_mode: The mirostat sampling mode.
@@ -4289,6 +4299,9 @@ prompt: The prompt to generate text from.
         Returns:
             Generated chat completion or a stream of chat completion chunks.
         """
+        if presence_penalty is not None and present_penalty == 0.0:
+            present_penalty = presence_penalty
+
         handler = (
             self.chat_handler
             or self._chat_handlers.get(self.chat_format)

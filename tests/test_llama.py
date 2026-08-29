@@ -62,6 +62,74 @@ def test_completion_public_apis_forward_ignore_eos():
 
 
 @pytest.mark.parametrize(
+    ("present_penalty", "presence_penalty", "expected"),
+    [(0.0, 1.5, 1.5), (0.7, 1.5, 0.7)],
+)
+def test_completion_presence_penalty_alias(
+    present_penalty, presence_penalty, expected
+):
+    llm = object.__new__(llama_cpp.Llama)
+    private_calls = []
+
+    def fake_private(**kwargs):
+        private_calls.append(kwargs)
+        yield {"choices": [{"text": "", "finish_reason": "length"}]}
+
+    llm._create_completion = fake_private
+    llama_cpp.Llama.create_completion(
+        llm,
+        [1],
+        present_penalty=present_penalty,
+        presence_penalty=presence_penalty,
+    )
+
+    assert private_calls[0]["present_penalty"] == expected
+
+
+def test_call_forwards_presence_penalty_alias():
+    llm = object.__new__(llama_cpp.Llama)
+    public_calls = []
+
+    def fake_public(**kwargs):
+        public_calls.append(kwargs)
+        return {"choices": [{"text": "", "finish_reason": "length"}]}
+
+    llm.create_completion = fake_public
+    llama_cpp.Llama.__call__(llm, "prompt", presence_penalty=1.5)
+
+    assert public_calls[0]["presence_penalty"] == 1.5
+    assert public_calls[0]["present_penalty"] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("present_penalty", "presence_penalty", "expected"),
+    [(0.0, 1.5, 1.5), (0.7, 1.5, 0.7)],
+)
+def test_chat_completion_presence_penalty_alias(
+    present_penalty, presence_penalty, expected
+):
+    llm = object.__new__(llama_cpp.Llama)
+    handler_calls = []
+
+    def fake_handler(**kwargs):
+        handler_calls.append(kwargs)
+        return {"choices": [{"message": {"content": ""}}]}
+
+    llm.chat_handler = fake_handler
+    llm._chat_handlers = {}
+    llm.chat_format = None
+    llama_cpp.Llama.create_chat_completion(
+        llm,
+        messages=[{"role": "user", "content": "Hello"}],
+        present_penalty=present_penalty,
+        presence_penalty=presence_penalty,
+    )
+
+    assert handler_calls[0]["present_penalty"] == expected
+    assert "presence_penalty" not in handler_calls[0]
+
+
+@pytest.mark.parametrize(
     ("ignore_eos", "expected_text", "expected_finish_reason"),
     [(False, "", "stop"), (True, "<eog>", "length")],
 )
