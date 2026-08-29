@@ -30,7 +30,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | [Llama Cache](modules/LlamaCache.md) | Cache interfaces and implementations for reusing model state across repeated prompts. |
 | [Llama Embedding](modules/LlamaEmbedding.md) | Dedicated embedding APIs, configuration, output formats, and batching behavior. |
 | [Llama Grammar](modules/LlamaGrammar.md) | Grammar parsing and constrained-generation utilities. |
-| [Llama Speculative Decoding](modules/LlamaSpeculative.md) | Stateful MTP, DFlash, DSpark, and n-gram engines; configuration, lifecycle, rollback, statistics, and benchmarks. |
+| [Llama Speculative Decoding](modules/LlamaSpeculative.md) | Stateful MTP, DFlash, DFlash2, DSpark, and n-gram engines; configuration, lifecycle, rollback, statistics, and benchmarks. |
 | [Logger](modules/Logger.md) | Python and native logging configuration, callbacks, levels, filtering, and output routing. |
 
 ### Feature Guides
@@ -38,6 +38,12 @@ vendored `llama.cpp` APIs remain the source of truth.
 | Page | Description |
 |---|---|
 | [Embeddings and Reranking](features/embeddings-rerank.md) | End-to-end sentence embeddings, token-level vectors, normalization, streaming batches, similarity output, and cross-encoder reranking. |
+
+### Examples
+
+| Page | Description |
+|---|---|
+| [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md) | Configure a DFlash2 sidecar, validate selector execution, compare ordinary and speculative output, and tune draft length. |
 
 ### Development
 
@@ -73,6 +79,7 @@ For speculative decoding:
 
 1. [Llama](core/Llama.md)
 2. [Llama Speculative Decoding](modules/LlamaSpeculative.md)
+3. [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md)
 
 For documentation contributors:
 
@@ -94,6 +101,7 @@ Completed pages currently linked from this index:
 - `modules/LlamaSpeculative.md`
 - `modules/Logger.md`
 - `features/embeddings-rerank.md`
+- `examples/dflash2-speculative-decoding.md`
 - `development/git-commit-generation-agent.md`
 - `SCHEMA.md`
 - `contributing-to-wiki.md`
@@ -105,7 +113,6 @@ and checked against the implementation.
 ### Planned areas
 
 - Basic and chat-completion examples
-- Speculative-decoding examples
 - Vision and audio examples
 - Caching, grammar, multi-model, and tool-call feature guides
 - Low-level llama.cpp and MTMD ctypes bindings

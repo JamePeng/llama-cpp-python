@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-08-20
+last_updated: 2026-08-29
 version_target: "latest"
 ---
 
@@ -32,14 +32,22 @@ Initialize the model and context. Note that model loading will immediately alloc
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `model_path` | `str` | **Required** | Model file path (GGUF format) |
+| `mmproj_path` | `Optional[str]` | `None` | Optional multimodal projection GGUF. When provided, `Llama` creates a generic MTMD chat handler; it replaces an explicitly supplied `chat_handler`. Prefer passing it by keyword. |
 | `n_gpu_layers` | `Union[int, Literal["auto", "all"]]` | `"auto"` | Number of model layers stored in VRAM:<br>• `auto`/`-1`: auto-selected by llama.cpp<br>• `all`/`-2`: all layers<br>• integer N: first N layers<br>• `0`: disable layer offload |
 | `cpu_moe` | `bool` | `False` | Whether to keep all MoE weights on CPU |
 | `n_cpu_moe` | `int` | `0` | Number of first N MoE layers to keep on CPU (compatible with `cpu_moe`) |
 | `split_mode` | `int` | `LLAMA_SPLIT_MODE_LAYER` | Model GPU split mode:<br>• `LLAMA_SPLIT_MODE_NONE`: single GPU<br>• `LLAMA_SPLIT_MODE_ROW`: row-level split<br>• `LLAMA_SPLIT_MODE_LAYER`: layer-level split |
-| `load_mode` | `int` (`llama_load_mode`) | `LLAMA_LOAD_MODE_MMAP` | How model data is loaded. Select one of the `LLAMA_LOAD_MODE_*` values described below. |
+| `load_mode` | `int` (`llama_load_mode`) | `LLAMA_LOAD_MODE_AUTO` | How model data is loaded. `AUTO` lets llama.cpp choose from device capabilities; the explicit `LLAMA_LOAD_MODE_*` values are described below. |
+| `lazy_mode` | `int` (`llama_lazy_mode`) | `LLAMA_LAZY_MODE_AUTO` | Controls on-demand reads for architecture-marked tensors when mmap is active. |
 | `main_gpu` | `int` | `0` | The primary GPU to use for intermediate results or the entire model. |
 | `tensor_split` | `List[float]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
 | `kv_overrides` | `Dict` | `None` | Key-value overrides for the model metadata (supports bool, int, float, str). |
+| `use_mmap`, `use_direct_io`, `use_mlock` | `bool` | `False` | Deprecated compatibility arguments. They no longer configure native loading; use `load_mode`. |
+| `vocab_only` | `bool` | `False` | Load model metadata and vocabulary without weight tensors. |
+| `check_tensors` | `bool` | `False` | Validate tensor data while loading the model. This increases load time. |
+| `use_extra_bufts` | `bool` | `True` | Allow extra backend buffer types, including supported weight-repacking paths. |
+| `no_host` | `bool` | `False` | Bypass the ordinary host buffer so compatible extra buffer types can be used. Advanced backend option. |
+| `no_alloc` | `bool` | `False` | Load metadata and simulate model allocation without allocating tensor data. Intended for inspection and planning rather than inference. |
 | `load_mtp` | `bool` | `False` | Load the target model's NextN/MTP tensors. This is enabled automatically for built-in MTP through `speculative`; normally it should not be set manually. |
 | `numa` | `Union[bool, int]` | `False` | NUMA strategy (e.g., `GGML_NUMA_STRATEGY_DISTRIBUTE`). |
 
@@ -50,11 +58,20 @@ arguments. It accepts a member of `llama_cpp.llama_load_mode`:
 
 | Value | Integer | Description |
 | :--- | :---: | :--- |
+| `LLAMA_LOAD_MODE_AUTO` | `-1` | Default. Auto-detect the loading behavior from device capabilities; currently resolves to mmap where supported and ordinary loading otherwise. |
 | `LLAMA_LOAD_MODE_NONE` | `0` | Use no special model-loading mode. |
-| `LLAMA_LOAD_MODE_MMAP` | `1` | Memory-map the model. This is the default. |
+| `LLAMA_LOAD_MODE_MMAP` | `1` | Memory-map the model. |
 | `LLAMA_LOAD_MODE_MLOCK` | `2` | Keep the loaded model in RAM rather than allowing it to be swapped or compressed. |
 | `LLAMA_LOAD_MODE_MMAP_MLOCK` | `3` | Memory-map the model and keep its mapped pages in RAM. |
 | `LLAMA_LOAD_MODE_DIRECT_IO` | `4` | Use direct I/O when it is available. |
+
+`lazy_mode` accepts a member of `llama_cpp.llama_lazy_mode`:
+
+| Value | Integer | Description |
+| :--- | :---: | :--- |
+| `LLAMA_LAZY_MODE_OFF` | `0` | Read complete tensors up front. |
+| `LLAMA_LAZY_MODE_AUTO` | `1` | Default. Lazily read architecture-marked tensors only when they are larger than 4 GiB. Requires mmap. |
+| `LLAMA_LAZY_MODE_ON` | `2` | Read rows of every architecture-marked tensor on demand. Requires mmap. |
 
 ```python
 import llama_cpp
@@ -62,6 +79,7 @@ import llama_cpp
 llm = llama_cpp.Llama(
     model_path="models/model.gguf",
     load_mode=llama_cpp.llama_load_mode.LLAMA_LOAD_MODE_MMAP_MLOCK,
+    lazy_mode=llama_cpp.llama_lazy_mode.LLAMA_LAZY_MODE_AUTO,
 )
 ```
 
@@ -82,6 +100,7 @@ mapping:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
+| `seed` | `int` | `LLAMA_DEFAULT_SEED` | RNG seed used by the model. `LLAMA_DEFAULT_SEED` requests a random seed. |
 | `n_ctx` | `int` | `512` | Text context size. Set to `0` to load from model metadata. |
 | `n_keep` | `int` | `256` | Preferred number of leading tokens to preserve during automatic context shifting. |
 | `n_batch` | `int` | `2048` | Maximum number of tokens in a logical prompt-processing batch. The effective value cannot exceed `n_ctx`. |
@@ -103,22 +122,37 @@ mapping:
 | `attention_type` | `int` | `LLAMA_ATTENTION_TYPE_UNSPECIFIED` | Attention mode used by the context. `UNSPECIFIED` lets llama.cpp select the model-compatible behavior. |
 | `logits_all` | `bool` | `False` | Retain logits for every evaluated token instead of only requested outputs. Completion log probabilities require this mode. |
 | `flash_attn_type` | `int` | `LLAMA_FLASH_ATTN_TYPE_AUTO` | Controls when Flash Attention is enabled. |
+| `rope_scaling_type` | `Optional[int]` | `LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED` | RoPE scaling strategy. The unspecified value follows model metadata. |
+| `rope_freq_base` | `float` | `0.0` | RoPE base frequency override. `0.0` follows model metadata. |
+| `rope_freq_scale` | `float` | `0.0` | RoPE frequency scaling override. `0.0` follows model metadata. |
+| `yarn_ext_factor` | `float` | `-1.0` | YaRN extrapolation mix factor. A negative value follows model metadata. |
+| `yarn_attn_factor` | `float` | `1.0` | YaRN attention magnitude scaling factor. |
+| `yarn_beta_fast` | `float` | `32.0` | YaRN low-correction dimension. |
+| `yarn_beta_slow` | `float` | `1.0` | YaRN high-correction dimension. |
+| `yarn_orig_ctx` | `int` | `0` | Original YaRN context size. `0` follows model metadata. |
 | `offload_kqv` | `bool` | `True` | Offload K, Q, and V tensor operations to the selected device when supported. |
+| `no_perf` | `bool` | `False` | Disable native performance timing collection when `True`. |
+| `op_offload` | `Optional[bool]` | `None` | Whether supported host tensor operations may be offloaded to a device. `None` keeps llama.cpp's default. |
 | `swa_full` | `Optional[bool]` | `None` | Use a full-size sliding-window-attention cache. `None` keeps llama.cpp's default. |
 | `kv_unified` | `Optional[bool]` | `None` | Use a unified KV buffer for all sequences. `LlamaEmbedding` enables this automatically. |
 | `type_k` / `type_v` | `Optional[int]` | `None` | KV cache data types for keys and values. `None` uses llama.cpp defaults. |
 
-### Advanced & Chat Parameters
+### Advanced, Chat & Sampling Parameters
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `chat_format` | `str` | `None` | String specifying the chat template (e.g., `"llama-2"`, `"chatml"`). Guessed from GGUF if None. |
 | `chat_handler` | `LlamaChatCompletionHandler` | `None` | Optional custom handler. See [[ChatHandlers]]. |
+| `chat_template_name` | `Optional[str]` | `None` | Named chat template passed to the generic MTMD handler created by `mmproj_path`. |
+| `chat_handler_kwargs` | `Dict[str, Any]` | `{}` | Additional keyword arguments passed to the generic MTMD chat handler created by `mmproj_path`. |
+| `tokenizer` | `Optional[BaseLlamaTokenizer]` | `None` | Override the tokenizer used by the high-level API. By default, `LlamaTokenizer` wraps the loaded model vocabulary. |
 | `draft_model` | `LlamaDraftModel` | `None` | Deprecated stateless draft callback kept for compatibility. New code should use `speculative`. |
 | `speculative` | `Union[SpecConfig, LlamaSpecEngine]` | `None` | Stateful speculative configuration or engine. Supports the complete begin/draft/process/accept lifecycle; it cannot be combined with `draft_model`. |
 | `ctx_checkpoints` | `int` | `16` | Max hybrid/recurrent context checkpoints to keep. Set to `0` to disable checkpointing for single-turn fast paths. |
 | `checkpoint_interval` | `int` | `4096` | Token interval for saving periodic Hybrid/Recurrent checkpoints during long prompt evaluation. |
 | `checkpoint_on_device` | `bool` | `False` | Store Hybrid/Recurrent checkpoint tensor payloads in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Reduces device-to-host copy overhead, but only one active checkpoint per `seq_id` is safe. |
+| `last_n_tokens_size` | `int` | `64` | Default recent-token history used by repetition-style samplers when their per-call history length is zero. |
+| `spm_infill` | `bool` | `False` | Use the Suffix/Prefix/Middle order for infill instead of Prefix/Suffix/Middle. |
 
 ### Runtime Logging Parameters
 
@@ -129,7 +163,9 @@ mapping:
 | `log_filters` | `Optional[Sequence[str]]` | `None` | Optional substring filters for native runtime logs. If any provided substring appears in a decoded backend log message, that message is suppressed. The default logger may include built-in filters for noisy low-level logs such as `CUDA Graph id %d reuse` messages. Pass an empty list `[]` to disable default substring filtering. |
 | `log_filters_case_sensitive` | `bool` | `True` | Whether `log_filters` should match case-sensitively. Defaults to `True` for predictable low-level backend log filtering. |
 
-*(Note: There are numerous additional RoPE/YaRN scaling parameters available for specialized context extension. Refer to the source code for the full list).*
+Unknown extra constructor keywords are accepted through `**kwargs` for
+compatibility but are not applied to model or context parameters. Use explicit
+named parameters from the current signature.
 
 ---
 
@@ -268,7 +304,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
     New code should pass `SpecConfig` through the `speculative` argument. This enables the stateful begin/draft/process/accept lifecycle, including verification batches, acceptance feedback, recurrent-state rollback, and per-run statistics.
 
-    The current implementation is text-only and uses sequence ID `0`. It supports built-in and external MTP, external DFlash and DSpark drafts, plus the `NGRAM_MAP_K` and `NGRAM_MAP_K4V` lookup engines. Multimodal pseudo-tokens and MTMD embedding batches are not yet supported by this path.
+    The current implementation is text-only and uses sequence ID `0`. It supports built-in and external MTP, external DFlash, DFlash2, and DSpark drafts, plus the `NGRAM_MAP_K` and `NGRAM_MAP_K4V` lookup engines. Multimodal pseudo-tokens and MTMD embedding batches are not yet supported by this path.
 
     **Built-in MTP heads**
 
@@ -307,7 +343,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     )
     ```
 
-    **External DFlash or DSpark model**
+    **External DFlash, DFlash2, or DSpark model**
 
     ```python
     llm = Llama(
@@ -316,20 +352,25 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
         n_batch=512,
         n_gpu_layers="all",
         speculative=SpecConfig(
+            # DFlash2 uses DRAFT_DFLASH and is detected from selector metadata.
             spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
-            draft_model_path="path/to/dflash-or-dspark.gguf",
+            draft_model_path="path/to/dflash-dflash2-or-dspark.gguf",
             draft_n_max=7,
             draft_p_min=0.0,
             draft_n_gpu_layers="all",
+            # Used by DFlash v1/DSpark; remains inactive for DFlash2.
             draft_backend_sampling=True,
         ),
     )
     ```
 
-    DFlash and DSpark require a compatible external draft GGUF. Their effective
-    draft length is limited by the GGUF's trained block size. `draft_p_min`
-    filters token probability for DFlash and predicted acceptance confidence for
-    DSpark. Benchmark draft length and threshold together; longer blocks only
+    DFlash, DFlash2, and DSpark require a compatible external draft GGUF. Their
+    effective draft length is limited by the GGUF's trained block size. DFlash2
+    uses `DRAFT_DFLASH` and is selected when `dflash.selector_top_k` is positive.
+    `draft_p_min` filters token probability for DFlash, selector-transition
+    probability for DFlash2, and predicted acceptance confidence for DSpark.
+    DFlash2 reads unmasked selector rows and does not activate backend vocabulary
+    sampling. Benchmark draft length and threshold together; longer blocks only
     help when their additional accepted tokens outweigh verification cost.
 
     **N-gram lookup**
@@ -697,5 +738,6 @@ for formatting query/document pairs.
 * [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
 * [[Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
-* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP, DFlash, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
+* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP, DFlash, DFlash2, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
+* [[DFlash2 Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md)] - Runnable Qwen3.8 DFlash2 configuration, validation, benchmark, and tuning workflow.
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).

@@ -29,7 +29,7 @@ This package provides:
         - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
     - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
         - [MTP speculative decoding](https://github.com/JamePeng/llama-cpp-python#mtp-speculative-decoding)
-        - [DFlash and DSpark speculative decoding](https://github.com/JamePeng/llama-cpp-python#dflash-and-dspark-speculative-decoding)
+        - [DFlash, DFlash2, and DSpark speculative decoding](https://github.com/JamePeng/llama-cpp-python#dflash-dflash2-and-dspark-speculative-decoding)
         - [N-gram speculative decoding](https://github.com/JamePeng/llama-cpp-python#n-gram-speculative-decoding)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
@@ -1037,7 +1037,7 @@ and provides five usable modes:
 | Mode | `SpeculativeType` | Draft source |
 |---|---|---|
 | MTP | `DRAFT_MTP` | Target model NextN/MTP heads or an external MTP GGUF |
-| DFlash | `DRAFT_DFLASH` | External block-diffusion draft GGUF |
+| DFlash / DFlash2 | `DRAFT_DFLASH` | External block-diffusion draft GGUF; DFlash2 is detected from selector metadata |
 | DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads |
 | N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history |
 | N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key, matching `llama.cpp` |
@@ -1046,13 +1046,18 @@ Eagle3, draft-simple, and the other n-gram variants appear in
 `SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
 engines.
 
-DFlash and DSpark share `LlamaDFlashDecoding`: target-layer features are fused
-and injected into the draft KV cache before one non-causal mask-block decode.
-Both require `draft_model_path`. The requested `draft_n_max` is clamped to the
+DFlash, DFlash2, and DSpark share `LlamaDFlashDecoding`: target-layer features
+are fused and injected into the draft KV cache before one non-causal mask-block
+decode. All three require `draft_model_path`. DFlash2 uses the same
+`DRAFT_DFLASH` type and is selected automatically when the sidecar reports a
+non-zero `dflash.selector_top_k`. The requested `draft_n_max` is clamped to the
 draft GGUF's trained block size; benchmark several values on the deployment
 hardware because a longer block is not always faster.
 
-More Information see wiki: [Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)
+For the full API and lifecycle reference, see
+[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md).
+For a runnable selector-based workflow, see
+[DFlash2 Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md).
 
 ### MTP speculative decoding
 
@@ -1118,11 +1123,13 @@ The verification batch contains `[id_last, draft...]`, so the maximum draft
 length must not exceed `n_batch - 1`. Longer drafts only help when their
 additional acceptance outweighs verification and rollback cost.
 
-### DFlash and DSpark speculative decoding
+### DFlash, DFlash2, and DSpark speculative decoding
 
-DFlash and DSpark require a compatible external draft GGUF. DFlash generates a
-non-causal mask block, while DSpark uses the same block path with additional
-Markov and acceptance-confidence heads.
+DFlash, DFlash2, and DSpark require a compatible external draft GGUF. DFlash
+generates a non-causal mask block. DFlash2 adds a selector lattice whose
+candidate IDs are walked with predecessor-dependent transition scores. DSpark
+uses the same block path with additional Markov and acceptance-confidence
+heads.
 
 ```python
 llm = Llama(
@@ -1132,21 +1139,30 @@ llm = Llama(
     n_gpu_layers="all",
     speculative=SpecConfig(
         spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
-        draft_model_path="path/to/dflash-or-dspark.gguf",
+        # DFlash2 uses the same type and is detected from selector metadata.
+        draft_model_path="path/to/dflash-dflash2-or-dspark.gguf",
         draft_n_max=7,
         draft_p_min=0.0,
         draft_n_gpu_layers="all",
+        # Used by DFlash v1/DSpark; remains inactive for DFlash2.
         draft_backend_sampling=True,
     ),
 )
 ```
 
 The effective draft length is clamped to the block size recorded in the draft
-GGUF. For DFlash, `draft_p_min` filters draft-token probability; for DSpark, it
-filters predicted acceptance confidence. Backend sampling is recommended for
-large vocabularies because it avoids copying complete logits rows to Python.
-Testing so far covers compatible Qwen3.6 DFlash and Qwen3.8 DSpark target/draft
-pairs; other compatible GGUFs may work but have not yet been validated here.
+GGUF. For DFlash, `draft_p_min` filters draft-token probability. For DFlash2,
+it filters the selected transition probability within the selector row. For
+DSpark, it filters predicted acceptance confidence. Backend sampling is useful
+for DFlash v1 and DSpark with large vocabularies. DFlash2 reads its compact
+selector output directly, requests unmasked NextN rows, and does not activate
+the backend vocabulary sampler even when `draft_backend_sampling=True`.
+
+Testing covers compatible Qwen3.6 DFlash and Qwen3.8 DSpark pairs, plus
+`Qwen3.8-27B-Q5_K_M.gguf` with the compatible
+`Qwen3.8-27B-DFlash2-Q8_0.gguf` sidecar. The Qwen3.8 DFlash2 pair completed
+greedy baseline comparisons with matching output tokens. Other compatible GGUF
+pairs may work but have not yet been validated here.
 
 Treat `draft_n_max=7` as a benchmark starting point rather than a universal
 default. Compare several draft lengths with the supplied example and inspect
@@ -1233,7 +1249,7 @@ Use the included examples for repeatable comparisons:
 # Ordinary vs built-in/external MTP
 python -m examples.high_level_api.high_level_api_mtp_speculative -h
 
-# Ordinary vs external DFlash or DSpark
+# Ordinary vs external DFlash, DFlash2, or DSpark
 python -m examples.high_level_api.high_level_api_dflash_dspark_speculative -h
 
 # N-gram N x M scans and cross-method benchmarks
@@ -1246,7 +1262,7 @@ python -m examples.benchmark.benchmark_speculative -h
   can make it slower than ordinary decoding.
 * Greedy speculative and ordinary runs can diverge because verification uses a
   different batch shape and may change floating-point tie-breaking. The
-  DFlash/DSpark benchmark reports the first divergent generated token.
+  DFlash/DFlash2/DSpark benchmark reports the first divergent generated token.
 * The current stateful engines are text-only and single-sequence. Do not enable
   them for MTMD/multimodal embedding batches or parallel sequence decoding.
 * A speculative reset clears target and draft state together; public prompt

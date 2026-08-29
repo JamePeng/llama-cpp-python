@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-08-24
+last_updated: 2026-08-29
 version_target: "latest"
 ---
 
@@ -29,7 +29,7 @@ contains algorithms that do not yet have Python engines.
 | Type | Python engine | Status | Availability |
 |---|---|---|---|
 | `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP | Since `0.3.48` |
-| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash GGUFs (text-only) | `0.3.49-preview` |
+| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash and selector-based DFlash2 GGUFs (text-only) | `0.3.49-preview` |
 | `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs (text-only) | `0.3.49-preview` |
 | `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
 | `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
@@ -49,10 +49,11 @@ engine.
 - `0.3.48` introduced the stateful, text-only MTP path for both target-internal
   NextN heads and compatible external MTP GGUFs. The K and K4V n-gram engines
   were also available in this release.
-- `0.3.49-preview` adds the first text-only external DFlash and DSpark support
-  through `LlamaDFlashDecoding`. This is preview functionality and was not part
-  of the `0.3.48` release; its supported models and tuning guidance may continue
-  to evolve before the final `0.3.49` release.
+- `0.3.49-preview` adds text-only external DFlash, DFlash2, and DSpark support
+  through `LlamaDFlashDecoding`. DFlash2 uses `DRAFT_DFLASH` and is detected
+  from the sidecar's selector metadata. This functionality was not part of the
+  `0.3.48` release; its supported models and tuning guidance may continue to
+  evolve before the final `0.3.49` release.
 
 ## Recommended Entry Point
 
@@ -119,9 +120,9 @@ additional Python-engine settings.
 | `draft_n_max` | `3` | Maximum proposed tokens for draft-family engines. |
 | `draft_n_min` | `0` | Discard a proposal shorter than this value. |
 | `draft_p_split` | `0.1` | Reserved split probability matching `llama.cpp`. |
-| `draft_p_min` | `0.0` | MTP/DFlash token-probability threshold or DSpark predicted acceptance-confidence threshold. |
+| `draft_p_min` | `0.0` | MTP/DFlash token-probability threshold, DFlash2 selector-transition threshold, or DSpark predicted acceptance-confidence threshold. |
 | `draft_model_path` | `None` | External draft GGUF. Omit it for built-in target MTP heads. |
-| `draft_backend_sampling` | `True` | Let supported model-backed engines select compact candidates on the backend instead of copying full logits rows to Python. |
+| `draft_backend_sampling` | `True` | Let supported model-backed engines select compact candidates on the backend instead of copying full logits rows to Python. DFlash2 uses its selector lattice instead, so this request remains inactive for DFlash2. |
 
 ### External draft runtime settings
 
@@ -343,19 +344,43 @@ deployment environment and choose the fastest stable value.
 Larger `draft_n_max` values increase the verification batch and rollback
 exposure and are only useful when later-position acceptance remains high.
 
-## DFlash and DSpark Engine
+## DFlash, DFlash2, and DSpark Engine
 
-`LlamaDFlashDecoding` implements both block-diffusion draft paths. It extracts
-the target layers requested by the draft GGUF, runs the draft encoder, injects
-the fused rows into the draft KV cache, and decodes the complete non-causal mask
-block in one call. DSpark uses the same cache and block path with its additional
-Markov and confidence heads.
+`LlamaDFlashDecoding` implements the DFlash-family block-diffusion paths. It
+extracts the target layers requested by the draft GGUF, runs the draft encoder,
+injects the fused rows into the draft KV cache, and decodes the complete
+non-causal mask block in one call. DFlash2 adds selector candidate and transition
+outputs; DSpark uses the same cache and block path with its additional Markov
+and confidence heads.
+
+### Variant detection and execution
+
+DFlash2 does not have a separate `SpeculativeType`. Configure
+`SpeculativeType.DRAFT_DFLASH`; after loading the sidecar, the engine reads
+`dflash.selector_top_k`. A positive value selects DFlash2. The selector width is
+fixed by the GGUF and is not a runtime tuning parameter.
+
+The resolved variant controls the draft output path:
+
+| Variant | NextN output | Candidate selection | `draft_backend_sampling` |
+|---|---|---|---|
+| DFlash v1 | Masked rows | Top token from vocabulary logits | Supported |
+| DFlash2 | Unmasked rows | Packed selector lattice | Not activated |
+| DSpark | Masked rows | Markov/confidence output | Supported where applicable |
+
+For each DFlash2 position, the packed output contains `K` candidate token IDs
+and `K x K` transition scores. The engine starts from predecessor index zero,
+selects the strongest transition for that predecessor, emits the corresponding
+candidate ID, and carries the selected index into the next row. When
+`draft_p_min > 0`, the selected transition is normalized across that row's `K`
+scores and drafting stops before a transition below the threshold.
 
 ### Lifecycle
 
-1. **Initialize:** load and validate the external sidecar, read its target-layer
-   and block metadata, create encoder/injection/noise batches, enable selected
-   target input taps, and configure the draft context for non-causal decoding.
+1. **Initialize:** load and validate the external sidecar, read its target-layer,
+   block, selector, and RoPE metadata, create encoder/injection/noise batches,
+   enable selected target input taps, and configure the resolved variant's
+   output mode for non-causal decoding.
 2. **Process prompt and begin:** each synchronized target decode calls
    `process()`, which gathers the configured target-layer rows, fuses them
    through the draft encoder, injects them into the draft cache, and
@@ -363,9 +388,10 @@ Markov and confidence heads.
    this processing populated the complete draft prompt; later target decodes
    continue through the same `process()` path.
 3. **Draft:** `draft()` captures a native or partial on-device checkpoint,
-   decodes one anchor-plus-mask block, applies DFlash probability or DSpark
-   confidence filtering, restores the transient noise branch, and retains the
-   checkpoint for verification.
+   decodes one anchor-plus-mask block, applies DFlash token probability,
+   DFlash2 selector-transition probability, or DSpark confidence filtering,
+   restores the transient noise branch, and retains the checkpoint for
+   verification.
 4. **Verify and commit:** the target verifies `[id_last, draft...]`. `accept()`
    clears temporary fused-row bookkeeping; rejection either removes the draft
    suffix natively or restores the checkpoint and replays only the sampled
@@ -374,7 +400,7 @@ Markov and confidence heads.
    `close()` releases all three batches, the draft context, sampler, and
    external sidecar model.
 
-Both modes currently require an external draft GGUF and are text-only:
+All variants currently require an external draft GGUF and are text-only:
 
 ```python
 llm = Llama(
@@ -383,33 +409,47 @@ llm = Llama(
     n_batch=512,
     n_gpu_layers="all",
     speculative=SpecConfig(
+        # DFlash2 uses DRAFT_DFLASH and is detected from selector metadata.
         spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
-        draft_model_path="path/to/dflash-or-dspark.gguf",
+        draft_model_path="path/to/dflash-dflash2-or-dspark.gguf",
         draft_n_max=7,
         draft_p_min=0.0,
         draft_n_gpu_layers="all",
+        # Used by DFlash v1/DSpark; remains inactive for DFlash2.
         draft_backend_sampling=True,
     ),
 )
 ```
 
-Testing so far covers compatible Qwen3.6 DFlash and Qwen3.8 DSpark target/draft
-pairs. Other GGUF pairs may work when their vocabulary, target-layer metadata,
-and embedding dimensions are compatible, but they have not yet been validated.
+Testing covers compatible Qwen3.6 DFlash and Qwen3.8 DSpark target/draft pairs.
+DFlash2 has been validated with `Qwen3.8-27B-Q5_K_M.gguf` and the compatible
+`Qwen3.8-27B-DFlash2-Q8_0.gguf` sidecar. Short greedy comparisons matched the
+ordinary decoder's output tokens, and selector drafting, verification,
+acceptance, and native rollback all completed successfully. Other GGUF pairs
+may work when their vocabulary, target-layer metadata, selector layout, and
+embedding dimensions are compatible, but they have not yet been validated.
 
 The requested draft length is clamped to the GGUF's `dflash.block_size`.
-DFlash can produce at most `block_size - 1` tokens. DSpark can produce
-`block_size` tokens when `dflash.sample_from_anchor=true`; otherwise it also
-uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected top-k
-probability. For DSpark, it filters the model's predicted acceptance confidence.
+DFlash and DFlash2 can produce at most `block_size - 1` tokens. DSpark can
+produce `block_size` tokens when `dflash.sample_from_anchor=true`; otherwise it
+also uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected
+top-token probability. For DFlash2, it filters the selected transition
+probability within the current predecessor row. For DSpark, it filters the
+model's predicted acceptance confidence.
 
 The engine keeps verification blocks atomic and checks every draft-memory
 removal. Transformer drafts and recurrent/hybrid drafts with enough native
 snapshot slots use suffix removal; other recurrent/hybrid drafts use a partial
 on-device checkpoint plus accepted-prefix replay. A failed native removal is a
-fatal state-alignment error rather than a runtime fallback trigger. MTMD
-embedding batches are rejected until the target's M-RoPE positions can be
-mapped safely into the scalar draft position space.
+fatal state-alignment error rather than a runtime fallback trigger.
+
+For text-token batches, a sidecar that declares M-RoPE receives four
+plane-major positions `[text, text, text, 0]` in the encoder and injection
+batches. Direct MTMD/multimodal embedding batches remain rejected because the
+target's four-dimensional media positions are not available to this process
+hook. A target model using M-RoPE does not by itself mark the draft sidecar as
+M-RoPE; inspect the resolved runtime configuration instead of inferring it from
+the target architecture.
 
 Target layer IDs come from the sidecar GGUF. Values from `0` through
 `target_model.n_layer()` are valid: the inclusive final value denotes the final
@@ -551,7 +591,8 @@ the end of `Llama.generate`.
 
 MTP and n-gram draft lengths are independent parameters. The general benchmark
 CLI uses `--mtp-draft-tokens` for MTP and `--ngram-draft-tokens` for n-gram
-methods. DFlash and DSpark use `--draft-tokens` in their dedicated example.
+methods. DFlash, DFlash2, and DSpark use `--draft-tokens` in their dedicated
+example.
 
 ```bash
 # Scan N={6,8,10,12} x M={8,16,32,48} for K and K4V
@@ -567,20 +608,25 @@ python -m examples.high_level_api.high_level_api_mtp_speculative \
   --draft-model mtp.gguf \
   --draft-tokens 2
 
-# Compare ordinary decoding with external DFlash or DSpark
+# Compare ordinary decoding with external DFlash2
 python -m examples.high_level_api.high_level_api_dflash_dspark_speculative \
-  --algorithm dflash \
+  --algorithm dflash2 \
   --model target.gguf \
-  --draft-model dflash.gguf \
-  --draft-tokens 7
+  --draft-model dflash2.gguf \
+  --draft-tokens 7 \
+  --draft-p-min 0 \
+  --temperature 0 \
+  --ignore-eos
 ```
 
 N-gram speedups are workload-sensitive. Repetitive structured output can benefit
 substantially, while low-repetition prose can be neutral or slower. Model-backed
 acceptance also depends on the target, draft tensors, sampling settings, prompt,
 and configured draft length. Measure TTFT, sustained speed, acceptance by
-position, target decode/sync time, and rollback cost together. For large
-vocabularies, keep backend sampling enabled unless profiling shows otherwise.
+position, target decode/sync time, and rollback cost together. For DFlash v1,
+DSpark, and other vocabulary-sampling engines, keep backend sampling enabled
+unless profiling shows otherwise. DFlash2 always selects from its compact
+selector lattice and therefore reports backend sampling as inactive.
 
 ## Limitations and Lifecycle Notes
 
@@ -613,5 +659,7 @@ rollback, phase statistics, or MTP resource management. New code should use
 * [Index/Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)
 * [Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)
 * [MTP example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_mtp_speculative.py)
-* [DFlash/DSpark example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_dflash_dspark_speculative.py)
+* [DFlash/DFlash2/DSpark example](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/high_level_api/high_level_api_dflash_dspark_speculative.py)
+* [DFlash2 walkthrough](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md)
+* [DFlash2 overview](https://inco.ai/blog/dflash2/)
 * [Speculative benchmark](https://github.com/JamePeng/llama-cpp-python/blob/main/examples/benchmark/benchmark_speculative.py)
