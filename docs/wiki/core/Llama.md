@@ -174,6 +174,9 @@ named parameters from the current signature.
 ### `create_chat_completion`
 
 Generates a chat response using the configured `chat_format` or `chat_handler`.
+It also accepts `presence_penalty` as a compatibility alias for the primary
+`present_penalty` parameter; an explicitly non-default `present_penalty` takes
+precedence.
 
 ```python
 import llama_cpp
@@ -191,9 +194,92 @@ response = model.create_chat_completion(
 print(response["choices"][0]["message"]["content"])
 ```
 
+### Structured JSON Output
+
+Pass `response_format={"type": "json_object"}` to constrain the response to
+valid JSON. Add a `schema` property when the output must follow a specific JSON
+Schema:
+
+```python
+response = model.create_chat_completion(
+    messages=[{"role": "user", "content": "Extract: Ada is 36 years old."}],
+    response_format={
+        "type": "json_object",
+        "schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string"},
+                "age": {"type": "integer"},
+            },
+            "required": ["name", "age"],
+        },
+    },
+    temperature=0.0,
+)
+```
+
+The schema is converted to a llama.cpp grammar. Keep schemas small and explicit
+for better reliability with compact models.
+
+### Tool Calling
+
+Chat handlers and model templates that support tool calling accept OpenAI-style
+`tools` and `tool_choice` arguments:
+
+```python
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get the weather for a city.",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    }
+]
+
+response = model.create_chat_completion(
+    messages=[{"role": "user", "content": "What is the weather in Shanghai?"}],
+    tools=tools,
+    tool_choice="auto",
+)
+
+tool_calls = response["choices"][0]["message"].get("tool_calls")
+```
+
+Tool syntax and automatic selection depend on the model's chat template. Pass a
+specific `tool_choice` object to force one named function when the active handler
+supports it.
+
+### `create_chat_completion_openai_v1`
+
+This method accepts the same arguments as `create_chat_completion()` but returns
+typed objects from the OpenAI Python package instead of dictionaries. Install
+the optional dependency first with `pip install openai`.
+
+```python
+response = model.create_chat_completion_openai_v1(
+    messages=[{"role": "user", "content": "Say hello in one sentence."}],
+    max_tokens=64,
+)
+
+print(response.choices[0].message.content)
+```
+
+With `stream=True`, it returns an iterator of typed `ChatCompletionChunk`
+objects.
+
 ### `create_completion` / `__call__`
 
 Generates standard text completion from a raw string prompt.
+
+For OpenAI naming compatibility, both methods accept `presence_penalty` as an
+optional alias. Internally it is normalized to the primary `present_penalty`
+parameter only when `present_penalty` remains at its default value.
 
 ```python
 import llama_cpp
@@ -285,20 +371,9 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
    By default, when calling `.generate()` or `.create_completion(reset=True)`, the engine checks for the longest matching prefix in the existing KV cache. To maximize speed, keep system prompts static and only append new dialogue to avoid re-evaluating the entire history. If the context limit is reached during `eval`, the model will automatically trigger a Context Shift (discarding older tokens while attempting to keep `n_keep` tokens, usually the system prompt).
 
-2. **Basic Chat with JSON Mode**:
-    Forces the model to output valid JSON by using the `response_format` parameter.
-    ```python
-    from llama_cpp import Llama
-
-    llm = Llama(model_path="path/to/model.gguf", n_gpu_layers=-1)
-
-    response = llm.create_chat_completion(
-        messages=[{"role": "user", "content": "Extract name and age from: John is 30."}],
-        response_format={"type": "json_object"},
-        temperature=0.0
-    )
-    print(response["choices"][0]["message"]["content"])
-    ```
+2. **Structured Output**:
+   Use `response_format` for JSON or JSON Schema constrained output. See
+   [Structured JSON Output](#structured-json-output) for the current API.
 
 3. **Speculative Decoding**:
 

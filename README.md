@@ -523,233 +523,125 @@ To upgrade and rebuild `llama-cpp-python` add `--upgrade --force-reinstall --no-
 
 ## High-level API
 
-[API Reference](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#high-level-api)
+[API Reference](docs/wiki/core/Llama.md)
 
-The high-level API provides a simple managed interface through the [`Llama`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama) class.
+The [`Llama`](docs/wiki/core/Llama.md)
+class manages GGUF model loading, chat formatting, tokenization, generation, and
+the native llama.cpp context.
 
-Below is a short example demonstrating how to use the high-level API to for basic text completion:
+Install `huggingface_hub` to download GGUF models directly from Hugging Face:
+
+```bash
+pip install --upgrade huggingface_hub
+```
+
+### Quick Start
+
+[`Llama.from_pretrained`](docs/wiki/core/Llama.md)
+downloads the selected file into the Hugging Face cache. Modern GGUF models
+usually include their chat template, so no explicit `chat_format` is needed.
+This example uses the compact
+[Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF) model.
+
+```python
+from llama_cpp import Llama
+
+llm = Llama.from_pretrained(
+    repo_id="Qwen/Qwen3-0.6B-GGUF",
+    filename="Qwen3-0.6B-Q8_0.gguf",
+    n_ctx=0,
+    verbose=False,
+)
+
+response = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "user",
+            "content": "Explain speculative decoding in simple terms. /no_think",
+        }
+    ],
+    max_tokens=512,
+    temperature=0.7,
+    top_p=0.8,
+    top_k=20,
+    min_p=0.0,
+    present_penalty=1.5,
+)
+
+print(response["choices"][0]["message"]["content"])
+```
+
+`n_ctx=0` uses the context length stored in the model metadata. Model layer
+offloading and file loading default to `n_gpu_layers="auto"` and
+`load_mode=LLAMA_LOAD_MODE_AUTO`, allowing llama.cpp to select suitable behavior
+for the available hardware. Use `verbose=False` for
+quiet error-only native logging, or set `verbosity` from `0` to `5` for finer
+control; `verbosity` takes precedence when both are provided.
+
+### Loading a Local GGUF
+
+Pass `model_path` when the model is already available locally:
 
 ```python
 from llama_cpp import Llama
 
 llm = Llama(
-      model_path="./models/7B/llama-model.gguf",
-      # n_gpu_layers=-1, # Uncomment to use GPU acceleration
-      # seed=1337, # Uncomment to set a specific seed
-      # n_ctx=2048, # Uncomment to increase the context window
-)
-output = llm(
-      "Q: Name the planets in the solar system? A: ", # Prompt
-      max_tokens=32, # Generate up to 32 tokens, set to None to generate up to the end of the context window
-      stop=["Q:", "\n"], # Stop generating just before the model would generate a new question
-      echo=True # Echo the prompt back in the output
-) # Generate a completion, can also call create_completion
-print(output)
-```
-
-By default `llama-cpp-python` generates completions in an OpenAI compatible format:
-
-```python
-{
-  "id": "cmpl-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
-  "object": "text_completion",
-  "created": 1679561337,
-  "model": "./models/7B/llama-model.gguf",
-  "choices": [
-    {
-      "text": "Q: Name the planets in the solar system? A: Mercury, Venus, Earth, Mars, Jupiter, Saturn, Uranus, Neptune and Pluto.",
-      "index": 0,
-      "logprobs": None,
-      "finish_reason": "stop"
-    }
-  ],
-  "usage": {
-    "prompt_tokens": 14,
-    "completion_tokens": 28,
-    "total_tokens": 42
-  }
-}
-```
-
-Text completion is available through the [`__call__`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.__call__) and [`create_completion`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_completion) methods of the [`Llama`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama) class.
-
-### Pulling models from [Hugging Face Hub](https://huggingface.co/models)
-
-You can download `Llama` models in `gguf` format directly from Hugging Face using the [`from_pretrained`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.from_pretrained) method.
-
-You'll need to install the `huggingface_hub` package to use this feature (`pip install --upgrade huggingface_hub`).
-
-
-
-```python
-llm = Llama.from_pretrained(
-    repo_id="Qwen/Qwen2.5-0.5B-Instruct-GGUF",
-    filename="qwen2.5-0.5b-instruct-q4_k_m.gguf",
-    verbose=False
+    model_path="/path/to/Qwen3-0.6B-Q8_0.gguf",
+    n_ctx=0,
 )
 ```
 
-By default [`from_pretrained`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.from_pretrained) will download the model to the huggingface cache directory, you can then manage installed model files with the [`hf`](https://huggingface.co/docs/huggingface_hub/en/guides/cli) tool.
-
-### Chat Completion
-
-The high-level API also provides a simple interface for chat completion.
-
-Chat completion requires that the model knows how to format the messages into a single prompt.
-The `Llama` class does this using pre-registered chat formats (ie. `chatml`, `llama-2`, `gemma`, etc) or by providing a custom chat handler object.
-
-The model will will format the messages into a single prompt using the following order of precedence:
-  - Use the `chat_handler` if provided
-  - Use the `chat_format` if provided
-  - Use the `tokenizer.chat_template` from the `gguf` model's metadata (should work for most new models, older models may not have this)
-  - else, fallback to the `llama-2` chat format
-
-Set `verbose=True` to see the selected chat format.
+Advanced loading can be configured explicitly when required:
 
 ```python
+import llama_cpp
 from llama_cpp import Llama
+
 llm = Llama(
-      model_path="path/to/llama-2/llama-model.gguf",
-      chat_format="llama-2"
-)
-llm.create_chat_completion(
-      messages = [
-          {"role": "system", "content": "You are an assistant who perfectly describes images."},
-          {
-              "role": "user",
-              "content": "Describe this image in detail please."
-          }
-      ]
+    model_path="/path/to/Qwen3-0.6B-Q8_0.gguf",
+    n_ctx=0,
+    n_gpu_layers="all",
+    load_mode=llama_cpp.llama_load_mode.LLAMA_LOAD_MODE_MMAP,
+    verbosity=3,  # llama.cpp-style informational logs
 )
 ```
 
-Chat completion is available through the [`create_chat_completion`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_chat_completion) method of the [`Llama`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama) class.
+See the [Llama class guide](docs/wiki/core/Llama.md) for loading modes, GPU
+offloading, context configuration, KV cache types, and multimodal projection
+models.
 
-For OpenAI API v1 compatibility, you use the [`create_chat_completion_openai_v1`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_chat_completion_openai_v1) method which will return pydantic models instead of dicts.
+### Streaming Chat Completion
 
-
-### JSON and JSON Schema Mode
-
-To constrain chat responses to only valid JSON or a specific JSON Schema use the `response_format` argument in [`create_chat_completion`](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#llama_cpp.Llama.create_chat_completion).
-
-#### JSON Mode
-
-The following example will constrain the response to valid JSON strings only.
+Set `stream=True` to iterate over OpenAI-compatible chat completion chunks:
 
 ```python
-from llama_cpp import Llama
-llm = Llama(model_path="path/to/model.gguf", chat_format="chatml")
-llm.create_chat_completion(
+stream = llm.create_chat_completion(
     messages=[
         {
-            "role": "system",
-            "content": "You are a helpful assistant that outputs in JSON.",
-        },
-        {"role": "user", "content": "Who won the world series in 2020"},
-    ],
-    response_format={
-        "type": "json_object",
-    },
-    temperature=0.7,
+            "role": "user",
+            "content": "Write a detailed technical explanation of how incremental UTF-8 decoding and cross-token stop-sequence detection work in a streaming text generator."}],
+    max_tokens=512,
+    stream=True,
 )
+
+for chunk in stream:
+    print(chunk["choices"][0]["delta"].get("content", ""), end="", flush=True)
 ```
 
-#### JSON Schema Mode
+### More High-level Features
 
-To constrain the response further to a specific JSON Schema add the schema to the `schema` property of the `response_format` argument.
+The same `Llama` instance also supports:
 
-```python
-from llama_cpp import Llama
-llm = Llama(model_path="path/to/model.gguf", chat_format="chatml")
-llm.create_chat_completion(
-    messages=[
-        {
-            "role": "system",
-            "content": "You are a helpful assistant that outputs in JSON.",
-        },
-        {"role": "user", "content": "Who won the world series in 2020"},
-    ],
-    response_format={
-        "type": "json_object",
-        "schema": {
-            "type": "object",
-            "properties": {"team_name": {"type": "string"}},
-            "required": ["team_name"],
-        },
-    },
-    temperature=0.7,
-)
-```
+- raw text completion with `create_completion()` or `llm(...)`
+- JSON and JSON Schema constrained output through `response_format`
+- OpenAI-compatible tool calling through `tools` and `tool_choice`
+- typed OpenAI v1 responses with `create_chat_completion_openai_v1()`
+- embeddings and reranking through `LlamaEmbedding`
+- speculative decoding through `SpecConfig`
+- multimodal GGUF models through `mmproj_path`
 
-### Function Calling
-
-The high-level API supports OpenAI compatible function and tool calling. This is possible through the `functionary` pre-trained models chat format or through the generic `chatml-function-calling` chat format.
-
-```python
-from llama_cpp import Llama
-llm = Llama(model_path="path/to/chatml/llama-model.gguf", chat_format="chatml-function-calling")
-llm.create_chat_completion(
-      messages = [
-        {
-          "role": "system",
-          "content": "A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user's questions. The assistant calls functions with appropriate input when necessary"
-
-        },
-        {
-          "role": "user",
-          "content": "Extract Jason is 25 years old"
-        }
-      ],
-      tools=[{
-        "type": "function",
-        "function": {
-          "name": "UserDetail",
-          "parameters": {
-            "type": "object",
-            "title": "UserDetail",
-            "properties": {
-              "name": {
-                "title": "Name",
-                "type": "string"
-              },
-              "age": {
-                "title": "Age",
-                "type": "integer"
-              }
-            },
-            "required": [ "name", "age" ]
-          }
-        }
-      }],
-      tool_choice={
-        "type": "function",
-        "function": {
-          "name": "UserDetail"
-        }
-      }
-)
-```
-
-<details>
-<summary>Functionary v2</summary>
-
-The various gguf-converted files for this set of models can be found [here](https://huggingface.co/meetkai). Functionary is able to intelligently call functions and also analyze any provided function outputs to generate coherent responses. All v2 models of functionary supports **parallel function calling**. You can provide either `functionary-v1` or `functionary-v2` for the `chat_format` when initializing the Llama class.
-
-Due to discrepancies between llama.cpp and HuggingFace's tokenizers, it is required to provide HF Tokenizer for functionary. The `LlamaHFTokenizer` class can be initialized and passed into the Llama class. This will override the default llama.cpp tokenizer used in Llama class. The tokenizer files are already included in the respective HF repositories hosting the gguf files.
-
-```python
-from llama_cpp import Llama
-from llama_cpp.llama_tokenizer import LlamaHFTokenizer
-llm = Llama.from_pretrained(
-  repo_id="meetkai/functionary-small-v2.2-GGUF",
-  filename="functionary-small-v2.2.q4_0.gguf",
-  chat_format="functionary-v2",
-  tokenizer=LlamaHFTokenizer.from_pretrained("meetkai/functionary-small-v2.2-GGUF")
-)
-```
-
-**NOTE**: There is no need to provide the default system messages used in Functionary as they are added automatically in the Functionary chat handler. Thus, the messages should contain just the chat messages and/or system messages that provide additional context for the model (e.g.: datetime, etc.).
-</details>
+See the [Llama guide](docs/wiki/core/Llama.md) for the complete API and focused
+examples, or continue below for advanced features.
 
 ---
 
@@ -896,6 +788,7 @@ Mirostat actively maintains a target entropy (`tau`) during generation to preven
 * **`repeat_penalty`** (`float`, default: `1.0`): General penalty for repeated tokens. `1.0` = disabled.
 * **`frequency_penalty`** (`float`, default: `0.0`): Penalty based on the absolute frequency of a token in the prompt.
 * **`present_penalty`** (`float`, default: `0.0`): Flat penalty applied if a token is present anywhere in the context.
+* **`presence_penalty`** (`Optional[float]`, default: `None`): Compatibility alias accepted by `create_completion()`, `__call__()`, `create_chat_completion()`, and the OpenAI-compatible server. `present_penalty` remains the primary parameter and takes precedence when set to a non-default value.
 * **`penalty_last_n`** (`int`, default: `64`): The number of recent tokens to consider for standard penalties. `0` = disabled, `-1` = full context size.
 
 
