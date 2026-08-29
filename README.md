@@ -1206,6 +1206,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [qwen3-vl](https://huggingface.co/unsloth/Qwen3-VL-8B-Thinking-GGUF) | `Qwen3VLChatHandler` | `qwen3-vl` |
 | [qwen3.5](https://huggingface.co/unsloth/Qwen3.5-27B-GGUF) | `Qwen35ChatHandler` | `qwen3.5` |
 | [qwen3.6](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | `Qwen35ChatHandler` | `qwen3.6` |
+| [qwen3.8](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | `GenericMTMDChatHandler` | `qwen3.8` |
 | [step3-vl](https://huggingface.co/JamePeng2023/Step3-VL-10B-GGUF) | `Step3VLChatHandler` | `step3-vl` |
 
 Then you'll need to load the multimodal projection model (`mmproj`) together with the main language model.
@@ -1214,7 +1215,7 @@ Starting from `0.3.41-preview`, new multimodal implementations are recommended t
 
 The parameter `clip_model_path` has been renamed to `mmproj_path` to better reflect its purpose and align with llama.cpp's multimodal projection model naming convention. New code should use `mmproj_path` exclusively.
 
-### Generic MTMD Chat Handler
+### Generic MTMD Chat Handler (Recommend)
 
 For multimodal GGUF models that already include a valid `tokenizer.chat_template`, you can use the generic MTMD handler through `mmproj_path`.
 
