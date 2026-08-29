@@ -924,6 +924,10 @@ the `begin -> process -> draft -> accept` lifecycle used by `llama.cpp`.
 Configure it with `speculative=SpecConfig(...)`; the older `draft_model=` API is
 deprecated and is kept only for compatibility with stateless draft callbacks.
 
+> **Version availability:** MTP speculative decoding is available starting with
+> `0.3.48`. DFlash, DFlash2, and DSpark speculative decoding are available
+> starting with the `0.3.49-preview` release series.
+
 The current implementation is text-only, supports one sequence (`seq_id=0`),
 and provides five usable modes:
 
@@ -953,6 +957,8 @@ For a runnable selector-based workflow, see
 [DFlash2 Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md).
 
 ### MTP speculative decoding
+
+**Available since:** `0.3.48`
 
 The built-in and external MTP paths have been tested with the Qwen3.5,
 Qwen3.6, and Qwen3.8 model families. External MTP has also been tested with a
@@ -1017,6 +1023,8 @@ length must not exceed `n_batch - 1`. Longer drafts only help when their
 additional acceptance outweighs verification and rollback cost.
 
 ### DFlash, DFlash2, and DSpark speculative decoding
+
+**Available since:** `0.3.49-preview`
 
 DFlash, DFlash2, and DSpark require a compatible external draft GGUF. DFlash
 generates a non-causal mask block. DFlash2 adds a selector lattice whose
