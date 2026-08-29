@@ -163,10 +163,12 @@ class LlamaEmbedding(Llama):
             is_single = False
 
         # Reset Context and Batch
-        if self.verbose:
-            self._ctx.reset_timings()
         self._batch.reset()
         llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(ctx), True)
+
+        perf_enabled = not self.context_params.no_perf
+        if perf_enabled:
+            self._ctx.reset_timings()
 
         # Initialize State Variables
         results: List[Any] = []
@@ -272,7 +274,7 @@ class LlamaEmbedding(Llama):
         # Process Remaining Items
         _decode_batch()
 
-        if self.verbose:
+        if self.verbose and perf_enabled:
             self._ctx.print_timings()
 
         final_result = results[0] if is_single else results

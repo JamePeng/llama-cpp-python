@@ -273,7 +273,7 @@ class Llama:
             logits_all: Return logits for all tokens, not just the last token. Must be True for completion to return logprobs.
             embeddings: Embedding mode only. if true, extract embeddings (together with logits)
             offload_kqv: Offload K, Q, V to GPU.
-            no_perf: Measure performance timings.
+            no_perf: Disable performance timing collection.
             op_offload: whether to offload host tensor operations to device
             swa_full: whether to use full-size SWA cache
             kv_unified: use single unified KV buffer for the KV cache of all sequences
@@ -3020,9 +3020,6 @@ class Llama:
                 return values
             return ((array / norm) * scale).tolist()
 
-        if self.verbose:
-            self._ctx.reset_timings()
-
         if isinstance(input, str):
             inputs: List[Union[str, List[int]]] = (
                 input.split(separator) if separator is not None else [input]
@@ -3036,6 +3033,10 @@ class Llama:
         llama_cpp_lib.llama_memory_clear(
             llama_cpp_lib.llama_get_memory(ctx), True
         )
+
+        perf_enabled = not self.context_params.no_perf
+        if perf_enabled:
+            self._ctx.reset_timings()
 
         data: List[Any] = []
         seq_sizes: List[int] = []
@@ -3135,7 +3136,7 @@ class Llama:
 
         decode_batch()
 
-        if self.verbose:
+        if self.verbose and perf_enabled:
             self._ctx.print_timings()
 
         output = data[0] if is_single else data
@@ -3295,9 +3296,6 @@ class Llama:
                 f'Detected duplicate leading "{self._model.token_get_text(self.token_bos())}" in prompt, this will likely reduce response quality, consider removing it...',
                 RuntimeWarning,
             )
-
-        if self.verbose:
-            self._ctx.reset_timings()
 
         if len(prompt_tokens) >= self._n_ctx:
             raise ValueError(
@@ -3589,9 +3587,6 @@ class Llama:
         if self._abort_event.is_set():
             text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
             finish_reason = "abort"
-
-        if self.verbose:
-            self._ctx.print_timings()
 
         if stream:
             remaining_tokens = completion_tokens[returned_tokens:]
@@ -3992,11 +3987,39 @@ prompt: The prompt to generate text from.
             reasoning_start_in_prompt=reasoning_start_in_prompt,
             reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
+
+        # Keep the native counters request-scoped even when verbose logging is
+        # disabled. The wrapper also guarantees that an abandoned streaming
+        # iterator prints its partial timings when it is explicitly closed.
+        perf_enabled = (
+            hasattr(self, "_ctx")
+            and not getattr(getattr(self, "context_params", None), "no_perf", False)
+        )
+        if perf_enabled:
+            raw_chunks = completion_or_chunks
+
+            def timed_chunks() -> Iterator[
+                Union[CreateCompletionResponse, CreateCompletionStreamResponse]
+            ]:
+                self._ctx.reset_timings()
+                try:
+                    yield from raw_chunks
+                finally:
+                    if self.verbose:
+                        self._ctx.print_timings()
+
+            completion_or_chunks = timed_chunks()
+
         if stream:
             chunks: Iterator[CreateCompletionStreamResponse] = completion_or_chunks
             return chunks
-        completion: Completion = next(completion_or_chunks)  # type: ignore
-        return completion
+        try:
+            completion: Completion = next(completion_or_chunks)  # type: ignore
+            return completion
+        finally:
+            close = getattr(completion_or_chunks, "close", None)
+            if close is not None:
+                close()
 
     def __call__(
         self,

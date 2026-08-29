@@ -1211,17 +1211,29 @@ class LlamaContext:
         return llama_cpp.llama_get_ctx_other(self.ctx)
 
     def reset_timings(self):
-        """Reset llama.cpp performance counters for this context."""
+        """Start a new llama.cpp performance-counter interval.
+
+        This resets the prompt-evaluation, token-evaluation, and graph-reuse
+        counters and updates the interval start time.  It does not reset the
+        model load time and does not synchronize queued backend work; callers
+        that cross an asynchronous decode boundary must synchronize first.
+        """
         self._assert_ctx()
         llama_cpp.llama_perf_context_reset(self.ctx)
 
     def print_timings(self):
-        """Print llama.cpp performance counters for this context."""
+        """Print the current llama.cpp performance-counter interval.
+
+        The native print function only reads the counters.  It does not
+        synchronize queued backend work, so the caller must first ensure that
+        the relevant decode output has been consumed or explicitly synchronize
+        at an otherwise asynchronous boundary.
+        """
         self._assert_ctx()
         llama_cpp.llama_perf_context_print(self.ctx)
 
     def perf_context(self) -> llama_cpp.llama_perf_context_data:
-        """Return a snapshot of the context's structured performance counters."""
+        """Return a non-synchronizing snapshot of the current perf interval."""
         self._assert_ctx()
         return llama_cpp.llama_perf_context(self.ctx)
 
