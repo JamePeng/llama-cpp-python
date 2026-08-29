@@ -11,6 +11,20 @@ import llama_cpp.llama_tokenizer as llama_tokenizer
 from llama_cpp.server.settings import ModelSettings
 
 
+def _create_prompt_cache(settings: ModelSettings):
+    if settings.cache_type == "disk":
+        if settings.verbose:
+            print(f"Using disk cache with size {settings.cache_size}")
+        return llama_cpp.LlamaDiskCache(capacity_bytes=settings.cache_size)
+    if settings.cache_type == "trie":
+        if settings.verbose:
+            print(f"Using trie cache with size {settings.cache_size}")
+        return llama_cpp.LlamaTrieCache(capacity_bytes=settings.cache_size)
+    if settings.verbose:
+        print(f"Using ram cache with size {settings.cache_size}")
+    return llama_cpp.LlamaRAMCache(capacity_bytes=settings.cache_size)
+
+
 class LlamaProxy:
     def __init__(self, models: List[ModelSettings]) -> None:
         assert len(models) > 0, "No models provided!"
@@ -348,17 +362,5 @@ class LlamaProxy:
             verbose=settings.verbose,
         )
         if settings.cache:
-            if settings.cache_type == "disk":
-                if settings.verbose:
-                    print(f"Using disk cache with size {settings.cache_size}")
-                cache = llama_cpp.LlamaDiskCache(capacity_bytes=settings.cache_size)
-            elif settings.cache_type == "tire":
-                if settings.verbose:
-                    print(f"Using tire cache with size {settings.cache_size}")
-                cache = llama_cpp.LlamaTrieCache(capacity_bytes=settings.cache_size)
-            else:
-                if settings.verbose:
-                    print(f"Using ram cache with size {settings.cache_size}")
-                cache = llama_cpp.LlamaRAMCache(capacity_bytes=settings.cache_size)
-            _model.set_cache(cache)
+            _model.set_cache(_create_prompt_cache(settings))
         return _model
