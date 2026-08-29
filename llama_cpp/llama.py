@@ -3021,7 +3021,7 @@ class Llama:
             return ((array / norm) * scale).tolist()
 
         if self.verbose:
-            llama_cpp_lib.llama_perf_context_reset(ctx)
+            self._ctx.reset_timings()
 
         if isinstance(input, str):
             inputs: List[Union[str, List[int]]] = (
@@ -3136,7 +3136,7 @@ class Llama:
         decode_batch()
 
         if self.verbose:
-            llama_cpp_lib.llama_perf_context_print(ctx)
+            self._ctx.print_timings()
 
         output = data[0] if is_single else data
         self.reset()

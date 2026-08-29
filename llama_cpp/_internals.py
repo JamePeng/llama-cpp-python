@@ -594,8 +594,17 @@ class LlamaLoraAdapter:
 
 
 class LlamaContext:
-    """Intermediate Python wrapper for a llama.cpp llama_context.
-    NOTE: For stability it's recommended you use the Llama class instead."""
+    """Own a native ``llama_context`` and expose its low-level operations.
+
+    The context stores runtime state such as the KV/recurrent memory, pending
+    backend work, output buffers, samplers, and applied adapters. Most callers
+    should use :class:`Llama`; this wrapper is intended for internal and
+    advanced low-level use. Pointers returned by output accessors are owned by
+    llama.cpp and remain valid only until the context reuses those buffers.
+    Output and state-transfer accessors synchronize pending backend work;
+    operations performed through the native memory handle do not generally add
+    an implicit synchronization boundary.
+    """
 
     def __init__(
         self,
@@ -604,6 +613,7 @@ class LlamaContext:
         params: llama_cpp.llama_context_params,
         verbose: bool = True,
     ):
+        """Create a context for ``model`` using native context ``params``."""
         self.model = model
         self.params = params
         self.verbose = verbose
@@ -623,6 +633,9 @@ class LlamaContext:
 
         self._loras_applied: bool = False
         self._cvec_applied: bool = False
+        # The native context borrows attached sampler pointers. Keep the Python
+        # wrappers alive until they are detached or the context is closed.
+        self._sampler_refs: Dict[int, "LlamaSampler"] = {}
 
     def close(self):
         """Manually free LlamaContext resources."""
@@ -641,11 +654,14 @@ class LlamaContext:
         # The context no longer needs to keep its parent model alive once the
         # native context and its callbacks have been released.
         self.model = None
+        self._sampler_refs = {}
 
     def __del__(self):
+        """Release native resources when the wrapper is garbage-collected."""
         self.close()
 
     def _assert_ctx(self):
+        """Raise when an operation is attempted on a closed context."""
         if not getattr(self, "ctx", None):
             raise RuntimeError(
                 "LlamaContext is not initialized or has already been closed. "
@@ -653,70 +669,116 @@ class LlamaContext:
             )
 
     def n_ctx(self) -> int:
+        """Return the total configured context capacity in tokens."""
         return llama_cpp.llama_n_ctx(self.ctx)
 
     def n_ctx_seq(self) -> int:
+        """Return the effective context capacity available to each sequence."""
         return llama_cpp.llama_n_ctx_seq(self.ctx)
 
     def n_batch(self) -> int:
+        """Return the maximum logical batch size accepted by the context."""
         return llama_cpp.llama_n_batch(self.ctx)
 
     def n_ubatch(self) -> int:
+        """Return the maximum physical micro-batch size used for graph execution."""
         return llama_cpp.llama_n_ubatch(self.ctx)
 
     def n_seq_max(self) -> int:
+        """Return the maximum number of sequences supported by one batch."""
         return llama_cpp.llama_n_seq_max(self.ctx)
 
     def n_rs_seq(self) -> int:
+        """Return the configured recurrent-state snapshot capacity per sequence."""
         return llama_cpp.llama_n_rs_seq(self.ctx)
 
     def pooling_type(self) -> int:
+        """Return the active ``llama_pooling_type`` value."""
         return llama_cpp.llama_pooling_type(self.ctx)
 
     # // Memory API
 
     def get_memory(self):
+        """Return the context-owned native memory/KV-cache handle.
+
+        The handle is non-owning and must not be freed by Python. Operations on
+        it do not implicitly wait for pending graph execution.
+        """
         return llama_cpp.llama_get_memory(self.ctx)
 
     def memory_clear(self, data: bool):
+        """Clear memory metadata and optionally zero the backing data buffers.
+
+        This method does not synchronize pending backend work. Callers use it
+        at reset or other established context boundaries.
+        """
         llama_cpp.llama_memory_clear(self.get_memory(), data)
 
     def memory_seq_rm(self, seq_id: int, p0: int, p1: int) -> bool:
+        """Remove sequence cells in ``[p0, p1)``.
+
+        Negative bounds follow llama.cpp conventions: ``p0 < 0`` starts at
+        zero and ``p1 < 0`` extends through the sequence end. Returns ``False``
+        when the selected memory implementation cannot remove only that range.
+        The operation does not synchronize pending backend work.
+        """
         if self.ctx is not None:
             return llama_cpp.llama_memory_seq_rm(self.get_memory(), seq_id, p0, p1)
         else:
             return False
 
     def memory_seq_cp(self, seq_id_src: int, seq_id_dst: int, p0: int, p1: int):
+        """Copy source-sequence memory cells in ``[p0, p1)`` to a destination.
+
+        Negative bounds follow the same convention as ``memory_seq_rm()``.
+        This operation does not synchronize pending backend work.
+        """
         llama_cpp.llama_memory_seq_cp(self.get_memory(), seq_id_src, seq_id_dst, p0, p1)
 
     def memory_seq_keep(self, seq_id: int):
+        """Keep only memory cells assigned to ``seq_id`` without synchronizing."""
         llama_cpp.llama_memory_seq_keep(self.get_memory(), seq_id)
 
     def memory_seq_add(self, seq_id: int, p0: int, p1: int, delta: int):
+        """Add ``delta`` to positions in ``[p0, p1)`` without synchronizing."""
         llama_cpp.llama_memory_seq_add(self.get_memory(), seq_id, p0, p1, delta)
 
     def memory_seq_div(self, seq_id: int, p0: int, p1: int, d: int):
+        """Integer-divide positions in ``[p0, p1)`` without synchronizing."""
         llama_cpp.llama_memory_seq_div(self.get_memory(), seq_id, p0, p1, d)
 
     def memory_seq_pos_max(self, seq_id: int) -> int:
+        """Return the greatest cached position for ``seq_id``, or native sentinel."""
         return llama_cpp.llama_memory_seq_pos_max(self.get_memory(), seq_id)
 
     def memory_seq_pos_min(self, seq_id: int) -> int:
+        """Return the smallest cached position for ``seq_id``, or native sentinel."""
         return llama_cpp.llama_memory_seq_pos_min(self.get_memory(), seq_id)
 
     def memory_can_shift(self) -> bool:
+        """Return whether the active memory implementation supports position shifts."""
         return llama_cpp.llama_memory_can_shift(self.get_memory())
 
     # // State / sessions API
 
     def get_state_size(self) -> int:
+        """Return the current full-state size in bytes for serialization.
+
+        This is the actual save size, not a guaranteed upper bound for loading
+        an arbitrary state produced by another context.
+        """
         return llama_cpp.llama_state_get_size(self.ctx)
 
     def get_state_data(self, dst:ctypes.Array[ctypes.c_uint8], size: int) -> int:
+        """Synchronize and copy the complete context state into ``dst``.
+
+        Returns the number of bytes written. ``dst`` must provide at least
+        ``size`` writable bytes.
+        """
         return llama_cpp.llama_state_get_data(self.ctx, dst, size)
 
     def set_state_data(self, src:ctypes.Array[ctypes.c_uint8], size: int) -> int:
+        """Synchronize, restore complete state from ``src``, and return bytes read."""
         return llama_cpp.llama_state_set_data(self.ctx, src, size)
 
     def load_state_file(
@@ -726,6 +788,7 @@ class LlamaContext:
         n_token_capacity: ctypes.c_size_t,
         n_token_count_out: CtypesPointer[ctypes.c_size_t]
     ) -> bool:
+        """Synchronize, then load complete state and token history from a file."""
         return llama_cpp.llama_state_load_file(self.ctx, path_session, tokens_out, n_token_capacity, n_token_count_out)
 
     def save_state_file(
@@ -734,15 +797,19 @@ class LlamaContext:
         tokens: ctypes.Array[llama_cpp.llama_token],
         n_token_count: ctypes.c_size_t
     ) -> bool:
+        """Synchronize, then save complete state and token history to a file."""
         return llama_cpp.llama_state_save_file(self.ctx, path_session, tokens, n_token_count)
 
     def get_state_seq_size(self, seq_id: int) -> int:
+        """Return the exact host-serialized state size for one sequence."""
         return llama_cpp.llama_state_seq_get_size(self.ctx, seq_id)
 
     def get_state_seq_data(self, dst: ctypes.Array[ctypes.c_uint8], size: int, seq_id: int) -> int:
+        """Synchronize and copy one sequence state into ``dst``."""
         return llama_cpp.llama_state_seq_get_data(self.ctx, dst, size, seq_id)
 
     def set_state_seq_data(self, src: ctypes.Array[ctypes.c_uint8], size: int, dest_seq_id: int) -> int:
+        """Synchronize and restore serialized state into ``dest_seq_id``."""
         return llama_cpp.llama_state_seq_set_data(self.ctx, src, size, dest_seq_id)
 
     def load_state_seq_file(
@@ -753,6 +820,7 @@ class LlamaContext:
         n_token_capacity: ctypes.c_size_t,
         n_token_count_out: CtypesPointer[ctypes.c_size_t]
     ) -> int:
+        """Synchronize, then load sequence state and tokens into ``dest_seq_id``."""
         return llama_cpp.llama_state_seq_load_file(self.ctx, filepath, dest_seq_id, tokens_out, n_token_capacity, n_token_count_out)
 
     def save_state_seq_file(
@@ -762,9 +830,16 @@ class LlamaContext:
         tokens: ctypes.Array[llama_cpp.llama_token],
         n_token_count: ctypes.c_size_t
     ) -> int:
+        """Synchronize, then save one sequence state and tokens to a file."""
         return llama_cpp.llama_state_seq_save_file(self.ctx, filepath, seq_id, tokens, n_token_count)
 
     def get_state_seq_size_ext(self, seq_id: int, flags: llama_cpp.llama_state_seq_flags) -> int:
+        """Return the sequence-state size for an extended serialization mode.
+
+        ``flags`` can restrict the snapshot to partial/recurrent state and can
+        request device-resident snapshots. Device snapshots are opaque and a
+        subsequent capture for the same sequence invalidates the prior one.
+        """
         return llama_cpp.llama_state_seq_get_size_ext(self.ctx, seq_id, flags)
 
     def get_state_seq_data_ext(
@@ -774,6 +849,10 @@ class LlamaContext:
         seq_id: int,
         flags: llama_cpp.llama_state_seq_flags
     ) -> int:
+        """Synchronize and capture one sequence according to ``flags``.
+
+        Returns the number of bytes or opaque handle bytes written to ``dst``.
+        """
         return llama_cpp.llama_state_seq_get_data_ext(self.ctx, dst, size, seq_id, flags)
 
     def set_state_seq_data_ext(
@@ -783,11 +862,17 @@ class LlamaContext:
         dest_seq_id: int,
         flags: llama_cpp.llama_state_seq_flags
     ) -> int:
+        """Synchronize and restore an extended snapshot into ``dest_seq_id``."""
         return llama_cpp.llama_state_seq_set_data_ext(self.ctx, src, size, dest_seq_id, flags)
 
     # // Decoding API
 
     def encode(self, batch: LlamaBatch):
+        """Run an encoder batch without using the decoder KV cache.
+
+        Raises ``RuntimeError`` for every nonzero native return code. On a
+        native error, llama.cpp restores memory to its pre-call state.
+        """
         self._assert_ctx()
         return_code = llama_cpp.llama_encode(
             self.ctx,
@@ -800,8 +885,11 @@ class LlamaContext:
         """
         Evaluate the batch of tokens using the transformer model.
 
-        This method executes the forward pass. If the KV cache is heavily fragmented
-        or out of space, it may return 1, indicating the caller should try to reduce
+        This method submits the decoder forward pass and updates context memory.
+        A successful return does not establish a host-visible completion
+        boundary; call ``synchronize()`` or an output accessor before consuming
+        results or measuring completed device time. If memory is fragmented or
+        out of space, it may return 1, indicating that the caller should reduce
         the batch size or evict idle sequences.
 
         Returns:
@@ -811,7 +899,8 @@ class LlamaContext:
 
         Raises:
             RuntimeError: If a fatal, non-recoverable error occurs during decoding
-                          (e.g., negative error codes or invalid batch structures).
+                or native decoding is aborted. Native abort/fatal paths may
+                leave already processed micro-batches in context memory.
         """
         self._assert_ctx()
         try:
@@ -869,11 +958,13 @@ class LlamaContext:
         llama_cpp.llama_set_causal_attn(self.ctx, causal_attn)
 
     def synchronize(self):
+        """Wait for all pending backend computation to finish.
+
+        Output and state accessors synchronize implicitly, so an explicit call
+        is normally unnecessary. It is useful when measuring phases or before
+        sharing context-owned results with another backend/context.
         """
-        Wait until all computations are finished
-        This is automatically done when using one of the functions below to obtain the computation results
-        and is not necessary to call it explicitly in most cases
-        """
+        self._assert_ctx()
         llama_cpp.llama_synchronize(self.ctx)
 
     def get_logits(self):
@@ -884,8 +975,11 @@ class LlamaContext:
         Rows: number of tokens for which llama_batch.logits[i] != 0
         Cols: n_vocab
 
+        This accessor synchronizes pending backend work. The returned pointer
+        references a context-owned buffer and must not be freed by Python.
+
         Returns:
-            Pointer to the logits buffer of shape (n_tokens, n_vocab)
+            Pointer to the logits buffer of shape ``(n_outputs, n_vocab)``.
         """
         self._assert_ctx()
         logits = llama_cpp.llama_get_logits(self.ctx)
@@ -895,12 +989,17 @@ class LlamaContext:
 
     def get_logits_ith(self, i: int):
         """
-        Return logits for the ith output row from the last llama_decode call.
+        Return logits for output row ``i`` from the last ``decode()`` call.
 
         Note:
-            This calls llama_get_logits_ith(), which may reorder/synchronize
-            the output buffer internally. Avoid calling it on the hot path unless
-            Python-side logits are required.
+            This accessor synchronizes and lazily restores user batch order.
+            Negative indices count from the final output row. If a backend
+            sampler is attached to the context, llama.cpp may return its compact
+            sampled-logits row instead of a full ``n_vocab`` row; speculative
+            callers query the corresponding sampled candidate/count APIs first.
+            Without a backend sampler, the row contains ``n_vocab`` floats.
+            The pointer is context-owned and may be invalidated by a later
+            evaluation.
         """
         self._assert_ctx()
         logits = llama_cpp.llama_get_logits_ith(self.ctx, i)
@@ -908,32 +1007,135 @@ class LlamaContext:
             raise RuntimeError(f"LlamaContext.get_logits_ith: invalid logits index {i}")
         return logits
 
+    # // Backend sampling API
+
+    def set_sampler(
+        self, seq_id: int, sampler: Optional["LlamaSampler"]
+    ) -> bool:
+        """Attach or detach a backend sampler for ``seq_id``.
+
+        The context borrows the native sampler pointer, so this wrapper retains
+        a strong reference while it is attached. Passing ``None`` detaches the
+        sampler. Changing an attached sampler can force graph reallocation.
+
+        Returns:
+            Whether llama.cpp accepted the sampler change.
+        """
+        self._assert_ctx()
+        sampler_ptr = None
+        if sampler is not None:
+            sampler_ptr = getattr(sampler, "sampler", None)
+            if not sampler_ptr:
+                raise RuntimeError("Cannot attach a closed or invalid sampler")
+
+        changed = bool(llama_cpp.llama_set_sampler(self.ctx, seq_id, sampler_ptr))
+        if changed:
+            if sampler is None:
+                self._sampler_refs.pop(seq_id, None)
+            else:
+                self._sampler_refs[seq_id] = sampler
+        return changed
+
+    def get_sampled_token_ith(self, i: int) -> int:
+        """Synchronize and return the backend-sampled token for output ``i``.
+
+        Returns ``LLAMA_TOKEN_NULL`` when no backend token was sampled.
+        """
+        self._assert_ctx()
+        return int(llama_cpp.llama_get_sampled_token_ith(self.ctx, i))
+
+    def get_sampled_probs_ith(self, i: int):
+        """Synchronize and return sampled probabilities for output ``i``.
+
+        The context owns the returned pointer. It can be null when the attached
+        sampler did not produce probabilities; use the matching count accessor
+        before constructing a view.
+        """
+        self._assert_ctx()
+        return llama_cpp.llama_get_sampled_probs_ith(self.ctx, i)
+
+    def get_sampled_probs_count_ith(self, i: int) -> int:
+        """Synchronize and return the sampled-probability count for output ``i``."""
+        self._assert_ctx()
+        return int(llama_cpp.llama_get_sampled_probs_count_ith(self.ctx, i))
+
+    def get_sampled_logits_ith(self, i: int):
+        """Synchronize and return sampled logits for output ``i``.
+
+        The context owns the returned pointer. It can be null when the attached
+        sampler did not retain logits; use the matching count accessor before
+        constructing a view.
+        """
+        self._assert_ctx()
+        return llama_cpp.llama_get_sampled_logits_ith(self.ctx, i)
+
+    def get_sampled_logits_count_ith(self, i: int) -> int:
+        """Synchronize and return the sampled-logit count for output ``i``."""
+        self._assert_ctx()
+        return int(llama_cpp.llama_get_sampled_logits_count_ith(self.ctx, i))
+
+    def get_sampled_candidates_ith(self, i: int):
+        """Synchronize and return sampled candidate token IDs for output ``i``.
+
+        The pointer is context-owned. Only the prefix reported by
+        ``get_sampled_candidates_count_ith()`` belongs to the sampled candidate
+        set.
+        """
+        self._assert_ctx()
+        return llama_cpp.llama_get_sampled_candidates_ith(self.ctx, i)
+
+    def get_sampled_candidates_count_ith(self, i: int) -> int:
+        """Synchronize and return the sampled-candidate count for output ``i``."""
+        self._assert_ctx()
+        return int(llama_cpp.llama_get_sampled_candidates_count_ith(self.ctx, i))
+
     def set_embeddings(self, embeddings: bool):
+        """Enable or disable embedding output for subsequent graph evaluations."""
         self._assert_ctx()
         llama_cpp.llama_set_embeddings(self.ctx, embeddings)
 
     def get_embeddings(self):
+        """Synchronize and return all unpooled output embeddings.
+
+        The returned context-owned pointer is laid out as
+        ``(n_outputs, n_embd_out)`` and may be invalidated by later evaluations.
+        """
         self._assert_ctx()
         return llama_cpp.llama_get_embeddings(self.ctx)
 
     def get_embeddings_ith(self, i: int):
+        """Synchronize and return the context-owned embedding row ``i``.
+
+        Negative indices address rows from the end; an invalid index produces
+        the native null pointer.
+        """
         self._assert_ctx()
         return llama_cpp.llama_get_embeddings_ith(self.ctx, i)
 
     def get_embeddings_seq(self, seq_id: int):
+        """Synchronize and return the pooled embedding for ``seq_id``."""
         self._assert_ctx()
         return llama_cpp.llama_get_embeddings_seq(self.ctx, seq_id)
 
     def set_embeddings_nextn(self, enabled: bool, masked: bool) -> None:
-        """
-        Set whether the context outputs nextn embeddings or not
-        If masked == true,  output the embeddings only for the tokens with batch.logits != 0
-        If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+        """Configure auxiliary NextN/DFlash output for subsequent evaluations.
+
+        With ``masked=True``, rows are retained only for batch entries whose
+        ``logits`` flag is set. With ``masked=False``, every batch row is
+        retained. The meaning of each row is model-specific: it may contain an
+        MTP hidden state, DFlash confidence, or a packed DFlash2 selector lattice.
         """
         self._assert_ctx()
         llama_cpp.llama_set_embeddings_nextn(self.ctx, enabled, masked)
 
     def get_embeddings_nextn(self):
+        """Synchronize and return the complete auxiliary NextN output buffer.
+
+        The pointer is context-owned and contains rows of ``n_embd_out`` floats.
+        In masked mode rows follow enabled output rows; in unmasked mode they
+        follow every raw batch token. The buffer may be invalidated by the next
+        encode/decode call. ``set_embeddings_nextn()`` must have enabled it.
+        """
         self._assert_ctx()
         embeddings = llama_cpp.llama_get_embeddings_nextn(self.ctx)
         if not embeddings:
@@ -941,6 +1143,13 @@ class LlamaContext:
         return embeddings
 
     def get_embeddings_nextn_ith(self, i: int):
+        """Synchronize and return auxiliary NextN output row ``i``.
+
+        In masked mode ``i`` uses ordinary output-row resolution and negative
+        indices count from the last output. In unmasked mode ``i`` is a
+        non-negative raw batch-token index. The returned pointer is owned by
+        the context and may be invalidated by a later evaluation.
+        """
         self._assert_ctx()
         embeddings = llama_cpp.llama_get_embeddings_nextn_ith(self.ctx, i)
         if not embeddings:
@@ -950,12 +1159,26 @@ class LlamaContext:
         return embeddings
 
     def set_embeddings_layer_inp(self, layer_id: int, enabled: bool) -> None:
+        """Enable or disable capture of a target layer's input activations.
+
+        ``layer_id`` is a model graph layer index. Some speculative models also
+        use the terminal layer index as the final head-input tap when supported
+        by the native graph builder. Changing this setting marks the backend
+        scheduler for graph re-reservation; configure all taps before decoding.
+        """
         self._assert_ctx()
         if layer_id < 0:
             raise ValueError("layer_id must be non-negative")
         llama_cpp.llama_set_embeddings_layer_inp(self.ctx, layer_id, enabled)
 
     def get_embeddings_layer_inp(self, layer_id: int):
+        """Synchronize and return captured input activations for ``layer_id``.
+
+        Capture is dense: rows correspond to every token in the most recent
+        batch, independent of its ``logits`` flags, and each row has the target
+        model's ``n_embd`` width. This is the layout consumed by DFlash feature
+        gathering. The context owns and may reuse the returned buffer.
+        """
         self._assert_ctx()
         if layer_id < 0:
             raise ValueError("layer_id must be non-negative")
@@ -967,10 +1190,10 @@ class LlamaContext:
         return embeddings
 
     def set_nextn_layer_offset(self, offset: int) -> None:
-        """
-        Select which appended NextN block the DECODER_MTP graph runs (offset past
-        the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
-        chain multiple trained NextN heads. Default 0 (first head).
+        """Select the appended NextN block used by a DECODER_MTP graph.
+
+        The selected layer is ``n_layer() + offset``. Speculative decoding uses
+        this to chain multiple trained NextN heads; zero selects the first head.
         """
         self._assert_ctx()
         if offset < 0:
@@ -978,14 +1201,29 @@ class LlamaContext:
         llama_cpp.llama_set_nextn_layer_offset(self.ctx, offset)
 
     def get_ctx_other(self):
+        """Return the optional non-owning peer context configured as ``ctx_other``.
+
+        MTP and DFlash-family draft graphs use this association to access or
+        share target-context resources. The returned native pointer must not be
+        freed by this wrapper.
+        """
         self._assert_ctx()
         return llama_cpp.llama_get_ctx_other(self.ctx)
 
     def reset_timings(self):
+        """Reset llama.cpp performance counters for this context."""
+        self._assert_ctx()
         llama_cpp.llama_perf_context_reset(self.ctx)
 
     def print_timings(self):
+        """Print llama.cpp performance counters for this context."""
+        self._assert_ctx()
         llama_cpp.llama_perf_context_print(self.ctx)
+
+    def perf_context(self) -> llama_cpp.llama_perf_context_data:
+        """Return a snapshot of the context's structured performance counters."""
+        self._assert_ctx()
+        return llama_cpp.llama_perf_context(self.ctx)
 
     # LoRA / ALoRA Dynamic Routing Methods
 
@@ -2396,18 +2634,15 @@ class LlamaSamplingContext:
         grammar_first: bool = True,
     ) -> int:
 
-        # 1. Synchronize
-        llama_cpp.llama_synchronize(ctx.ctx)
-
-        # 2. Backend sampler shortcut
-        sampled = llama_cpp.llama_get_sampled_token_ith(ctx.ctx, idx)
+        # 1. Backend sampler shortcut. The accessor synchronizes pending work.
+        sampled = ctx.get_sampled_token_ith(idx)
         if sampled != llama_cpp.LLAMA_TOKEN_NULL:
             if self.grammar_sampler:
                 raise RuntimeError("Backend sampling + grammar unsupported")
             return int(sampled)
 
-        # 3. build cur_p
-        logits_ptr = llama_cpp.llama_get_logits_ith(ctx.ctx, idx)
+        # 2. Build cur_p from the full-vocabulary fallback logits.
+        logits_ptr = ctx.get_logits_ith(idx)
         cur_addr = ctypes.addressof(logits_ptr.contents)
 
         if self._logits_ptr_addr != cur_addr:

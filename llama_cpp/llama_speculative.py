@@ -1188,9 +1188,7 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
             return
         backend_sampler = internals.LlamaSampler()
         backend_sampler.add_top_k(10)
-        if self._llama_cpp_lib.llama_set_sampler(
-            self.draft_context.ctx, 0, backend_sampler.sampler
-        ):
+        if self.draft_context.set_sampler(0, backend_sampler):
             self._backend_sampler = backend_sampler
             self._backend_sampling = True
         else:
@@ -1215,9 +1213,7 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
             return
         if getattr(self, "draft_context", None) is not None:
             try:
-                self._llama_cpp_lib.llama_set_sampler(
-                    self.draft_context.ctx, 0, None
-                )
+                self.draft_context.set_sampler(0, None)
             except Exception as exc:
                 errors.append(exc)
         try:
@@ -1295,35 +1291,21 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         top ten entries of the full logits row on the CPU.
         """
         if self._backend_sampling:
-            token = int(
-                self._llama_cpp_lib.llama_get_sampled_token_ith(
-                    self.draft_context.ctx, output_index
-                )
+            token = self.draft_context.get_sampled_token_ith(output_index)
+            candidates_count = (
+                self.draft_context.get_sampled_candidates_count_ith(output_index)
             )
-            candidates_count = int(
-                self._llama_cpp_lib.llama_get_sampled_candidates_count_ith(
-                    self.draft_context.ctx, output_index
-                )
+            probs_count = self.draft_context.get_sampled_probs_count_ith(
+                output_index
             )
-            probs_count = int(
-                self._llama_cpp_lib.llama_get_sampled_probs_count_ith(
-                    self.draft_context.ctx, output_index
-                )
+            logits_count = self.draft_context.get_sampled_logits_count_ith(
+                output_index
             )
-            logits_count = int(
-                self._llama_cpp_lib.llama_get_sampled_logits_count_ith(
-                    self.draft_context.ctx, output_index
-                )
+            candidates_ptr = self.draft_context.get_sampled_candidates_ith(
+                output_index
             )
-            candidates_ptr = self._llama_cpp_lib.llama_get_sampled_candidates_ith(
-                self.draft_context.ctx, output_index
-            )
-            probs_ptr = self._llama_cpp_lib.llama_get_sampled_probs_ith(
-                self.draft_context.ctx, output_index
-            )
-            logits_ptr = self._llama_cpp_lib.llama_get_sampled_logits_ith(
-                self.draft_context.ctx, output_index
-            )
+            probs_ptr = self.draft_context.get_sampled_probs_ith(output_index)
+            logits_ptr = self.draft_context.get_sampled_logits_ith(output_index)
 
             if candidates_count > 0 and candidates_ptr:
                 candidates = np.ctypeslib.as_array(

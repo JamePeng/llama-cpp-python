@@ -164,7 +164,7 @@ class LlamaEmbedding(Llama):
 
         # Reset Context and Batch
         if self.verbose:
-            llama_cpp_lib.llama_perf_context_reset(ctx)
+            self._ctx.reset_timings()
         self._batch.reset()
         llama_cpp_lib.llama_memory_clear(llama_cpp_lib.llama_get_memory(ctx), True)
 
@@ -273,7 +273,7 @@ class LlamaEmbedding(Llama):
         _decode_batch()
 
         if self.verbose:
-            llama_cpp_lib.llama_perf_context_print(ctx)
+            self._ctx.print_timings()
 
         final_result = results[0] if is_single else results
 
