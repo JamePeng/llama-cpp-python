@@ -213,6 +213,16 @@ class GGMLPrec(enum.IntEnum):
     GGML_PREC_F32     = 10
 
 
+# // op hint
+# enum ggml_op_hint {
+#     GGML_HINT_NONE             = 0,
+#     GGML_HINT_SRC0_IS_HADAMARD = 1,
+# };
+class GGMLOpHint(enum.IntEnum):
+    GGML_HINT_NONE =  0
+    GGML_HINT_SRC0_IS_HADAMARD = 1
+
+
 # // model file types
 # enum ggml_ftype {
 #     GGML_FTYPE_UNKNOWN        = -1,
@@ -369,6 +379,9 @@ class GGMLFType(enum.IntEnum):
 #     GGML_OP_SOLVE_TRI,
 #     GGML_OP_GATED_DELTA_NET,
 #     GGML_OP_LIGHTNING_INDEXER,
+#     GGML_OP_DSV4_HC_COMB,
+#     GGML_OP_DSV4_HC_PRE,
+#     GGML_OP_DSV4_HC_POST,
 
 #     GGML_OP_UNARY,
 
@@ -480,23 +493,26 @@ class GGML_OP(enum.IntEnum):
     GGML_OP_SOLVE_TRI = 85
     GGML_OP_GATED_DELTA_NET = 86
     GGML_OP_LIGHTNING_INDEXER = 87
+    GGML_OP_DSV4_HC_COMB = 88
+    GGML_OP_DSV4_HC_PRE = 89
+    GGML_OP_DSV4_HC_POST = 90
 
-    GGML_OP_UNARY = 88
+    GGML_OP_UNARY = 91
 
-    GGML_OP_MAP_CUSTOM1 = 89
-    GGML_OP_MAP_CUSTOM2 = 90
-    GGML_OP_MAP_CUSTOM3 = 91
+    GGML_OP_MAP_CUSTOM1 = 92
+    GGML_OP_MAP_CUSTOM2 = 93
+    GGML_OP_MAP_CUSTOM3 = 94
 
-    GGML_OP_CUSTOM = 92
+    GGML_OP_CUSTOM = 95
 
-    GGML_OP_CROSS_ENTROPY_LOSS = 93
-    GGML_OP_CROSS_ENTROPY_LOSS_BACK = 94
-    GGML_OP_OPT_STEP_ADAMW = 95
-    GGML_OP_OPT_STEP_SGD = 96
+    GGML_OP_CROSS_ENTROPY_LOSS = 96
+    GGML_OP_CROSS_ENTROPY_LOSS_BACK = 97
+    GGML_OP_OPT_STEP_ADAMW = 98
+    GGML_OP_OPT_STEP_SGD = 99
 
-    GGML_OP_GLU = 97
+    GGML_OP_GLU = 100
 
-    GGML_OP_COUNT = 98
+    GGML_OP_COUNT = 101
 
 # enum ggml_unary_op {
 #     GGML_UNARY_OP_ABS,
@@ -557,6 +573,7 @@ class GGMLUnaryOp(enum.IntEnum):
 #     GGML_GLU_OP_SWIGLU_OAI,
 #     GGML_GLU_OP_GEGLU_ERF,
 #     GGML_GLU_OP_GEGLU_QUICK,
+#     GGML_GLU_OP_SWIGLU_CLAMP,
 #     GGML_GLU_OP_COUNT,
 # };
 class GGMLGluOp(enum.IntEnum):
@@ -566,8 +583,56 @@ class GGMLGluOp(enum.IntEnum):
     GGML_GLU_OP_SWIGLU_OAI = 3
     GGML_GLU_OP_GEGLU_ERF = 4
     GGML_GLU_OP_GEGLU_QUICK = 5
+    GGML_GLU_OP_SWIGLU_CLAMP = 6
 
-    GGML_GLU_OP_COUNT = 6
+    GGML_GLU_OP_COUNT = 7
+
+
+# enum ggml_log_level {
+#     GGML_LOG_LEVEL_NONE  = 0,
+#     GGML_LOG_LEVEL_DEBUG = 1,
+#     GGML_LOG_LEVEL_INFO  = 2,
+#     GGML_LOG_LEVEL_WARN  = 3,
+#     GGML_LOG_LEVEL_ERROR = 4,
+#     GGML_LOG_LEVEL_CONT  = 5, // continue previous log
+# };
+class GGMLLogLevel(enum.IntEnum):
+    GGML_LOG_LEVEL_NONE  = 0
+    GGML_LOG_LEVEL_DEBUG = 1
+    GGML_LOG_LEVEL_INFO  = 2
+    GGML_LOG_LEVEL_WARN  = 3
+    GGML_LOG_LEVEL_ERROR = 4
+    GGML_LOG_LEVEL_CONT  = 5 # continue previous log
+
+
+# // this tensor...
+# enum ggml_tensor_flag {
+#     GGML_TENSOR_FLAG_INPUT   =  1, // ...is an input for the GGML compute graph
+#     GGML_TENSOR_FLAG_OUTPUT  =  2, // ...is an output for the GGML compute graph
+#     GGML_TENSOR_FLAG_PARAM   =  4, // ...contains trainable parameters
+#     GGML_TENSOR_FLAG_LOSS    =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
+#     GGML_TENSOR_FLAG_COMPUTE = 16, // ...must be computed
+# };
+class GGMLTensorFlag(enum.IntEnum):
+    GGML_TENSOR_FLAG_INPUT   = 1   # ...is an input for the GGML compute graph
+    GGML_TENSOR_FLAG_OUTPUT  = 2   # ...is an output for the GGML compute graph
+    GGML_TENSOR_FLAG_PARAM   = 4   # ...contains trainable parameters
+    GGML_TENSOR_FLAG_LOSS    = 8   # ...defines loss for numerical optimization (multiple loss tensors add up)
+    GGML_TENSOR_FLAG_COMPUTE = 16  # ...must be computed
+
+
+# enum ggml_tri_type {
+#     GGML_TRI_TYPE_UPPER_DIAG = 0,
+#     GGML_TRI_TYPE_UPPER      = 1,
+#     GGML_TRI_TYPE_LOWER_DIAG = 2,
+#     GGML_TRI_TYPE_LOWER      = 3
+# };
+class GGMLTriType(enum.IntEnum):
+    GGML_TRI_TYPE_UPPER_DIAG = 0
+    GGML_TRI_TYPE_UPPER      = 1
+    GGML_TRI_TYPE_LOWER_DIAG = 2
+    GGML_TRI_TYPE_LOWER      = 3
+
 
 # //
 # // ggml object
@@ -647,50 +712,6 @@ class ggml_context(ctypes.Structure):
     ]
 
 ggml_context_p = ctypes.POINTER(ggml_context)
-
-
-# enum ggml_log_level {
-#     GGML_LOG_LEVEL_NONE  = 0,
-#     GGML_LOG_LEVEL_DEBUG = 1,
-#     GGML_LOG_LEVEL_INFO  = 2,
-#     GGML_LOG_LEVEL_WARN  = 3,
-#     GGML_LOG_LEVEL_ERROR = 4,
-#     GGML_LOG_LEVEL_CONT  = 5, // continue previous log
-# };
-class GGMLLogLevel(enum.IntEnum):
-    GGML_LOG_LEVEL_NONE  = 0
-    GGML_LOG_LEVEL_DEBUG = 1
-    GGML_LOG_LEVEL_INFO  = 2
-    GGML_LOG_LEVEL_WARN  = 3
-    GGML_LOG_LEVEL_ERROR = 4
-    GGML_LOG_LEVEL_CONT  = 5 # continue previous log
-
-
-# // this tensor...
-# enum ggml_tensor_flag {
-#     GGML_TENSOR_FLAG_INPUT  =  1, // ...is an input for the GGML compute graph
-#     GGML_TENSOR_FLAG_OUTPUT =  2, // ...is an output for the GGML compute graph
-#     GGML_TENSOR_FLAG_PARAM  =  4, // ...contains trainable parameters
-#     GGML_TENSOR_FLAG_LOSS   =  8, // ...defines loss for numerical optimization (multiple loss tensors add up)
-# };
-class GGMLTensorFlag(enum.IntEnum):
-    GGML_TENSOR_FLAG_INPUT  = 1  # ...is an input for the GGML compute graph
-    GGML_TENSOR_FLAG_OUTPUT = 2  # ...is an output for the GGML compute graph
-    GGML_TENSOR_FLAG_PARAM  = 4  # ...contains trainable parameters
-    GGML_TENSOR_FLAG_LOSS   = 8  # ...defines loss for numerical optimization (multiple loss tensors add up)
-
-
-# enum ggml_tri_type {
-#     GGML_TRI_TYPE_UPPER_DIAG = 0,
-#     GGML_TRI_TYPE_UPPER      = 1,
-#     GGML_TRI_TYPE_LOWER_DIAG = 2,
-#     GGML_TRI_TYPE_LOWER      = 3
-# };
-class GGMLTriType(enum.IntEnum):
-    GGML_TRI_TYPE_UPPER_DIAG = 0
-    GGML_TRI_TYPE_UPPER      = 1
-    GGML_TRI_TYPE_LOWER_DIAG = 2
-    GGML_TRI_TYPE_LOWER      = 3
 
 
 # struct ggml_init_params {
