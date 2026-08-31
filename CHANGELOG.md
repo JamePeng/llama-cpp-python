@@ -7,6 +7,233 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.49] DFlash2 / DFlash / DSpark Speculative Decoding Support, and MTMD Video Support
+
+- feat(speculative): `0-day` Support `DFlash2` selector and M-RoPE execution
+    - walk the packed DFlash2 selector lattice using candidate IDs and
+    predecessor-dependent transition scores
+    - apply draft_p_min to selector-path confidence and preserve checkpoint
+    rollback behavior
+    - request unmasked nextn outputs for DFlash2 while skipping unused logits
+    and backend vocabulary sampling
+    - retain the existing masked/backend flow for DFlash v1 and DSpark
+    - add safe four-plane M-RoPE position storage for embedding batches
+    - propagate text-token positions through the DFlash encoder and injection
+    batches when the draft model declares M-RoPE
+    - keep direct MTMD embedding batches explicitly unsupported until their
+    four-dimensional target positions can be mapped
+    - cover selector traversal, confidence truncation, execution configuration,
+    M-RoPE layout, pointer ownership, and position propagation with tests
+    - **support dflash2 nvfp4-scale draft model**
+
+- feat(examples): expose `DFlash2` benchmark configuration
+    - add dflash2 as an explicit algorithm option
+    - continue auto-detecting DFlash2 when dflash is requested
+    - reject explicit DFlash2 runs when selector metadata is absent
+    - expose draft_n_min alongside draft_n_max and draft_p_min
+    - report selector top-k, block size, masked output mode, M-RoPE state,
+    and requested versus active backend sampling
+    - label comparison and output sections with the resolved algorithm
+
+- feat(speculative): expose `DFlash2` selector metadata
+    - bind llama_model_dflash_selector_top_k from llama-ext
+    - expose the selector width through the internal LlamaModel wrapper
+    - detect DFlash2 draft models after loading the sidecar
+    - retain `selector_top_k` and `is_dflash2` for algorithm-specific setup
+
+    This prepares the DFlash engine for selector-lattice decoding without
+    changing the existing DFlash and DSpark execution paths. prepare DFlash engine
+    for DFlash2 detection
+
+- feat(speculative): add text-only `DFlash` and `DSpark` decoding
+    - factor shared model-backed draft setup into _LlamaModelDraftEngine
+    - reuse model loading, vocabulary validation, context setup, backend sampling,
+    candidate extraction, and shutdown-safe resource cleanup across MTP and
+    DFlash-family engines
+    - reset inherited embedding and pooling settings for draft contexts
+    - implement external DFlash and DSpark model loading and metadata validation
+    - gather and fuse requested target-layer features into the draft context
+    - build non-causal mask blocks for DFlash candidate generation
+    - support DSpark anchor sampling and acceptance-confidence filtering
+    - clamp draft lengths to the block capacity recorded in the draft GGUF
+    - support native and on-device draft checkpoints with accepted-prefix replay
+    - validate every critical draft-memory suffix removal
+    - accept the final target-layer input tap required by Nemotron DFlash models
+    - reject unsupported multimodal embedding batches before draft processing
+    - clarify target rollback capability with can_follow_target_native_rollback
+    - add lifecycle, factory, feature injection, rollback, and checkpoint tests
+
+- feat(examples): add `DFlash` and `DSpark` throughput benchmark
+    - add a portable CLI without machine-specific model paths
+    - compare ordinary decoding against external DFlash or DSpark drafting
+    - support configurable draft length, probability threshold, warmup, and runs
+    - expose CPU placement, backend sampling, and ignore-EOG options
+    - report aggregate throughput, acceptance, phase timing, and rollback metrics
+    - check deterministic runs and report the first output-token divergence
+
+- feat(completion): expose `ignore_eos` in high-level APIs
+    - add `ignore_eos` to create_completion() and Llama.__call__()
+    - forward the option through _create_completion() to generate()
+    - prevent the completion wrapper from stopping on EOG tokens when enabled
+    - preserve existing positional argument compatibility
+    - document the new high-level completion option
+    - add tests for parameter forwarding and EOG handling
+
+- feat(mtmd): align helper bindings and expose `video` options
+    - bind `mtmd_helper_init_opt` and its default initializer
+    - pass helper options to bitmap file and buffer APIs
+    - correct video pointer and buffer ctypes signatures
+    - expose `video FPS`, `ffmpeg directory`, and `timestamp` settings
+    - validate ffmpeg and ffprobe executables
+    - retain the encoded ffmpeg path for ctypes pointer safety
+    - add ABI and high-level configuration tests
+
+- feat(multimodal): add MTMD video chat example
+    - support the video content schema in the fallback chat template
+    - add a standalone configurable MTMD video inference example
+    - document Gemma 4 schema compatibility and ffmpeg setup
+    - include FPS, context, and long-video resource guidance
+
+- feat(api): accept `presence_penalty` as a compatibility alias
+    - accept `presence_penalty` in completion, callable, and chat APIs
+    - expose the alias through OpenAI-compatible server request models
+    - normalize the alias to the canonical `present_penalty` parameter
+    - preserve an explicitly configured `present_penalty` value
+    - keep sampler and chat-handler internals using **`penalty_present`**
+    - add coverage for alias forwarding and parameter precedence
+    - I find that there are still people who like this naming choice :)
+
+- feat(multimodal): report prompt prefill timings separately
+    - isolate MTMD prompt evaluation from text generation timings
+    - synchronize pending backend work at explicit multimodal phase boundaries
+    - measure text, image, and audio prompt chunks in one context interval
+    - skip additional timing synchronization for fully cached prompts
+    - label multimodal prompt metrics before completion resets the counters
+
+- refactor(perf): make context timings request-scoped
+    - document the non-synchronizing behavior of context performance APIs
+    - reset completion and embedding counters independently of verbose logging
+    - honor no_perf when collecting and printing backend timings
+    - finalize timing output for completed, closed, and failed generations
+    - avoid redundant synchronization in normal completion and embedding paths
+
+- refactor(context): encapsulate sampling and performance APIs
+    - document `LlamaContext` ownership, synchronization, and buffer lifetime semantics
+    - wrap backend sampler attachment and sampled output accessors
+    - retain attached sampler references for the lifetime of the native context
+    - expose structured context performance metrics through perf_context()
+    - route speculative decoding and embedding timing calls through LlamaContext
+    - remove the redundant explicit synchronization before sampled-token access
+    - add coverage for sampler attachment, sampled outputs, performance wrappers,
+    and speculative decoder cleanup
+
+- docs(README): recommend generic MTMD support for Qwen3.8
+    - add Qwen3.8 to the supported multimodal model table
+    - document GenericMTMDChatHandler as the recommended handler
+    - identify qwen3.8 as the corresponding chat format
+
+- docs(README): modernize the high-level API guide
+    - replace legacy Llama 2 examples with a Qwen3-0.6B quickstart
+    - make Hugging Face loading and chat completion the primary workflow
+    - document automatic GPU offloading and model loading defaults
+    - add concise local GGUF and streaming examples
+    - link API references to the maintained Llama wiki
+    - document JSON Schema constrained output and tool calling
+    - document typed OpenAI v1 chat completion responses
+    - describe verbose and verbosity logging controls
+    - document presence_penalty as an alias for present_penalty
+    - remove outdated Functionary and duplicated legacy examples
+
+- docs(README): add speculative decoding version availability
+    - note that MTP speculative decoding is available since 0.3.48
+    - mark DFlash, DFlash2, and DSpark support as available from 0.3.49-preview
+    - add version notes to the speculative decoding overview and feature sections
+
+- docs: document `DFlash2` and refresh Llama configuration
+    - document DFlash2 selector traversal, backend behavior, and probability filtering
+    - add a dedicated DFlash2 speculative decoding setup and benchmark guide
+    - describe the validated Qwen3.8 target and DFlash2 draft model pairing
+    - clarify M-RoPE handling and current multimodal limitations
+    - distinguish DFlash v1, DFlash2, and DSpark execution paths
+    - update README and wiki navigation for the dedicated DFlash2 guide
+    - synchronize Llama constructor documentation with the current Python API
+    - document load_mode AUTO behavior and the lazy_mode API rename
+    - add missing model loading, context, RoPE, KV cache, performance, and MTMD options
+
+- docs(speculative): document `MTP`, `DFlash`, and `DSpark` support
+    - move speculative decoding next to sampling configuration in the README
+    - document stateful MTP, DFlash, DSpark, and n-gram engine configuration
+    - add DFlash and DSpark external-sidecar examples and tuning guidance
+    - describe block-size limits, backend sampling, checkpoints, and statistics
+    - document the current text-only and single-sequence limitations
+    - record tested Qwen3.5, Qwen3.6, and Qwen3.8 MTP configurations
+    - document tested external MTP support for gemma4 with gemma4-assistant
+    - explain automatic target-context, shared-KV, and same-position handling
+    - link the dedicated MTP and DFlash/DSpark benchmark examples
+    - Update README.md Table of Contents and Index for DFlash and DSpark speculative decoding
+
+- docs(speculative): align wiki with model-backed draft engines
+    - document the `_LlamaModelDraftEngine` responsibilities and extension workflow
+    - describe MTP and DFlash/DSpark lifecycle and resource ownership
+    - add speculative output limits, engine capabilities, and checkpoint statistics
+    - clarify MTP head chaining and Gemma4 shared-memory behavior
+    - document DFlash target-layer taps and rollback strategies
+    - record MTP availability since 0.3.48
+    - mark DFlash and DSpark as 0.3.49-preview features
+    - fix outdated descriptions and related documentation links
+
+- fix(cache): correct RAM accounting and trie cache selection
+    - Subtract the previous state size when replacing an existing RAM cache
+    entry to prevent inflated usage and premature eviction.
+    - Fix the server cache type check so "trie" correctly creates a
+    LlamaTrieCache.
+
+- fix(speculative): recover cache state on interrupted verification
+    * Track speculative verification as an in-flight transaction and reconcile the
+    target and draft contexts when generation exits before normal acceptance or
+    rollback.
+    - preserve only tokens already delivered across yield
+    - use native rollback for supported hybrid contexts
+    - restore checkpoints and replay committed inputs as a hybrid fallback
+    - truncate both caches for standard transformer contexts
+    - reset the model if interrupted-state recovery fails
+    - avoid saving a hybrid checkpoint after failed reconciliation
+    - add tests for native, checkpoint, and transformer recovery paths
+
+- fix(speculative): align MTP context and verification limits
+    - size draft contexts from the initialized target context n_ctx
+    - warn when MTP prompt processing leaves the draft cache incomplete
+    - skip prompt-cache diagnostics for shared-memory MTP contexts
+    - cap draft proposals at n_batch - 1 to keep verification batches atomic
+    - preserve the user-requested draft_n_max while applying the runtime limit
+
+- fix(cache): track native positions for hybrid checkpoint rollback
+    - store native memory `pos_min` and `pos_max` in HybridCheckpoint
+    - remove the attention-memory suffix from `pos_max + 1` after partial restore
+    - preserve compatibility with legacy checkpoints without native positions
+    - return failure when suffix cleanup cannot be completed
+    - add checkpoint position and rollback cleanup tests
+    - update `HybridCheckpointCache` documentation
+
+- fix(sampling): align DRY history defaults with llama.cpp
+    - set dry_penalty_last_n to 64 across sampling and generation APIs
+    - align completion, chat, and multimodal handler defaults
+    - update the low-level API example and CLI default
+    - document 64 as the default DRY repetition scan window
+    - preserve 0 for disabling scans and -1 for using the full context
+
+- fix(mtmd): jinja typo error in Gemma4ChatHandler(**@craftingmod**)
+
+- ci(test): drop obsolete macOS Intel test jobs
+
+- feat: Update llama.cpp to [ggml-org/llama.cpp/commit/9723942adc518b43c4b95dc4dce6906903eb5e09](https://github.com/ggml-org/llama.cpp/commit/9723942adc518b43c4b95dc4dce6906903eb5e09)
+    - support `load_mode` and `Qwen3.8-Flash-Next`
+    - including the dflash2 nvfp4 fix patch (https://github.com/ggml-org/llama.cpp/pull/28000)
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260831
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/75622979b0e3fa8590586971bc594c00eec33b76...1966df596f0033592a2ae168fd444abbf293dba8
+
 ## [0.3.48] Stateful MTP Speculative Decoding Arrives
 
 - feat(speculative): introduce text-only stateful MTP decoding
