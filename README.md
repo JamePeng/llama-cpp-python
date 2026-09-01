@@ -14,13 +14,15 @@ Efficient Python bindings for **ggml-org's** [`llama.cpp`](https://github.com/gg
 This package provides:
 
 - Low-level access to C API via `ctypes` interface.
+    - [Low-level API](#low-level-api)
+    - [Low-level tutorial and examples](examples/low_level_api/README.md)
     - [llama_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/llama_cpp.py)
     - [mtmd_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/mtmd_cpp.py)
     - [ggml_cpp_lib](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/_ggml.py)
         - *Note: Synchronize ggml's ctypes calls as needed, but won't fully implement it, because most of it is called at the lower level in the upstream llama.cpp.*
 - High-level Python API for text completion
     - OpenAI-like API and Type([llama_types.py](https://github.com/JamePeng/llama-cpp-python/blob/main/llama_cpp/llama_types.py))
-    - [High-level API](https://github.com/JamePeng/llama-cpp-python#high-level-api)
+    - [High-level API](#high-level-api)
     - [Continuing Assistant Responses (Prefill)](https://github.com/JamePeng/llama-cpp-python#continuing-assistant-responses-prefill)
     - [Dynamic LoRA Routing & Control Vectors (Multi-Tenant Serving)](https://github.com/JamePeng/llama-cpp-python#dynamic-lora-routing--control-vectors-multi-tenant-serving)
         - [Dynamic LoRA Example](https://github.com/JamePeng/llama-cpp-python#dynamic-lora-example)
@@ -521,6 +523,33 @@ Without this file, `ggml-cpu-*.dll` may fail to load dynamically at runtime.
 ### Upgrading and Reinstalling
 
 To upgrade and rebuild `llama-cpp-python` add `--upgrade --force-reinstall --no-cache-dir` flags to the `pip install` command to ensure the package is rebuilt from source.
+
+## Low-level API
+
+[Low-level tutorial and examples](examples/low_level_api/README.md)
+
+The low-level API exposes direct [`ctypes`](https://docs.python.org/3/library/ctypes.html)
+bindings for the current native APIs:
+
+- [`llama_cpp/llama_cpp.py`](llama_cpp/llama_cpp.py) mirrors
+  [`llama.h`](vendor/llama.cpp/include/llama.h).
+- [`llama_cpp/mtmd_cpp.py`](llama_cpp/mtmd_cpp.py) mirrors the multimodal
+  `mtmd` API.
+- [`llama_cpp/_ggml.py`](llama_cpp/_ggml.py) contains the supported `ggml`
+  backend bindings.
+
+The low-level examples cover streaming generation, chat templates, a
+reason/action tool loop, and model quantization. Start with the tutorial in
+[`examples/low_level_api`](examples/low_level_api):
+
+```bash
+python examples/low_level_api/generate.py -m path/to/model.gguf -p "Explain why the sky is blue:" --n-ctx 4096 --max-tokens 256 --n-gpu-layers auto --verbosity info
+```
+
+Run an example with `-h` for its complete options. The shared runtime
+demonstrates the current model/context lifecycle, vocabulary-based
+tokenization, `llama_batch` decoding, sampler chains, dynamic backend loading,
+and native logging configuration.
 
 ## High-level API
 
@@ -2107,33 +2136,6 @@ python3 -m llama_cpp.server --hf_model_repo_id Qwen/Qwen2-0.5B-Instruct-GGUF --m
 - [Function Calling support](https://llama-cpp-python.readthedocs.io/en/latest/server/#function-calling)
 - [Vision API support](https://llama-cpp-python.readthedocs.io/en/latest/server/#multimodal-models)
 - [Multiple Models](https://llama-cpp-python.readthedocs.io/en/latest/server/#configuration-and-multi-model-support)
-
-## Low-level API
-
-[Low-level tutorial and examples](examples/low_level_api/README.md)
-
-The low-level API exposes direct [`ctypes`](https://docs.python.org/3/library/ctypes.html)
-bindings for the current native APIs:
-
-- [`llama_cpp/llama_cpp.py`](llama_cpp/llama_cpp.py) mirrors
-  [`llama.h`](vendor/llama.cpp/include/llama.h).
-- [`llama_cpp/mtmd_cpp.py`](llama_cpp/mtmd_cpp.py) mirrors the multimodal
-  `mtmd` API.
-- [`llama_cpp/_ggml.py`](llama_cpp/_ggml.py) contains the supported `ggml`
-  backend bindings.
-
-The low-level examples cover streaming generation, chat templates, a
-reason/action tool loop, and model quantization. Start with the tutorial in
-[`examples/low_level_api`](examples/low_level_api):
-
-```bash
-python examples/low_level_api/generate.py -m path/to/model.gguf -p "Explain why the sky is blue:" --n-ctx 4096 --max-tokens 256 --n-gpu-layers auto --verbosity info
-```
-
-Run an example with `-h` for its complete options. The shared runtime
-demonstrates the current model/context lifecycle, vocabulary-based
-tokenization, `llama_batch` decoding, sampler chains, dynamic backend loading,
-and native logging configuration.
 
 ## Documentation
 
