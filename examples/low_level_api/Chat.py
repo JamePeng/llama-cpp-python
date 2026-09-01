@@ -1,75 +1,108 @@
-#!/bin/python
-import sys, os, datetime
-from common import GptParams
-from low_level_api_chat_cpp import LLaMAInteract
+"""Interactive chat using the template stored in a GGUF model."""
 
+from __future__ import annotations
 
-def env_or_def(env, default):
-    if env in os.environ:
-        return os.environ[env]
-    return default
+import argparse
 
-
-AI_NAME = env_or_def("AI_NAME", "ChatLLaMa")
-MODEL = env_or_def("MODEL", "./models/llama-13B/ggml-model.bin")
-USER_NAME = env_or_def("USER_NAME", "USER")
-N_PREDICTS = int(env_or_def("N_PREDICTS", "2048"))
-N_THREAD = int(env_or_def("N_THREAD", "8"))
-
-today = datetime.datetime.today()
-DATE_YEAR = today.strftime("%Y")
-DATE_TIME = today.strftime("%H:%M")
-
-prompt = f"""Text transcript of a never ending dialog, where {USER_NAME} interacts with an AI assistant named {AI_NAME}.
-{AI_NAME} is helpful, kind, honest, friendly, good at writing and never fails to answer {USER_NAME}'s requests immediately and with details and precision.
-There are no annotations like (30 seconds passed...) or (to himself), just what {USER_NAME} and {AI_NAME} say aloud to each other.
-The dialog lasts for years, the entirety of it is shared below. It's 10000 pages long.
-The transcript only includes text, it does not include markup like HTML and Markdown.
-
-{USER_NAME}: Hello, {AI_NAME}!
-{AI_NAME}: Hello {USER_NAME}! How may I help you today?
-{USER_NAME}: What year is it?
-{AI_NAME}: We are in {DATE_YEAR}.
-{USER_NAME}: Please tell me the largest city in Europe.
-{AI_NAME}: The largest city in Europe is Moscow, the capital of Russia.
-{USER_NAME}: What can you tell me about Moscow?
-{AI_NAME}: Moscow, on the Moskva River in western Russia, is the nation's cosmopolitan capital. In its historic core is the Kremlin, a complex that's home to the president and tsarist treasures in the Armoury. Outside its walls is Red Square, Russia’s symbolic center.
-{USER_NAME}: What is a cat?
-{AI_NAME}: A cat is a domestic species of small carnivorous mammal. It is the only domesticated species in the family Felidae.
-{USER_NAME}: How do I pass command line arguments to a Node.js program?
-{AI_NAME}: The arguments are stored in process.argv.
-
-    argv[0] is the path to the Node. js executable.
-    argv[1] is the path to the script file.
-    argv[2] is the first argument passed to the script.
-    argv[3] is the second argument passed to the script and so on.
-{USER_NAME}: Name a color.
-{AI_NAME}: Blue.
-{USER_NAME}: What time is it?
-{AI_NAME}: It is {DATE_TIME}.
-{USER_NAME}:""" + " ".join(
-    sys.argv[1:]
+from common import (
+    HelpFormatter,
+    add_generation_arguments,
+    add_model_arguments,
+    run_cli,
+    validate_generation,
+    validate_model_arguments,
+    validate_positive,
 )
 
-print("Loading model...")
-params = GptParams(
-    n_ctx=2048,
-    temp=0.7,
-    top_k=40,
-    top_p=0.5,
-    repeat_last_n=256,
-    n_batch=1024,
-    repeat_penalty=1.17647,
-    model=MODEL,
-    n_threads=N_THREAD,
-    n_predict=N_PREDICTS,
-    use_color=True,
-    interactive=True,
-    antiprompt=[f"{USER_NAME}:"],
-    input_prefix=" ",
-    input_suffix=f"{AI_NAME}:",
-    prompt=prompt,
-)
 
-with LLaMAInteract(params) as m:
-    m.interact()
+def parse_args() -> tuple[argparse.ArgumentParser, argparse.Namespace]:
+    parser = argparse.ArgumentParser(
+        description="Low-level interactive chat.",
+        formatter_class=HelpFormatter,
+        epilog="""Commands:
+  /reset  clear the conversation
+  /exit   leave the chat
+
+Example:
+  python examples/low_level_api/chat.py -m instruct-model.gguf --n-ctx 4096 --max-tokens 512 --n-gpu-layers all
+""",
+    )
+    add_model_arguments(parser)
+    add_generation_arguments(parser, max_tokens=512)
+    parser.add_argument(
+        "--system",
+        default="You are a helpful, concise assistant.",
+        help="System message; pass an empty string to disable it.",
+    )
+    return parser, parser.parse_args()
+
+
+def main() -> int:
+    parser, args = parse_args()
+    validate_model_arguments(parser, args)
+    validate_positive(parser, max_tokens=args.max_tokens)
+    validate_generation(parser, args)
+
+    from runtime import LowLevelLlama
+
+    messages: list[tuple[str, str]] = []
+    if args.system:
+        messages.append(("system", args.system))
+
+    with LowLevelLlama(
+        args.model,
+        n_ctx=args.n_ctx,
+        n_batch=args.n_batch,
+        n_ubatch=args.n_ubatch,
+        n_threads=args.threads,
+        n_gpu_layers=args.n_gpu_layers,
+        verbose=args.verbose,
+        verbosity=args.verbosity,
+    ) as model:
+        print("Chat ready. Enter /reset or /exit at any time.")
+        while True:
+            try:
+                user_text = input("\nYou: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                break
+
+            if not user_text:
+                continue
+            if user_text == "/exit":
+                break
+            if user_text == "/reset":
+                messages = [("system", args.system)] if args.system else []
+                print("Conversation cleared.")
+                continue
+
+            messages.append(("user", user_text))
+            try:
+                # Re-render history so the model's own template supplies delimiters.
+                prompt = model.render_chat(messages)
+                print("Assistant: ", end="", flush=True)
+                chunks: list[str] = []
+                for text in model.generate(
+                    prompt,
+                    max_tokens=args.max_tokens,
+                    temperature=args.temperature,
+                    top_k=args.top_k,
+                    top_p=args.top_p,
+                    repeat_penalty=args.repeat_penalty,
+                    seed=args.seed,
+                    add_special=False,
+                    parse_special=True,
+                ):
+                    chunks.append(text)
+                    print(text, end="", flush=True)
+                print()
+                messages.append(("assistant", "".join(chunks)))
+            except (RuntimeError, ValueError) as exc:
+                messages.pop()
+                print(f"Error: {exc}")
+                print("Use /reset, shorten the conversation, or increase --n-ctx.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(run_cli(main))

@@ -1,447 +1,173 @@
-import os
+from __future__ import annotations
+
 import argparse
-import re
-
-from dataclasses import dataclass, field
-from typing import List
-
-# Based on https://github.com/ggerganov/llama.cpp/blob/master/examples/common.cpp
+import os
+import sys
+from collections.abc import Callable
+from pathlib import Path
 
 
-@dataclass
-class GptParams:
-    seed: int = -1
-    n_threads: int = min(4, os.cpu_count() or 1)
-    n_predict: int = 128
-    n_parts: int = -1
-    n_ctx: int = 512
-    n_batch: int = 8
-    n_keep: int = 0
+class HelpFormatter(
+    argparse.ArgumentDefaultsHelpFormatter,
+    argparse.RawDescriptionHelpFormatter,
+):
+    """Keep examples readable while showing defaults."""
 
-    ignore_eos: bool = False
-    logit_bias: dict[int, float] = field(default_factory=dict)
-    top_k: int = 40
-    top_n_sigma: float = -1.00
-    top_p: float = 0.95
-
-    typical_p: float = 1.00
-    temp: float = 0.80
-    repeat_penalty: float = 1.10
-    repeat_last_n: int = 64
-    frequency_penalty: float = 0.0
-    present_penalty: float = 0.0
-    mirostat: int = 0
-    mirostat_tau: float = 5.0
-    mirostat_eta: float = 0.1
-    xtc_threshold: float = 0.1
-    xtc_probability: float = 0.0
-    dry_multiplier: float = 0.0
-    dry_base: float = 1.75
-    dry_allowed_length: int = 2
-    dry_penalty_last_n:int = 64
-    dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"]
-    model: str = "./models/llama-7B/ggml-model.bin"
-    prompt: str = ""
-    path_session: str = ""
-    input_prefix: str = " "
-    input_suffix: str = ""
-    antiprompt: List[str] = field(default_factory=list)
-
-    lora_adapter: str = ""
-    lora_base: str = ""
-
-    memory_f16: bool = True
-    random_prompt: bool = False
-    use_color: bool = False
-    interactive: bool = False
-
-    embedding: bool = False
-    interactive_start: bool = False
-
-    instruct: bool = False
-    perplexity: bool = False
-    mem_test: bool = False
-    verbose_prompt: bool = False
-
-    file: str = None
-
-    # If chat ended prematurely, append this to the conversation to fix it.
-    # Set to "\nUser:" etc.
-    # This is an alternative to input_prefix which always adds it, so it potentially duplicates "User:""
-    fix_prefix: str = ""
-    input_echo: bool = (True,)
-
-    # Default instructions for Alpaca
-    # switch to "Human" and "Assistant" for Vicuna.
-    # TODO: TBD how they are gonna handle this upstream
-    instruct_inp_prefix: str = "\n\n### Instruction:\n\n"
-    instruct_inp_suffix: str = "\n\n### Response:\n\n"
+    def _get_help_string(self, action: argparse.Action) -> str:
+        if action.default is None:
+            return action.help or ""
+        return super()._get_help_string(action)
 
 
-def gpt_params_parse(argv=None):
-    parser = argparse.ArgumentParser(
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+def existing_file(value: str) -> Path:
+    path = Path(value).expanduser().resolve()
+    if not path.is_file():
+        raise argparse.ArgumentTypeError(f"file does not exist: {path}")
+    return path
+
+
+def gpu_layers(value: str) -> int:
+    names = {"auto": -1, "all": -2}
+    if value.lower() in names:
+        return names[value.lower()]
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("use an integer, 'auto', or 'all'") from exc
+
+
+def micro_batch(value: str) -> int:
+    if value.lower() == "auto":
+        return 0
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("use a positive integer or 'auto'") from exc
+
+
+def add_logging_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        default=None,
+        help="Enable debug-level native logs (compatibility switch).",
     )
     parser.add_argument(
-        "-s",
-        "--seed",
-        type=int,
-        default=-1,
-        help="RNG seed (use random seed for <= 0)",
-        dest="seed",
+        "--verbosity",
+        metavar="LEVEL",
+        default=None,
+        help="Native log level 0-5 or output/error/warning/info/trace/debug.",
+    )
+
+
+def add_model_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-m", "--model", required=True, type=existing_file, help="GGUF model path."
     )
     parser.add_argument(
-        "-t",
+        "--n-ctx", type=int, default=4096, help="Context size in tokens."
+    )
+    parser.add_argument(
+        "--n-batch", type=int, default=512, help="Maximum prompt decode batch size."
+    )
+    parser.add_argument(
+        "--n-ubatch",
+        type=micro_batch,
+        default="auto",
+        metavar="N|auto",
+        help="Physical micro-batch size; auto uses at most 512 tokens.",
+    )
+    parser.add_argument(
         "--threads",
         type=int,
-        default=min(4, os.cpu_count() or 1),
-        help="number of threads to use during computation",
-        dest="n_threads",
+        default=max(1, min(8, os.cpu_count() or 1)),
+        help="Threads used for generation and prompt decoding.",
     )
+    parser.add_argument(
+        "--n-gpu-layers",
+        type=gpu_layers,
+        default="auto",
+        metavar="N|auto|all",
+        help="Maximum layers to offload: an integer, 'auto', or 'all'.",
+    )
+    add_logging_arguments(parser)
+
+
+def add_generation_arguments(
+    parser: argparse.ArgumentParser, *, max_tokens: int = 256
+) -> None:
     parser.add_argument(
         "-n",
-        "--n_predict",
+        "--max-tokens",
         type=int,
-        default=128,
-        help="number of tokens to predict (-1 = infinity)",
-        dest="n_predict",
+        default=max_tokens,
+        help="Maximum generated tokens.",
     )
     parser.add_argument(
-        "--n_parts", type=int, default=-1, help="number of model parts", dest="n_parts"
+        "--temperature", type=float, default=0.8, help="Zero selects greedy output."
     )
     parser.add_argument(
-        "-c",
-        "--ctx_size",
-        type=int,
-        default=512,
-        help="size of the prompt context",
-        dest="n_ctx",
+        "--top-k", type=int, default=40, help="Keep the K most likely tokens."
     )
     parser.add_argument(
-        "-b",
-        "--batch_size",
-        type=int,
-        default=8,
-        help="batch size for prompt processing",
-        dest="n_batch",
+        "--top-p", type=float, default=0.95, help="Nucleus sampling probability."
     )
     parser.add_argument(
-        "--keep",
-        type=int,
-        default=0,
-        help="number of tokens to keep from the initial prompt",
-        dest="n_keep",
-    )
-
-    parser.add_argument(
-        "-l",
-        "--logit-bias",
-        type=str,
-        action="append",
-        help="--logit-bias TOKEN_ID(+/-)BIAS",
-        dest="logit_bias_str",
-    )
-    parser.add_argument(
-        "--ignore-eos",
-        action="store_true",
-        help="ignore end of stream token and continue generating",
-        dest="ignore_eos",
-    )
-    parser.add_argument(
-        "--top_k", type=int, default=40, help="top-k sampling", dest="top_k"
-    )
-    parser.add_argument(
-        "--top_n_sigma", type=int, default=40, help="top-n-sigma sampling", dest="top_n_sigma"
-    )
-    parser.add_argument(
-        "--top_p", type=float, default=0.95, help="top-p samplin", dest="top_p"
-    )
-    parser.add_argument(
-        "--temp", type=float, default=0.80, help="temperature", dest="temp"
-    )
-    parser.add_argument(
-        "--repeat_penalty",
+        "--repeat-penalty",
         type=float,
-        default=1.10,
-        help="penalize repeat sequence of tokens",
-        dest="repeat_penalty",
+        default=1.1,
+        help="Penalty applied to recent generated tokens.",
     )
     parser.add_argument(
-        "--repeat_last_n",
-        type=int,
-        default=64,
-        help="last n tokens to consider for penalize ",
-        dest="repeat_last_n",
-    )
-    parser.add_argument(
-        "--frequency_penalty",
-        type=float,
-        default=0.0,
-        help="repeat alpha frequency penalty (0.0 = disabled)",
-        dest="frequency_penalty",
-    )
-    parser.add_argument(
-        "--present_penalty",
-        type=float,
-        default=0.0,
-        help="repeat alpha present penalty (0.0 = disabled)",
-        dest="present_penalty",
-    )
-    parser.add_argument(
-        "--mirostat",
-        type=float,
-        default=1.0,
-        help="use Mirostat sampling.",
-        dest="mirostat",
-    )
-    parser.add_argument(
-        "--mirostat_ent",
-        type=float,
-        default=5.0,
-        help="Mirostat target entropy, parameter tau represents the average surprise value",
-        dest="mirostat_tau",
-    )
-    parser.add_argument(
-        "--mirostat_lr",
-        type=float,
-        default=0.1,
-        help="Mirostat learning rate, parameter eta",
-        dest="mirostat_eta",
+        "--seed", type=int, default=-1, help="Negative values select a random seed."
     )
 
-    parser.add_argument(
-        "--xtc_threshold",
-        type=float,
-        default=0.1,
-        help="Sets a minimum probability threshold for tokens to be removed (default: 0.1)",
-        dest="xtc_threshold",
-    )
 
-    parser.add_argument(
-        "--xtc_probability",
-        type=float,
-        default=0.0,
-        help="Sets the chance for token removal (checked once on sampler start) (default: 0.0)",
-        dest="xtc_probability",
-    )
-
-    parser.add_argument(
-        "--dry_multiplier",
-        type=float,
-        default=0.0,
-        help="Set the DRY repetition penalty multiplier. Default is 0.0, which disables DRY.",
-        dest="dry_multiplier",
-    )
-
-    parser.add_argument(
-        "--dry_base",
-        type=float,
-        default=1.75,
-        help="Set the DRY repetition penalty base value. Default is 1.75",
-        dest="dry_base",
-    )
-
-    parser.add_argument(
-        "--dry_allowed_length",
-        type=int,
-        default=2,
-        help="Tokens that extend repetition beyond this receive exponentially increasing penalty. Default is 2",
-        dest="dry_allowed_length",
-    )
-
-    parser.add_argument(
-        "--dry_penalty_last_n",
-        type=int,
-        default=64,
-        help="How many tokens to scan for repetitions. Default is 64; 0 disables scanning and -1 uses the context size",
-        dest="dry_penalty_last_n",
-    )
-
-    parser.add_argument(
-        "-m",
-        "--model",
-        type=str,
-        default="./models/llama-7B/ggml-model.bin",
-        help="model path",
-        dest="model",
-    )
-    parser.add_argument(
-        "-p", "--prompt", type=str, default=None, help="initial prompt", dest="prompt"
-    )
-    parser.add_argument(
-        "-f",
-        "--file",
-        type=str,
-        default=None,
-        help="file containing initial prompt to load",
-        dest="file",
-    )
-    parser.add_argument(
-        "--session",
-        type=str,
-        default=None,
-        help="file to cache model state in (may be large!)",
-        dest="path_session",
-    )
-    parser.add_argument(
-        "--in-prefix",
-        type=str,
-        default="",
-        help="string to prefix user inputs with",
-        dest="input_prefix",
-    )
-    parser.add_argument(
-        "--in-suffix", type=str, default="", help="append to input", dest="input_suffix"
-    )
-    parser.add_argument(
-        "-r",
-        "--reverse-prompt",
-        type=str,
-        action="append",
-        help="poll user input upon seeing PROMPT (can be\nspecified more than once for multiple prompts).",
-        dest="antiprompt",
-    )
-
-    parser.add_argument(
-        "--lora",
-        type=str,
-        default="",
-        help="apply LoRA adapter (implies --no-mmap)",
-        dest="lora_adapter",
-    )
-    parser.add_argument(
-        "--lora-base",
-        type=str,
-        default="",
-        help="optional model to use as a base for the layers modified by the LoRA adapter",
-        dest="lora_base",
-    )
-
-    parser.add_argument(
-        "--memory_f32",
-        action="store_false",
-        help="use f32 instead of f16 for memory key+value",
-        dest="memory_f16",
-    )
-    parser.add_argument(
-        "--random-prompt",
-        action="store_true",
-        help="start with a randomized prompt.",
-        dest="random_prompt",
-    )
-    parser.add_argument(
-        "--color",
-        action="store_true",
-        help="colorise output to distinguish prompt and user input from generations",
-        dest="use_color",
-    )
-    parser.add_argument(
-        "-i",
-        "--interactive",
-        action="store_true",
-        help="run in interactive mode",
-        dest="interactive",
-    )
-
-    parser.add_argument("--embedding", action="store_true", help="", dest="embedding")
-    parser.add_argument(
-        "--interactive-first",
-        action="store_true",
-        help="run in interactive mode and wait for input right away",
-        dest="interactive_start",
-    )
-
-    parser.add_argument(
-        "-ins",
-        "--instruct",
-        action="store_true",
-        help="run in instruction mode (use with Alpaca or Vicuna models)",
-        dest="instruct",
-    )
-    parser.add_argument(
-        "--perplexity",
-        action="store_true",
-        help="compute perplexity over the prompt",
-        dest="perplexity",
-    )
-    parser.add_argument(
-        "--no-mmap",
-        action="store_false",
-        help="do not memory-map model (slower load but may reduce pageouts if not using mlock)",
-        dest="use_mmap",
-    )
-    parser.add_argument(
-        "--mlock",
-        action="store_true",
-        help="force system to keep model in RAM rather than swapping or compressing",
-        dest="use_mlock",
-    )
-    parser.add_argument(
-        "--mtest",
-        action="store_true",
-        help="compute maximum memory usage",
-        dest="mem_test",
-    )
-    parser.add_argument(
-        "--verbose-prompt",
-        action="store_true",
-        help="print prompt before generation",
-        dest="verbose_prompt",
-    )
-
-    # Custom args
-    parser.add_argument(
-        "--fix-prefix",
-        type=str,
-        default="",
-        help="append to input when generated n_predict tokens",
-        dest="fix_prefix",
-    )
-    parser.add_argument(
-        "--input-noecho",
-        action="store_false",
-        help="dont output the input",
-        dest="input_echo",
-    )
-
-    parser.add_argument(
-        "--interactive-start",
-        action="store_true",
-        help="run in interactive mode",
-        dest="interactive",
-    )
-
-    args = parser.parse_args(argv)
-
-    logit_bias_str = args.logit_bias_str
-    delattr(args, "logit_bias_str")
-    params = GptParams(**vars(args))
-
-    if params.lora_adapter:
-        params.use_mmap = False
-
-    if logit_bias_str != None:
-        for i in logit_bias_str:
-            if m := re.match(r"(\d+)([-+]\d+)", i):
-                params.logit_bias[int(m.group(1))] = float(m.group(2))
-
-    return params
+def validate_positive(parser: argparse.ArgumentParser, **values: int) -> None:
+    for name, value in values.items():
+        if value <= 0:
+            parser.error(f"--{name.replace('_', '-')} must be greater than zero")
 
 
-def gpt_random_prompt(rng):
-    return [
-        "So",
-        "Once upon a time",
-        "When",
-        "The",
-        "After",
-        "If",
-        "import",
-        "He",
-        "She",
-        "They",
-    ][rng % 10]
+def validate_generation(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.temperature < 0:
+        parser.error("--temperature must be zero or greater")
+    if args.top_k < 0:
+        parser.error("--top-k must be zero or greater")
+    if not 0 < args.top_p <= 1:
+        parser.error("--top-p must be greater than zero and at most one")
+    if args.repeat_penalty <= 0:
+        parser.error("--repeat-penalty must be greater than zero")
+    if args.seed > 0xFFFFFFFF:
+        parser.error("--seed must fit in an unsigned 32-bit integer")
 
 
-if __name__ == "__main__":
-    print(gpt_params_parse())
+def validate_model_arguments(
+    parser: argparse.ArgumentParser, args: argparse.Namespace
+) -> None:
+    if args.n_ubatch == 0:
+        args.n_ubatch = min(args.n_batch, 512)
+    validate_positive(
+        parser,
+        n_ctx=args.n_ctx,
+        n_batch=args.n_batch,
+        n_ubatch=args.n_ubatch,
+        threads=args.threads,
+    )
+    if args.n_batch > args.n_ctx:
+        parser.error("--n-batch must not exceed --n-ctx")
+    if args.n_ubatch > args.n_batch:
+        parser.error("--n-ubatch must not exceed --n-batch")
+
+
+def run_cli(entrypoint: Callable[[], int]) -> int:
+    try:
+        return entrypoint()
+    except (RuntimeError, ValueError) as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        return 130
