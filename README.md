@@ -2110,33 +2110,35 @@ python3 -m llama_cpp.server --hf_model_repo_id Qwen/Qwen2-0.5B-Instruct-GGUF --m
 
 ## Low-level API
 
-[API Reference](https://llama-cpp-python.readthedocs.io/en/latest/api-reference/#low-level-api)
+[Low-level tutorial and examples](examples/low_level_api/README.md)
 
-The low-level API is a direct [`ctypes`](https://docs.python.org/3/library/ctypes.html) binding to the C API provided by `llama.cpp`.
-The entire low-level API can be found in [llama_cpp/llama_cpp.py](https://github.com/abetlen/llama-cpp-python/blob/master/llama_cpp/llama_cpp.py) and directly mirrors the C API in [llama.h](https://github.com/ggerganov/llama.cpp/blob/master/llama.h).
+The low-level API exposes direct [`ctypes`](https://docs.python.org/3/library/ctypes.html)
+bindings for the current native APIs:
 
-Below is a short example demonstrating how to use the low-level API to tokenize a prompt:
+- [`llama_cpp/llama_cpp.py`](llama_cpp/llama_cpp.py) mirrors
+  [`llama.h`](vendor/llama.cpp/include/llama.h).
+- [`llama_cpp/mtmd_cpp.py`](llama_cpp/mtmd_cpp.py) mirrors the multimodal
+  `mtmd` API.
+- [`llama_cpp/_ggml.py`](llama_cpp/_ggml.py) contains the supported `ggml`
+  backend bindings.
 
-```python
-import llama_cpp
-import ctypes
-llama_cpp.llama_backend_init(False) # Must be called once at the start of each program
-params = llama_cpp.llama_context_default_params()
-# use bytes for char * params
-model = llama_cpp.llama_load_model_from_file(b"./models/7b/llama-model.gguf", params)
-ctx = llama_cpp.llama_new_context_with_model(model, params)
-max_tokens = params.n_ctx
-# use ctypes arrays for array params
-tokens = (llama_cpp.llama_token * int(max_tokens))()
-n_tokens = llama_cpp.llama_tokenize(ctx, b"Q: Name the planets in the solar system? A: ", tokens, max_tokens, llama_cpp.c_bool(True))
-llama_cpp.llama_free(ctx)
+The low-level examples cover streaming generation, chat templates, a
+reason/action tool loop, and model quantization. Start with the tutorial in
+[`examples/low_level_api`](examples/low_level_api):
+
+```bash
+python examples/low_level_api/generate.py -m path/to/model.gguf -p "Explain why the sky is blue:" --n-ctx 4096 --max-tokens 256 --n-gpu-layers auto --verbosity info
 ```
 
-Check out the [examples folder](examples/low_level_api) for more examples of using the low-level API.
+Run an example with `-h` for its complete options. The shared runtime
+demonstrates the current model/context lifecycle, vocabulary-based
+tokenization, `llama_batch` decoding, sampler chains, dynamic backend loading,
+and native logging configuration.
 
 ## Documentation
 
-Documentation is available via [https://llama-cpp-python.readthedocs.io/](https://llama-cpp-python.readthedocs.io/).
+Documentation is maintained in [`docs/wiki`](docs/wiki) and published to the
+[project wiki](https://github.com/JamePeng/llama-cpp-python/wiki).
 If you find any issues with the documentation, please open an issue or submit a PR.
 
 ## Development
