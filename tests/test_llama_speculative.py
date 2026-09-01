@@ -805,15 +805,11 @@ class _FakeDFlashDraftContext:
         self.fused = fused
         self.confidence = confidence
         self.decoded = []
-        self.encoded = []
         self.synchronized = False
         self.removals = []
 
     def n_ubatch(self):
         return 8
-
-    def encode(self, batch):
-        self.encoded.append(batch.embeddings.copy())
 
     def decode(self, batch):
         self.decoded.append(
@@ -852,6 +848,7 @@ def _draft_test_dflash_engine(*, dspark, sample_from_anchor, p_min=0.0):
     engine.selector_top_k = 0
     engine.sample_from_anchor = sample_from_anchor
     engine.draft_limit = 3
+    engine.draft_min = engine.config.draft_n_min
     engine.mask_token_id = 99
     engine.n_embd_dec = 2
     engine.noise_batch = _FakeDFlashBatch()
@@ -890,6 +887,20 @@ def test_dspark_anchor_layout_uses_confidence_to_truncate_block():
 
     assert engine.noise_batch.tokens == [42, 99, 99]
     assert result.tolist() == [100]
+
+
+def test_dflash_uses_block_clamped_minimum_draft_length():
+    engine = _draft_test_dflash_engine(
+        dspark=False, sample_from_anchor=True, p_min=0.0
+    )
+    engine.config.draft_n_min = 3
+    engine.draft_limit = 1
+    engine.draft_min = 1
+    engine.draft_context = _FakeDFlashDraftContext()
+
+    result = engine.draft([], n_past=7, id_last=42, n_max=3)
+
+    assert result.tolist() == [101]
 
 
 def test_dflash2_walks_selector_lattice_without_requesting_logits():
@@ -950,6 +961,7 @@ def test_dflash2_configures_unmasked_nextn_without_backend_sampling(
 ):
     engine = object.__new__(LlamaDFlashDecoding)
     engine.is_dflash2 = is_dflash2
+    engine.causal_attn = True
     engine.target_layer_ids = [2, 5]
     backend_calls = []
     engine._enable_backend_sampling = lambda internals: backend_calls.append(
@@ -983,15 +995,23 @@ def test_dflash2_configures_unmasked_nextn_without_backend_sampling(
     assert len(backend_calls) == expected_backend_calls
     assert engine.target_context.layers == [(2, True), (5, True)]
     assert engine.draft_context.nextn == [(True, expected_masked)]
-    assert engine.draft_context.causal == [False]
+    assert engine.draft_context.causal == [True]
 
 
-def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
+def test_dspark_probability_filter_requires_confidence_head():
+    metadata = {"dflash.has_confidence_head": "false"}
+
+    with pytest.raises(ValueError, match="no confidence head"):
+        LlamaDFlashDecoding._validate_dspark_confidence_head(metadata, 0.1)
+
+    LlamaDFlashDecoding._validate_dspark_confidence_head(metadata, 0.0)
+
+
+def test_dflash_process_interleaves_target_layers_for_fused_injection():
     engine = object.__new__(LlamaDFlashDecoding)
     engine.target_layer_ids = [1, 3]
     engine.n_embd_tgt = 2
     engine.n_embd_enc = 4
-    engine.n_embd_dec = 3
     layer_1 = np.asarray([[1, 2], [3, 4]], dtype=np.float32)
     layer_3 = np.asarray([[10, 20], [30, 40]], dtype=np.float32)
 
@@ -1002,10 +1022,8 @@ def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
                 ctypes.POINTER(ctypes.c_float)
             )
 
-    fused = np.asarray([[5, 6, 7], [8, 9, 10]], dtype=np.float32)
     engine.target_context = _TargetContext()
-    engine.draft_context = _FakeDFlashDraftContext(fused=fused)
-    engine.encoder_batch = _FakeDFlashBatch()
+    engine.draft_context = _FakeDFlashDraftContext()
     engine.inject_batch = _FakeDFlashBatch()
     engine.verify_positions = []
     engine.is_mrope = False
@@ -1021,20 +1039,19 @@ def test_dflash_process_interleaves_target_layers_and_injects_fused_rows():
     engine.process(_TargetBatch())
 
     np.testing.assert_array_equal(
-        engine.draft_context.encoded[0].reshape(2, 4),
+        engine.draft_context.decoded[0][2].reshape(2, 4),
         [[1, 2, 10, 20], [3, 4, 30, 40]],
     )
-    np.testing.assert_array_equal(
-        engine.draft_context.decoded[0][2].reshape(2, 3), fused
-    )
     assert engine.draft_context.decoded[0][1] == [4, 5]
-    assert engine.draft_context.synchronized
     assert engine.verify_positions == [4, 5]
-    assert engine.encoder_batch.logits == [True, True]
+    np.testing.assert_array_equal(
+        engine.verify_features,
+        [[1, 2, 10, 20], [3, 4, 30, 40]],
+    )
     assert engine.inject_batch.logits == []
 
 
-def test_dflash_mrope_process_uses_target_positions_for_encoder_and_injection():
+def test_dflash_mrope_process_uses_target_positions_for_fused_injection():
     engine = object.__new__(LlamaDFlashDecoding)
     engine.target_layer_ids = [1]
     engine.n_embd_tgt = 2
@@ -1050,10 +1067,8 @@ def test_dflash_mrope_process_uses_target_positions_for_encoder_and_injection():
                 ctypes.POINTER(ctypes.c_float)
             )
 
-    fused = np.asarray([[5, 6], [7, 8]], dtype=np.float32)
     engine.target_context = _TargetContext()
-    engine.draft_context = _FakeDFlashDraftContext(fused=fused)
-    engine.encoder_batch = _FakeDFlashBatch()
+    engine.draft_context = _FakeDFlashDraftContext()
     engine.inject_batch = _FakeDFlashBatch()
     engine.verify_positions = []
 
@@ -1068,21 +1083,44 @@ def test_dflash_mrope_process_uses_target_positions_for_encoder_and_injection():
     engine.process(_TargetBatch())
 
     expected = [[4, 5], [4, 5], [4, 5], [0, 0]]
-    assert engine.encoder_batch.mrope_positions == expected
     assert engine.inject_batch.mrope_positions == expected
     assert engine.verify_positions == [4, 5]
 
 
-def test_dflash_rejects_multimodal_embedding_batches_until_positions_are_mapped():
+def test_dflash_processes_target_embedding_batches_from_extracted_features():
     engine = object.__new__(LlamaDFlashDecoding)
+    engine.target_layer_ids = [1]
+    engine.n_embd_tgt = 2
+    engine.n_embd_enc = 2
+    engine.is_mrope = False
+    target_rows = np.asarray([[1, 2]], dtype=np.float32)
+
+    class _TargetContext:
+        def get_embeddings_layer_inp(self, layer_id):
+            assert layer_id == 1
+            return target_rows.ctypes.data_as(
+                ctypes.POINTER(ctypes.c_float)
+            )
+
+    engine.target_context = _TargetContext()
+    engine.draft_context = _FakeDFlashDraftContext()
+    engine.inject_batch = _FakeDFlashBatch()
+    engine.verify_positions = []
 
     class _EmbeddingBatch:
         n_tokens = 1
         token = None
         embd = [0.0]
+        pos = [7]
+        n_seq_id = [1]
+        seq_id = [[0]]
 
-    with pytest.raises(NotImplementedError, match="text-only"):
-        engine.process(_EmbeddingBatch())
+    engine.process(_EmbeddingBatch())
+
+    np.testing.assert_array_equal(
+        engine.draft_context.decoded[0][2], [1, 2]
+    )
+    assert engine.draft_context.decoded[0][1] == [7]
 
 
 def test_dflash_accepts_final_target_layer_input_tap_for_nemotron():
@@ -1111,9 +1149,10 @@ def test_dflash_native_checkpoint_uses_suffix_removal_without_state_buffer():
     engine = object.__new__(LlamaDFlashDecoding)
     engine.draft_context = _FakeCheckpointContext(position=7, state_size=8)
     engine._use_native_draft_rollback = True
+    engine.n_embd_enc = 2
     engine.n_embd_dec = 2
     engine.verify_positions = [8, 9]
-    engine.verify_fused = np.ones((2, 2), dtype=np.float32)
+    engine.verify_features = np.ones((2, 2), dtype=np.float32)
     engine._active_verification_checkpoint = None
     engine.reset_checkpoint_stats()
 
@@ -1142,9 +1181,10 @@ def test_dflash_can_follow_target_rollback_with_device_draft_checkpoints():
 def test_dflash_device_checkpoint_restore_reclaims_noise_suffix():
     engine = object.__new__(LlamaDFlashDecoding)
     engine.draft_context = _FakeCheckpointContext(position=7, state_size=8)
+    engine.n_embd_enc = 2
     engine.n_embd_dec = 2
     engine.verify_positions = [8, 9]
-    engine.verify_fused = np.ones((2, 2), dtype=np.float32)
+    engine.verify_features = np.ones((2, 2), dtype=np.float32)
     engine._active_verification_checkpoint = {"position": 7}
     engine.reset_checkpoint_stats()
     checkpoint = {
@@ -1162,13 +1202,14 @@ def test_dflash_device_checkpoint_restore_reclaims_noise_suffix():
     assert engine.checkpoint_stats()["device_restores"] == 1
 
 
-def test_dflash_device_checkpoint_rollback_replays_accepted_fused_prefix():
+def test_dflash_device_checkpoint_rollback_replays_accepted_feature_prefix():
     engine = object.__new__(LlamaDFlashDecoding)
     engine._use_native_draft_rollback = False
     engine.verify_positions = [8, 9, 10]
-    engine.verify_fused = np.asarray(
+    engine.verify_features = np.asarray(
         [[1, 2], [3, 4], [5, 6]], dtype=np.float32
     )
+    engine.n_embd_enc = 2
     engine.n_embd_dec = 2
     engine.inject_batch = _FakeDFlashBatch()
     engine.draft_context = _FakeDFlashDraftContext()
@@ -1177,7 +1218,7 @@ def test_dflash_device_checkpoint_rollback_replays_accepted_fused_prefix():
     def restore(checkpoint, seq_id=0):
         restored.append(checkpoint)
         engine.verify_positions.clear()
-        engine.verify_fused = np.empty((0, 2), dtype=np.float32)
+        engine.verify_features = np.empty((0, 2), dtype=np.float32)
 
     engine.restore = restore
     engine.rollback_verified({"position": 7}, n_accepted=1)
@@ -1187,7 +1228,6 @@ def test_dflash_device_checkpoint_rollback_replays_accepted_fused_prefix():
         engine.draft_context.decoded[0][2].reshape(2, 2), [[1, 2], [3, 4]]
     )
     assert engine.draft_context.decoded[0][1] == [8, 9]
-    assert engine.draft_context.synchronized
 
 
 def test_dflash_checkpoint_truncation_replays_only_the_accepted_prefix():
@@ -1195,9 +1235,10 @@ def test_dflash_checkpoint_truncation_replays_only_the_accepted_prefix():
     engine._use_native_draft_rollback = False
     engine._active_verification_checkpoint = {"position": 7}
     engine.verify_positions = [8, 9, 10]
-    engine.verify_fused = np.asarray(
+    engine.verify_features = np.asarray(
         [[1, 2], [3, 4], [5, 6]], dtype=np.float32
     )
+    engine.n_embd_enc = 2
     engine.n_embd_dec = 2
     engine.inject_batch = _FakeDFlashBatch()
     engine.draft_context = _FakeDFlashDraftContext()
@@ -1211,4 +1252,3 @@ def test_dflash_checkpoint_truncation_replays_only_the_accepted_prefix():
         engine.draft_context.decoded[0][2].reshape(2, 2), [[1, 2], [3, 4]]
     )
     assert engine.draft_context.decoded[0][1] == [8, 9]
-    assert engine.draft_context.synchronized

@@ -1891,14 +1891,14 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     """Python orchestration for llama.cpp's DFlash and DSpark draft graphs.
 
-    Both algorithms extract configured target-layer inputs, fuse them with the
-    draft encoder, inject the fused rows into the draft KV cache, and decode a
-    non-causal mask block in one pass.  DSpark reuses the same graph and cache
-    path but reads its Markov/confidence outputs differently.
+    Both algorithms extract configured target-layer inputs and pass them to a
+    fused encoder/KV-injection decode before generating a draft block. DSpark
+    reuses the same graph and cache path but reads its Markov/confidence outputs
+    differently.
 
-    Target token batches support both scalar and M-RoPE draft positions. Direct
-    MTMD embedding batches remain unsupported until their four-dimensional
-    target positions can be mapped into the speculative process hook.
+    Target token and embedding batches support scalar positions. M-RoPE draft
+    sidecars repeat the target text position across the first three position
+    planes and clear the fourth, matching llama.cpp's fused injection path.
     """
 
     def __init__(
@@ -1911,7 +1911,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         context_params: Any,
         verbose: bool = True,
     ) -> None:
-        """Load a DFlash/DSpark sidecar and create its three-stage draft graph."""
+        """Load a DFlash/DSpark sidecar and create its fused draft graph."""
         from llama_cpp import _internals as internals
         from llama_cpp import llama_cpp as llama_cpp_lib
 
@@ -1935,7 +1935,6 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         self.draft_model = None
         self.draft_context = None
         self.noise_batch = None
-        self.encoder_batch = None
         self.inject_batch = None
 
         self.draft_model = self._load_draft_model(
@@ -1974,12 +1973,20 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             self.sample_from_anchor = self._metadata_bool(
                 metadata, "dflash.sample_from_anchor", True
             )
+            self.causal_attn = self._metadata_bool(
+                metadata, "dflash.attention.causal", False
+            )
+            if self.is_dspark:
+                self._validate_dspark_confidence_head(
+                    metadata, config.draft_p_min
+                )
             trained_limit = (
                 self.block_size
                 if self.is_dspark and self.sample_from_anchor
                 else self.block_size - 1
             )
             self.draft_limit = min(config.draft_n_max, trained_limit)
+            self.draft_min = min(config.draft_n_min, trained_limit)
             if self.draft_limit <= 0:
                 raise ValueError("DFlash resolved draft length must be positive")
 
@@ -2000,9 +2007,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 int(draft_ctx_params.n_ubatch), block_capacity
             )
             draft_ctx_params.n_outputs_max = block_capacity
-            # Keeping a complete block in one sequence prevents the backend
-            # from splitting the non-causal DFlash verification graph.
-            draft_ctx_params.n_outputs_max_per_seq = block_capacity
+            draft_ctx_params.n_outputs_max_per_seq = (
+                block_capacity if config.draft_backend_sampling else 1
+            )
             self.draft_context = internals.LlamaContext(
                 model=self.draft_model,
                 params=draft_ctx_params,
@@ -2014,20 +2021,13 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 n_seq_max=1,
                 verbose=verbose,
             )
-            self.encoder_batch = internals.LlamaBatch(
+            self.inject_batch = internals.LlamaBatch(
                 n_tokens=self.draft_context.n_ubatch(),
                 embd=self.n_embd_enc,
                 n_seq_max=1,
                 verbose=verbose,
             )
-            self.inject_batch = internals.LlamaBatch(
-                n_tokens=self.draft_context.n_ubatch(),
-                embd=self.n_embd_dec,
-                n_seq_max=1,
-                verbose=verbose,
-            )
             if self.is_mrope:
-                self.encoder_batch.enable_mrope_positions()
                 self.inject_batch.enable_mrope_positions()
 
             self._configure_draft_execution(internals)
@@ -2042,7 +2042,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             self._pending_verification_checkpoint = None
             self._active_verification_checkpoint = None
             self.verify_positions: List[int] = []
-            self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+            self.verify_features = np.empty(
+                (0, self.n_embd_enc), dtype=np.float32
+            )
             self.reset_checkpoint_stats()
         except BaseException:
             self.close()
@@ -2070,7 +2072,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         self.draft_context.set_embeddings_nextn(
             True, masked=not self.is_dflash2
         )
-        self.draft_context.set_causal_attn(False)
+        self.draft_context.set_causal_attn(self.causal_attn)
 
     @staticmethod
     def _validate_target_layer_ids(
@@ -2097,6 +2099,18 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             return False
         raise ValueError(f"Invalid boolean GGUF metadata {key}={value!r}")
 
+    @classmethod
+    def _validate_dspark_confidence_head(
+        cls, metadata: Dict[str, str], p_min: float
+    ) -> None:
+        """Require DSpark confidence outputs when probability filtering is active."""
+        if p_min > 0.0 and not cls._metadata_bool(
+            metadata, "dflash.has_confidence_head", True
+        ):
+            raise ValueError(
+                "DSpark draft has no confidence head; set draft_p_min=0"
+            )
+
     def _print_runtime_configuration(self) -> None:
         """Print resolved DFlash/DSpark model, block, and context settings."""
         if self.is_dspark:
@@ -2116,6 +2130,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             f"model={self.config.draft_model_path!r}, "
             f"draft_n_min={self.config.draft_n_min}, "
             f"draft_n_max={self.config.draft_n_max}, "
+            f"resolved_n_min={self.draft_min}, "
             f"resolved_n_max={self.draft_limit}, "
             f"draft_p_min={self.config.draft_p_min:g}",
             file=sys.stderr,
@@ -2124,6 +2139,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             "LlamaDFlashDecoding: "
             f"block_size={self.block_size}, mask_token={self.mask_token_id}, "
             f"sample_from_anchor={self.sample_from_anchor}, "
+            f"causal_attn={self.causal_attn}, "
             f"selector_top_k={self.selector_top_k}, "
             f"mrope={self.is_mrope}, "
             f"target_layers={self.target_layer_ids}, "
@@ -2140,7 +2156,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             f"draft_n_rs_seq={self.draft_context.n_rs_seq()}, "
             f"draft_checkpoint="
             f"{'native' if self._use_native_draft_rollback else 'on-device'}, "
-            "multimodal=text-only",
+            "target_batches=token-or-embedding",
             file=sys.stderr,
         )
 
@@ -2165,6 +2181,10 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         features = np.empty((count, self.n_embd_enc), dtype=np.float32)
         for layer_index, layer_id in enumerate(self.target_layer_ids):
             pointer = self.target_context.get_embeddings_layer_inp(layer_id)
+            if not pointer:
+                raise RuntimeError(
+                    f"DFlash target layer {layer_id} input was not extracted"
+                )
             rows = np.ctypeslib.as_array(
                 pointer, shape=(batch_rows * self.n_embd_tgt,)
             ).reshape(batch_rows, self.n_embd_tgt)
@@ -2175,7 +2195,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         return features
 
     def process(self, batch: Any, seq_id: int = 0) -> None:
-        """Fuse target-layer rows and inject them into the draft context cache."""
+        """Inject target-layer rows through the fused draft encoder/cache graph."""
         if seq_id != 0:
             raise NotImplementedError(
                 "DFlash speculative decoding currently supports seq_id=0"
@@ -2183,12 +2203,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         n_tokens = int(batch.n_tokens)
         if n_tokens <= 0:
             return
-        if bool(batch.embd):
-            raise NotImplementedError(
-                "DFlash/DSpark speculative decoding is currently text-only; "
-                "MTMD embedding batches require four-dimensional position mapping"
-            )
-        if not bool(batch.token):
+        has_tokens = bool(batch.token)
+        has_embeddings = bool(batch.embd)
+        if has_tokens == has_embeddings:
             return
 
         for i in range(n_tokens):
@@ -2198,62 +2215,31 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 )
 
         chunk_size = self.draft_context.n_ubatch()
-        fused_chunks: List[npt.NDArray[np.float32]] = []
+        feature_chunks: List[npt.NDArray[np.float32]] = []
         for offset in range(0, n_tokens, chunk_size):
             count = min(chunk_size, n_tokens - offset)
             positions = [int(batch.pos[offset + i]) for i in range(count)]
             features = self._gather_target_features(
                 batch_rows=n_tokens, offset=offset, count=count
             )
+            feature_chunks.append(features)
+            self._inject_target_features(features, positions, seq_id=seq_id)
 
-            self.encoder_batch.reset()
-            if self.is_mrope:
-                self.encoder_batch.add_embeddings_mrope(
-                    features.reshape(-1),
-                    pos_array=[
-                        positions,
-                        positions,
-                        positions,
-                        [0] * count,
-                    ],
-                    seq_ids=[0],
-                    logits_array=[True] * count,
-                )
-            else:
-                self.encoder_batch.add_embeddings(
-                    features.reshape(-1),
-                    pos_array=list(range(count)),
-                    seq_ids=[0],
-                    logits_array=[True] * count,
-                )
-            self.draft_context.encode(self.encoder_batch)
-            fused = self._copy_rows(
-                self.draft_context.get_embeddings_nextn(),
-                count,
-                self.n_embd_dec,
-            )
-            fused_chunks.append(fused)
-
-            self._inject_fused_rows(fused, positions, seq_id=seq_id)
-
-        # Match the server's context-switch boundary: all injected rows must be
-        # complete before draft() reads the cache on a potentially other backend.
-        self.draft_context.synchronize()
         self.verify_positions = [int(batch.pos[i]) for i in range(n_tokens)]
-        self.verify_fused = np.concatenate(fused_chunks, axis=0)
+        self.verify_features = np.concatenate(feature_chunks, axis=0)
 
-    def _inject_fused_rows(
+    def _inject_target_features(
         self,
-        fused: npt.NDArray[np.float32],
+        features: npt.NDArray[np.float32],
         positions: Sequence[int],
         *,
         seq_id: int,
     ) -> None:
-        """Inject already-fused target rows, chunking at the draft ubatch."""
-        if len(positions) != len(fused):
+        """Encode and inject target features, chunking at the draft ubatch."""
+        if len(positions) != len(features):
             raise ValueError(
-                "DFlash fused row/position mismatch: "
-                f"{len(fused)} != {len(positions)}"
+                "DFlash feature row/position mismatch: "
+                f"{len(features)} != {len(positions)}"
             )
         chunk_size = self.draft_context.n_ubatch()
         for offset in range(0, len(positions), chunk_size):
@@ -2262,7 +2248,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             chunk_positions = positions[offset : offset + count]
             if getattr(self, "is_mrope", False):
                 self.inject_batch.add_embeddings_mrope(
-                    fused[offset : offset + count].reshape(-1),
+                    features[offset : offset + count].reshape(-1),
                     pos_array=[
                         chunk_positions,
                         chunk_positions,
@@ -2273,7 +2259,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 )
             else:
                 self.inject_batch.add_embeddings(
-                    fused[offset : offset + count].reshape(-1),
+                    features[offset : offset + count].reshape(-1),
                     pos_array=chunk_positions,
                     seq_ids=[seq_id],
                 )
@@ -2281,7 +2267,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             if status != 0:
                 raise RuntimeError(
                     "DFlash KV injection failed with status "
-                    f"{status} at fused row offset {offset}"
+                    f"{status} at feature row offset {offset}"
                 )
 
     def checkpoint(self, seq_id: int = 0) -> Any:
@@ -2380,7 +2366,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     raise RuntimeError("DFlash native draft-context rollback failed")
                 self._checkpoint_stats["native_restores"] += 1
             self.verify_positions.clear()
-            self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+            self.verify_features = np.empty(
+                (0, self.n_embd_enc), dtype=np.float32
+            )
             self._active_verification_checkpoint = None
         finally:
             self._checkpoint_stats["restores"] += 1
@@ -2419,7 +2407,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     def rollback_verified(
         self, checkpoint: Any, n_accepted: int, seq_id: int = 0
     ) -> None:
-        """Discard rejected rows or restore and replay the accepted fused prefix."""
+        """Discard rejected rows or restore and replay accepted target features."""
         if seq_id != 0:
             raise NotImplementedError(
                 "DFlash speculative decoding currently supports seq_id=0"
@@ -2430,18 +2418,19 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             return
         if not self._use_native_draft_rollback:
             accepted_positions = self.verify_positions[:count]
-            accepted_fused = self.verify_fused[:count].copy()
+            accepted_features = self.verify_features[:count].copy()
             self.restore(checkpoint, seq_id)
-            self._inject_fused_rows(
-                accepted_fused, accepted_positions, seq_id=seq_id
+            self._inject_target_features(
+                accepted_features, accepted_positions, seq_id=seq_id
             )
-            self.draft_context.synchronize()
             return
         position = self.verify_positions[count - 1] + 1
         if not self.draft_context.memory_seq_rm(seq_id, position, -1):
             raise RuntimeError("DFlash native verification rollback failed")
         self.verify_positions.clear()
-        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self.verify_features = np.empty(
+            (0, self.n_embd_enc), dtype=np.float32
+        )
         self._active_verification_checkpoint = None
         self._checkpoint_stats["native_verification_rollbacks"] += 1
 
@@ -2462,15 +2451,16 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 )
             keep = sum(pos < position for pos in self.verify_positions)
             accepted_positions = self.verify_positions[:keep]
-            accepted_fused = self.verify_fused[:keep].copy()
+            accepted_features = self.verify_features[:keep].copy()
             self.restore(checkpoint, seq_id)
             if keep:
-                self._inject_fused_rows(
-                    accepted_fused, accepted_positions, seq_id=seq_id
+                self._inject_target_features(
+                    accepted_features, accepted_positions, seq_id=seq_id
                 )
-                self.draft_context.synchronize()
         self.verify_positions.clear()
-        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self.verify_features = np.empty(
+            (0, self.n_embd_enc), dtype=np.float32
+        )
         self._active_verification_checkpoint = None
 
     def draft(
@@ -2549,7 +2539,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         finally:
             self.restore(checkpoint, seq_id)
 
-        if len(result) < self.config.draft_n_min:
+        if len(result) < self.draft_min:
             result.clear()
         if result:
             self._pending_verification_checkpoint = checkpoint
@@ -2598,7 +2588,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 "DFlash speculative decoding currently supports seq_id=0"
             )
         self.verify_positions.clear()
-        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self.verify_features = np.empty(
+            (0, self.n_embd_enc), dtype=np.float32
+        )
         self._active_verification_checkpoint = None
 
     def clear(self) -> None:
@@ -2608,7 +2600,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         self._pending_verification_checkpoint = None
         self._active_verification_checkpoint = None
         self.verify_positions.clear()
-        self.verify_fused = np.empty((0, self.n_embd_dec), dtype=np.float32)
+        self.verify_features = np.empty(
+            (0, self.n_embd_enc), dtype=np.float32
+        )
         if self.draft_context is not None:
             self.draft_context.memory_clear(True)
         self._reset_backend_sampler()
@@ -2622,7 +2616,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
         self._close_draft_resources(
             errors,
-            batch_names=("noise_batch", "encoder_batch", "inject_batch"),
+            batch_names=("noise_batch", "inject_batch"),
             close_model=True,
         )
 
