@@ -34,6 +34,7 @@ This package provides:
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
         - Support Models Lists
         - [Introducing Generic MTMD Chat Handler](https://github.com/JamePeng/llama-cpp-python#generic-mtmd-chat-handler)
+        - [Loading a Local Video With Generic MTMD](https://github.com/JamePeng/llama-cpp-python#loading-a-local-video-with-generic-mtmd)
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
         - [Speech Recognition With Qwen3-ASR (Speech-to-Text)](https://github.com/JamePeng/llama-cpp-python#speech-recognition-with-qwen3-asr-speech-to-text)
         - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--text)
@@ -1177,20 +1178,24 @@ python -m examples.benchmark.benchmark_speculative -h
 
 ## Multi-modal Models
 
-`llama-cpp-python` supports such as llava1.5 which allow the language model to read information from both text and images.
+`llama-cpp-python` provides MTMD-based multimodal input for compatible GGUF
+models. Depending on the model and its multimodal projector (`mmproj`), inputs
+can include images, audio, and video in addition to text. Video is implemented
+as timestamped image-frame sampling through the llama.cpp MTMD helper and
+therefore requires a vision-capable projector plus `ffmpeg` and `ffprobe`.
 
 Below are the supported multi-modal models and their respective chat handlers (Python API) and chat formats (Server API).
 
-| Model | `LlamaChatHandler` | `chat_format` |
+| Model | MTMD chat handler | `chat_format` |
 |:--- |:--- |:--- |
 | [llava-v1.5-7b](https://huggingface.co/mys/ggml_llava-v1.5-7b) | `Llava15ChatHandler` | `llava-1-5` |
 | [llava-v1.6-34b](https://huggingface.co/cjpais/llava-v1.6-34B-gguf) | `Llava16ChatHandler` | `llava-1-6` |
 | [moondream2](https://huggingface.co/vikhyatk/moondream2) | `MoondreamChatHandler` | `moondream2` |
-| [nanollava](https://huggingface.co/abetlen/nanollava-gguf) | `NanollavaChatHandler` | `nanollava` |
+| [nanollava](https://huggingface.co/abetlen/nanollava-gguf) | `NanoLlavaChatHandler` | `nanollava` |
 | [llama-3-vision-alpha](https://huggingface.co/abetlen/llama-3-vision-alpha-gguf) | `Llama3VisionAlphaChatHandler` | `llama-3-vision-alpha` |
 | [minicpm-v-2.6](https://huggingface.co/openbmb/MiniCPM-V-2_6-gguf) | `MiniCPMv26ChatHandler` | `minicpm-v-2.6`, `minicpm-v-4.0` |
 | [minicpm-v-4.5](https://huggingface.co/openbmb/MiniCPM-V-4_5-gguf) | `MiniCPMv45ChatHandler` | `minicpm-v-4.5` |
-| [minicpm-v-4.6](https://huggingface.co/openbmb/MiniCPM-V-4.6-gguf) | `MiniCPMv46ChatHandler` | `minicpm-v-4.6` |
+| [minicpm-v-4.6](https://huggingface.co/openbmb/MiniCPM-V-4.6-gguf) | `MiniCPMV46ChatHandler` | `minicpm-v-4.6` |
 | [gemma3](https://huggingface.co/unsloth/gemma-3-27b-it-GGUF) | `Gemma3ChatHandler` | `gemma3` |
 | [gemma4](https://huggingface.co/unsloth/gemma-4-26B-A4B-it-GGUF) | `Gemma4ChatHandler` | `gemma4` |
 | [glm4.1v](https://huggingface.co/unsloth/GLM-4.1V-9B-Thinking-GGUF) | `GLM41VChatHandler` | `glm4.1v` |
@@ -1209,13 +1214,18 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [qwen3.8](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | `GenericMTMDChatHandler` | `qwen3.8` |
 | [step3-vl](https://huggingface.co/JamePeng2023/Step3-VL-10B-GGUF) | `Step3VLChatHandler` | `step3-vl` |
 
+The table identifies known handlers, not a guarantee that every listed model
+supports every modality. The loaded `mmproj` determines image/audio capability,
+and video additionally requires vision support, an MTMD video-enabled build,
+available ffmpeg tools, and a chat template that renders a video marker.
+
 Then you'll need to load the multimodal projection model (`mmproj`) together with the main language model.
 
 Starting from `0.3.41-preview`, new multimodal implementations are recommended to use the updated interfaces in `llama_multimodal`. For backward compatibility, the legacy `llama_chat_format` path is still retained, but may be deprecated in future versions.
 
 The parameter `clip_model_path` has been renamed to `mmproj_path` to better reflect its purpose and align with llama.cpp's multimodal projection model naming convention. New code should use `mmproj_path` exclusively.
 
-### Generic MTMD Chat Handler (Recommend)
+### Generic MTMD Chat Handler (Recommended)
 
 For multimodal GGUF models that already include a valid `tokenizer.chat_template`, you can use the generic MTMD handler through `mmproj_path`.
 
@@ -1263,29 +1273,35 @@ response = llm.create_chat_completion(
 )
 
 print(response["choices"][0]["message"]["content"])
-````
+```
 
 #### Chat Template Resolution Order
 
-`GenericMTMDChatHandler` resolves the chat template in the following order:
+When `mmproj_path` is passed directly to `Llama`, llama-cpp-python constructs a
+`GenericMTMDChatHandler` and uses the model's `tokenizer.chat_template` metadata.
+If the model does not provide a usable template, the handler falls back to its
+built-in MTMD template.
 
-1. Use the explicit `chat_format` passed through `chat_handler_kwargs`, if provided.
-2. Use the named model chat template if `chat_template_name` is provided.
-3. Fall back to the default `tokenizer.chat_template` stored in the GGUF model metadata.
-4. Fall back to the built-in MTMD chat template if no model template is available.
-
-Example using a named chat template:
+To supply a template explicitly, instantiate `GenericMTMDChatHandler` yourself
+and pass it through `chat_handler`:
 
 ```python
+from pathlib import Path
+
+from llama_cpp import Llama
+from llama_cpp.llama_multimodal import GenericMTMDChatHandler
+
+chat_template = Path("path/to/chat_template.jinja").read_text(encoding="utf-8")
+
 llm = Llama(
     model_path=r"path/to/model.gguf",
-    mmproj_path=r"path/to/mmproj.gguf",
-    # chat_template_name="default",
+    chat_handler=GenericMTMDChatHandler(
+        chat_format=chat_template,
+        mmproj_path=r"path/to/mmproj.gguf",
+        verbose=False,
+    ),
     n_gpu_layers=-1,
     n_ctx=4096,
-    chat_handler_kwargs={
-        "verbose": False,
-    },
 )
 ```
 
@@ -1348,6 +1364,102 @@ Use `GenericMTMDChatHandler` when the model-provided `tokenizer.chat_template` a
 **Note**: Multi-modal models also support tool calling and JSON mode.
 
 
+## Loading a Local Video With Generic MTMD
+
+MTMD video input requires a vision-capable `mmproj` and an MTMD build compiled
+with video support. The default build enables video support and launches the
+system `ffprobe` and `ffmpeg` executables to inspect the video and sample RGB
+frames. Download them from the [official FFmpeg download page](https://ffmpeg.org/download.html),
+then place both tools on `PATH`, or pass the directory that contains them through
+`video_ffmpeg_bin_dir`.
+
+```python
+from llama_cpp import Llama
+
+MODEL_PATH = r"path/to/model.gguf"
+MMPROJ_PATH = r"path/to/mmproj.gguf"
+VIDEO_PATH = r"path/to/video.mp4"
+
+video_options = {
+    # Start low: MTMD expands the sampled frames during tokenization.
+    "video_fps_target": 1.0,
+    # Insert text timestamps such as [0m5.00s]; <= 0 disables them.
+    "video_timestamp_interval_ms": 5000,
+    "batch_max_tokens": 1024,
+    # Optional when ffmpeg and ffprobe are already available on PATH:
+    # "video_ffmpeg_bin_dir": r"path/to/ffmpeg/bin",
+}
+
+llm = Llama(
+    model_path=MODEL_PATH,
+    mmproj_path=MMPROJ_PATH,
+    n_gpu_layers="auto",
+    n_ctx=32768,
+    n_batch=2048,
+    chat_handler_kwargs=video_options,
+    verbose=True,
+)
+
+response = llm.create_chat_completion(
+    messages=[
+        {
+            "role": "user",
+            "content": [
+                {
+                    # Gemma 4 templates expect the `video` schema.
+                    "type": "video",
+                    "video": VIDEO_PATH,
+                },
+                {
+                    "type": "text",
+                    "text": (
+                        "Describe the main scenes and actions in chronological "
+                        "order, including approximate timestamps."
+                    ),
+                },
+            ],
+        }
+    ],
+    max_tokens=512,
+)
+
+print(response["choices"][0]["message"]["content"])
+llm.close()
+```
+
+Video preprocessing options are passed through `chat_handler_kwargs`:
+
+| Option | MTMD default | Description |
+|:--- |:--- |:--- |
+| `video_fps_target` | `4.0` | Desired sampled FPS. Values `<= 0` use the video's native FPS and can be very expensive. |
+| `video_ffmpeg_bin_dir` | `None` | Directory containing both `ffmpeg` and `ffprobe`. `None` searches `PATH`. |
+| `video_timestamp_interval_ms` | `5000` | Interval between timestamp text chunks. Values `<= 0` disable timestamps. |
+| `batch_max_tokens` | `1024` | Maximum number of MTMD media tokens processed in one decode batch. |
+
+Advanced callers can instead pass a complete `mtmd_helper_init_opt` ctypes
+structure. Do not combine that structure with individual `video_*` options.
+
+Use `{"type": "video_url", "video_url": {"url": ...}}` only when the
+model's Jinja chat template explicitly supports `video_url`. For example,
+Gemma 4's default template expects `{"type": "video", "video": ...}`; using
+`video_url` with that template produces no media marker and fails marker-count
+validation.
+
+The helper samples visual frames only. A video's audio track is ignored, so a
+vision-only model does not need audio-input support. Video understanding is
+therefore based on sampled frames, timestamps, and model-specific temporal frame
+merging rather than native audio/video stream modeling.
+
+> **Resource note:** The current helper reads the input video into memory and
+> expands all sampled frames during MTMD tokenization. There is no automatic
+> duration, frame-count, or total-video-token budget. Begin with short videos
+> and a low FPS; long or high-resolution videos can consume substantial RAM and
+> exceed the model context window.
+
+For a configurable command-line version, including `-h` setup guidance, see
+[`examples/high_level_api/mtmd_video_chat.py`](examples/high_level_api/mtmd_video_chat.py).
+
+
 ## Loading a Local Image With Qwen3VL(Thinking/Instruct)
 
 <summary>This script demonstrates how to load a local image, encode it as a base64 Data URI, and pass it to a local Qwen3-VL model (with the 'force_reasoning' parameter enabled for thinking model, disabled for instruct model) for processing using the llama-cpp-python library.</summary><br>
@@ -1358,7 +1470,6 @@ Use `GenericMTMDChatHandler` when the model-provided `tokenizer.chat_template` a
 ```python
 # Import necessary libraries
 from llama_cpp import Llama
-# from llama_cpp.llama_chat_format import Qwen3VLChatHandler
 from llama_cpp.llama_multimodal import Qwen3VLChatHandler
 import base64
 import os
@@ -1374,7 +1485,7 @@ llm = Llama(
     model_path=MODEL_PATH,
     # Set up the chat handler for Qwen3-VL, specifying the projector path
     chat_handler=Qwen3VLChatHandler(
-      clip_model_path=MMPROJ_PATH,
+      mmproj_path=MMPROJ_PATH,
       force_reasoning=True,  # Note: Some models use `enable_thinking` as a switch variable. See the comments in the corresponding model's chathandler for details.
       image_min_tokens=1024, # Note: Qwen3-VL models require at minimum 1024 image tokens to function correctly on bbox grounding tasks
     ),
@@ -1516,7 +1627,6 @@ The `Qwen3ASRChatHandler` is specifically designed for the Qwen3 Automatic Speec
 
 ```python
 from llama_cpp import Llama
-# from llama_cpp.llama_chat_format import Qwen3ASRChatHandler
 from llama_cpp.llama_multimodal import Qwen3ASRChatHandler
 import base64
 import os
@@ -1529,7 +1639,7 @@ MMPROJ_PATH = r"./mmproj-Qwen3-ASR-1.7b-BF16.gguf"
 llm = Llama(
     model_path=MODEL_PATH,
     chat_handler=Qwen3ASRChatHandler(
-        clip_model_path=MMPROJ_PATH,
+        mmproj_path=MMPROJ_PATH,
         verbose=False,
     ),
     n_gpu_layers=-1,
@@ -1622,7 +1732,6 @@ Below is a complete, production-ready example demonstrating how to dynamically r
 
 ```python
 from llama_cpp import Llama
-# from llama_cpp.llama_chat_format import Gemma4ChatHandler
 from llama_cpp.llama_multimodal import Gemma4ChatHandler
 import base64
 import os
@@ -1637,7 +1746,7 @@ MMPROJ_PATH = r"/path/to/mmproj-Gemma-4-E4B-It-BF16.gguf"
 llm = Llama(
     model_path=MODEL_PATH,
     chat_handler=Gemma4ChatHandler(
-        clip_model_path=MMPROJ_PATH,
+        mmproj_path=MMPROJ_PATH,
         enable_thinking=True,  # MUST be True for E2B/E4B models
         verbose=True,          # Enable Debug Info
     ),
@@ -2146,7 +2255,7 @@ Libraries from other authors are often smaller because they may only compile for
         ```python
         llm = Llama(
             model_path="./Qwen3.5-VL-9B.gguf",
-            chat_handler=MTMDChatHandler(clip_model_path="./mmproj.gguf"),
+            mmproj_path="./mmproj.gguf",
             n_ctx=4096,
             ctx_checkpoints=0  # <-- SET THIS TO 0 TO ENABLE ZERO-LATENCY FAST PATH
         )
