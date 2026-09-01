@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-08-29
+last_updated: 2026-09-02
 version_target: "latest"
 ---
 
@@ -19,7 +19,9 @@ New code should pass a `SpecConfig` to `Llama(speculative=...)`. The old
 `Llama(draft_model=...)` callback path and `LlamaDraftModel` are deprecated
 compatibility APIs.
 
-The current engines are text-only and support one sequence (`seq_id=0`).
+The current engines support one sequence (`seq_id=0`). MTP and n-gram engines
+are text-only. The DFlash family can consume target token or embedding batches
+after the target context has extracted the configured layer inputs.
 
 ## Implementation Status
 
@@ -29,8 +31,8 @@ contains algorithms that do not yet have Python engines.
 | Type | Python engine | Status | Availability |
 |---|---|---|---|
 | `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP | Since `0.3.48` |
-| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash and selector-based DFlash2 GGUFs (text-only) | `0.3.49-preview` |
-| `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs (text-only) | `0.3.49-preview` |
+| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash and selector-based DFlash2 GGUFs | Since `0.3.49` |
+| `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs | Since `0.3.49` |
 | `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
 | `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
 | `DRAFT_EAGLE3` | none | Declared, not implemented | — |
@@ -49,11 +51,10 @@ engine.
 - `0.3.48` introduced the stateful, text-only MTP path for both target-internal
   NextN heads and compatible external MTP GGUFs. The K and K4V n-gram engines
   were also available in this release.
-- `0.3.49-preview` adds text-only external DFlash, DFlash2, and DSpark support
+- `0.3.49` introduced external DFlash, DFlash2, and DSpark support
   through `LlamaDFlashDecoding`. DFlash2 uses `DRAFT_DFLASH` and is detected
   from the sidecar's selector metadata. This functionality was not part of the
-  `0.3.48` release; its supported models and tuning guidance may continue to
-  evolve before the final `0.3.49` release.
+  `0.3.48` release.
 
 ## Recommended Entry Point
 
@@ -378,29 +379,28 @@ scores and drafting stops before a transition below the threshold.
 ### Lifecycle
 
 1. **Initialize:** load and validate the external sidecar, read its target-layer,
-   block, selector, and RoPE metadata, create encoder/injection/noise batches,
+   block, selector, RoPE, and attention metadata, create injection/noise batches,
    enable selected target input taps, and configure the resolved variant's
-   output mode for non-causal decoding.
+   output mode.
 2. **Process prompt and begin:** each synchronized target decode calls
-   `process()`, which gathers the configured target-layer rows, fuses them
-   through the draft encoder, injects them into the draft cache, and
-   synchronizes that context. After prompt evaluation, `begin()` verifies that
-   this processing populated the complete draft prompt; later target decodes
-   continue through the same `process()` path.
+   `process()`, which gathers the configured target-layer rows and passes them
+   to the fused encoder/KV-injection draft decode. After prompt evaluation,
+   `begin()` verifies that this processing populated the complete draft prompt;
+   later target decodes continue through the same `process()` path.
 3. **Draft:** `draft()` captures a native or partial on-device checkpoint,
    decodes one anchor-plus-mask block, applies DFlash token probability,
    DFlash2 selector-transition probability, or DSpark confidence filtering,
    restores the transient noise branch, and retains the checkpoint for
    verification.
 4. **Verify and commit:** the target verifies `[id_last, draft...]`. `accept()`
-   clears temporary fused-row bookkeeping; rejection either removes the draft
+   clears temporary feature-row bookkeeping; rejection either removes the draft
    suffix natively or restores the checkpoint and replays only the sampled
-   token plus accepted fused rows.
+   token plus accepted target features.
 5. **Reset or close:** `clear()` empties request-local cache and sampler state;
-   `close()` releases all three batches, the draft context, sampler, and
+   `close()` releases both batches, the draft context, sampler, and
    external sidecar model.
 
-All variants currently require an external draft GGUF and are text-only:
+All variants currently require an external draft GGUF:
 
 ```python
 llm = Llama(
@@ -429,13 +429,16 @@ acceptance, and native rollback all completed successfully. Other GGUF pairs
 may work when their vocabulary, target-layer metadata, selector layout, and
 embedding dimensions are compatible, but they have not yet been validated.
 
-The requested draft length is clamped to the GGUF's `dflash.block_size`.
+The requested minimum and maximum draft lengths are clamped to the GGUF's
+`dflash.block_size`.
 DFlash and DFlash2 can produce at most `block_size - 1` tokens. DSpark can
 produce `block_size` tokens when `dflash.sample_from_anchor=true`; otherwise it
 also uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected
 top-token probability. For DFlash2, it filters the selected transition
 probability within the current predecessor row. For DSpark, it filters the
 model's predicted acceptance confidence.
+When a DSpark sidecar declares `dflash.has_confidence_head=false`, probability
+filtering requires `draft_p_min=0`.
 
 The engine keeps verification blocks atomic and checks every draft-memory
 removal. Transformer drafts and recurrent/hybrid drafts with enough native
@@ -443,19 +446,18 @@ snapshot slots use suffix removal; other recurrent/hybrid drafts use a partial
 on-device checkpoint plus accepted-prefix replay. A failed native removal is a
 fatal state-alignment error rather than a runtime fallback trigger.
 
-For text-token batches, a sidecar that declares M-RoPE receives four
-plane-major positions `[text, text, text, 0]` in the encoder and injection
-batches. Direct MTMD/multimodal embedding batches remain rejected because the
-target's four-dimensional media positions are not available to this process
-hook. A target model using M-RoPE does not by itself mark the draft sidecar as
-M-RoPE; inspect the resolved runtime configuration instead of inferring it from
-the target architecture.
+For token or embedding target batches, a sidecar that declares M-RoPE receives
+four plane-major positions `[text, text, text, 0]` in the fused injection batch,
+matching the current `llama.cpp` DFlash driver. A target model using M-RoPE does
+not by itself mark the draft sidecar as M-RoPE; inspect the resolved runtime
+configuration instead of inferring it from the target architecture.
 
 Target layer IDs come from the sidecar GGUF. Values from `0` through
 `target_model.n_layer()` are valid: the inclusive final value denotes the final
 head-input tap required by architectures such as Nemotron DFlash. Target rows
-are fused and injected in draft-`n_ubatch` chunks, followed by an explicit draft
-context synchronization before block generation.
+are copied into draft-`n_ubatch` chunks. The draft graph fuses its encoder with
+KV injection in one decode, avoiding the previous device-to-host-to-device
+round trip and the separate encoder graph build.
 
 ## N-gram Map Engines
 
@@ -630,8 +632,8 @@ selector lattice and therefore reports backend sampling as inactive.
 
 ## Limitations and Lifecycle Notes
 
-* Current stateful engines are text-only. Do not use them with MTMD/multimodal
-  embedding batches or negative placeholder token IDs.
+* MTP and n-gram engines are text-only. DFlash-family engines accept target
+  embedding batches, but end-to-end multimodal model coverage is still limited.
 * Current engines support only `seq_id=0`; parallel sequence decoding is not yet
   supported.
 * Speculative resets clear target and engine state together. Public prompt-cache

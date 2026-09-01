@@ -146,7 +146,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - docs(README): add speculative decoding version availability
     - note that MTP speculative decoding is available since 0.3.48
-    - mark DFlash, DFlash2, and DSpark support as available from 0.3.49-preview
+    - mark DFlash, DFlash2, and DSpark support as available from 0.3.49
     - add version notes to the speculative decoding overview and feature sections
 
 - docs: document `DFlash2` and refresh Llama configuration
@@ -179,7 +179,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     - clarify MTP head chaining and Gemma4 shared-memory behavior
     - document DFlash target-layer taps and rollback strategies
     - record MTP availability since 0.3.48
-    - mark DFlash and DSpark as 0.3.49-preview features
+    - mark DFlash and DSpark as 0.3.49 features
     - fix outdated descriptions and related documentation links
 
 - fix(cache): correct RAM accounting and trie cache selection

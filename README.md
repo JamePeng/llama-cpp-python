@@ -956,10 +956,12 @@ deprecated and is kept only for compatibility with stateless draft callbacks.
 
 > **Version availability:** MTP speculative decoding is available starting with
 > `0.3.48`. DFlash, DFlash2, and DSpark speculative decoding are available
-> starting with the `0.3.49-preview` release series.
+> starting with `0.3.49`.
 
-The current implementation is text-only, supports one sequence (`seq_id=0`),
-and provides five usable modes:
+The current implementation supports one sequence (`seq_id=0`) and provides
+five usable modes. MTP and n-gram engines are text-only; the DFlash family can
+process target token or embedding batches after extracting its configured
+target-layer inputs.
 
 | Mode | `SpeculativeType` | Draft source |
 |---|---|---|
@@ -1054,7 +1056,7 @@ additional acceptance outweighs verification and rollback cost.
 
 ### DFlash, DFlash2, and DSpark speculative decoding
 
-**Available since:** `0.3.49-preview`
+**Available since:** `0.3.49`
 
 DFlash, DFlash2, and DSpark require a compatible external draft GGUF. DFlash
 generates a non-causal mask block. DFlash2 adds a selector lattice whose

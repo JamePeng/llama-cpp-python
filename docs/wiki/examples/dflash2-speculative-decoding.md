@@ -1,8 +1,8 @@
 ---
 title: DFlash2 Speculative Decoding
 source_file: examples/high_level_api/high_level_api_dflash_dspark_speculative.py
-last_updated: 2026-08-29
-version_target: "0.3.49-preview"
+last_updated: 2026-09-02
+version_target: "0.3.49"
 ---
 
 # DFlash2 Speculative Decoding
@@ -20,8 +20,7 @@ separate `DRAFT_DFLASH2` enum value.
 
 ## Prerequisites
 
-- A build of `llama-cpp-python` containing the `0.3.49-preview` speculative
-  changes.
+- `llama-cpp-python` `0.3.49` or newer.
 - A target GGUF and a DFlash2 GGUF trained for that exact target family.
 - Enough combined memory for the target model, sidecar, contexts, and compute
   buffers.
