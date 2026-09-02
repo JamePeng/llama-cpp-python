@@ -96,6 +96,10 @@ GGML_DEFAULT_GRAPH_SIZE = 2048
 GGML_EXIT_SUCCESS = 0
 GGML_EXIT_ABORTED = 1
 
+# typedef struct ggml_threadpool * ggml_threadpool_t;
+# Contexts borrow this opaque handle; the ggml CPU backend owns it.
+ggml_threadpool_p = ctypes.c_void_p
+
 GGML_ROPE_TYPE_NORMAL = 0
 GGML_ROPE_TYPE_NEOX   = 2
 GGML_ROPE_TYPE_MROPE  = 8

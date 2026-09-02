@@ -10,7 +10,8 @@ from ._ggml import (
     ggml_backend_sched_eval_callback,
     ggml_log_callback,
     ggml_opt_get_optimizer_params,
-    ggml_cgraph
+    ggml_cgraph,
+    ggml_threadpool_p,
 )
 
 from typing import (
@@ -1433,11 +1434,30 @@ def llama_numa_init(numa: int, /):
 #         struct llama_context * ctx,
 #            ggml_threadpool_t   threadpool,
 #            ggml_threadpool_t   threadpool_batch);
-# TODO: Add llama_attach_threadpool
+@ctypes_function(
+    "llama_attach_threadpool",
+    [llama_context_p_ctypes, ggml_threadpool_p, ggml_threadpool_p],
+    None,
+)
+def llama_attach_threadpool(
+    ctx: llama_context_p,
+    threadpool: ggml_threadpool_p,
+    threadpool_batch: Optional[ggml_threadpool_p],
+    /,
+):
+    """Attach externally owned generation and batch threadpools.
+
+    A null ``threadpool_batch`` makes llama.cpp use ``threadpool`` for both.
+    The context borrows the handles and does not free them.
+    """
+    ...
 
 
 # LLAMA_API void llama_detach_threadpool(struct llama_context * ctx);
-# TODO: Add llama_detach_threadpool
+@ctypes_function("llama_detach_threadpool", [llama_context_p_ctypes], None)
+def llama_detach_threadpool(ctx: llama_context_p, /):
+    """Detach externally owned threadpools from a context."""
+    ...
 
 
 # typedef void (*llama_model_set_tensor_data_t)(struct ggml_tensor * tensor, void * userdata);
@@ -3209,11 +3229,11 @@ def llama_set_warmup(ctx: llama_context_p, warmup: bool, /):
 )
 def llama_set_abort_callback(
     ctx: llama_context_p,
-    abort_callback: Callable[[ctypes.c_void_p], None],
-    abort_callback_data: ctypes.c_void_p,
+    abort_callback: ggml_abort_callback,
+    abort_callback_data: Optional[ctypes.c_void_p],
     /,
 ):
-    """Set abort callback"""
+    """Set or clear the context's borrowed native abort callback."""
     ...
 
 

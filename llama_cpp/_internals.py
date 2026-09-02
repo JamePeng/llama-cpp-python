@@ -633,6 +633,13 @@ class LlamaContext:
 
         self._loras_applied: bool = False
         self._cvec_applied: bool = False
+        self._threadpool_refs = None
+        # llama.cpp borrows callbacks and their user data. Keep callbacks from
+        # the initial params alive just as set_abort_callback() does.
+        self._abort_callback_ref = (
+            self.params.abort_callback if bool(self.params.abort_callback) else None
+        )
+        self._abort_callback_data_ref = self.params.abort_callback_data
         # The native context borrows attached sampler pointers. Keep the Python
         # wrappers alive until they are detached or the context is closed.
         self._sampler_refs: Dict[int, "LlamaSampler"] = {}
@@ -655,6 +662,9 @@ class LlamaContext:
         # native context and its callbacks have been released.
         self.model = None
         self._sampler_refs = {}
+        self._threadpool_refs = None
+        self._abort_callback_ref = None
+        self._abort_callback_data_ref = None
 
     def __del__(self):
         """Release native resources when the wrapper is garbage-collected."""
@@ -941,6 +951,56 @@ class LlamaContext:
             n_threads_batch: the number of threads used for prompt and batch processing (multiple tokens)
         """
         llama_cpp.llama_set_n_threads(self.ctx, n_threads, n_threads_batch)
+
+    def attach_threadpool(self, threadpool, threadpool_batch=None) -> None:
+        """Attach externally owned ggml threadpools to this context.
+
+        When ``threadpool_batch`` is omitted, llama.cpp uses ``threadpool`` for
+        both generation and batch processing. The wrapper retains the supplied
+        Python objects but does not take ownership of the native pools.
+        """
+        self._assert_ctx()
+        if not threadpool:
+            raise ValueError("threadpool must be a non-null ggml threadpool handle")
+        self.synchronize()
+        llama_cpp.llama_attach_threadpool(self.ctx, threadpool, threadpool_batch)
+        self._threadpool_refs = (
+            threadpool,
+            threadpool if threadpool_batch is None else threadpool_batch,
+        )
+
+    def detach_threadpool(self) -> None:
+        """Synchronize and detach externally owned ggml threadpools."""
+        self._assert_ctx()
+        self.synchronize()
+        llama_cpp.llama_detach_threadpool(self.ctx)
+        self._threadpool_refs = None
+
+    def set_abort_callback(
+        self,
+        abort_callback: Optional[Callable[[ctypes.c_void_p], bool]],
+        abort_callback_data: Optional[ctypes.c_void_p] = None,
+    ) -> None:
+        """Set or clear the callback checked during backend execution.
+
+        Returning ``True`` requests that llama.cpp abort the current decode.
+        The native context borrows the callback and data pointer, so both are
+        retained until replacement, clearing, or context shutdown.
+        """
+        self._assert_ctx()
+        if abort_callback is None:
+            callback_ref = llama_cpp.ggml_abort_callback()
+            data_ref = None
+        elif isinstance(abort_callback, llama_cpp.ggml_abort_callback):
+            callback_ref = abort_callback
+            data_ref = abort_callback_data
+        else:
+            callback_ref = llama_cpp.ggml_abort_callback(abort_callback)
+            data_ref = abort_callback_data
+
+        llama_cpp.llama_set_abort_callback(self.ctx, callback_ref, data_ref)
+        self._abort_callback_ref = None if abort_callback is None else callback_ref
+        self._abort_callback_data_ref = data_ref
 
     def n_threads(self) -> int:
         """Get the number of threads used for generation of a single token."""

@@ -103,6 +103,14 @@ class AbortCriteria:
         return self.abort_event.is_set()
 
 
+@llama_cpp_lib.ggml_abort_callback
+def _llama_native_abort_callback(data: ctypes.c_void_p) -> bool:
+    """Read an instance abort flag without retaining its Llama object."""
+    if not data:
+        return False
+    return bool(ctypes.cast(data, ctypes.POINTER(ctypes.c_bool)).contents.value)
+
+
 class Llama:
     """High-level Python wrapper for a llama.cpp model."""
 
@@ -1013,6 +1021,11 @@ class Llama:
 
         # Create a thread-safe interrupt event
         self._abort_event = threading.Event()
+        self._native_abort_flag = ctypes.c_bool(False)
+        self._ctx.set_abort_callback(
+            _llama_native_abort_callback,
+            ctypes.cast(ctypes.pointer(self._native_abort_flag), ctypes.c_void_p),
+        )
 
     def close(self) -> None:
         """Explicitly free the model from memory."""
@@ -1253,6 +1266,18 @@ class Llama:
         """
         self._seed = seed
 
+    def attach_threadpool(self, threadpool, threadpool_batch=None) -> None:
+        """Attach externally owned ggml threadpools to the native context.
+
+        If ``threadpool_batch`` is omitted, the generation pool is used for
+        batch processing too. The pools remain owned by the caller.
+        """
+        self._ctx.attach_threadpool(threadpool, threadpool_batch)
+
+    def detach_threadpool(self) -> None:
+        """Detach externally owned ggml threadpools from the native context."""
+        self._ctx.detach_threadpool()
+
     def reset(self):
         """Reset all Python and native model state."""
         # Use a full memory clear rather than sequence removal: recurrent state
@@ -1281,6 +1306,9 @@ class Llama:
         """
         if self.verbose:
             print(f"Llama.abort: Abort signal received. Terminating generation...", file=sys.stderr)
+        native_abort_flag = getattr(self, "_native_abort_flag", None)
+        if native_abort_flag is not None:
+            native_abort_flag.value = True
         self._abort_event.set()
 
     def _validate_eval_tokens(
@@ -3203,6 +3231,9 @@ class Llama:
     ]:
         assert suffix is None or suffix.__class__ is str
         # Each time a new request is initiated, the previous abort state must be cleared.
+        native_abort_flag = getattr(self, "_native_abort_flag", None)
+        if native_abort_flag is not None:
+            native_abort_flag.value = False
         self._abort_event.clear()
 
         completion_id: str = f"cmpl-{str(uuid.uuid4())}"
