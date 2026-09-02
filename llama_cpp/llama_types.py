@@ -46,7 +46,7 @@ class CompletionChoice(TypedDict):
     text: str
     index: int
     logprobs: Optional[CompletionLogprobs]
-    finish_reason: Optional[Literal["stop", "length", "content_filter"]]
+    finish_reason: Optional[Literal["stop", "length", "content_filter", "abort"]]
 
 
 class PromptTokensDetails(TypedDict):
@@ -144,7 +144,7 @@ class ChatCompletionResponseChoice(TypedDict):
     index: int
     message: "ChatCompletionResponseMessage"
     logprobs: Optional[ChatCompletionLogprobs]
-    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "function_call"]]
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "function_call", "abort"]]
 
 
 ServiceTier = Literal["auto", "default", "flex", "scale", "priority"]
@@ -205,7 +205,7 @@ class ChatCompletionStreamResponseChoice(TypedDict):
     delta: Union[
         ChatCompletionStreamResponseDelta, ChatCompletionStreamResponseDeltaEmpty
     ]
-    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "function_call"]]
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "content_filter", "function_call", "abort"]]
     logprobs: NotRequired[Optional[ChatCompletionLogprobs]]
 
 
