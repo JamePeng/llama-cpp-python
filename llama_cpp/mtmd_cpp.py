@@ -198,6 +198,20 @@ class mtmd_input_text(Structure):
 mtmd_input_text_p = NewType("mtmd_input_text_p", int)
 mtmd_input_text_p_ctypes = POINTER(mtmd_input_text)
 
+# struct mtmd_input_part {
+#     // only text or bitmap can be set, not both
+#     const struct mtmd_input_text * text;
+#     const struct mtmd_bitmap * bitmap;
+# };
+class mtmd_input_part(Structure):
+    _fields_ = [
+        ("text", mtmd_input_text_p_ctypes),
+        ("bitmap", mtmd_bitmap_p_ctypes),
+    ]
+
+mtmd_input_part_p = NewType("mtmd_input_part_p", int)
+mtmd_input_part_p_ctypes = POINTER(mtmd_input_part)
+
 # enum clip_flash_attn_type {
 #     CLIP_FLASH_ATTN_TYPE_AUTO     = -1,
 #     CLIP_FLASH_ATTN_TYPE_DISABLED = 0,
@@ -804,10 +818,10 @@ def mtmd_image_tokens_get_decoder_pos(image_tokens: mtmd_image_tokens_p, pos_0: 
     """
     ...
 
-# // tokenize an input text prompt and a list of bitmaps (images/audio)
-# // the prompt must have the input image marker (default: "<__media__>") in it
+# // tokenize an input text prompt and a list of bitmaps (image/audio)
+# // the prompt must have the input media marker (default: "<__media__>") in it
 # // the default marker is defined by mtmd_default_marker()
-# // the marker will be replaced with the image/audio chunk
+# // the marker will be replaced with the media chunk
 # // for example:
 # //   "here is an image: <__media__>\ndescribe it in detail."
 # //   this will gives 3 chunks:
@@ -819,7 +833,7 @@ def mtmd_image_tokens_get_decoder_pos(image_tokens: mtmd_image_tokens_p, pos_0: 
 # // return values:
 # //   0 on success
 # //   1 on number of bitmaps not matching the number of markers
-# //   2 on image preprocessing error
+# //   2 on media preprocessing error
 # MTMD_API int32_t mtmd_tokenize(mtmd_context * ctx,
 #                                mtmd_input_chunks * output,
 #                                const mtmd_input_text * text,
@@ -839,19 +853,72 @@ def mtmd_tokenize(
     ctx: mtmd_context_p,
     output: mtmd_input_chunks_p,
     text: mtmd_input_text_p,
-    bitmaps: POINTER(mtmd_bitmap_p), # type: ignore
+    bitmaps: POINTER(mtmd_bitmap_p_ctypes), # type: ignore
     n_bitmaps: c_size_t,
     /,
 ) -> c_int32:
     """
-    tokenize an input text prompt and a list of bitmaps (images/audio)
-    the prompt must have the input image marker (default: "<__media__>") in it
+    tokenize an input text prompt and a list of bitmaps (image/audio)
+    the prompt must have the input media marker (default: "<__media__>") in it
     the default marker is defined by mtmd_default_marker()
-    the marker will be replaced with the image/audio chunk
+    the marker will be replaced with the media chunk
+
+    for example:
+     "here is an image: <__media__>\ndescribe it in detail."
+      this will gives 3 chunks:
+       1. "here is an image: <start_of_image>"
+       2. (image/audio tokens)
+       3. "<end_of_image>\\ndescribe it in detail."
+
+     number of bitmaps must be equal to the number of markers in the prompt
+     this function is thread-safe (shared ctx)
+
     return values:
       0 on success
       1 on number of bitmaps not matching the number of markers
-      2 on image preprocessing error
+      2 on media preprocessing error
+    """
+    ...
+
+
+# // same as mtmd_tokenize(), but takes an array of mtmd_input_part
+# // use cases:
+# // - when you don't want to use media markers (they will be tokenized as normal text)
+# // - when you want to control parse_special for each text part
+# // note: per-part add_special will be ignored
+# // return 1 if a part has both text and bitmap set (or neither)
+# MTMD_API int32_t mtmd_tokenize_from_parts(mtmd_context * ctx,
+#                                           mtmd_input_chunks * output,
+#                                           const mtmd_input_part ** parts,
+#                                           size_t n_parts,
+#                                           bool add_special);
+@ctypes_function_mtmd(
+    "mtmd_tokenize_from_parts", [
+        mtmd_context_p_ctypes,
+        mtmd_input_chunks_p_ctypes,
+        POINTER(mtmd_input_part_p_ctypes),
+        c_size_t,
+        c_bool,
+    ],
+    c_int32,
+)
+def mtmd_tokenize_from_parts(
+    ctx: mtmd_context_p,
+    output: mtmd_input_chunks_p,
+    parts: POINTER(mtmd_input_part_p_ctypes), # type: ignore
+    n_parts: c_size_t,
+    add_special: c_bool,
+    /,
+) -> c_int32:
+    """
+    same as mtmd_tokenize(), but takes an array of mtmd_input_part
+
+    use cases:
+     - when you don't want to use media markers (they will be tokenized as normal text)
+     - when you want to control parse_special for each text part
+
+    note: per-part add_special will be ignored.
+    return 1 if a part has both text and bitmap set (or neither)
     """
     ...
 
