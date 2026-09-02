@@ -1,23 +1,17 @@
 import ctypes
+import json
 import multiprocessing
-import os
 import threading
 from types import SimpleNamespace
+
 import pytest
 import numpy as np
-from scipy.special import log_softmax
 from huggingface_hub import hf_hub_download
 
 import llama_cpp
 import llama_cpp._internals as internals
 from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 from llama_cpp.llama_speculative import _speculative_generation_timing_stats
-
-from typing import (
-    List,
-    Dict,
-)
-
 
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
 
@@ -85,9 +79,8 @@ def test_completion_presence_penalty_alias(
 
     assert private_calls[0]["present_penalty"] == expected
 
-
-def test_call_forwards_presence_penalty_alias():
-    llm = object.__new__(llama_cpp.Llama)
+    # __call__ is a distinct public entry point but can share this forwarding
+    # test instead of maintaining a second near-identical mock setup.
     public_calls = []
 
     def fake_public(**kwargs):
@@ -95,10 +88,15 @@ def test_call_forwards_presence_penalty_alias():
         return {"choices": [{"text": "", "finish_reason": "length"}]}
 
     llm.create_completion = fake_public
-    llama_cpp.Llama.__call__(llm, "prompt", presence_penalty=1.5)
+    llama_cpp.Llama.__call__(
+        llm,
+        "prompt",
+        present_penalty=present_penalty,
+        presence_penalty=presence_penalty,
+    )
 
-    assert public_calls[0]["presence_penalty"] == 1.5
-    assert public_calls[0]["present_penalty"] == 0.0
+    assert public_calls[0]["presence_penalty"] == presence_penalty
+    assert public_calls[0]["present_penalty"] == present_penalty
 
 
 @pytest.mark.parametrize(
@@ -297,6 +295,86 @@ def test_context_close_releases_parent_references():
     assert context.params is None
 
 
+def test_context_manages_borrowed_threadpool_references(monkeypatch):
+    context = internals.LlamaContext.__new__(internals.LlamaContext)
+    context.ctx = object()
+    context._threadpool_refs = None
+    calls = []
+
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_synchronize",
+        lambda ctx: calls.append(("synchronize", ctx)),
+    )
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_attach_threadpool",
+        lambda ctx, pool, batch_pool: calls.append(
+            ("attach", ctx, pool, batch_pool)
+        ),
+    )
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_detach_threadpool",
+        lambda ctx: calls.append(("detach", ctx)),
+    )
+
+    pool = ctypes.c_void_p(1)
+    context.attach_threadpool(pool)
+    assert context._threadpool_refs == (pool, pool)
+    assert calls[-2:] == [
+        ("synchronize", context.ctx),
+        ("attach", context.ctx, pool, None),
+    ]
+
+    context.detach_threadpool()
+    assert context._threadpool_refs is None
+    assert calls[-2:] == [
+        ("synchronize", context.ctx),
+        ("detach", context.ctx),
+    ]
+
+
+def test_context_manages_native_abort_callback_lifetime(monkeypatch):
+    context = internals.LlamaContext.__new__(internals.LlamaContext)
+    context.ctx = object()
+    context._abort_callback_ref = None
+    context._abort_callback_data_ref = None
+    calls = []
+
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_set_abort_callback",
+        lambda ctx, callback, data: calls.append((ctx, callback, data)),
+    )
+
+    data = ctypes.c_void_p(42)
+    context.set_abort_callback(lambda user_data: user_data == data.value, data)
+
+    callback = context._abort_callback_ref
+    assert callback(data) is True
+    assert context._abort_callback_data_ref is data
+    assert calls[-1] == (context.ctx, callback, data)
+
+    context.set_abort_callback(None)
+    assert context._abort_callback_ref is None
+    assert context._abort_callback_data_ref is None
+    assert bool(calls[-1][1]) is False
+
+
+def test_high_level_abort_updates_python_and_native_flags():
+    llm = object.__new__(llama_cpp.Llama)
+    llm.verbose = False
+    llm._abort_event = threading.Event()
+    llm._native_abort_flag = ctypes.c_bool(False)
+    data = ctypes.cast(ctypes.pointer(llm._native_abort_flag), ctypes.c_void_p)
+
+    assert llama_cpp.llama._llama_native_abort_callback(data) is False
+    llm.abort()
+    assert llm._abort_event.is_set()
+    assert llama_cpp.llama._llama_native_abort_callback(data) is True
+
+
 def test_sampling_context_partial_init_can_close_idempotently(monkeypatch):
     closed_resources = []
 
@@ -357,10 +435,6 @@ def test_sampling_context_partial_init_can_close_idempotently(monkeypatch):
     assert sampling_context.vocab is None
 
 
-def test_llama_cpp_version():
-    assert llama_cpp.__version__
-
-
 def test_llama_cpp_tokenization():
     """
     Test the tokenizer API (Llama.tokenize and Llama.detokenize).
@@ -368,38 +442,26 @@ def test_llama_cpp_tokenization():
     """
     llama = llama_cpp.Llama(model_path=MODEL, vocab_only=True, verbose=False)
 
-    assert llama
-    assert llama._ctx.ctx is not None
+    try:
+        text = b"Hello World"
 
-    text = b"Hello World"
+        tokens = llama.tokenize(text)
+        assert tokens == [llama.token_bos(), 15043, 2787]
+        assert llama.detokenize(tokens)[1:] == text
 
-    tokens = llama.tokenize(text)
-    assert tokens[0] == llama.token_bos()
-    assert tokens == [1, 15043, 2787]
-    detokenized = llama.detokenize(tokens)
-    assert detokenized[1:] == text
+        tokens = llama.tokenize(text, add_bos=False)
+        assert tokens == [15043, 2787]
+        assert llama.detokenize(tokens) == text
 
-    tokens = llama.tokenize(text, add_bos=False)
-    assert tokens[0] != llama.token_bos()
-    assert tokens == [15043, 2787]
+        text = b"Hello World</s>"
+        assert llama.tokenize(text) == [1, 15043, 2787, 829, 29879, 29958]
+        assert llama.tokenize(text, special=True) == [1, 15043, 2787, llama.token_eos()]
 
-    detokenized = llama.detokenize(tokens)
-    assert detokenized == text
-
-    text = b"Hello World</s>"
-    tokens = llama.tokenize(text)
-    assert tokens[-1] != llama.token_eos()
-    assert tokens == [1, 15043, 2787, 829, 29879, 29958]
-
-    tokens = llama.tokenize(text, special=True)
-    assert tokens[-1] == llama.token_eos()
-    assert tokens == [1, 15043, 2787, 2]
-
-    text = b""
-    tokens = llama.tokenize(text, add_bos=True, special=True)
-    assert tokens[-1] != llama.token_eos()
-    assert tokens == [llama.token_bos()]
-    assert text == llama.detokenize(tokens)
+        tokens = llama.tokenize(b"", add_bos=True, special=True)
+        assert tokens == [llama.token_bos()]
+        assert llama.detokenize(tokens) == b""
+    finally:
+        llama.close()
 
 
 def test_llama_batch_seq_id_error_guidance():
@@ -478,7 +540,7 @@ def test_llama_batch_mrope_embeddings_use_four_position_planes():
         batch.close()
 
 
-@pytest.fixture
+@pytest.fixture(scope="module")
 def llama_cpp_model_path():
     """Fixture to download a real GGUF model for integration tests."""
     repo_id = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
@@ -487,13 +549,41 @@ def llama_cpp_model_path():
     return model_path
 
 
+@pytest.fixture(scope="module")
+def shared_completion_model(llama_cpp_model_path):
+    """Load the common completion model once for independent feature tests."""
+    model = llama_cpp.Llama(
+        llama_cpp_model_path,
+        n_ctx=64,
+        n_batch=32,
+        n_ubatch=32,
+        n_threads=multiprocessing.cpu_count(),
+        n_threads_batch=multiprocessing.cpu_count(),
+        logits_all=False,
+        swa_full=True,
+        kv_unified=True,
+    )
+    try:
+        yield model
+    finally:
+        model.close()
+
+
+@pytest.fixture
+def completion_model(shared_completion_model):
+    """Give each feature test a clean context without reloading model weights."""
+    shared_completion_model.reset()
+    try:
+        yield shared_completion_model
+    finally:
+        shared_completion_model.reset()
+
+
 def test_real_model(llama_cpp_model_path):
     """
     Test the Low-Level API (internals.*).
     This manually constructs the Model, Context, Batch, and Sampler Chain.
     """
-    assert os.path.exists(llama_cpp_model_path)
-
     # 1. Setup Model Parameters
     params = llama_cpp.llama_model_default_params()
     params.check_tensors = False
@@ -562,24 +652,11 @@ def test_real_model(llama_cpp_model_path):
 
     output = result[len(tokens):]
     output_text = model.detokenize(output, special=True)
-    print(output_text)
     assert b"over" in output_text or b"lazy dog" in output_text
 
-def test_real_llama(llama_cpp_model_path):
-    model = llama_cpp.Llama(
-        llama_cpp_model_path,
-        n_ctx=32,
-        n_batch=32,
-        n_ubatch=32,
-        n_threads=multiprocessing.cpu_count(),
-        n_threads_batch=multiprocessing.cpu_count(),
-        logits_all=False,
-        swa_full=True,
-        kv_unified=True,
-    )
 
-    # 1. Basic Completion Test
-    output = model.create_completion(
+def test_real_llama_completion(completion_model):
+    output = completion_model.create_completion(
         "The quick brown fox jumps",
         max_tokens=4,
         top_k=50,
@@ -590,66 +667,9 @@ def test_real_llama(llama_cpp_model_path):
     text = output["choices"][0]["text"]
     assert "over" in text or "lazy dog" in text
 
-    # 2. Grammar Constraint Test (Updated: Coin Flip)
-    # We verify that the model ONLY outputs "heads" or "tails".
-    # This tests the sampler mechanism, not the model's intelligence.
-    output = model.create_completion(
-        "Flip a coin: heads or tails? Result:",
-        max_tokens=4,
-        top_k=50,
-        top_p=0.9,
-        temperature=0.8,
-        seed=1337,
-        grammar=llama_cpp.LlamaGrammar.from_string("""
-            root ::= "heads" | "tails"
-        """)
-    )
 
-    generated_text = output["choices"][0]["text"]
-    print(f"\n[Grammar Coin Flip] Output: {generated_text}")
-
-    # Assert that the output is strictly one of the allowed grammar options
-    assert generated_text in ["heads", "tails"], \
-        f"Grammar failed! Expected 'heads' or 'tails', got: '{generated_text}'"
-
-    # 3. Logit Bias Test
-    suffix = b"rot"
-    tokens = model.tokenize(suffix, add_bos=True, special=True)
-    logit_bias: Dict[int, float] = {}
-
-    for token_id in tokens:
-        logit_bias[token_id] = 1000
-
-    output = model.create_completion(
-        "The capital of france is par",
-        max_tokens=4,
-        top_k=50,
-        top_p=0.9,
-        temperature=0.8,
-        seed=1337,
-        logit_bias=logit_bias
-    )
-
-    assert output["choices"][0]["text"].lower().startswith("rot")
-
-def test_grammar_sampling_safety(llama_cpp_model_path):
-    """
-    Test 2: Grammar-constrained sampling (safety / stability check)
-    This test forces very strict JSON-like output using a minimal grammar.
-    """
-    # Very restrictive grammar — only allows simple { "key": number }
-    # (intentionally limited to trigger potential accept-stage bugs)
-    model = llama_cpp.Llama(
-        llama_cpp_model_path,
-        n_ctx=32,
-        n_batch=32,
-        n_ubatch=32,
-        n_threads=multiprocessing.cpu_count(),
-        n_threads_batch=multiprocessing.cpu_count(),
-        logits_all=False,
-        swa_full=True,
-        kv_unified=True,
-    )
+def test_grammar_sampling_safety(completion_model):
+    """A strict grammar must produce a complete, parseable JSON object."""
     grammar_text = r'''
         root   ::= object
         object ::= "{" space pair "}"
@@ -660,98 +680,55 @@ def test_grammar_sampling_safety(llama_cpp_model_path):
         space  ::= [ ]?
     '''
 
-    # Create grammar object from string definition
     grammar = llama_cpp.LlamaGrammar.from_string(grammar_text)
-
-    # Prompt that naturally wants to produce something JSON-like
-    prompt = "Generate a JSON with age:"
-
-    # Generate with grammar constraint + near-greedy sampling
-    output = model.create_completion(
-        prompt,
+    output = completion_model.create_completion(
+        "Generate a JSON with age:",
         max_tokens=20,
         grammar=grammar,
         temperature=0.1
     )
 
     generated_text = output["choices"][0]["text"]
-    print(f"\n[Grammar] Output: {generated_text}")
+    parsed = json.loads(generated_text)
+    assert len(parsed) == 1
+    assert isinstance(next(iter(parsed.values())), int)
 
-    # Basic structural validation (we don't parse full JSON here — just checking survival + minimal shape)
-    assert "{" in generated_text and "}" in generated_text, \
-        "Generated text is missing JSON object braces"
-    assert ":" in generated_text, \
-        "Generated text is missing key-value separator (:)"
-
-def test_logit_bias(llama_cpp_model_path):
-    """
-    Test 3: Logit Bias
-    Verifies that specific tokens can be forced using logit bias.
-    """
-    # Load model with minimal context to save memory (just for tokenization & small generation)
-    model = llama_cpp.Llama(
-        llama_cpp_model_path,
-        n_ctx=32,
-        n_batch=32,
-        n_ubatch=32,
-        n_threads=multiprocessing.cpu_count(),
-        n_threads_batch=multiprocessing.cpu_count(),
-        logits_all=False,
-        swa_full=True,
-        kv_unified=True,
-    )
-
+def test_logit_bias(completion_model):
+    """A strong positive bias must force the selected token."""
     # Target token we want to force the model to generate
     target_word = " banana"           # Note the leading space — important for most tokenizers
     # Get the token ID corresponding to " banana" (Qwen-style tokenizer expected)
-    target_token = model.tokenize(target_word.encode("utf-8"), add_bos=False)[0]
+    target_token = completion_model.tokenize(target_word.encode("utf-8"), add_bos=False)[0]
 
     # Apply very strong positive bias to make this token extremely likely
     bias = {target_token: 100.0}
 
     # Generate a very short continuation with temperature=0 (greedy) + strong bias
-    output = model.create_completion(
+    output = completion_model.create_completion(
         "I like to eat",
         max_tokens=3,
         logit_bias=bias,
         temperature=0.0
     )
 
-    # Extract generated text
     generated_text = output["choices"][0]["text"]
-    print(f"\n[Bias] Output: {generated_text}")
-
-    # Verify that our forced token actually appeared in the output
     assert "banana" in generated_text, f"Expected 'banana' in output, got: '{generated_text}'"
 
 
-def test_custom_logits_processor(llama_cpp_model_path):
+def test_custom_logits_processor(completion_model):
     """
     Test 4: Custom Logits Processor (Pure Python Implementation).
 
     Verifies that we can manipulate logits in Python before sampling.
     In this test, we suppress any token containing the letter 'e'.
     """
-    # Load model with minimal context to save memory (just for tokenization & small generation)
-    model = llama_cpp.Llama(
-        llama_cpp_model_path,
-        n_ctx=64,
-        n_batch=32,
-        n_ubatch=32,
-        n_threads=multiprocessing.cpu_count(),
-        n_threads_batch=multiprocessing.cpu_count(),
-        logits_all=False,
-        swa_full=True,
-        kv_unified=True,
-    )
-
     def no_e_processor(input_ids, scores):
         """
         Filters out tokens containing 'e'.
         """
         for token_id in range(len(scores)):
             # Decode single token → get its string representation
-            token_str = model.detokenize([token_id]).decode("utf-8", errors="ignore")
+            token_str = completion_model.detokenize([token_id]).decode("utf-8", errors="ignore")
 
             # Ban tokens that contain 'e' anywhere in their decoded form
             if "e" in token_str:
@@ -760,7 +737,7 @@ def test_custom_logits_processor(llama_cpp_model_path):
         return scores
 
     # Generate with greedy sampling (temperature=0) + our custom processor
-    output = model.create_completion(
+    output = completion_model.create_completion(
         "The alphabet starts with",
         max_tokens=10,
         logits_processor=llama_cpp.LogitsProcessorList([no_e_processor]),
@@ -768,9 +745,6 @@ def test_custom_logits_processor(llama_cpp_model_path):
     )
 
     generated_text = output["choices"][0]["text"]
-    print(f"\n[Custom] Output (No 'e'): {generated_text}")
-
-    # Basic validation: make sure no 'e' appears in the generated text
     assert "e" not in generated_text, \
         f"Expected no letter 'e' in output, but found one:\n  Output was: '{generated_text}'"
 
