@@ -930,6 +930,7 @@ class MTMDChatHandler:
                     decode_error = None
 
                     for future in concurrent.futures.as_completed(futures):
+                        # Ensure inserting all bitmap/video_ctx into cleanup array except decoding error
                         try:
                             idx, bitmap, video_ctx = future.result()
                         except Exception as exc:
