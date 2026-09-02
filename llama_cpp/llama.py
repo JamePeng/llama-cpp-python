@@ -1368,6 +1368,19 @@ class Llama:
             decode_started = time.perf_counter()
             try:
                 status = self._ctx.decode(self._batch)
+            except internals.LlamaDecodeAbort:
+                # llama.cpp may have committed an unknown number of ubatches.
+                # A full reset is the only backend-independent way to realign
+                # native memory with the Python token ledger (including hybrid
+                # and recurrent contexts).
+                try:
+                    self.reset()
+                except Exception as reset_exc:
+                    raise RuntimeError(
+                        "Llama.eval(decode): failed to reset context after "
+                        "native decode abort"
+                    ) from reset_exc
+                raise
             except Exception as exc:
                 min_pos = min(current_batch_size, 128)
                 preview = chunk[:min_pos]
@@ -2683,6 +2696,14 @@ class Llama:
                                 : self._n_ctx - self.n_tokens - len(tokens)
                             ]
                         )
+        except internals.LlamaDecodeAbort:
+            # Convert the recoverable native control-flow signal into normal
+            # generator termination. _decode_eval_batch() has already cleared
+            # the possibly partial native state; marking the event lets the
+            # completion layer report finish_reason="abort".
+            self._abort_event.set()
+            verification_active = False
+            return
         finally:
             self._speculative_verifying = False
             if verification_active and self.speculative is not None:
@@ -3733,7 +3754,7 @@ class Llama:
                     }
                 ],
             }
-            if self.cache:
+            if self.cache and finish_reason != "abort":
                 if self.verbose:
                     print("Llama._create_completion: cache save", file=sys.stderr)
                 self.cache[prompt_tokens + completion_tokens] = self.save_state()
@@ -3741,7 +3762,7 @@ class Llama:
                     print("Llama._create_completion: cache saved", file=sys.stderr)
             return
 
-        if self.cache:
+        if self.cache and finish_reason != "abort":
             if self.verbose:
                 print("Llama._create_completion: cache save", file=sys.stderr)
             self.cache[prompt_tokens + completion_tokens] = self.save_state()

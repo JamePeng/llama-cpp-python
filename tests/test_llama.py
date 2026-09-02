@@ -362,6 +362,35 @@ def test_context_manages_native_abort_callback_lifetime(monkeypatch):
     assert bool(calls[-1][1]) is False
 
 
+def test_context_decode_raises_distinct_native_abort(monkeypatch):
+    context = internals.LlamaContext.__new__(internals.LlamaContext)
+    context.ctx = object()
+    batch = SimpleNamespace(batch=object())
+
+    monkeypatch.setattr(internals.llama_cpp, "llama_decode", lambda _ctx, _batch: 2)
+
+    with pytest.raises(internals.LlamaDecodeAbort, match="aborted by user callback"):
+        context.decode(batch)
+
+
+def test_decode_eval_batch_resets_and_preserves_native_abort(monkeypatch):
+    llm = object.__new__(llama_cpp.Llama)
+    llm._batch = SimpleNamespace(batch=SimpleNamespace(n_tokens=0))
+    llm._ctx = SimpleNamespace(
+        decode=lambda _batch: (_ for _ in ()).throw(
+            internals.LlamaDecodeAbort("native abort")
+        )
+    )
+    llm._active_speculative_phase_stats = None
+    reset_calls = []
+    monkeypatch.setattr(llm, "reset", lambda: reset_calls.append(True))
+
+    with pytest.raises(internals.LlamaDecodeAbort, match="native abort"):
+        llm._decode_eval_batch([1, 2], 2)
+
+    assert reset_calls == [True]
+
+
 def test_high_level_abort_updates_python_and_native_flags():
     llm = object.__new__(llama_cpp.Llama)
     llm.verbose = False
@@ -666,6 +695,43 @@ def test_real_llama_completion(completion_model):
     )
     text = output["choices"][0]["text"]
     assert "over" in text or "lazy dog" in text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_native_decode_abort_finishes_and_resets_context(
+    completion_model, monkeypatch, stream
+):
+    """A native decode abort must be a normal, reusable completion boundary."""
+
+    class RecordingCache:
+        def __init__(self):
+            self.writes = []
+
+        def __getitem__(self, _key):
+            raise KeyError
+
+        def __setitem__(self, key, value):
+            self.writes.append((key, value))
+
+    def abort_decode(_batch):
+        raise internals.LlamaDecodeAbort("native abort")
+
+    cache = RecordingCache()
+    monkeypatch.setattr(completion_model._ctx, "decode", abort_decode)
+    monkeypatch.setattr(completion_model, "cache", cache)
+
+    output = completion_model.create_completion(
+        "Abort this request during prompt evaluation",
+        max_tokens=4,
+        stream=stream,
+    )
+    result = list(output)[-1] if stream else output
+
+    assert result["choices"][0]["finish_reason"] == "abort"
+    assert completion_model.n_tokens == 0
+    assert completion_model._ctx.memory_seq_pos_min(0) == -1
+    assert completion_model._ctx.memory_seq_pos_max(0) == -1
+    assert cache.writes == []
 
 
 def test_grammar_sampling_safety(completion_model):

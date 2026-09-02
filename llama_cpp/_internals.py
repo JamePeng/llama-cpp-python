@@ -39,6 +39,10 @@ if TYPE_CHECKING:
 # Python wrappers over llama.h structs
 
 
+class LlamaDecodeAbort(RuntimeError):
+    """Raised when llama.cpp aborts an in-flight decoder graph."""
+
+
 class LlamaModel:
     """Intermediate Python wrapper for a llama.cpp llama_model.
     NOTE: For stability it's recommended you use the Llama class instead."""
@@ -908,9 +912,9 @@ class LlamaContext:
                fallback strategy, such as reducing the batch size and retrying.
 
         Raises:
-            RuntimeError: If a fatal, non-recoverable error occurs during decoding
-                or native decoding is aborted. Native abort/fatal paths may
-                leave already processed micro-batches in context memory.
+            LlamaDecodeAbort: If the native abort callback interrupts decoding.
+                Already processed micro-batches may remain in context memory.
+            RuntimeError: If a fatal, non-recoverable error occurs during decoding.
         """
         self._assert_ctx()
         try:
@@ -931,9 +935,14 @@ class LlamaContext:
         elif return_code == 1:
             return 1
 
+        # An abort is an expected control-flow signal, not a fatal backend
+        # failure. Keep it distinct so the high-level wrapper can discard any
+        # partially committed ubatches and finish the request normally.
+        elif return_code == 2:
+            raise LlamaDecodeAbort("llama_decode aborted by user callback")
+
         # Any other code indicates a fatal failure.
         error_map = {
-             2: "Decoding aborted by user callback",
             -1: "Invalid input batch (e.g. n_tokens == 0 or exceeding capacity)",
             -2: "Could not allocate space for the compute graph (VRAM exhausted)",
             -3: "Graph computation failed internally",
