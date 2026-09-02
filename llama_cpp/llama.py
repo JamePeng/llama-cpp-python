@@ -154,9 +154,7 @@ class Llama:
         n_outputs_max_per_seq: int = 1,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
-        ctx_type: Optional[
-            int
-        ] = llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_DEFAULT,
+        ctx_type: int = llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_DEFAULT,
         rope_scaling_type: Optional[
             int
         ] = llama_cpp_lib.llama_rope_scaling_type.LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED,
