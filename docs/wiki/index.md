@@ -32,6 +32,8 @@ vendored `llama.cpp` APIs remain the source of truth.
 | [Llama Grammar](modules/LlamaGrammar.md) | Grammar parsing and constrained-generation utilities. |
 | [Llama Speculative Decoding](modules/LlamaSpeculative.md) | Stateful MTP, DFlash, DFlash2, DSpark, and n-gram engines; configuration, lifecycle, rollback, statistics, and benchmarks. |
 | [Logger](modules/Logger.md) | Python and native logging configuration, callbacks, levels, filtering, and output routing. |
+| [llama.cpp ctypes Bindings](modules/LlamaCppBindings.md) | Source-oriented reference for the low-level llama.cpp and ggml ctypes bindings. |
+| [MTMD ctypes Bindings](modules/MTMDCppBindings.md) | Source-oriented reference for the low-level multimodal ctypes bindings. |
 
 ### Feature Guides
 
@@ -100,6 +102,8 @@ Completed pages currently linked from this index:
 - `modules/LlamaGrammar.md`
 - `modules/LlamaSpeculative.md`
 - `modules/Logger.md`
+- `modules/LlamaCppBindings.md`
+- `modules/MTMDCppBindings.md`
 - `features/embeddings-rerank.md`
 - `examples/dflash2-speculative-decoding.md`
 - `development/git-commit-generation-agent.md`
@@ -115,7 +119,6 @@ and checked against the implementation.
 - Basic and chat-completion examples
 - Vision and audio examples
 - Caching, grammar, multi-model, and tool-call feature guides
-- Low-level llama.cpp and MTMD ctypes bindings
 - Common and MCP type references
 - Troubleshooting and backend diagnostics
 

@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-08-29
+last_updated: 2026-09-03
 version_target: "latest"
 ---
 
@@ -25,7 +25,10 @@ context lifecycle.
 
 ## Constructor (`__init__`)
 
-Initialize the model and context. Note that model loading will immediately allocate RAM/VRAM based on the selected offloading parameters.
+Initialize the model and context. Normal inference construction allocates model
+and context resources according to the loading and offloading parameters.
+`vocab_only=True` avoids loading weight tensors, while `no_alloc=True` simulates
+model allocation for inspection and planning rather than inference.
 
 ### Core Model & Hardware Parameters
 
@@ -33,15 +36,15 @@ Initialize the model and context. Note that model loading will immediately alloc
 | :--- | :--- | :--- | :--- |
 | `model_path` | `str` | **Required** | Model file path (GGUF format) |
 | `mmproj_path` | `Optional[str]` | `None` | Optional multimodal projection GGUF. When provided, `Llama` creates a generic MTMD chat handler; it replaces an explicitly supplied `chat_handler`. Prefer passing it by keyword. |
-| `n_gpu_layers` | `Union[int, Literal["auto", "all"]]` | `"auto"` | Number of model layers stored in VRAM:<br>• `auto`/`-1`: auto-selected by llama.cpp<br>• `all`/`-2`: all layers<br>• integer N: first N layers<br>• `0`: disable layer offload |
+| `n_gpu_layers` | `Union[int, Literal["auto", "all"]]` | `"auto"` | Maximum number of model layers stored in VRAM:<br>• `auto`/`-1`: auto-selected by llama.cpp<br>• `all`/`-2`: all possible layers<br>• positive integer N: offload up to N layers<br>• `0`: disable layer offload |
 | `cpu_moe` | `bool` | `False` | Whether to keep all MoE weights on CPU |
 | `n_cpu_moe` | `int` | `0` | Number of first N MoE layers to keep on CPU (compatible with `cpu_moe`) |
 | `split_mode` | `int` | `LLAMA_SPLIT_MODE_LAYER` | Model GPU split mode:<br>• `LLAMA_SPLIT_MODE_NONE`: single GPU<br>• `LLAMA_SPLIT_MODE_ROW`: row-level split<br>• `LLAMA_SPLIT_MODE_LAYER`: layer-level split |
 | `load_mode` | `int` (`llama_load_mode`) | `LLAMA_LOAD_MODE_AUTO` | How model data is loaded. `AUTO` lets llama.cpp choose from device capabilities; the explicit `LLAMA_LOAD_MODE_*` values are described below. |
 | `lazy_mode` | `int` (`llama_lazy_mode`) | `LLAMA_LAZY_MODE_AUTO` | Controls on-demand reads for architecture-marked tensors when mmap is active. |
-| `main_gpu` | `int` | `0` | The primary GPU to use for intermediate results or the entire model. |
-| `tensor_split` | `List[float]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
-| `kv_overrides` | `Dict` | `None` | Key-value overrides for the model metadata (supports bool, int, float, str). |
+| `main_gpu` | `int` | `0` | With `LLAMA_SPLIT_MODE_NONE`, selects the GPU for the whole model. With `ROW`, selects the GPU for small tensors and intermediate results. It is ignored with `LAYER`. |
+| `tensor_split` | `Optional[List[float]]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
+| `kv_overrides` | `Optional[Dict[str, Union[bool, int, float, str]]]` | `None` | Key-value overrides for the model metadata. |
 | `use_mmap`, `use_direct_io`, `use_mlock` | `bool` | `False` | Deprecated compatibility arguments. They no longer configure native loading; use `load_mode`. |
 | `vocab_only` | `bool` | `False` | Load model metadata and vocabulary without weight tensors. |
 | `check_tensors` | `bool` | `False` | Validate tensor data while loading the model. This increases load time. |
@@ -109,8 +112,8 @@ mapping:
 | `n_rs_seq` | `int` | `0` | Experimental recurrent-state snapshots retained per sequence for rollback. `0` disables rollback snapshots. |
 | `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` lets llama.cpp use the effective `n_batch`. |
 | `n_outputs_max_per_seq` | `int` | `1` | Maximum outputs per sequence. `0` lets llama.cpp use the effective `n_outputs_max`. |
-| `n_threads` | `int` | `None` | Number of threads for generation (defaults to CPU count // 2). |
-| `n_threads_batch` | `int` | `None` | Number of threads for batch processing (defaults to CPU count). |
+| `n_threads` | `Optional[int]` | `None` | Number of threads for generation (defaults to CPU count // 2). |
+| `n_threads_batch` | `Optional[int]` | `None` | Number of threads for batch processing (defaults to CPU count). |
 | `ctx_type` | `int` | `LLAMA_CONTEXT_TYPE_DEFAULT` | Context implementation selected by llama.cpp. Keep the default unless a model or backend requires another context type. |
 
 ### Embedding, Attention & KV Parameters
@@ -119,9 +122,9 @@ mapping:
 | :--- | :--- | :--- | :--- |
 | `embeddings` | `bool` | `False` | Enable embedding extraction alongside logits. Must be `True` before calling `embed()` or `create_embedding()`. |
 | `pooling_type` | `int` | `LLAMA_POOLING_TYPE_UNSPECIFIED` | Pooling strategy for embedding output. `UNSPECIFIED` follows model metadata, `NONE` returns token-level vectors, and `RANK` returns classifier or reranking output. |
-| `attention_type` | `int` | `LLAMA_ATTENTION_TYPE_UNSPECIFIED` | Attention mode used by the context. `UNSPECIFIED` lets llama.cpp select the model-compatible behavior. |
+| `attention_type` | `Optional[int]` | `LLAMA_ATTENTION_TYPE_UNSPECIFIED` | Attention mode used by the context. `None` is normalized to `UNSPECIFIED`, which lets llama.cpp select the model-compatible behavior. |
 | `logits_all` | `bool` | `False` | Retain logits for every evaluated token instead of only requested outputs. Completion log probabilities require this mode. |
-| `flash_attn_type` | `int` | `LLAMA_FLASH_ATTN_TYPE_AUTO` | Controls when Flash Attention is enabled. |
+| `flash_attn_type` | `Optional[int]` | `LLAMA_FLASH_ATTN_TYPE_AUTO` | Controls when Flash Attention is enabled. `None` is normalized to `AUTO`. |
 | `rope_scaling_type` | `Optional[int]` | `LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED` | RoPE scaling strategy. The unspecified value follows model metadata. |
 | `rope_freq_base` | `float` | `0.0` | RoPE base frequency override. `0.0` follows model metadata. |
 | `rope_freq_scale` | `float` | `0.0` | RoPE frequency scaling override. `0.0` follows model metadata. |
@@ -141,13 +144,13 @@ mapping:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `chat_format` | `str` | `None` | String specifying the chat template (e.g., `"llama-2"`, `"chatml"`). Guessed from GGUF if None. |
-| `chat_handler` | `LlamaChatCompletionHandler` | `None` | Optional custom handler. See [[ChatHandlers]]. |
+| `chat_format` | `Optional[str]` | `None` | String specifying the chat template (e.g., `"llama-2"`, `"chatml"`). Guessed from GGUF if None. |
+| `chat_handler` | `Optional[LlamaChatCompletionHandler]` | `None` | Optional custom handler. See [[ChatHandlers]]. |
 | `chat_template_name` | `Optional[str]` | `None` | Named chat template passed to the generic MTMD handler created by `mmproj_path`. |
 | `chat_handler_kwargs` | `Dict[str, Any]` | `{}` | Additional keyword arguments passed to the generic MTMD chat handler created by `mmproj_path`. |
 | `tokenizer` | `Optional[BaseLlamaTokenizer]` | `None` | Override the tokenizer used by the high-level API. By default, `LlamaTokenizer` wraps the loaded model vocabulary. |
-| `draft_model` | `LlamaDraftModel` | `None` | Deprecated stateless draft callback kept for compatibility. New code should use `speculative`. |
-| `speculative` | `Union[SpecConfig, LlamaSpecEngine]` | `None` | Stateful speculative configuration or engine. Supports the complete begin/draft/process/accept lifecycle; it cannot be combined with `draft_model`. |
+| `draft_model` | `Optional[LlamaDraftModel]` | `None` | Deprecated stateless draft callback kept for compatibility. New code should use `speculative`. |
+| `speculative` | `Optional[Union[SpecConfig, LlamaSpecEngine]]` | `None` | Stateful speculative configuration or engine. Supports the complete begin/draft/process/accept lifecycle; it cannot be combined with `draft_model`. |
 | `ctx_checkpoints` | `int` | `16` | Max hybrid/recurrent context checkpoints to keep. Set to `0` to disable checkpointing for single-turn fast paths. |
 | `checkpoint_interval` | `int` | `4096` | Token interval for saving periodic Hybrid/Recurrent checkpoints during long prompt evaluation. |
 | `checkpoint_on_device` | `bool` | `False` | Store Hybrid/Recurrent checkpoint tensor payloads in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Reduces device-to-host copy overhead, but only one active checkpoint per `seq_id` is safe. |
@@ -273,6 +276,11 @@ print(response.choices[0].message.content)
 With `stream=True`, it returns an iterator of typed `ChatCompletionChunk`
 objects.
 
+The OpenAI SDK's typed `finish_reason` currently does not include the local
+`"abort"` extension. If an interrupted response is converted through this
+method, the SDK may raise a validation error. Use `create_chat_completion()`
+directly when the caller needs to handle `finish_reason="abort"`.
+
 ### `create_completion` / `__call__`
 
 Generates standard text completion from a raw string prompt.
@@ -305,18 +313,83 @@ for token in model.generate(tokens, top_k=40, top_p=0.95, temp=0.2):
 
 ### `eval`
 
-Low-level method to ingest and evaluate a sequence of tokens. Used internally to update the KV cache and logits. Handles **Context Shifting** automatically to prevent OOM when the token count exceeds `n_ctx`.
+Low-level method to ingest and evaluate a sequence of tokens. Used internally
+to update context memory and logits. When the token count exceeds `n_ctx`, it
+attempts **Context Shifting** by discarding older tokens while preserving up to
+`n_keep` leading tokens. It raises `RuntimeError` if the backend memory cannot
+be shifted or the incoming chunk cannot fit.
 
 ```python
 # Evaluates a chunk of tokens and updates internal state
 model.eval(tokens=[1, 453, 234, 987], active_loras=[{"name": "coding_adapter", "scale": 1.0}])
 ```
 
+If the native abort callback interrupts an in-flight `llama_decode()` call,
+`eval()` fully resets the context and raises the internal
+`LlamaDecodeAbort` exception. Direct low-level callers should treat that
+exception as the end of the current request. The full reset is necessary
+because llama.cpp may already have committed an unknown number of physical
+micro-batches while the Python token ledger still represents the pre-call
+state.
+
+### `reset`
+
+Clears the evaluated sequence state owned by the active context. This includes
+native KV/recurrent memory, the Python token cursor, cached output boundaries,
+hybrid checkpoints, and speculative-engine state. It does not unload model
+weights, reset sampling configuration, or clear a separately configured
+prompt-cache object.
+
 ### `abort`
 
-Immediately halts an active generation loop safely.
+Requests cancellation of active generation. `abort()` sets both the Python
+generation event and the native callback flag:
 
-* **Usage**: Typically called from a separate monitoring thread (like a timer). When triggered, the running stream will exit and the final chunk will contain `"finish_reason": "abort"`.
+- The Python event is checked at generation boundaries on every backend.
+- The native callback can interrupt an in-flight `llama_decode()` graph, but
+  llama.cpp currently documents this path as CPU-only.
+- A new high-level completion clears the previous abort flags before starting.
+
+For `create_completion()` and chat handlers that delegate to the standard text
+completion path, both streaming and non-streaming responses finish with
+`"finish_reason": "abort"`. A native mid-decode abort also performs a full
+context reset, because completed micro-batches cannot be inferred reliably.
+Consequently, the interrupted request loses its reusable KV/checkpoint state
+and is not written to the configured prompt cache. Text already emitted by a
+stream remains valid output, but a later request must evaluate its prompt
+again.
+
+For a native mid-decode abort, `generate()` ends iteration normally after the
+reset. If cancellation is observed only at a Python generation boundary, it can
+stop without forcing that full reset. Direct `eval()` and
+`LlamaContext.decode()` callers instead receive `LlamaDecodeAbort`; the latter
+is an advanced internal API and does not perform the high-level reset itself.
+
+Call `abort()` from another thread, such as a timeout timer or UI cancellation
+handler. Do not use one `Llama` instance for concurrent generation requests;
+the abort flags and context state belong to the instance.
+
+### External Threadpool Management
+
+`attach_threadpool(threadpool, threadpool_batch=None)` attaches externally
+created `ggml_threadpool` handles to the native context. The first pool is used
+for single-token generation. When `threadpool_batch` is omitted, llama.cpp uses
+the first pool for batch/prompt processing too.
+
+`detach_threadpool()` waits for pending context work and removes both handles.
+Attaching also synchronizes first, so a pool cannot be replaced while work is
+still pending. The Python wrapper keeps strong references to the supplied
+objects while attached, but ownership stays with the caller: it neither creates
+nor frees the native pools.
+
+The package currently exposes the opaque `ggml_threadpool_p` handle and the
+attach/detach calls, but not `ggml_threadpool_new()` or
+`ggml_threadpool_free()`. Obtain and release pools through the native extension
+or integration that created them. Detach before freeing an external pool, and
+keep the `Llama` context alive while the pool is attached. Applications that do
+not need shared or specially configured pools should rely on llama.cpp's
+automatic threadpool creation and the `n_threads` / `n_threads_batch`
+constructor parameters.
 
 ### Runtime Logging Control
 
@@ -369,7 +442,13 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
 1. **Context Shifting & Prompt Caching**:
 
-   By default, when calling `.generate()` or `.create_completion(reset=True)`, the engine checks for the longest matching prefix in the existing KV cache. To maximize speed, keep system prompts static and only append new dialogue to avoid re-evaluating the entire history. If the context limit is reached during `eval`, the model will automatically trigger a Context Shift (discarding older tokens while attempting to keep `n_keep` tokens, usually the system prompt).
+   By default, `generate(reset=True)` and `create_completion()` check for the
+   longest matching prefix in existing context memory. To maximize speed, keep
+   system prompts static and only append new dialogue to avoid re-evaluating the
+   entire history. If the context limit is reached during `eval`, the model
+   attempts a Context Shift, discarding older tokens while preserving up to
+   `n_keep` leading tokens. Backends whose memory cannot shift raise an error
+   instead.
 
 2. **Structured Output**:
    Use `response_format` for JSON or JSON Schema constrained output. See
@@ -530,9 +609,16 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
 6.  **Assistant Prefill**:
 
-    `llama-cpp-python` supports native **Assistant Prefill** for seamless message continuation. You can now simply use the `assistant_prefill=True` parameter in the `create_chat_completion` function.
+    `llama-cpp-python` supports **Assistant Prefill** for message continuation
+    through the `assistant_prefill=True` parameter of
+    `create_chat_completion()`.
 
-    This safely renders the `N-1` conversation history using standard Jinja templates (preserving exact control tokens) and flawlessly appends your partial text directly to the prompt.
+    The default chat-format path copies the input message list, removes the last
+    assistant message before rendering the preceding history, and appends that
+    message's text to the formatted prompt. If the list is empty, the final role
+    is not `assistant`, or its content is empty, prefill is ignored (with a
+    warning when verbose logging is enabled). Custom chat handlers may implement
+    different behavior.
 
     ```python
     from llama_cpp import Llama
@@ -553,7 +639,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     )
 
     prefilled_text = messages[-1]["content"]
-    # The model will flawlessly continue from " Venus\n3. Earth..."
+    # The generated text continues after the supplied "2." prefix.
     generated_text = response["choices"][0]["message"]["content"]
 
     print(prefilled_text + generated_text)
@@ -561,7 +647,14 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
 7. **Interrupting Reasoning & Assistant Prefill (Time-boxing)**:
 
-    Use the `abort()` method alongside `assistant_prefill=True` to forcefully stop a reasoning model (like Qwen or DeepSeek) if it thinks for too long, inject a bridge text, and force it to output the final answer.
+    Use `abort()` alongside `assistant_prefill=True` to request cancellation
+    when a reasoning model (such as Qwen or DeepSeek) exceeds a time limit, then
+    inject bridge text and request continuation as a final answer.
+
+    A native mid-decode abort resets the context, so the continuation request
+    below re-evaluates the reconstructed message history rather than reusing the
+    interrupted request's KV state. The partial text collected by the caller is
+    preserved in the assistant-prefill message.
     ```python
     import threading
     from llama_cpp import Llama
@@ -814,5 +907,6 @@ for formatting query/document pairs.
 * [[Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
 * [[Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
 * [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP, DFlash, DFlash2, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
+* [[llama.cpp ctypes Bindings](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCppBindings.md)] - Source pointers for the low-level llama.cpp and ggml bindings.
 * [[DFlash2 Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md)] - Runnable Qwen3.8 DFlash2 configuration, validation, benchmark, and tuning workflow.
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).
