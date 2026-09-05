@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-09-02
+last_updated: 2026-09-05
 version_target: "latest"
 ---
 
@@ -632,12 +632,33 @@ selector lattice and therefore reports backend sampling as inactive.
 
 ## Limitations and Lifecycle Notes
 
+### Prefix-cache reuse and `reset`
+
+`HybridCheckpointCache` currently saves and restores only the target context.
+Model-backed speculative engines also maintain draft-side state. For MTP this
+includes the draft context and the `pending_h` hidden-state handoff, which must
+remain at exactly the same token position as the target.
+
+`generate()` defaults to `reset=True`. Without speculative decoding, that mode
+attempts to reuse the longest matching target prefix. With a speculative engine
+enabled, the current implementation instead clears the target and engine state
+together before prompt evaluation. Restoring only the target cache without a
+matching draft checkpoint could leave the two contexts misaligned. Consequently,
+cross-request longest-prefix reuse is not currently available while speculative
+decoding is enabled; this safety behavior is separate from the checkpoint and
+rollback operations used successfully inside one speculative generation.
+
+Do not use `reset=False` as a cache-reuse workaround. It blindly appends the
+provided tokens to the existing context instead of performing prefix matching.
+It is safe only for callers that manage the low-level token stream and pass
+strictly new suffix tokens. Supporting general prefix reuse requires a coupled
+checkpoint containing both the target state and the corresponding speculative
+state.
+
 * MTP and n-gram engines are text-only. DFlash-family engines accept target
   embedding batches, but end-to-end multimodal model coverage is still limited.
 * Current engines support only `seq_id=0`; parallel sequence decoding is not yet
   supported.
-* Speculative resets clear target and engine state together. Public prompt-cache
-  state does not currently serialize the speculative engine's context.
 * Speculation still runs target verification. Low acceptance or expensive
   rollback can make it slower than ordinary decoding.
 * Greedy runs can diverge from ordinary output because different verification
