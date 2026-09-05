@@ -39,7 +39,7 @@ This package provides:
         - [Loading a Local Video With Generic MTMD](https://github.com/JamePeng/llama-cpp-python#loading-a-local-video-with-generic-mtmd)
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
         - [Speech Recognition With Qwen3-ASR (Speech-to-Text)](https://github.com/JamePeng/llama-cpp-python#speech-recognition-with-qwen3-asr-speech-to-text)
-        - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--text)
+        - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Video + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--video--text)
     - [Embeddings & Reranking (GGUF)](https://github.com/JamePeng/llama-cpp-python#embeddings--reranking-gguf)
         - [1. Text Embeddings (Vector Search)](https://github.com/JamePeng/llama-cpp-python#1-text-embeddings-vector-search)
         - [2. Reranking (Cross-Encoder Scoring)](https://github.com/JamePeng/llama-cpp-python#2-reranking-cross-encoder-scoring)
@@ -1753,13 +1753,15 @@ print(f"Transcribe: {response['choices'][0]['message']['content']}")
 
 </details>
 
-## Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Text)
+## Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Video + Text)
 
-Below is a complete, production-ready example demonstrating how to dynamically route and process both image and audio files. It includes a universal media processor that automatically converts local files into the correct payload structure (Data URIs for images, and `input_audio` for audio files).
+Below is a complete example showing how to route image, audio, and video files into one request. Images use Data URIs, audio uses `input_audio`, and videos use local paths so the MTMD video helper can sample frames with FFmpeg without Base64-encoding the entire file.
+
+Video input requires a vision-capable projector, an MTMD build compiled with video support, and `ffmpeg` plus `ffprobe`. Start with a low sampling rate such as 1 FPS because every sampled frame consumes context tokens and preprocessing memory.
 
 > **⚠️ IMPORTANT: GEMMA-4 MODEL CAPABILITIES & LIMITATIONS**
-> * **Gemma4 E2B / E4B:** Supports Full Multimodal (Vision + Audio + Text). `enable_thinking` **MUST** be `True`(default).
-> * **Gemma4 31B / 26BA4B:** Supports Vision + Text ONLY (Audio is NOT supported). `enable_thinking` can be toggled (`True` or `False`).
+> * **Gemma4 E2B / E4B:** Supports Vision + Audio + Video + Text. `enable_thinking` **MUST** be `True`(default).
+> * **Gemma4 31B / 26BA4B:** Supports Vision + Video + Text (Audio is NOT supported). `enable_thinking` can be toggled (`True` or `False`).
 
 ```python
 from llama_cpp import Llama
@@ -1772,17 +1774,21 @@ MODEL_PATH = r"/path/to/Gemma-4-E4B-It-BF16.gguf"
 # BF16 mmproj is required for audio. Other quantizations are known to have degraded performance.
 MMPROJ_PATH = r"/path/to/mmproj-Gemma-4-E4B-It-BF16.gguf"
 
-# Initialize the Llama model with multimodal support
+# Initialize the Llama model with multimodal and video support
 # Note: Since we are using E4B here, enable_thinking MUST be True, and audio is supported.
 llm = Llama(
     model_path=MODEL_PATH,
     chat_handler=Gemma4ChatHandler(
         mmproj_path=MMPROJ_PATH,
         enable_thinking=True,  # MUST be True for E2B/E4B models
+        video_fps_target=1.0,  # Start low; sampled frames consume context tokens
+        video_timestamp_interval_ms=5000,
+        # video_ffmpeg_bin_dir=r"/path/to/ffmpeg/bin",  # Omit when tools are on PATH
+        batch_max_tokens=1024,
         verbose=True,          # Enable Debug Info
     ),
     n_gpu_layers=-1,
-    n_ctx=10240,
+    n_ctx=32768,               # Video usually needs more context than a single image
     verbose=True,              # Enable Debug Info
 )
 
@@ -1800,11 +1806,18 @@ _MEDIA_MIME_TYPES = {
     '.wav':  ('audio', 'wav'),    # OpenAI standard usually uses raw format names for audio
     '.mp3':  ('audio', 'mp3'),
     # '.flac': ('audio', 'flac'),
+
+    # ------ Video formats ------
+    '.mp4':  ('video', 'video/mp4'),
+    '.mkv':  ('video', 'video/x-matroska'),
+    '.mov':  ('video', 'video/quicktime'),
+    '.webm': ('video', 'video/webm'),
+    '.avi':  ('video', 'video/x-msvideo'),
 }
 
 def build_media_payload(file_path: str) -> dict:
     """
-    Read a local media file (image or audio) and convert it into a valid input payload for the LLM.
+    Convert a local image, audio file, or video into a Gemma 4 content item.
     """
     if not os.path.isfile(file_path):
         raise FileNotFoundError(f"Media file not found: {file_path}")
@@ -1813,9 +1826,17 @@ def build_media_payload(file_path: str) -> dict:
     media_category, mime_or_format = _MEDIA_MIME_TYPES.get(extension, ('unknown', 'application/octet-stream'))
 
     if media_category == 'unknown':
-        print(f"Warning: Unknown extension '{extension}'. It might not be processed correctly.")
+        raise ValueError(f"Unsupported media extension: {extension} ({file_path})")
 
-    # Read and Base64 encode the file
+    if media_category == 'video':
+        # Gemma 4 expects type="video". Keep the path intact so MTMD can pass it
+        # to ffprobe/ffmpeg and decode sampled frames on demand.
+        return {
+            "type": "video",
+            "video": os.path.abspath(file_path),
+        }
+
+    # Images and audio use inline Base64 payloads.
     with open(file_path, "rb") as f:
         encoded_data = base64.b64encode(f.read()).decode("utf-8")
 
@@ -1866,9 +1887,9 @@ def run_inference(media_paths: list, text_prompt: str):
     response = llm.create_chat_completion(
         messages=[
             {"role": "system", "content": """
-            You are a highly capable multimodal assistant that can process both text, vision and audio.
+            You are a highly capable multimodal assistant that can process text, images, audio, and video.
 
-            """}, # Note: Supported ONLY by Gemma4 E2B / E4B.
+            """}, # Note: Audio Supported ONLY by Gemma4 E2B / E4B.
             {"role": "user", "content": user_content}
         ],
         temperature=1.0,
@@ -1906,6 +1927,24 @@ run_inference(
 # run_inference(
 #     media_paths=[r"/path/to/test.wav"],
 #     text_prompt="Transcribe this audio and summarize the main points."
+# )
+
+# --- Example D: Video Only (Video + Text) ---
+# Requires an MTMD video-enabled build plus ffmpeg and ffprobe.
+# run_inference(
+#     media_paths=[r"/path/to/test.mp4"],
+#     text_prompt="Describe the main events in this video and include timestamps."
+# )
+
+# --- Example E: Image + Audio + Video (Omni Multimodal) ---
+# Note: Audio support requires Gemma4 E2B/E4B and a compatible BF16 mmproj.
+# run_inference(
+#     media_paths=[
+#         r"/path/to/test.png",
+#         r"/path/to/test.wav",
+#         r"/path/to/test.mp4",
+#     ],
+#     text_prompt="Analyze the media together and explain how their contents relate."
 # )
 ```
 
