@@ -807,54 +807,75 @@ class MTMDChatHandler:
             bitmaps=bitmaps,
         )
 
-        if chunks is None:
-            chunks = self._mtmd_cpp.mtmd_input_chunks_init()
+        with ExitStack() as cleanup:
             if chunks is None:
-                raise ValueError(
-                    f"{self.log_prefix}(_mtmd_tokenize): failed to init mtmd_input_chunks"
-                )
+                chunks = self._mtmd_cpp.mtmd_input_chunks_init()
+                if chunks is None:
+                    raise ValueError(
+                        f"{self.log_prefix}(_mtmd_tokenize): failed to init mtmd_input_chunks"
+                    )
 
-        input_text = self._mtmd_cpp.mtmd_input_text()
-        encoded_text = text.encode("utf-8")
-        input_text.text = ctypes.c_char_p(encoded_text)
-        input_text.text_len = len(encoded_text)
-        input_text.add_special = (llama.n_tokens == 0)
-        input_text.parse_special = True
+                cleanup.callback(self._mtmd_cpp.mtmd_input_chunks_free, chunks)
 
-        n_bitmaps = len(bitmaps)
+            input_text = self._mtmd_cpp.mtmd_input_text()
+            encoded_text = text.encode("utf-8")
+            input_text.text = ctypes.c_char_p(encoded_text)
+            input_text.text_len = len(encoded_text)
+            input_text.add_special = (llama.n_tokens == 0)
+            input_text.parse_special = True
 
-        if n_bitmaps > 0:
-            bitmap_array = (
-                self._mtmd_cpp.mtmd_bitmap_p_ctypes * n_bitmaps
-            )(*bitmaps)
-        else:
-            bitmap_array = None
+            n_bitmaps = len(bitmaps)
 
-        result = self._mtmd_cpp.mtmd_tokenize(
-            self.mtmd_ctx,
-            chunks,
-            ctypes.byref(input_text),
-            bitmap_array,
-            n_bitmaps,
-        )
+            if n_bitmaps > 0:
+                bitmap_array = (
+                    self._mtmd_cpp.mtmd_bitmap_p_ctypes * n_bitmaps
+                )(*bitmaps)
+            else:
+                bitmap_array = None
 
-        if result != 0:
-            marker_count = text.count(self.media_marker)
-            raise ValueError(
-                f"{self.log_prefix}(_mtmd_tokenize): mtmd_tokenize failed\n"
-                f"- result={result}\n"
-                f"- text_len={len(text)}\n"
-                f"- marker_count={marker_count}\n"
-                f"- n_bitmaps={n_bitmaps}\n"
-                f"- supports_vision={self.is_support_vision}\n"
-                f"- supports_audio={self.is_support_audio}\n"
-                f"- supports_video={self.is_support_video}\n"
-                "Possible causes: marker/bitmap mismatch, invalid image/audio data, "
-                "unsupported vision/audio projector, failed media preprocessing, "
-                "or text tokenization failure."
+            result = self._mtmd_cpp.mtmd_tokenize(
+                self.mtmd_ctx,
+                chunks,
+                ctypes.byref(input_text),
+                bitmap_array,
+                n_bitmaps,
             )
 
-        return chunks
+            if result != 0:
+                marker_count = text.count(self.media_marker)
+                raise ValueError(
+                    f"{self.log_prefix}(_mtmd_tokenize): mtmd_tokenize failed\n"
+                    f"- result={result}\n"
+                    f"- text_len={len(text)}\n"
+                    f"- marker_count={marker_count}\n"
+                    f"- n_bitmaps={n_bitmaps}\n"
+                    f"- supports_vision={self.is_support_vision}\n"
+                    f"- supports_audio={self.is_support_audio}\n"
+                    f"- supports_video={self.is_support_video}\n"
+                    "Possible causes: marker/bitmap mismatch, invalid image/audio data, "
+                    "unsupported vision/audio projector, failed media preprocessing, "
+                    "or text tokenization failure."
+                )
+
+            # Transfer ownership only after success; caller-provided chunks are borrowed.
+            cleanup.pop_all()
+            return chunks
+
+    def _free_mtmd_resources(self, chunks=None, bitmaps=None, videos=None):
+        """Release all owned resources, even if an individual free raises."""
+        with ExitStack() as cleanup:
+            # Callbacks run in reverse order: chunks, bitmaps, then videos.
+            for resources, free in (
+                (videos, self._mtmd_cpp.mtmd_helper_video_free),
+                (bitmaps, self._mtmd_cpp.mtmd_bitmap_free),
+            ):
+                if resources:
+                    for resource in reversed(resources):
+                        cleanup.callback(free, resource)
+                    # Transfer ownership before freeing so outer cleanup cannot retry these pointers.
+                    resources.clear()
+            if chunks is not None:
+                cleanup.callback(self._mtmd_cpp.mtmd_input_chunks_free, chunks)
 
     def _process_mtmd_prompt(
         self,
@@ -916,38 +937,37 @@ class MTMDChatHandler:
         try:
             # Concurrent Media Decoding
             import concurrent.futures
+            from threading import Lock
             if media_items:
+                # Serialize cleanup registration only; media loading/decoding stays parallel.
+                cleanup_lock = Lock()
+
                 def _create_bitmap_func(idx: int, item: dict):
+                    # Each task loads and decodes one media item independently.
                     media_bytes = self.load_media(item["url"], item["type"])
                     bitmap, video_ctx = self._create_bitmap_from_bytes(media_bytes)
-                    return idx, bitmap, video_ctx
-                # This method uses multi-threaded parallel processing to convert images or audio to bitmaps,
-                # which can be used in the future to process large numbers of video frames.
-                max_workers = min(llama.n_threads, len(media_items))
-                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = [executor.submit(_create_bitmap_func, i, item) for i, item in enumerate(media_items)]
-                    
-                    decode_error = None
-
-                    for future in concurrent.futures.as_completed(futures):
-                        # Ensure inserting all bitmap/video_ctx into cleanup array except decoding error
-                        try:
-                            idx, bitmap, video_ctx = future.result()
-                        except Exception as exc:
-                            if decode_error is None:
-                                decode_error = exc
-                            continue
-
-                        bitmaps[idx] = bitmap
+                    # Register ownership here: the caller may never reach this future's result.
+                    with cleanup_lock:
                         bitmap_cleanup.append(bitmap)
-
                         if video_ctx:
                             video_cleanup.append(video_ctx)
+                    return idx, bitmap
+                # Bound concurrency by the configured thread count and available media items.
+                max_workers = min(llama.n_threads, len(media_items))
+                # Context exit joins workers before outer error cleanup, even if submit() fails.
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all items first so loading and decoding can overlap.
+                    futures = [executor.submit(_create_bitmap_func, i, item) for i, item in enumerate(media_items)]
+                    
+                    # Consume completed tasks without waiting for earlier, slower inputs.
+                    for future in concurrent.futures.as_completed(futures):
+                        # Re-raise worker errors here; executor exit waits for remaining tasks
+                        # to finish registering resources before the outer cleanup runs.
+                        idx, bitmap = future.result()
+                        # Only this thread writes bitmaps; restore input order for tokenization.
+                        bitmaps[idx] = bitmap
 
-                    if decode_error is not None:
-                        raise decode_error
-
-                # Strict validation: Abort if any thread failed to decode its assigned media
+                # All workers have finished; verify every input has a bitmap before tokenization.
                 if any(b is None for b in bitmaps):
                     raise RuntimeError(f"{self.log_prefix}(_create_bitmap_func): Failed to decode one or more media files.")
                 else:
@@ -966,10 +986,7 @@ class MTMDChatHandler:
             )
 
             # Video helper contexts only need to stay alive until mtmd_tokenize() completes.
-            if video_cleanup:
-                for video_ctx in video_cleanup:
-                    self._mtmd_cpp.mtmd_helper_video_free(video_ctx)
-                video_cleanup.clear()
+            self._free_mtmd_resources(videos=video_cleanup)
 
             # 5. Virtual Token Ledger Construction
             full_prompt_ids = []
@@ -1046,28 +1063,13 @@ class MTMDChatHandler:
                     "or the chat template/media marker normalization is incorrect."
                 )
 
+            # Transfer chunks and bitmaps to __call__ for cleanup after prompt evaluation.
             return full_prompt_ids, chunk_token_spans, chunks, bitmap_cleanup
 
-        except Exception as e:
-            # Ensure no useless pointers remain upon any failure
-            # Free chunks
-            if chunks is not None:
-                self._mtmd_cpp.mtmd_input_chunks_free(chunks)
-                chunks = None
-            # Free bitmaps
-            if len(bitmap_cleanup) > 0:
-                for bitmap in bitmap_cleanup:
-                    self._mtmd_cpp.mtmd_bitmap_free(bitmap)
-                bitmap_cleanup = None
-            # Free videos
-            if len(video_cleanup) > 0:
-                for video_ctx in video_cleanup:
-                    self._mtmd_cpp.mtmd_helper_video_free(video_ctx)
-                video_cleanup = None
-
-            bitmaps = None
-
-            raise e
+        except BaseException:
+            # Include cancellation and KeyboardInterrupt in failure cleanup.
+            self._free_mtmd_resources(chunks, bitmap_cleanup, video_cleanup)
+            raise
 
     def __call__(
         self,
@@ -1140,10 +1142,10 @@ class MTMDChatHandler:
             add_generation_prompt=add_generation_prompt,
         )
 
-        if self.verbose:
-            print(f"{self.log_prefix}(__call__): Prepared virtual token ledger of length {len(full_prompt_ids)}.", file=sys.stderr)
-
         try:
+            if self.verbose:
+                print(f"{self.log_prefix}(__call__): Prepared virtual token ledger of length {len(full_prompt_ids)}.", file=sys.stderr)
+
             # 3. KV Cache Synchronization & State Rollback
             # Compares the virtual ledger with physical history to prevent Cache Poisoning.
             current_history = llama.input_ids[:llama.n_tokens].tolist()
@@ -1314,16 +1316,8 @@ class MTMDChatHandler:
                     seq_id=0
                 )
         finally:
-            # Cleanup chunks
-            if chunks is not None:
-                self._mtmd_cpp.mtmd_input_chunks_free(chunks)
-                chunks = None
-            # Cleanup bitmaps
-            if bitmap_cleanup:
-                for bitmap in bitmap_cleanup:
-                    self._mtmd_cpp.mtmd_bitmap_free(bitmap)
-                bitmap_cleanup.clear()
-            bitmap_array = None
+            # Generation no longer needs these resources once prompt evaluation ends.
+            self._free_mtmd_resources(chunks, bitmap_cleanup)
 
         # Handle response format and tools (same as before)
         if response_format is not None and response_format["type"] == "json_object":
