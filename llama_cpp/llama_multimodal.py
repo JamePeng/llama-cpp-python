@@ -926,15 +926,26 @@ class MTMDChatHandler:
                 max_workers = min(llama.n_threads, len(media_items))
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = [executor.submit(_create_bitmap_func, i, item) for i, item in enumerate(media_items)]
+                    
+                    decode_error = None
 
                     for future in concurrent.futures.as_completed(futures):
-                        idx, bitmap, video_ctx = future.result()
+                        # Ensure inserting all bitmap/video_ctx into cleanup array except decoding error
+                        try:
+                            idx, bitmap, video_ctx = future.result()
+                        except Exception as exc:
+                            if decode_error is None:
+                                decode_error = exc
+                            continue
 
                         bitmaps[idx] = bitmap
                         bitmap_cleanup.append(bitmap)
 
                         if video_ctx:
                             video_cleanup.append(video_ctx)
+
+                    if decode_error is not None:
+                        raise decode_error
 
                 # Strict validation: Abort if any thread failed to decode its assigned media
                 if any(b is None for b in bitmaps):
