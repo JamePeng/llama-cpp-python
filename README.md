@@ -39,6 +39,7 @@ This package provides:
         - [Loading a Local Video With Generic MTMD](https://github.com/JamePeng/llama-cpp-python#loading-a-local-video-with-generic-mtmd)
         - [Loading a Local Image With Qwen3VL(Thinking/Instruct)](https://github.com/JamePeng/llama-cpp-python#loading-a-local-image-with-qwen3vlthinkinginstruct)
         - [Speech Recognition With Qwen3-ASR (Speech-to-Text)](https://github.com/JamePeng/llama-cpp-python#speech-recognition-with-qwen3-asr-speech-to-text)
+        - [Speech Synthesis With MTMD (Text-to-Speech)](#speech-synthesis-with-mtmd-text-to-speech)
         - [Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Video + Text)](https://github.com/JamePeng/llama-cpp-python#comprehensive-omni-multimodal-example-gemma-4-vision--audio--video--text)
     - [Embeddings & Reranking (GGUF)](https://github.com/JamePeng/llama-cpp-python#embeddings--reranking-gguf)
         - [1. Text Embeddings (Vector Search)](https://github.com/JamePeng/llama-cpp-python#1-text-embeddings-vector-search)
@@ -1215,6 +1216,10 @@ can include images, audio, and video in addition to text. Video is implemented
 as timestamped image-frame sampling through the llama.cpp MTMD helper and
 therefore requires a vision-capable projector plus `ffmpeg` and `ffprobe`.
 
+For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
+with Qwen3-TTS Base and Pocket TTS. See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
+for supported models, downloadable weights, and examples.
+
 Below are the supported multi-modal models and their respective chat handlers (Python API) and chat formats (Server API).
 
 | Model | MTMD chat handler | `chat_format` |
@@ -1752,6 +1757,64 @@ print(f"Transcribe: {response['choices'][0]['message']['content']}")
 * **System Prompt:** Because the Qwen3-ASR template strips out user text, all instructions (like translation requests or formatting rules) **must** be placed in the `"system"` role.
 
 </details>
+
+### Speech Synthesis With MTMD (Text-to-Speech)
+
+Use `MTMDAudioGenerator` with a dedicated `Llama` instance and a matching
+audio-generation `mmproj`. TTS uses `create_speech()` rather than a chat handler
+or server `chat_format`.
+
+| Model | Python API | Reference audio | Language |
+|:--- |:--- |:--- |:--- |
+| [Qwen3-TTS-12Hz-Base-GGUF](https://huggingface.co/JamePeng2023/Qwen3-TTS-12Hz-Base-GGUF) | `MTMDAudioGenerator` | Optional speaker reference | Selectable, including Chinese, English and Japanese |
+| Pocket TTS | `MTMDAudioGenerator` | Required | Determined by the language-pack weights |
+
+The Qwen repository currently provides **1.7B Base** backbone and mmproj files
+in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
+files and replace `/path/to/model/` with their local directory.
+
+```python
+from contextlib import closing
+
+from llama_cpp import Llama, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_multimodal import MTMDAudioGenerator
+
+with closing(Llama(
+    model_path="/path/to/model/qwen3-TTS-12Hz-1.7B-Base-BF16.gguf",
+    embeddings=True,
+    pooling_type=LLAMA_POOLING_TYPE_NONE,
+    n_ctx=4096,
+    n_gpu_layers=-1,  # Use 0 for CPU inference.
+)) as llama:
+    with MTMDAudioGenerator(
+        mmproj_path="/path/to/model/mmproj-qwen3-TTS-12Hz-1.7B-Base-BF16.gguf",
+        use_gpu=True,
+        flash_attn=None,  # AUTO; True enables FA, False disables it.
+    ) as generator:
+        audio = generator.create_speech(
+            llama=llama,
+            text="Hello, welcome to speech synthesis.",
+            language="en",
+            speaker_reference="/path/to/reference.wav",
+            seed=42,
+        )
+        audio.save("output.wav")
+```
+
+Use `speaker_reference="/path/to/reference.wav"` for a reference voice, or omit
+it for Qwen without a reference;
+encoded audio bytes, URLs and data URIs are also accepted. For Pocket, provide
+a reference and omit `language`. Qwen currently uses only the reference speaker
+embedding: `ref_text`-conditioned full cloning, CustomVoice and preset speaker
+IDs are not supported. The FA option controls mmproj independently of the backbone.
+
+The result contains complete WAV or raw float32 PCM audio. Invalid audio raises
+an error; `finish_reason="length"` means the generation-step limit was reached
+and speech may be incomplete. There is no streaming output yet.
+
+- [TTS API guide and limitations](docs/wiki/examples/audio/audio-tts.md)
+- [CLI examples: reference voices, multilingual and batch synthesis](examples/high_level_api/mtmd_tts.py)
+- [Streamlit playground: upload, recording, playback and downloads](examples/streamlit_tts/README.md)
 
 ## Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Video + Text)
 
