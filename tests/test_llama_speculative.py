@@ -1087,13 +1087,14 @@ def test_dflash_mrope_process_uses_target_positions_for_fused_injection():
     assert engine.verify_positions == [4, 5]
 
 
-def test_dflash_processes_target_embedding_batches_from_extracted_features():
+@pytest.mark.parametrize("positions", [[7], [7, 8], [7, 20]])
+def test_dflash_processes_target_embedding_batches_from_extracted_features(positions):
     engine = object.__new__(LlamaDFlashDecoding)
     engine.target_layer_ids = [1]
     engine.n_embd_tgt = 2
     engine.n_embd_enc = 2
     engine.is_mrope = False
-    target_rows = np.asarray([[1, 2]], dtype=np.float32)
+    target_rows = np.asarray([[1, 2]] * len(positions), dtype=np.float32)
 
     class _TargetContext:
         def get_embeddings_layer_inp(self, layer_id):
@@ -1108,19 +1109,59 @@ def test_dflash_processes_target_embedding_batches_from_extracted_features():
     engine.verify_positions = []
 
     class _EmbeddingBatch:
-        n_tokens = 1
+        n_tokens = len(positions)
         token = None
         embd = [0.0]
-        pos = [7]
-        n_seq_id = [1]
-        seq_id = [[0]]
+        pos = positions
+        n_seq_id = [1] * len(positions)
+        seq_id = [[0]] * len(positions)
 
     engine.process(_EmbeddingBatch())
 
     np.testing.assert_array_equal(
-        engine.draft_context.decoded[0][2], [1, 2]
+        engine.draft_context.decoded[0][2], target_rows.reshape(-1)
     )
-    assert engine.draft_context.decoded[0][1] == [7]
+    assert engine.draft_context.decoded[0][1] == positions
+
+
+def test_dflash_skips_pinned_image_without_touching_draft_state():
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.verify_positions = [3]
+    engine.verify_features = np.asarray([[1, 2]], dtype=np.float32)
+
+    class ImageBatch:
+        n_tokens = 3
+        token = None
+        embd = [0.0]
+        pos = [7, 7, 7]
+        n_seq_id = [1, 1, 1]
+        seq_id = [[0], [0], [0]]
+
+    # No target/draft contexts: skipping must not read features or decode.
+    engine.process(ImageBatch())
+    assert engine.verify_positions == [3]
+    np.testing.assert_array_equal(engine.verify_features, [[1, 2]])
+
+
+def test_dflash_native_position_is_independent_of_history_length():
+    engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True)
+    engine.draft_context = _FakeDFlashDraftContext()
+    result = engine.draft_at_position([1] * 100, pos0=7, id_last=42, n_max=3)
+    assert result.tolist() == [101, 102, 103]
+    assert engine.noise_batch.positions == [7, 8, 9, 10]
+    with pytest.raises(ValueError, match="non-negative"):
+        engine.draft_at_position([], pos0=-1, id_last=42, n_max=3)
+
+
+@pytest.mark.parametrize("native_max,cursor", [(-1, 0), (6, 7), (99, 100)])
+def test_speculative_start_position_matches_verification(native_max, cursor):
+    from types import SimpleNamespace
+
+    llm = object.__new__(llama_cpp.Llama)
+    llm._ctx = SimpleNamespace(memory_seq_pos_max=lambda seq_id: native_max)
+    assert llm._speculative_start_position(cursor) == cursor
+    with pytest.raises(NotImplementedError, match="position ledger"):
+        llm._speculative_start_position(cursor + 10)
 
 
 def test_dflash_accepts_final_target_layer_input_tap_for_nemotron():

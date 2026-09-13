@@ -443,6 +443,26 @@ class LlamaSpecEngine(abc.ABC):
         """
         raise NotImplementedError()
 
+    def draft_at_position(
+        self,
+        input_ids: Sequence[int],
+        *,
+        pos0: int,
+        id_last: int,
+        n_max: int,
+        seq_id: int = 0,
+    ) -> npt.NDArray[np.intc]:
+        """Draft at a native position, independently of the history length.
+
+        The legacy ``draft(n_past=...)`` keyword denotes this same position.
+        Delegate to it so existing custom engines remain compatible.
+        """
+        if pos0 < 0:
+            raise ValueError("Draft start position must be non-negative")
+        return self.draft(
+            input_ids, n_past=pos0, id_last=id_last, n_max=n_max, seq_id=seq_id
+        )
+
     def accept(self, n_accepted: int, seq_id: int = 0) -> None:
         """Commit the sampled token plus ``n_accepted`` accepted draft tokens."""
         _ = n_accepted, seq_id
@@ -2213,6 +2233,10 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 raise NotImplementedError(
                     "DFlash speculative decoding currently supports one sequence"
                 )
+
+        # Match llama.cpp: pinned image rows can exhaust a windowed draft cache.
+        if has_embeddings and n_tokens > 1 and batch.pos[0] == batch.pos[n_tokens - 1]:
+            return
 
         chunk_size = self.draft_context.n_ubatch()
         feature_chunks: List[npt.NDArray[np.float32]] = []

@@ -1350,6 +1350,17 @@ class Llama:
                 f"memory range [{p0}, {p1})"
             )
 
+    def _speculative_start_position(self, token_cursor: int) -> int:
+        """Check that drafting and token-based verification use the same position."""
+        pos0 = self._ctx.memory_seq_pos_max(0) + 1
+        if pos0 != token_cursor:
+            raise NotImplementedError(
+                "High-level speculative verification requires contiguous text "
+                f"positions: next native position={pos0}, token cursor={token_cursor}. "
+                "Non-contiguous media positions require a separate position ledger."
+            )
+        return pos0
+
     def _limit_speculative_draft_n_max(self, requested: int) -> int:
         """Keep ``[id_last, draft...]`` within one atomic target batch."""
         return min(max(0, int(requested)), max(0, self.n_batch - 1))
@@ -2321,11 +2332,12 @@ class Llama:
             n_max = self._limit_speculative_draft_n_max(n_max)
             if n_max <= 0:
                 return np.empty(0, dtype=np.intc)
+            pos0 = self._speculative_start_position(n_past)
             started = time.perf_counter()
             try:
-                result = self.speculative.draft(
+                result = self.speculative.draft_at_position(
                     history,
-                    n_past=n_past,
+                    pos0=pos0,
                     id_last=id_last,
                     n_max=n_max,
                     seq_id=0,

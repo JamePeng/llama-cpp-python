@@ -632,6 +632,24 @@ selector lattice and therefore reports backend sampling as inactive.
 
 ## Limitations and Lifecycle Notes
 
+### Native draft positions and image batches
+
+`LlamaSpecEngine.draft_at_position(..., pos0=...)` takes the native position of
+the anchor token, independently of the token-history length. It delegates to the
+existing `draft(n_past=...)` interface, whose `n_past` keyword also denotes a
+position. Existing engine subclasses can continue implementing `draft()`.
+
+DFlash-family engines skip embedding batches with multiple rows pinned to the
+same position (the first and last row positions match), following llama.cpp's
+image handling. Injecting these rows can exhaust a windowed draft cache. Single
+embedding rows and batches with advancing positions still pass through normally.
+
+High-level speculative generation currently requires contiguous text positions.
+It checks the next native target position against the token cursor and rejects a
+mismatch before drafting: target verification and rollback still use token-based
+positions. The low-level position interface does not by itself enable end-to-end
+multimodal speculative generation.
+
 ### Prefix-cache reuse and `reset`
 
 `HybridCheckpointCache` currently saves and restores only the target context.
