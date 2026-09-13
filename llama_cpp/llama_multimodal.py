@@ -3,11 +3,16 @@ from __future__ import annotations
 import base64
 import ctypes
 import json
+import io
+import math
 import os
 import sys
+import threading
 import zlib
+import wave
 
 from contextlib import ExitStack
+from dataclasses import dataclass
 from typing_extensions import Self
 from typing import (
     Any,
@@ -57,6 +62,7 @@ class MTMDBaseHandler:
         video_fps_target: Optional[float] = None,
         video_ffmpeg_bin_dir: Optional[Union[str, os.PathLike[str]]] = None,
         video_timestamp_interval_ms: Optional[int] = None,
+        flash_attn: Optional[bool] = None,
         **kwargs
     ):
 
@@ -99,6 +105,9 @@ class MTMDBaseHandler:
         self.image_max_tokens = image_max_tokens
         self.batch_max_tokens = batch_max_tokens
         self.use_gpu = use_gpu
+        if flash_attn is not None and not isinstance(flash_attn, bool):
+            raise TypeError("flash_attn must be bool or None")
+        self.flash_attn = flash_attn
 
         import llama_cpp.mtmd_cpp as mtmd_cpp
         self._mtmd_cpp = mtmd_cpp
@@ -190,7 +199,12 @@ class MTMDBaseHandler:
         self.mctx_params.device = None
         self.mctx_params.print_timings = self.verbose
         self.mctx_params.n_threads = llama_model.n_threads
-        self.mctx_params.flash_attn_type = self._mtmd_cpp.clip_flash_attn_type.CLIP_FLASH_ATTN_TYPE_AUTO
+        flash_types = self._mtmd_cpp.clip_flash_attn_type
+        self.mctx_params.flash_attn_type = (
+            flash_types.CLIP_FLASH_ATTN_TYPE_AUTO if self.flash_attn is None else
+            flash_types.CLIP_FLASH_ATTN_TYPE_ENABLED if self.flash_attn else
+            flash_types.CLIP_FLASH_ATTN_TYPE_DISABLED
+        )
         self.mctx_params.warmup = True
         if self.image_min_tokens > 0:
             self.mctx_params.image_min_tokens = self.image_min_tokens
@@ -596,6 +610,300 @@ class MTMDBaseHandler:
             **kwargs,
         )
 
+
+
+@dataclass(frozen=True)
+class GeneratedAudio:
+    """Owned mono audio data. Raw PCM uses native-endian float32 samples."""
+
+    data: bytes
+    sample_rate: int
+    n_samples: int
+    format: Literal["wav", "pcm_f32"]
+    finish_reason: Literal["stop", "length"]
+    channels: int = 1
+
+    @property
+    def duration(self) -> float:
+        return self.n_samples / self.sample_rate
+
+    def save(self, path: Union[str, os.PathLike[str]]) -> None:
+        """Write the existing bytes without converting the audio format."""
+        with open(path, "wb") as output:
+            output.write(self.data)
+
+
+class MTMDAudioGenerator(MTMDBaseHandler):
+    """Non-streaming speech synthesis using the vendor audio generation helper.
+
+    Use a dedicated Llama with embeddings=True and pooling_type=NONE. Requests
+    clear its KV and Python token state. Do not use or close that Llama from
+    another thread during synthesis. Close this generator before the Llama.
+
+    flash_attn controls mmproj attention independently of the Llama backbone:
+    None selects AUTO (default), True enables it, and False disables it.
+    """
+
+    def __init__(self, *args, flash_attn: Optional[bool] = None, **kwargs):
+        self._request_lock = threading.Lock()
+        self._closed = False
+        self._bound_llama = None
+        self._audio_ctx = None
+        super().__init__(*args, flash_attn=flash_attn, **kwargs)
+
+    def __enter__(self) -> Self:
+        if self._closed:
+            raise RuntimeError("Audio generator is closed")
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        self.close()
+
+    def close(self) -> None:
+        lock = getattr(self, "_request_lock", None)
+        if lock is None:
+            super().close()
+            return
+        if not lock.acquire(blocking=False):
+            raise RuntimeError("Cannot close audio generator during synthesis")
+        try:
+            self._closed = True
+            try:
+                super().close()
+            finally:
+                self._audio_ctx = None
+                self._bound_llama = None
+        finally:
+            lock.release()
+
+    def _init_mtmd_context(self, llama_model: llama_core.Llama):
+        if self._bound_llama is not None and self._bound_llama is not llama_model:
+            raise ValueError("Audio generator is already bound to a different Llama")
+        self._bound_llama = llama_model
+        super()._init_mtmd_context(llama_model)
+
+    def _create_audio_sampler(self, llama, *, seed, temperature, top_k, top_p, min_p, repeat_penalty):
+        from ._internals import LlamaSamplingContext, LlamaSamplingParams
+
+        return LlamaSamplingContext(
+            params=LlamaSamplingParams(
+                seed=seed, temp=temperature, top_k=top_k, top_p=top_p,
+                min_p=min_p, penalty_repeat=repeat_penalty,
+                penalty_last_n=llama.n_ctx(),
+            ),
+            model=llama._model,
+        )
+
+    @staticmethod
+    def _validate_audio(data: bytes, response_format: str, rate: int, samples: int) -> None:
+        """Reject malformed buffers and clearly invalid signals, not low volume speech."""
+        import numpy as np
+
+        if samples <= 0:
+            raise RuntimeError("TTS returned empty audio")
+        if response_format == "wav":
+            try:
+                with wave.open(io.BytesIO(data), "rb") as wav:
+                    if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()) != (1, 2, rate, samples):
+                        raise RuntimeError("TTS WAV metadata does not match the output metadata")
+                    payload = wav.readframes(samples)
+                if len(payload) != samples * 2:
+                    raise RuntimeError("TTS returned truncated WAV samples")
+                signal = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
+            except (wave.Error, EOFError) as exc:
+                raise RuntimeError("TTS returned malformed WAV data") from exc
+        else:
+            if len(data) != samples * 4:
+                raise RuntimeError("TTS PCM byte length does not match the sample count")
+            signal = np.frombuffer(data, dtype=np.float32)
+        if not np.isfinite(signal).all():
+            raise RuntimeError("TTS returned non-finite audio samples (NaN or infinity)")
+        if np.max(np.abs(signal)) > 1.0:
+            raise RuntimeError("TTS returned out-of-range PCM samples")
+        if np.all(signal == signal[0]) or np.mean(np.abs(signal) >= 0.999) >= 0.99:
+            raise RuntimeError(
+                "TTS returned invalid audio: constant signal or >=99% full-scale clipping. "
+                "Check the model files and native backend build."
+            )
+
+    @staticmethod
+    def _check_audio_abort(llama: llama_core.Llama) -> None:
+        if llama._abort_event.is_set():
+            raise InterruptedError("Speech synthesis aborted")
+
+    def _check_audio_result(self, llama: llama_core.Llama, result: int, stage: str) -> None:
+        self._check_audio_abort(llama)
+        if result != 0:
+            raise RuntimeError(f"TTS {stage} failed (code {result})")
+
+    def _decode_audio(self, llama: llama_core.Llama, n_batch: int, sampler, max_frames: int) -> Literal["stop", "length"]:
+        mtmd = self._mtmd_cpp
+        while True:
+            self._check_audio_abort(llama)
+            remaining = mtmd.mtmd_helper_gen_audio_step_prompt(self._audio_ctx, n_batch)
+            self._check_audio_abort(llama)
+            if remaining < 0:
+                raise RuntimeError(f"TTS step_prompt failed (code {remaining})")
+            if remaining == 0:
+                break
+        hidden = llama_cpp_lib.llama_get_embeddings_ith(llama._ctx.ctx, -1)
+        if not hidden:
+            raise RuntimeError("TTS prompt returned no hidden state")
+
+        for _ in range(max_frames):
+            self._check_audio_abort(llama)
+            token = llama_cpp_lib.LLAMA_TOKEN_NULL
+            if sampler is not None:
+                token = sampler.sample(llama._ctx, idx=-1)
+                sampler.accept(token, accept_grammar=False)
+            next_hidden = ctypes.POINTER(ctypes.c_float)()
+            stop = ctypes.c_bool(False)
+            self._check_audio_result(llama, mtmd.mtmd_helper_gen_audio_step_gen(
+                self._audio_ctx, token, hidden, ctypes.byref(next_hidden), ctypes.byref(stop),
+            ), "step_gen")
+            if stop.value:
+                return "stop"
+            if not next_hidden:
+                raise RuntimeError("TTS step_gen returned no hidden state without stopping")
+            hidden = next_hidden
+
+        return "length"
+
+    def _get_audio_output(
+        self, llama: llama_core.Llama, response_format: Literal["wav", "pcm_f32"],
+        finish_reason: Literal["stop", "length"],
+    ) -> GeneratedAudio:
+        mtmd = self._mtmd_cpp
+        rate, data, size, samples = ctypes.c_int32(), ctypes.c_char_p(), ctypes.c_size_t(), ctypes.c_int64()
+        self._check_audio_result(llama, mtmd.mtmd_helper_gen_audio_get_output(
+            self._audio_ctx, ctypes.byref(rate), ctypes.byref(data), ctypes.byref(size), ctypes.byref(samples),
+        ), "get_output")
+        if rate.value <= 0 or samples.value < 0 or (size.value and not data):
+            raise RuntimeError("TTS returned invalid audio metadata or buffer")
+        audio_data = ctypes.string_at(data, size.value) if size.value else b""
+        self._validate_audio(audio_data, response_format, rate.value, samples.value)
+        return GeneratedAudio(
+            data=audio_data,
+            sample_rate=rate.value, n_samples=samples.value,
+            format=response_format, finish_reason=finish_reason,
+        )
+
+    def create_speech(
+        self,
+        *,
+        llama: llama_core.Llama,
+        text: str,
+        language: Optional[str] = None,
+        speaker_reference: Optional[Union[str, os.PathLike[str], bytes]] = None,
+        response_format: Literal["wav", "pcm_f32"] = "wav",
+        max_frames: int = 512,
+        seed: Optional[int] = None,
+        temperature: float = 0.8,
+        top_k: int = 40,
+        top_p: float = 0.95,
+        min_p: float = 0.05,
+        repeat_penalty: float = 1.05,
+    ) -> GeneratedAudio:
+        """Synthesize complete audio and return a Python-owned result.
+
+        Qwen3-TTS uses the sampling options; top_k/top_p also reach its code
+        predictor (top_k <= 0 selects the helper default for that stage).
+        Pocket TTS requires speaker_reference, ignores sampling options except
+        seed, and selects language and flow settings from its weights.
+        References accept encoded audio bytes, local paths, URLs or data URIs.
+        max_frames limits helper generation steps, not text tokens or seconds.
+        Llama.abort() interrupts synthesis with InterruptedError.
+        """
+        if not self._request_lock.acquire(blocking=False):
+            raise RuntimeError("Audio generator is already synthesizing speech")
+        try:
+            if self._closed:
+                raise RuntimeError("Audio generator is closed")
+            if not isinstance(text, str) or not text.strip() or "\x00" in text:
+                raise ValueError("text must be a non-empty string without NUL characters")
+            if language is not None and (
+                not isinstance(language, str) or not language.strip() or "\x00" in language
+            ):
+                raise ValueError("language must be a non-empty string without NUL characters")
+            if response_format not in ("wav", "pcm_f32"):
+                raise ValueError("response_format must be 'wav' or 'pcm_f32'")
+            if isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0:
+                raise ValueError("max_frames must be a positive integer")
+            if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 0xFFFFFFFF):
+                raise ValueError("seed must be a uint32 integer or None")
+            if not isinstance(top_k, int) or isinstance(top_k, bool) or not -(2**31) <= top_k < 2**31:
+                raise ValueError("top_k must be an int32 integer")
+            if not all(math.isfinite(v) for v in (temperature, top_p, min_p, repeat_penalty)):
+                raise ValueError("Sampling values must be finite")
+            if not 0 < top_p <= 1 or not 0 <= min_p <= 1 or repeat_penalty <= 0:
+                raise ValueError("Invalid top_p, min_p or repeat_penalty")
+            if not getattr(llama._ctx, "ctx", None) or llama.context_params is None:
+                raise RuntimeError("Llama is closed")
+            if not llama.context_params.embeddings or llama._ctx.pooling_type() != llama_cpp_lib.LLAMA_POOLING_TYPE_NONE:
+                raise ValueError("TTS requires Llama(embeddings=True, pooling_type=LLAMA_POOLING_TYPE_NONE)")
+            n_batch = min(llama._ctx.n_batch(), self.batch_max_tokens)
+            if n_batch <= 0:
+                raise ValueError("TTS batch size must be positive")
+
+            self._init_mtmd_context(llama)
+            mtmd = self._mtmd_cpp
+            info = mtmd.mtmd_gen_audio_get_info(self.mtmd_ctx)
+            types = mtmd.mtmd_gen_audio_type
+            is_qwen = info.type == types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS
+            is_pocket = info.type == types.MTMD_GEN_AUDIO_TYPE_POCKETTTS
+            if not (is_qwen or is_pocket):
+                raise ValueError("mmproj does not provide a supported TTS pipeline")
+            if is_pocket and speaker_reference is None:
+                raise ValueError("Pocket TTS requires speaker_reference")
+            if is_pocket and language is not None:
+                raise ValueError("Pocket TTS language is determined by its weights")
+
+            with ExitStack() as cleanup:
+                speaker = None
+                if speaker_reference is not None:
+                    if not self.is_support_audio:
+                        raise ValueError("mmproj does not support reference audio input")
+                    payload = speaker_reference if isinstance(speaker_reference, bytes) else self.load_media(os.fspath(speaker_reference), "audio")
+                    self.detect_audio_format(payload)
+                    speaker, video = self._create_bitmap_from_bytes(payload)
+                    cleanup.callback(self._free_mtmd_resources, bitmaps=[speaker], videos=[video] if video else [])
+                    if video or not mtmd.mtmd_bitmap_is_audio(speaker):
+                        raise ValueError("speaker_reference must contain audio")
+
+                if self._audio_ctx is None:
+                    audio_ctx = mtmd.mtmd_helper_gen_audio_init(llama._ctx.ctx, self.mtmd_ctx)
+                    if not audio_ctx:
+                        raise RuntimeError("Failed to initialize TTS helper")
+                    self._audio_ctx = audio_ctx
+                    self._exit_stack.callback(mtmd.mtmd_helper_gen_audio_free, audio_ctx)
+
+                actual_seed = llama_cpp_lib.LLAMA_DEFAULT_SEED if seed is None else seed
+                sampler = None
+                if is_qwen:
+                    sampler = self._create_audio_sampler(
+                        llama, seed=actual_seed, temperature=temperature, top_k=top_k,
+                        top_p=top_p, min_p=min_p, repeat_penalty=repeat_penalty,
+                    )
+                    cleanup.callback(sampler.close)
+
+                llama._native_abort_flag.value = False
+                llama._abort_event.clear()
+                cleanup.callback(llama.reset)
+                cleanup.callback(mtmd.mtmd_helper_gen_audio_reset, self._audio_ctx)
+                llama.reset()
+                prompt = text.encode("utf-8")
+                inp = mtmd.mtmd_helper_gen_audio_inp(
+                    seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
+                    lang=language.encode("utf-8") if language is not None else None,
+                    top_k=top_k, top_p=top_p, seed=actual_seed,
+                    out_type=(mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
+                              if response_format == "wav" else mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM),
+                )
+                self._check_audio_result(llama, mtmd.mtmd_helper_gen_audio_set_input(self._audio_ctx, ctypes.byref(inp)), "set_input")
+                finish_reason = self._decode_audio(llama, n_batch, sampler, max_frames)
+                return self._get_audio_output(llama, response_format, finish_reason)
+        finally:
+            self._request_lock.release()
 
 
 class MTMDChatHandler(MTMDBaseHandler):

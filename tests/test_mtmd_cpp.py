@@ -3,6 +3,8 @@ import importlib
 import os
 from types import SimpleNamespace
 from unittest.mock import Mock
+import threading
+import struct
 
 import pytest
 
@@ -100,11 +102,13 @@ def test_mtmd_chat_handler_rejects_invalid_ffmpeg_bin_dir(tmp_path):
 
 
 @pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
-def test_mtmd_context_initialization_and_close(tmp_path, handler_name):
+@pytest.mark.parametrize("flash_attn, expected_flash", [(None, -1), (False, 0), (True, 1)])
+def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_attn, expected_flash):
     multimodal = importlib.import_module("llama_cpp.llama_multimodal")
     handler = getattr(multimodal, handler_name)(
         clip_model_path=str(tmp_path), verbose=False, use_gpu=False,
         image_min_tokens=32, image_max_tokens=128, batch_max_tokens=256,
+        flash_attn=flash_attn,
     )
     native = handler._mtmd_cpp
     backend = SimpleNamespace(
@@ -137,6 +141,7 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name):
         assert handler.mctx_params.image_min_tokens == 32
         assert handler.mctx_params.image_max_tokens == 128
         assert handler.mctx_params.batch_max_tokens == 256
+        assert handler.mctx_params.flash_attn_type == expected_flash
         if handler_name == "MTMDChatHandler":
             assert handler.mtmd_bos_token == "<bos>"
             assert handler.mtmd_eos_token == "<eos>"
@@ -206,3 +211,251 @@ def test_mtmd_base_image_loader_uses_subclass_byte_loader():
         assert image.format == "JPEG"
         assert image.mode == "RGB"
         assert image.size == (2, 2)
+
+
+@pytest.fixture
+def audio_pipeline(tmp_path, monkeypatch):
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    native = importlib.import_module("llama_cpp.mtmd_cpp")
+    generator = multimodal.MTMDAudioGenerator(mmproj_path=str(tmp_path), verbose=False)
+    hidden = (ctypes.c_float * 2)(1, 2)
+    output = ctypes.create_string_buffer(struct.pack("4f", 0.0, 0.1, -0.1, 0.0))
+    import io, wave
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav:
+        wav.setparams((1, 2, 24000, 4, "NONE", "not compressed"))
+        wav.writeframes(b"\x00\x00\x01\x00\xff\xff\x00\x00")
+    wav_output = ctypes.create_string_buffer(wav_buffer.getvalue())
+    state = SimpleNamespace(kind=1, steps=0, fail=None, prompts=[], tokens=[], stop_at=2)
+
+    def set_input(ctx, ptr):
+        inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
+        state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
+        state.steps = 0
+        state.out_type = inp.out_type
+        return 1 if state.fail == "set_input" else 0
+
+    def step_gen(ctx, token, previous, next_ptr, stop_ptr):
+        state.steps += 1
+        state.tokens.append(token)
+        assert previous[0] == 1
+        if state.fail == "step_gen":
+            return 1
+        stop = state.steps >= state.stop_at
+        ctypes.cast(stop_ptr, ctypes.POINTER(ctypes.c_bool))[0] = stop
+        if not stop and state.fail != "missing_hidden":
+            ctypes.cast(next_ptr, ctypes.POINTER(ctypes.POINTER(ctypes.c_float)))[0] = ctypes.cast(hidden, ctypes.POINTER(ctypes.c_float))
+        return 0
+
+    def get_output(ctx, rate, data, size, samples):
+        ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = 24000
+        buffer = output if state.out_type == 0 else wav_output
+        ctypes.cast(data, ctypes.POINTER(ctypes.c_char_p))[0] = ctypes.cast(buffer, ctypes.c_char_p)
+        ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t))[0] = len(buffer) - 1
+        ctypes.cast(samples, ctypes.POINTER(ctypes.c_int64))[0] = 4
+        return 1 if state.fail == "get_output" else 0
+
+    backend = SimpleNamespace(
+        mtmd_gen_audio_type=native.mtmd_gen_audio_type,
+        mtmd_helper_gen_audio_outtype=native.mtmd_helper_gen_audio_outtype,
+        mtmd_helper_gen_audio_inp=native.mtmd_helper_gen_audio_inp,
+        mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=state.kind),
+        mtmd_helper_gen_audio_init=Mock(return_value=456),
+        mtmd_helper_gen_audio_free=Mock(), mtmd_helper_gen_audio_reset=Mock(),
+        mtmd_helper_gen_audio_set_input=set_input,
+        mtmd_helper_gen_audio_step_prompt=lambda ctx, batch: -1 if state.fail == "step_prompt" else 0,
+        mtmd_helper_gen_audio_step_gen=step_gen,
+        mtmd_helper_gen_audio_get_output=get_output,
+        mtmd_bitmap_is_audio=lambda bitmap: True,
+        mtmd_bitmap_free=Mock(), mtmd_helper_video_free=Mock(), mtmd_free=Mock(),
+    )
+    generator._mtmd_cpp = backend
+    generator.mtmd_ctx = 123
+    generator.is_support_audio = True
+    monkeypatch.setattr(generator, "_create_bitmap_from_bytes", lambda payload: (789, None))
+    monkeypatch.setattr(multimodal.llama_cpp_lib, "llama_get_embeddings_ith", lambda ctx, idx: ctypes.cast(hidden, ctypes.POINTER(ctypes.c_float)))
+    sampler = Mock()
+    sampler.sample.return_value = 42
+    sampler_factory = Mock(return_value=sampler)
+    monkeypatch.setattr(generator, "_create_audio_sampler", sampler_factory)
+    llama = SimpleNamespace(
+        _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64),
+        context_params=SimpleNamespace(embeddings=True),
+        _abort_event=threading.Event(), _native_abort_flag=ctypes.c_bool(False),
+        reset=Mock(),
+    )
+    yield generator, llama, backend, state, sampler_factory, output
+    generator.close()
+
+
+def test_tts_qwen_repeated_requests_copy_binary_output(audio_pipeline):
+    generator, llama, backend, state, factory, output = audio_pipeline
+    expected = output.raw[:-1]
+    for _ in range(2):
+        result = generator.create_speech(llama=llama, text="你好", seed=7, response_format="pcm_f32")
+        assert result.data == expected
+        assert result.finish_reason == "stop"
+        assert result.duration == 4 / 24000
+    output[0] = b"z"
+    assert result.data == expected
+    assert state.prompts == [("你好".encode(), 7)] * 2
+    assert state.tokens == [42] * 4
+    assert llama.reset.call_count == 4
+    assert factory.return_value.accept.call_count == 4
+    assert factory.return_value.close.call_count == 2
+    assert backend.mtmd_helper_gen_audio_reset.call_count == 2
+    backend.mtmd_helper_gen_audio_init.assert_called_once()
+    generator.close()
+    backend.mtmd_helper_gen_audio_free.assert_called_once_with(456)
+
+
+def test_tts_pocket_skips_sampler_and_limits_steps(audio_pipeline):
+    generator, llama, backend, state, factory, _ = audio_pipeline
+    state.kind = 2
+    result = generator.create_speech(
+        llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE", max_frames=1,
+    )
+    assert result.finish_reason == "length"
+    assert state.tokens == [-1]
+    factory.assert_not_called()
+    backend.mtmd_bitmap_free.assert_called_once_with(789)
+
+
+@pytest.mark.parametrize("stage", ["set_input", "step_prompt", "step_gen", "get_output", "missing_hidden"])
+def test_tts_failure_can_be_followed_by_success(audio_pipeline, stage):
+    generator, llama, backend, state, factory, _ = audio_pipeline
+    state.fail = stage
+    with pytest.raises(RuntimeError):
+        generator.create_speech(llama=llama, text="hello")
+    assert backend.mtmd_helper_gen_audio_reset.call_count == 1
+    assert llama.reset.call_count == 2
+    state.fail = None
+    assert generator.create_speech(llama=llama, text="hello").finish_reason == "stop"
+
+
+def test_tts_validates_model_and_request_before_decode(audio_pipeline):
+    generator, llama, backend, state, _, _ = audio_pipeline
+    for options in ({"text": " "}, {"max_frames": 0}, {"seed": -1}, {"response_format": "mp3"}):
+        with pytest.raises(ValueError):
+            generator.create_speech(**{"llama": llama, "text": "hello", **options})
+    state.kind = 2
+    with pytest.raises(ValueError, match="requires speaker_reference"):
+        generator.create_speech(llama=llama, text="hello")
+    state.kind = 0
+    with pytest.raises(ValueError, match="supported TTS"):
+        generator.create_speech(llama=llama, text="hello")
+    backend.mtmd_helper_gen_audio_init.assert_not_called()
+
+
+def test_tts_rejects_rebinding_and_closed_generator(audio_pipeline):
+    generator, llama, _, _, _, _ = audio_pipeline
+    generator.create_speech(llama=llama, text="hello")
+    with pytest.raises(ValueError, match="different Llama"):
+        generator.create_speech(llama=SimpleNamespace(**vars(llama)), text="hello")
+    generator.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        generator.create_speech(llama=llama, text="hello")
+
+
+def test_tts_abort_releases_request_resources(audio_pipeline):
+    generator, llama, backend, state, _, _ = audio_pipeline
+    def abort(ctx, batch):
+        llama._abort_event.set()
+        return -1
+    backend.mtmd_helper_gen_audio_step_prompt = abort
+    with pytest.raises(InterruptedError):
+        generator.create_speech(llama=llama, text="hello")
+    assert llama.reset.call_count == 2
+    backend.mtmd_helper_gen_audio_reset.assert_called_once()
+
+
+@pytest.mark.parametrize("invalid", ["embeddings", "pooling", "closed", "batch"])
+def test_tts_rejects_unusable_llama_context(audio_pipeline, invalid):
+    generator, llama, backend, _, _, _ = audio_pipeline
+    if invalid == "embeddings":
+        llama.context_params.embeddings = False
+    elif invalid == "pooling":
+        llama._ctx.pooling_type = lambda: 1
+    elif invalid == "closed":
+        llama._ctx.ctx = None
+    else:
+        generator.batch_max_tokens = 0
+    with pytest.raises((ValueError, RuntimeError)):
+        generator.create_speech(llama=llama, text="hello")
+    backend.mtmd_helper_gen_audio_init.assert_not_called()
+    llama.reset.assert_not_called()
+
+
+def test_tts_rejects_concurrent_use(audio_pipeline):
+    generator, llama, backend, _, _, _ = audio_pipeline
+    with generator._request_lock:
+        with pytest.raises(RuntimeError, match="already synthesizing"):
+            generator.create_speech(llama=llama, text="hello")
+        with pytest.raises(RuntimeError, match="during synthesis"):
+            generator.close()
+    assert generator.create_speech(llama=llama, text="hello").finish_reason == "stop"
+
+
+def test_generated_audio_wav_save(tmp_path):
+    import io
+    import wave
+    from llama_cpp.llama_multimodal import GeneratedAudio
+
+    data = io.BytesIO()
+    with wave.open(data, "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(24000)
+        wav.writeframes(b"\x00\x00\x01\x00")
+    result = GeneratedAudio(data.getvalue(), 24000, 2, "wav", "stop")
+    path = tmp_path / "speech.wav"
+    result.save(path)
+    with wave.open(str(path), "rb") as wav:
+        assert wav.getnframes() == result.n_samples
+        assert wav.getframerate() == result.sample_rate
+        assert wav.readframes(2) == b"\x00\x00\x01\x00"
+
+
+@pytest.mark.parametrize("values", [[], [float("nan"), 0.0], [float("inf"), 0.0], [-1.0]*4, [0.0]*4, [0.2]*4, [-1.0, 1.0]*50, [2.0, 0.0]])
+def test_tts_rejects_invalid_pcm(values):
+    from llama_cpp.llama_multimodal import MTMDAudioGenerator
+    with pytest.raises(RuntimeError):
+        MTMDAudioGenerator._validate_audio(struct.pack(f"{len(values)}f", *values), "pcm_f32", 24000, len(values))
+
+
+def test_tts_audio_validation_keeps_quiet_speech_and_checks_lengths():
+    from llama_cpp.llama_multimodal import MTMDAudioGenerator
+    payload = struct.pack("4f", 0, 1e-8, -1e-8, 0)
+    MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 4)
+    with pytest.raises(RuntimeError, match="byte length"):
+        MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 5)
+    with pytest.raises(RuntimeError, match="malformed WAV"):
+        MTMDAudioGenerator._validate_audio(b"bad", "wav", 24000, 4)
+
+
+def test_tts_invalid_output_cleans_up_and_can_retry(audio_pipeline):
+    generator, llama, backend, _, _, output = audio_pipeline
+    valid = output.raw
+    ctypes.memmove(output, struct.pack("4f", -1, -1, -1, -1), 16)
+    with pytest.raises(RuntimeError, match="invalid audio"):
+        generator.create_speech(llama=llama, text="hello", response_format="pcm_f32")
+    backend.mtmd_helper_gen_audio_reset.assert_called_once()
+    assert llama.reset.call_count == 2
+    ctypes.memmove(output, valid, len(valid))
+    assert generator.create_speech(llama=llama, text="hello", response_format="pcm_f32").finish_reason == "stop"
+
+
+def test_tts_flash_attention_modes_and_chat_default(tmp_path):
+    from llama_cpp.llama_multimodal import MTMDAudioGenerator, MTMDChatHandler
+    for cls, kwargs, expected in (
+        (MTMDAudioGenerator, {}, None),
+        (MTMDAudioGenerator, {"flash_attn": None}, None),
+        (MTMDAudioGenerator, {"flash_attn": False}, False),
+        (MTMDAudioGenerator, {"flash_attn": True}, True),
+        (MTMDChatHandler, {}, None),
+    ):
+        handler = cls(mmproj_path=str(tmp_path), **kwargs)
+        try:
+            assert handler.flash_attn is expected
+        finally:
+            handler.close()
