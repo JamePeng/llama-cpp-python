@@ -46,6 +46,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | Page | Description |
 |---|---|
 | [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md) | Configure a DFlash2 sidecar, validate selector execution, compare ordinary and speculative output, and tune draft length. |
+| [MTMD Speech Synthesis](examples/audio/audio-tts.md) | Generate speech with Qwen3-TTS Base or Pocket TTS; configure reference audio and FA, and explore CLI and Streamlit examples. |
 
 ### Development
 
@@ -83,6 +84,12 @@ For speculative decoding:
 2. [Llama Speculative Decoding](modules/LlamaSpeculative.md)
 3. [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md)
 
+For text-to-speech:
+
+1. [MTMD Speech Synthesis](examples/audio/audio-tts.md) — Qwen3-TTS Base and Pocket TTS, reference audio, Flash Attention, output formats, and current cloning limitations.
+2. [CLI TTS Example](../../examples/high_level_api/mtmd_tts.py) — single requests, multilingual scenarios, and batch synthesis.
+3. [Streamlit TTS Playground](../../examples/streamlit_tts/README.md) — reference upload/recording, playback, and downloads.
+
 For documentation contributors:
 
 1. [Wiki Schema](SCHEMA.md)
@@ -106,6 +113,7 @@ Completed pages currently linked from this index:
 - `modules/MTMDCppBindings.md`
 - `features/embeddings-rerank.md`
 - `examples/dflash2-speculative-decoding.md`
+- `examples/audio/audio-tts.md`
 - `development/git-commit-generation-agent.md`
 - `SCHEMA.md`
 - `contributing-to-wiki.md`
@@ -117,7 +125,7 @@ and checked against the implementation.
 ### Planned areas
 
 - Basic and chat-completion examples
-- Vision and audio examples
+- Vision and audio-input examples
 - Caching, grammar, multi-model, and tool-call feature guides
 - Common and MCP type references
 - Troubleshooting and backend diagnostics
