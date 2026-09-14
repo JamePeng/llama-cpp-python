@@ -930,7 +930,7 @@ def chat_formatter_to_chat_completion_handler(
             tool = next((t for t in tools if t["function"]["name"] == name), None)
             if tool is None:
                 raise ValueError(f"Tool choice '{name}' not found in tools.")
-            schema = tool["function"]["parameters"]
+            schema = _tool_parameter_schema(tool["function"])
             try:
                 # create grammar from json schema
                 grammar = llama_grammar.LlamaGrammar.from_json_schema(
@@ -1237,6 +1237,13 @@ def _grammar_for_json(verbose: bool = False):
     )
 
 
+def _tool_parameter_schema(function):
+    parameters = function.get("parameters")
+    if parameters is None or parameters == {}:
+        return {"type": "object", "properties": {}}
+    return parameters
+
+
 def _grammar_for_json_schema(
     schema: str, verbose: bool = False, fallback_to_json: bool = True
 ):
@@ -1258,7 +1265,7 @@ def _grammar_for_response_format(
 
     if "schema" in response_format:
         return _grammar_for_json_schema(
-            json.dumps(response_format["schema"]), verbose=verbose
+            json.dumps(response_format["schema"] or {"type": "object"}), verbose=verbose
         )
     else:
         return _grammar_for_json(verbose=verbose)
@@ -3228,7 +3235,7 @@ def chatml_function_calling(
         prompt += f"functions.{tool_name}:\n"
         try:
             grammar = llama_grammar.LlamaGrammar.from_json_schema(
-                json.dumps(tool["function"]["parameters"]), verbose=llama.verbose
+                json.dumps(_tool_parameter_schema(tool["function"])), verbose=llama.verbose
             )
         except Exception as e:
             grammar = llama_grammar.LlamaGrammar.from_string(
@@ -3377,7 +3384,7 @@ def chatml_function_calling(
             prompt += f"functions.{tool_name}:\n"
             try:
                 grammar = llama_grammar.LlamaGrammar.from_json_schema(
-                    json.dumps(tool["function"]["parameters"]), verbose=llama.verbose
+                    json.dumps(_tool_parameter_schema(tool["function"])), verbose=llama.verbose
                 )
             except Exception as e:
                 grammar = llama_grammar.LlamaGrammar.from_string(

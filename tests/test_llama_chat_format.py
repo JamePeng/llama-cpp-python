@@ -4,6 +4,21 @@ import pytest
 
 from llama_cpp.llama_chat_format import Jinja2ChatFormatter
 
+
+def test_empty_response_schema_remains_object():
+    from llama_cpp.llama_chat_format import _grammar_for_response_format
+    grammar = _grammar_for_response_format({'type': 'json_object', 'schema': {}})
+    assert 'root ::= object' in grammar.grammar.splitlines()
+
+
+@pytest.mark.parametrize('function', [{}, {'parameters': None}, {'parameters': {}}])
+def test_empty_tool_parameters_remain_empty_object(function):
+    from llama_cpp.llama_chat_format import _tool_parameter_schema
+    from llama_cpp.llama_grammar import json_schema_to_gbnf
+    schema = _tool_parameter_schema(function)
+    assert schema == {'type': 'object', 'properties': {}}
+    assert 'root ::= "{" space "}"' in json_schema_to_gbnf(schema).splitlines()
+
 QWEN35_EOS_TOKEN = "<|im_end|>"
 
 # A compact Qwen3.5-style template keeps these tests independent of model files.
