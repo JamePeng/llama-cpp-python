@@ -545,6 +545,8 @@ GRAMMAR_LITERAL_ESCAPE_RE = re.compile(r'[\r\n"\\]')
 GRAMMAR_RANGE_LITERAL_ESCAPE_RE = re.compile(r'[\r\n"\]\-\\]')
 GRAMMAR_LITERAL_ESCAPES = {'\r': '\\r', '\n': '\\n', '"': '\\"', '-': '\\-', ']': '\\]', '\\': '\\\\'}
 
+_MISSING = object()
+
 class SchemaConverter:
     def __init__(self, *, prop_order, allow_fetch, dotall, raw_pattern):
         self._prop_order = prop_order
@@ -557,6 +559,9 @@ class SchemaConverter:
         self._refs = {}
         self._ref_rule_names = {}
         self._character_rules = {}
+        # Caches live only as long as this schema conversion.
+        self._character_input_rules = {}
+        self._hex_intervals = {}
 
     def _format_literal(self, literal):
         escaped = GRAMMAR_LITERAL_ESCAPE_RE.sub(
@@ -615,9 +620,12 @@ class SchemaConverter:
             result = parts
         return result
 
-    @staticmethod
-    def _hex_interval(lo, hi):
+    def _hex_interval(self, lo, hi):
         """Four hex digits with case-insensitive A-F, compressed by prefix."""
+        key = (lo, hi)
+        cached = self._hex_intervals.get(key, _MISSING)
+        if cached is not _MISSING:
+            return cached
         def build(low, high, digits):
             if digits == 0:
                 return '""'
@@ -631,16 +639,24 @@ class SchemaConverter:
                 tail = build(max(0, low - first * block), min(block - 1, high - first * block), digits - 1)
                 options.append(head + ' ' + tail)
             return '(' + ' | '.join(options) + ')'
-        return build(lo, hi, 4)
+        result = build(lo, hi, 4)
+        self._hex_intervals[key] = result
+        return result
 
     def _character_rule(self, ranges, raw=False):
         # Compare decoded characters, including equivalent JSON escape spellings.
-        ranges = self._subtract_ranges(ranges, [(0xD800, 0xDFFF)])
+        input_key = (raw, tuple(ranges))
+        cached = self._character_input_rules.get(input_key, _MISSING)
+        if cached is not _MISSING:
+            return cached
+        ranges = self._subtract_ranges(input_key[1], [(0xD800, 0xDFFF)])
         if not ranges:
             raise ValueError('Character class matches no Unicode scalar values')
         cache_key = (raw, tuple(ranges))
-        if cache_key in self._character_rules:
-            return self._character_rules[cache_key]
+        cached = self._character_rules.get(cache_key, _MISSING)
+        if cached is not _MISSING:
+            self._character_input_rules[input_key] = cached
+            return cached
         options = []
         direct = ranges if raw else self._subtract_ranges(ranges, [(0, 31), (34, 34), (92, 92)])
         if direct:
@@ -671,6 +687,7 @@ class SchemaConverter:
                                        marker + ' ' + self._hex_interval(0xDC00 + l0, 0xDC00 + l1))
         name = self._add_rule(f'char-range-{len(self._character_rules)}', ' | '.join(options))
         self._character_rules[cache_key] = name
+        self._character_input_rules[input_key] = name
         return name
 
     def _not_strings(self, strings):
@@ -697,13 +714,17 @@ class SchemaConverter:
 
     def _add_rule(self, name, rule):
         esc_name = INVALID_RULE_CHARS_RE.sub('-', name)
-        if esc_name not in self._rules or self._rules[esc_name] == rule:
+        existing = self._rules.get(esc_name, _MISSING)
+        if existing is _MISSING or existing == rule:
             key = esc_name
         else:
             i = 0
-            while f'{esc_name}{i}' in self._rules and self._rules[f'{esc_name}{i}'] != rule:
+            while True:
+                key = f'{esc_name}{i}'
+                existing = self._rules.get(key, _MISSING)
+                if existing is _MISSING or existing == rule:
+                    break
                 i += 1
-            key = f'{esc_name}{i}'
         self._rules[key] = rule
         return key
 
@@ -1216,25 +1237,23 @@ class SchemaConverter:
             if required_props:
                 rule += ' "," space ( '
 
-            def get_recursive_refs(ks, first_is_optional):
-                [k, *rest] = ks
+            # Build each optional suffix once, preserving rule allocation order.
+            alternatives = [''] * len(optional_props)
+            optional_suffix = None
+            for i in range(len(optional_props) - 1, -1, -1):
+                k = optional_props[i]
                 kv_rule_name = prop_kv_rule_names[k]
                 comma_ref = f'( "," space {kv_rule_name} )'
-                if first_is_optional:
-                    res = comma_ref + ('*' if k is additional_key else '?')
-                else:
-                    res = kv_rule_name + (' ' + comma_ref + "*" if k is additional_key else '')
-                if len(rest) > 0:
-                    res += ' ' + self._add_rule(
+                suffix_ref = ''
+                if optional_suffix is not None:
+                    suffix_ref = ' ' + self._add_rule(
                         f'{name}{"-" if name else ""}{"additional" if k is additional_key else k}-rest',
-                        get_recursive_refs(rest, first_is_optional=True)
+                        optional_suffix,
                     )
-                return res
+                alternatives[i] = kv_rule_name + (' ' + comma_ref + '*' if k is additional_key else '') + suffix_ref
+                optional_suffix = comma_ref + ('*' if k is additional_key else '?') + suffix_ref
 
-            rule += ' | '.join(
-                get_recursive_refs(optional_props[i:], first_is_optional=False)
-                for i in range(len(optional_props))
-            )
+            rule += ' | '.join(alternatives)
             if required_props:
                 rule += ' )'
             rule += ' )?'

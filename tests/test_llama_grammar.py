@@ -394,6 +394,58 @@ def test_allof_conflicting_boolean_numeric_property_is_rejected():
         ]})
 
 
+def test_large_optional_object_does_not_require_python_recursion():
+    schema = {'type': 'object', 'properties': {
+        f'field{i}': {'type': 'integer'} for i in range(1200)
+    }}
+    grammar = llama_grammar.json_schema_to_gbnf(schema)
+    assert 'field1199-kv ::=' in grammar
+    assert 'root ::= "{" space' in grammar
+
+
+def test_rule_lookup_preserves_empty_placeholders_and_name_collisions():
+    converter = llama_grammar.SchemaConverter(prop_order={}, allow_fetch=False, dotall=False, raw_pattern=False)
+    assert converter._add_rule('reference', '') == 'reference'
+    assert converter._add_rule('reference', '"a"') == 'reference0'
+    assert converter._add_rule('reference', '"a"') == 'reference0'
+    assert converter._add_rule('reference', '') == 'reference'
+
+
+def test_character_cache_keeps_raw_json_and_converter_namespaces_separate():
+    def converter():
+        return llama_grammar.SchemaConverter(prop_order={}, allow_fetch=False, dotall=False, raw_pattern=False)
+    first, second = converter(), converter()
+    chars = [(50, 57), (48, 51)]
+    original = first._character_rule(chars)
+    snapshot = first.format_grammar()
+    assert first._character_rule(chars) == original
+    assert first._character_rule([(48, 57)]) == original
+    assert first.format_grammar() == snapshot
+    assert first._character_rule(chars, raw=True) != original
+    fresh = second._character_rule([(65, 90)])
+    assert fresh == original
+    assert second.format_grammar() != snapshot
+    assert chars == [(50, 57), (48, 51)]
+
+
+@pytest.mark.parametrize('required, additional, order, good, bad', [
+    ([], False, None, ['{}', '{"a":1}', '{"c":3}', '{"a":1,"c":3}'],
+     ['{"c":3,"a":1}', '{"a":1,"a":2}', '{"x":1}']),
+    (['b'], False, ['c', 'a'], ['{"b":1}', '{"b":1,"a":2}', '{"b":1,"c":2,"a":3}'],
+     ['{}', '{"a":2,"b":1}', '{"b":1,"a":2,"c":3}']),
+    ([], True, None, ['{}', '{"a":1,"x":2,"y":3}', '{"x":2}'],
+     ['{"x":2,"a":1}', '{"a":1,"\\u0061":2}']),
+])
+def test_model_optional_suffix_order_and_cardinality(grammar_model, required, additional, order, good, bad):
+    schema = {'type': 'object', 'properties': {k: {'type': 'integer'} for k in ['a', 'b', 'c']},
+              'required': required, 'additionalProperties': additional}
+    grammar = llama_grammar.json_schema_to_gbnf(schema, prop_order=order)
+    for text in good:
+        assert _native_accepts(grammar_model, grammar, text), text
+    for text in bad:
+        assert not _native_accepts(grammar_model, grammar, text), text
+
+
 @pytest.fixture(scope='module')
 def grammar_model():
     model_path = os.environ.get('LLAMA_GRAMMAR_TEST_MODEL')
