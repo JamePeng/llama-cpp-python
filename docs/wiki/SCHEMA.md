@@ -1,203 +1,211 @@
 # LLM Wiki Schema – llama-cpp-python
 
 **Schema Metadata**:
+
 - **Author**: JamePeng
-- **Maintainer**: LLM-assisted documentation workflow
+- **Maintainer**: Human and LLM-assisted documentation workflow
 - **Project**: [llama-cpp-python](https://github.com/JamePeng/llama-cpp-python) wiki
-- **Last Modified**: 2026-06-02
-- **Version Target**: latest source code
-- **Schema Version**: 0.4
+- **Last Modified**: 2026-09-15
+- **Version Target**: current checked-out source
+- **Schema Version**: 0.5
 
-**Purpose**:
-- Maintain a living, always-up-to-date, structured documentation wiki for the `llama-cpp-python` library, with LLMs acting as the primary documentation maintainer.
-- The wiki must help users understand the latest public API, core classes, modules, configuration options, examples, and migration paths based on the current source code.
-- The wiki should explain not only *how to call an API*, but also *what role the class/module plays in the library*, *how its state is configured*, and *how users should choose between related APIs*.
-- The schema also defines the expected wiki directory layout, page ownership, and update rules so new pages can be generated consistently.
+## Purpose and scope
 
-**Core Principles**:
-- The source of truth is the latest code in `llama_cpp/`, especially:
-  - `llama.py`
-  - `_internals.py`
-  - `llama_chat_format.py`
-  - `llama_cache.py`
-  - `llama_embedding.py`
-  - `llama_types.py`
-  - `llama_cpp.py`
-  - `mtmd_cpp.py`
-  - `_ggml.py`
-  - `_logger.py`
-- Never invent parameters or behavior. Always read the current source code before writing/updating a page.
-- Prefer documenting public and user-facing APIs first. Internal implementation details may be documented only when they help users understand behavior, extension points, debugging, or advanced usage.
-- All examples must be complete, runnable with the latest API, and include necessary imports.
-- Clearly mark deprecated, legacy, or changed usage with a warning and show the modern replacement.
-- Use internal wiki links, such as `[[Llama]]`, `[[LlamaCache]]`, `[[LlamaSpeculative]]`, or `[[Qwen35ChatHandler]]`, for cross-referencing.
-- Keep pages concise, professional, and user-friendly.
+The wiki helps readers choose APIs, configure them correctly, understand their
+behavior, and handle their limits. This schema defines page ownership, coverage,
+and writing conventions. The [contribution guide](contributing-to-wiki.md)
+describes the editing workflow; the [index](index.md) is the single place to
+maintain the wiki directory, page inventory, navigation, and completion status.
 
-**Documentation Language**:
-- The default documentation language is **English**.
-- All generated wiki pages, examples, explanations, titles, tables, and warnings should be written in English unless the user explicitly requests another language.
-- Code comments inside examples should also be in English by default.
-- If the source code contains Chinese comments or non-English notes, translate them into clear English while preserving the original meaning.
+Write in English, including example comments, unless requested otherwise. Lead
+with what the reader can do and which API to use. Explain internal details when
+they clarify configuration, ownership, performance, extension points, or debugging.
 
-**Wiki Directory Layout**:
+## Evidence and accuracy
 
-The wiki should be organized by documentation purpose rather than by source-file location alone.
+Read the relevant checked-out source before changing behavioral claims. Start
+with the public API and follow calls into helpers and native code as needed.
 
-```text
-docs/wiki/
-├─ core/               # Core classes and modules (e.g., Llama, main API objects)
-├─ development/        # Developer-focused pages, tools, agents, CI/CD workflows
-├─ examples/           # Complete runnable examples for users
-├─ features/           # High-level features spanning multiple classes/modules
-├─ modules/            # Specialized modules (cache, embeddings, logging, speculative decoding, bindings)
-├─ types/              # Type definitions and data structures used across the library
-├─ .gitkeep            # Placeholder for Git to track empty directories
-├─ contributing-to-wiki.md  # Guidelines for contributing to the wiki
-├─ index.md            # Entry point and table of contents
-├─ install.md          # Installation instructions
-├─ SCHEMA.md           # Documentation schema and style guide (this file)
-├─ troubleshooting.md  # Known issues, debugging tips, FAQ
+- Check the corresponding vendored implementation for native behavior. An
+  upstream change does not establish that the checked-out vendor includes it.
+- Distinguish Python support, native support, the loaded library build, and
+  model or hardware requirements. A declared enum or accepted parameter alone
+  does not establish that a working implementation is available.
+- Verify signatures, defaults, return values, validation, and fallback paths.
+  Explain when errors occur: construction, conversion, model attachment, or
+  generation, as applicable.
+- Bound support claims. Supporting some `allOf` combinations does not imply
+  complete JSON Schema intersection or satisfiability checking.
+- Explain what a fallback preserves or discards. A generic JSON grammar fallback
+  must not be described as preserving the original schema constraints.
+- Separate facts established by code from inference. Label inference and its
+  basis; omit unsupported claims.
+- Claim release availability only with evidence from the relevant release or
+  tag. Source support does not guarantee support in an installed wheel.
+
+For each limitation, explain the trigger, consequence, and supported alternative
+when one exists. Distinguish unsupported behavior from deliberate design choices.
+
+## Page ownership
+
+Organize pages by the reader's task rather than mirroring source files. Consult
+the index for page locations; do not duplicate directory trees or page inventories
+in individual guides. Keep only cross-references relevant to the page's subject.
+
+For a module with multiple classes, start with an overview. Split out a class
+when it is a substantial public API, configuration surface, or extension point.
+Keep small helpers on the module page. API references own signatures and
+contracts; feature guides own workflows and cross-API choices. Link between them
+instead of duplicating whole explanations.
+
+## Metadata
+
+Use YAML frontmatter for new class and module references. Preserve existing
+metadata conventions; feature guides, examples, and navigation pages do not need
+frontmatter added solely for uniformity.
+
+```yaml
+---
+title: Llama Grammar
+module_name: llama_cpp.llama_grammar
+source_file: llama_cpp/llama_grammar.py
+last_updated: YYYY-MM-DD
+version_target: "latest"
+---
 ```
 
-### Top-Level Files
+Use `class_name` for a class or `module_name` for a module. Use `source_file` for
+one primary source or `source_files` as a YAML list for multiple sources. These
+are repository-relative metadata paths, not links. Update `last_updated` on
+reviewed, changed pages that have it; do not refresh untouched pages. `latest`
+means the checked-out source reviewed, not every released package. Use one clear
+H1 for page content.
 
-| Path | Purpose | Update Guidance |
-|---|---|---|
-| `docs/wiki/SCHEMA.md` | Defines the documentation contract, directory structure, page templates, and LLM update rules. | Update when adding a new page type, directory, documentation standard, or structural convention. |
-| `docs/wiki/index.md` | Main wiki landing page and navigation entry. | Update when important pages are added, renamed, reorganized, or promoted. |
-| `docs/wiki/contributing-to-wiki.md` | Human and LLM contribution guide for maintaining the wiki. | Keep aligned with this schema, especially source-reading and accuracy rules. |
-| `docs/wiki/install.md` | Installation guide placeholder or final installation documentation. | Convert from placeholder to complete page when installation docs are ready. |
-| `docs/wiki/troubleshooting.md` | Troubleshooting guide placeholder or final diagnostics documentation. | Expand with common runtime, build, backend, model loading, and environment issues. |
-| `docs/wiki/.gitkeep` | Keeps the wiki directory tracked when needed. | No documentation content is required. |
+## Page coverage
 
-### Directory Ownership
+These are coverage requirements where applicable, not mandatory heading names or
+a fixed section order. Combine short sections and omit empty boilerplate. Add
+deprecation and migration notes only when relevant.
 
-| Directory | Purpose | Typical Content | Primary Audience |
-|---|---|---|---|
-| `core/` | High-level public entry points and central user APIs. | `Llama`, model lifecycle, generation APIs, chat/completion interfaces. | General users and advanced users. |
-| `modules/` | Focused subsystem pages, user-facing modules, low-level bindings, helpers, and advanced API areas. | Cache, embeddings, grammar, speculative decoding, logging, llama.cpp bindings, MTMD bindings. | Advanced users, extension authors, maintainers. |
-| `features/` | Workflow-oriented guides that span multiple APIs or modules. | Chat formatting, structured output, multimodal usage, backend loading, caching workflows, speculative decoding workflows. | Users solving a specific task. |
-| `examples/` | Complete runnable examples. | Minimal inference, chat completion, embeddings, grammar-constrained generation, speculative decoding, multimodal usage. | Users who want copy-paste starting points. |
-| `types/` | Type and schema documentation. | Request/response structures, typed dictionaries, protocol-style types, OpenAI-compatible payloads. | Users integrating with typed code or API-compatible workflows. |
-| `development/` | Maintainer-facing documentation and contribution workflows. | Build notes, CI notes, release notes, commit generation workflow, documentation maintenance rules. | Maintainers and contributors. |
+### Class and module references
 
-**Page Types and Templates**:
+Open with purpose, public or internal status, the recommended entry point, and
+its relationship to nearby APIs. Cover construction, important public state,
+methods, lifecycle, errors, and related guides.
 
-1. **Class / Module Page**
-   Examples: `core/Llama.md`, `modules/LlamaEmbedding.md`, `modules/LlamaCache.md`
+Preserve positional-only `/`, keyword-only `*`, and defaults in signatures.
+Distinguish writable configuration, read-only properties, and per-request state.
+Explain who owns native resources, whether definitions can be reused, and how
+resources are closed where relevant. Do not infer thread safety from reusability.
 
-   - Frontmatter (YAML):
-     ```yaml
-     ---
-     title: Llama Class
-     class_name: Llama
-     source_file: llama_cpp/llama.py
-     last_updated: YYYY-MM-DD
-     version_target: "latest"
-     ---
-     ```
+| Table | Suggested columns |
+|---|---|
+| Parameters | Parameter, Type, Default, Description |
+| Public attributes | Attribute, Type, Access or Source, Description |
+| Errors | Condition, Exception or Outcome, Stage |
+| Support | Option, Implementation, Status, Requirements |
 
-   - Sections, in order:
-     - Overview
-     - Role in the Library
-     - Constructor (`__init__`) – full parameter table with types, defaults, and explanations
-     - Important Attributes / State
-     - Core Methods, with signatures and usage examples
-     - Best Practices & Common Patterns
-     - Deprecated / Changed APIs, with migration notes
-     - Related Links
+Explain units, sentinel values, interacting options, ignored arguments, and
+precedence. Do not list every private variable.
 
-   - The **Overview** should briefly explain:
-     - What the class or module is.
-     - What problem it solves.
-     - Whether it is a high-level public API, extension point, helper, or internal implementation detail.
-     - When users should use it.
+### Feature guides
 
-   - The **Role in the Library** should explain how the class or module relates to nearby APIs. For example, whether it wraps low-level bindings, handles chat formatting, manages cache state, provides embeddings, or connects to multimodal behavior.
+Start with the task and a useful entry point or minimal example. Explain API
+choices, prerequisites, configuration semantics, workflow, results, and limits.
+Use a decision table when different APIs or modes solve different needs.
 
-   - Constructor parameter tables should use:
+Attribute restrictions to the responsible layer: converter, sampler, chat
+handler, native build, or model. For performance changes, identify the affected
+phase and cache lifetime. Faster schema conversion does not establish faster
+per-token inference.
 
-     | Parameter | Type | Default | Description |
-     |---|---|---|---|
+### Runnable examples
 
-   - Important attributes or state should use:
+State the goal and prerequisites before complete code. Include imports,
+configuration, resource cleanup, and how to inspect results. Explain model
+requirements, output formats, and relevant failure or cancellation behavior.
+Label sample output as illustrative when generation can vary.
 
-     | Attribute | Type | Source | Description |
-     |---|---|---|---|
+### Installation, diagnostics, types, and development
 
-   - Only document attributes that affect user understanding, configuration, lifecycle, inference behavior, caching, chat formatting, embeddings, or debugging. Do not document every trivial private variable.
+- Installation: identify the platform and shell, prerequisites, options, and
+  verification steps. Distinguish updating source from rebuilding the native
+  library actually loaded by Python.
+- Diagnostics: organize by symptom with concrete checks and remedies; explain
+  the effects of destructive recovery steps.
+- Types: describe required fields, optional fields, variants, and where each
+  structure is produced or consumed.
+- Development: define scope, inputs, outputs, workflow, and action boundaries.
+  The [commit generation guide](development/git-commit-generation-agent.md)
+  illustrates separating drafting from repository actions.
 
-2. **Feature Page**
-   Example: `features/speculative-decoding.md`, `features/embeddings-rerank.md`
+## Reference patterns from completed pages
 
-   Feature pages should explain workflows across multiple classes or modules.
+Borrow these structures, then recheck any behavioral details against the current
+source. These examples are not permanent guarantees that every claim stays current.
 
-   Required sections:
-   - Overview
-   - When to Use
-   - Related APIs
-   - Code Examples
-   - Configuration Notes
-   - Limitations
-   - Related Features
+| Page | Pattern to reuse |
+|---|---|
+| [Llama Grammar](modules/LlamaGrammar.md) | Separate reusable configuration from sampler state; explain validation stages and errors. |
+| [Grammar guide](features/grammar.md) | Move from usage to conversion semantics, performance scope, and precise vendor differences. |
+| [Speculative decoding](modules/LlamaSpeculative.md) | Introduce the public entry point, compare availability, then explain lifecycle and rollback. |
+| [Embeddings and reranking](features/embeddings-rerank.md) | Map goals to APIs and pooling modes; state model requirements alongside recommendations. |
+| [Audio TTS](examples/audio/audio-tts.md) | Put experimental status and prerequisites early; connect cleanup and output interpretation to complete code. |
+| [Installation](install.md) | Separate platform commands and backend options; explain native rebuild requirements. |
+| [Wiki index](index.md) | Offer task-based reading paths and separate completed pages from planned areas. |
 
-3. **Example Page**
-   Example: `examples/chat-completion.md`
+## Examples and prose
 
-   Required sections:
-   - Goal
-   - Prerequisites
-   - Complete Runnable Code
-   - Expected Output
-   - Tips
+Distinguish three kinds of code blocks:
 
-   Rules:
-   - Use the latest API.
-   - Include all required imports.
-   - Avoid pseudo-code.
-   - Keep examples focused.
-   - Mention required model assumptions when needed, such as GGUF file path, embedding mode, grammar file, chat format, or multimodal assets.
+- **Runnable example**: includes imports, setup, use, and cleanup; the user
+  supplies only stated dependencies and model or input paths.
+- **Focused snippet**: demonstrates one operation and explicitly names required
+  existing objects, such as a configured `llm`; it is not a standalone script.
+- **Signature or conceptual sketch**: clearly labeled reference or pseudocode,
+  never described as executable validation.
 
-4. **Development Page**
-   Example: `development/GitCommitGenerationAgent.md`
+Use portable placeholders such as `./model.gguf`, not contributor-specific
+absolute paths. State model, tokenizer, chat format, multimodal asset, or backend
+requirements where relevant. Use the cleanup mechanism actually supported by the
+API. Label shell blocks appropriately for PowerShell, Bash, or another shell.
 
-   Development pages are maintainer-facing and may document repository workflows, CI, release notes, build matrix decisions, or documentation maintenance conventions.
+Write direct explanations: the action, its result, and the condition that changes
+that result. Use tables for comparisons and lists for parallel choices or steps.
+Avoid repeated warnings, empty headings, and broad claims such as “all models”
+when only particular configurations are established.
 
-   Required sections:
-   - Overview
-   - Scope
-   - Workflow
-   - Inputs / Outputs
-   - Rules and Constraints
-   - Examples
-   - Related Links
+## Links and navigation
 
-**Cross-Linking Rules**:
+Use standard relative Markdown links, resolved from the containing page:
+`[Grammar guide](features/grammar.md)` at the wiki root, or
+`[Llama Grammar](../modules/LlamaGrammar.md)` from a feature page. Avoid
+double-bracket wiki links and contributor filesystem URLs. Link to source files
+with repository-relative Markdown paths when useful.
 
-- Use wiki-style internal links for pages that exist or should exist, such as `[[Llama]]`, `[[LlamaCache]]`, `[[LlamaSpeculative]]`, and `[[Logger]]`.
-- Link from high-level pages to lower-level module pages when the module explains advanced details.
-- Link from feature pages back to the relevant class/module pages.
-- Avoid circular explanations. A page may link to another page for details instead of repeating the same explanation.
+Verify that linked pages and anchors exist. Do not link empty or planned files
+as completed documentation. Empty files may remain placeholders until useful
+content is ready; filler content is not a completion requirement.
 
-**Update Rules**:
+When adding, renaming, or promoting a page, update the index's navigation and
+status, and its reading order when helpful. Remove the matching planned entry
+when that scope is complete. Align descriptions with actual coverage. Do not
+duplicate directory listings or completion inventories in other pages.
 
-- Before updating any page, the LLM must read the relevant source files.
-- Update the `last_updated` date.
-- If a new feature appears, such as a new chat handler, sampler, cache type, embedding API, multimodal API, backend option, or binding wrapper, create or expand the corresponding page.
-- If behavior is inferred from implementation rather than explicitly documented in code, mark the explanation as implementation-based.
-- Empty files should be converted into explicit placeholder pages instead of being left blank.
-- Maintain a high standard of readability and accuracy.
+## Validation and maintenance
 
-**Quality Checklist**:
+Before finalizing a change:
 
-Before finalizing a wiki page, verify:
+1. Verify changed behavior against the relevant Python and native sources.
+2. Check signatures, examples, ownership, fallbacks, and limitations within scope.
+3. Check Markdown fences, relative links, anchors, metadata, and whitespace.
+4. Check runnable snippets as appropriate. Syntax compilation, mocked checks,
+   and real model execution establish different things; report what was done.
+   A documentation-only edit does not automatically require model inference.
+5. Synchronize affected navigation without rewriting unrelated pages or dates.
 
-- The page reflects the latest source code.
-- All parameters, defaults, and return values are accurate.
-- Examples are runnable and include necessary imports.
-- Internal links point to the correct wiki page names.
-- Advanced or low-level APIs are clearly labeled.
-- Deprecated behavior is clearly separated from current usage.
-- The page avoids undocumented claims, speculative behavior, or outdated assumptions.
-
-This schema is the contract. All generated content must follow it.
+Keep test links, local test paths, execution records, and machine-specific
+benchmark tables out of wiki pages. Describe user-facing behavior and performance
+scope there; keep validation evidence and measured results in review notes or
+commit descriptions when relevant. Never claim checks or execution that were
+not performed.
