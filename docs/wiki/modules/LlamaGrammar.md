@@ -2,7 +2,7 @@
 title: Llama Grammar
 module_name: llama_cpp.llama_grammar
 source_file: llama_cpp/llama_grammar.py
-last_updated: 2026-05-03
+last_updated: 2026-09-15
 version_target: "latest"
 ---
 
@@ -10,91 +10,70 @@ version_target: "latest"
 
 ## Overview
 
-`llama_grammar.py` provides grammar utilities for constrained generation in `llama-cpp-python`.
+`llama_cpp.llama_grammar` provides reusable grammar definitions, built-in GBNF
+strings, and Python JSON Schema to GBNF conversion. For generation examples and
+conversion behavior, see the [grammar guide](../features/grammar.md).
 
-The module defines the `LlamaGrammar` class, a collection of built-in GBNF grammar strings, and a JSON Schema to GBNF converter based on the upstream `llama.cpp` grammar tooling.
+`LlamaGrammar` stores text and configuration. Each sampling context owns its own
+native grammar sampler and token history. Constructing a definition validates
+its inputs; the native sampler checks GBNF syntax and the existence of the
+selected root when the grammar is attached to a model.
 
-Use this module when you need to guide model output toward a specific grammar, such as JSON, JSON arrays, lists, arithmetic expressions, or custom GBNF rules.
+## Classes and constants
 
-## Role in the Library
+| Name | Role |
+| --- | --- |
+| `LlamaGrammar` | Public grammar definition created from text, a file, or JSON Schema. |
+| `SchemaConverter` | Internal converter used by `json_schema_to_gbnf`; its methods are not a stable public API. |
+| `BuiltinRule` | Internal container for primitive grammar text and dependencies. |
+| `LLAMA_GRAMMAR_DEFAULT_ROOT` | Default start rule, `"root"`. |
 
-`LlamaGrammar` acts as a lightweight wrapper around a GBNF grammar string.
-
-The module also includes helper logic for converting JSON Schema definitions into GBNF grammar text. This allows users to define structured output constraints using JSON Schema-like input and convert it into a grammar format usable by llama.cpp-style constrained generation.
-
-## Important Classes
-
-| Class | Status | Description |
-|---|---|---|
-| `LlamaGrammar` | public | Main wrapper class for grammar strings. Supports creation from raw strings, files, and JSON Schema. |
-| `BuiltinRule` | internal helper | Small container used by the JSON Schema converter to store built-in grammar rule content and dependencies. |
-| `SchemaConverter` | internal implementation | Converts JSON Schema structures into GBNF grammar rules. Used by `json_schema_to_gbnf`. |
-
-## Constants
-
-### Default Root
-
-| Constant | Type | Value | Description |
-|---|---|---|---|
-| `LLAMA_GRAMMAR_DEFAULT_ROOT` | `str` | `"root"` | Default root rule name used by `LlamaGrammar`. |
-
-### Built-in GBNF Grammars
-
-The module includes several built-in GBNF grammar strings.
+Built-in grammar strings:
 
 | Constant | Description |
-|---|---|
-| `ARITHMETIC_GBNF` | Grammar for simple arithmetic-like expressions. |
-| `C_GBNF` | Example grammar for a subset of C-like declarations and statements. |
-| `CHESS_GBNF` | JSON-like grammar currently defined similarly to object/array/value grammar. |
-| `ENGLISH_GBNF` | Simple English-character grammar. The source notes that it may be incomplete and mostly serves as an example. |
-| `JAPANESE_GBNF` | JSON-like grammar currently defined similarly to object/array/value grammar. |
-| `JSON_ARR_GBNF` | Grammar for generating JSON arrays. |
-| `JSON_GBNF` | Grammar for JSON objects and values. |
-| `LIST_GBNF` | Grammar for newline-separated Markdown-style list items. |
+| --- | --- |
+| `JSON_GBNF` | JSON with an object at the root; nested values may have other JSON types. |
+| `JSON_ARR_GBNF` | JSON arrays. |
+| `ARITHMETIC_GBNF` | Simple arithmetic expressions. |
+| `C_GBNF` | Example subset of C-like declarations and statements. |
+| `LIST_GBNF` | Newline-separated Markdown-style list items. |
+| `ENGLISH_GBNF` | Example English-character grammar; incomplete. |
+| `CHESS_GBNF`, `JAPANESE_GBNF` | Currently JSON-like example grammars. |
 
-### JSON Schema Conversion Rules
-
-The module also defines internal constants used by `SchemaConverter`.
-
-| Constant | Description |
-|---|---|
-| `SPACE_RULE` | Shared grammar rule for constrained whitespace. |
-| `PRIMITIVE_RULES` | Built-in grammar rules for primitive schema types such as boolean, number, integer, object, array, string, and null. |
-| `STRING_FORMAT_RULES` | Built-in grammar rules for selected string formats such as date, time, and date-time. |
-| `RESERVED_NAMES` | Rule names reserved by the converter. |
-| `DOTALL` | Pattern rule matching any Unicode code point. |
-| `DOT` | Pattern rule matching any character except line breaks. |
+Internal rule constants include `SPACE_RULE`, `PRIMITIVE_RULES`,
+`STRING_FORMAT_RULES`, `RESERVED_NAMES`, `DOT`, and `DOTALL`.
 
 ## `LlamaGrammar`
 
-```python
-class LlamaGrammar
-````
-
-Main wrapper for GBNF grammar text.
-
 ### Constructor
 
+Prefer the factory methods below for application code.
+
 ```python
-def __init__(self, *args, _grammar: str, **kwargs)
+def __init__(
+    self,
+    *args,
+    _grammar: str,
+    root: str = LLAMA_GRAMMAR_DEFAULT_ROOT,
+    triggers: Optional[List[Union[str, int]]] = None,
+    **kwargs,
+)
 ```
 
-| Parameter  | Type     | Default  | Description                                                                      |
-| ---------- | -------- | -------- | -------------------------------------------------------------------------------- |
-| `*args`    | variadic | none     | Accepted by the constructor but not used directly in the current implementation. |
-| `_grammar` | `str`    | required | Grammar string stored by the instance.                                           |
-| `**kwargs` | variadic | none     | Accepted by the constructor but not used directly in the current implementation. |
+`_grammar` is required. `root` and `triggers` are keyword-only. Legacy `*args`
+and `**kwargs` are accepted but unused.
 
-### Important Attributes / State
+### Properties
 
-| Attribute  | Type           | Source                          | Description                                             |
-| ---------- | -------------- | ------------------------------- | ------------------------------------------------------- |
-| `_grammar` | `str`          | `_grammar` constructor argument | Internal grammar string stored by the instance.         |
-| `_root`    | `str`          | `LLAMA_GRAMMAR_DEFAULT_ROOT`    | Internal root rule name. Defaults to `"root"`.          |
-| `grammar`  | `str` property | `_grammar`                      | Read-only property returning the stored grammar string. |
+| Property | Type | Meaning |
+| --- | --- | --- |
+| `grammar` | `str` | GBNF source text. |
+| `root` | `str` | Native sampler start-rule name. |
+| `triggers` | `Tuple[Union[str, int], ...]` | Snapshot of regex patterns and token IDs for lazy sampling. |
 
-## Class Methods
+These properties have no setters. The trigger list is copied into a tuple, so
+subsequent changes to the caller's list do not affect the definition. The
+instance owns no native resources and requires no `close()` call.
 
 ### `from_string`
 
@@ -104,30 +83,20 @@ def from_string(
     cls,
     grammar: str,
     verbose: bool = True,
+    *,
+    root: str = LLAMA_GRAMMAR_DEFAULT_ROOT,
+    triggers: Optional[List[Union[str, int]]] = None,
 ) -> "LlamaGrammar"
 ```
 
-Creates a `LlamaGrammar` instance from a raw GBNF grammar string.
-
-| Parameter | Type   | Default  | Description                                                                                       |
-| --------- | ------ | -------- | ------------------------------------------------------------------------------------------------- |
-| `grammar` | `str`  | required | Raw GBNF grammar string.                                                                          |
-| `verbose` | `bool` | `True`   | Accepted by the method. The current implementation forwards no logging behavior from this method. |
-
-Returns:
-
-| Type           | Description                                              |
-| -------------- | -------------------------------------------------------- |
-| `LlamaGrammar` | Grammar instance containing the provided grammar string. |
-
-#### Example
+Wraps GBNF text. `root` selects the start rule; its default is `"root"`.
+`verbose` is retained for compatibility and currently has no effect.
 
 ```python
-from llama_cpp.llama_grammar import LlamaGrammar, JSON_GBNF
+from llama_cpp import LlamaGrammar
 
-grammar = LlamaGrammar.from_string(JSON_GBNF)
-
-print(grammar.grammar)
+grammar = LlamaGrammar.from_string('answer ::= "yes" | "no"', root="answer")
+assert grammar.root == "answer"
 ```
 
 ### `from_file`
@@ -138,31 +107,17 @@ def from_file(
     cls,
     file: Union[str, Path],
     verbose: bool = True,
+    *,
+    root: str = LLAMA_GRAMMAR_DEFAULT_ROOT,
+    triggers: Optional[List[Union[str, int]]] = None,
 ) -> "LlamaGrammar"
 ```
 
-Creates a `LlamaGrammar` instance from a UTF-8 grammar file.
-
-| Parameter | Type               | Default  | Description              |
-| --------- | ------------------ | -------- | ------------------------ |
-| `file`    | `Union[str, Path]` | required | Path to a grammar file.  |
-| `verbose` | `bool`             | `True`   | Passed to `from_string`. |
-
-Behavior based on the current implementation:
-
-* Raises `FileNotFoundError` if the file does not exist.
-* Raises `IOError` if reading the file fails.
-* Raises `ValueError` if the grammar file is empty.
-* Reads the file using UTF-8 encoding.
-
-#### Example
+Reads a non-empty UTF-8 GBNF file and applies the same input checks as
+`from_string`. `root` and `triggers` have the same meaning in both methods.
 
 ```python
-from llama_cpp.llama_grammar import LlamaGrammar
-
-grammar = LlamaGrammar.from_file("./json.gbnf")
-
-print(grammar.grammar)
+grammar = LlamaGrammar.from_file("./answer.gbnf", root="answer")
 ```
 
 ### `from_json_schema`
@@ -177,46 +132,70 @@ def from_json_schema(
     dotall: bool = False,
     raw_pattern: bool = False,
     verbose: bool = True,
+    *,
+    triggers: Optional[List[Union[str, int]]] = None,
 ) -> "LlamaGrammar"
 ```
 
-Creates a `LlamaGrammar` instance by converting a JSON Schema string or dictionary into GBNF grammar.
+Converts a JSON string or dictionary to GBNF. Generated grammars always use
+`root`; this factory does not accept a custom root name. Input dictionaries
+are copied recursively before references are resolved.
 
-| Parameter     | Type                  | Default  | Description                                                                                              |
-| ------------- | --------------------- | -------- | -------------------------------------------------------------------------------------------------------- |
-| `json_schema` | `Union[str, dict]`    | required | JSON Schema input as a JSON string or Python dictionary.                                                 |
-| `prop_order`  | `Optional[List[str]]` | `None`   | Optional property order. The source comment notes this can help improve stability for small models.      |
-| `allow_fetch` | `bool`                | `False`  | Allows remote schema fetching for HTTPS `$ref` values when enabled.                                      |
-| `dotall`      | `bool`                | `False`  | Controls whether pattern `.` should match all Unicode code points during regex-to-grammar conversion.    |
-| `raw_pattern` | `bool`                | `False`  | Controls whether regex patterns are converted as raw grammar patterns instead of quoted string patterns. |
-| `verbose`     | `bool`                | `True`   | Passed to `from_string`.                                                                                 |
+| Parameter | Meaning |
+| --- | --- |
+| `json_schema` | JSON Schema string or dictionary. |
+| `prop_order` | Preferred property order. Required properties always precede optional properties; unspecified properties retain their input order. |
+| `allow_fetch` | Enables HTTPS reference fetching; disabled by default. |
+| `dotall` | Lets pattern dots match line terminators; disabled by default. |
+| `raw_pattern` | Emits pattern content without JSON string quoting and escaping; intended for raw output. |
+| `verbose` | Retained for compatibility; currently has no effect. |
+| `triggers` | Lazy-sampling regex patterns or token IDs. |
 
-Returns:
-
-| Type           | Description                                                    |
-| -------------- | -------------------------------------------------------------- |
-| `LlamaGrammar` | Grammar instance containing the generated GBNF grammar string. |
-
-If conversion fails, the method raises `ValueError`.
-
-#### Example
+Conversion and definition-validation failures are wrapped in `ValueError`.
 
 ```python
-from llama_cpp.llama_grammar import LlamaGrammar
+from llama_cpp import LlamaGrammar
 
 schema = {
     "type": "object",
     "properties": {
-        "name": {"type": "string"},
-        "age": {"type": "integer"},
+        "answer": {"type": "string"},
+        "confidence": {"type": "number"},
     },
-    "required": ["name"],
+    "required": ["answer"],
 }
-
-grammar = LlamaGrammar.from_json_schema(schema)
-
-print(grammar.grammar)
+grammar = LlamaGrammar.from_json_schema(schema, prop_order=["answer", "confidence"])
 ```
+
+### Lazy sampling
+
+Set `triggers` on a definition and pass `grammar_lazy=True` to generation:
+
+```python
+from llama_cpp import LlamaGrammar
+
+# llm is an existing Llama model instance.
+grammar = LlamaGrammar.from_string(
+    'answer ::= "yes" | "no"',
+    root="answer",
+    triggers=[r"[\s\S]*?(yes|no)[\s\S]*"],
+)
+result = llm.create_completion(
+    "Answer yes or no: is water wet?",
+    grammar=grammar,
+    grammar_lazy=True,
+)
+```
+
+String triggers are native regex patterns, not literal words. Patterns match
+the entire accumulated output; grammar processing starts at the first capture
+group and includes the remaining buffered output. A token trigger includes the
+triggering token in grammar processing. Select triggers whose captured content
+can begin the grammar. Patterns must be valid for the native regex engine;
+construction only checks their text, not regex syntax.
+
+Triggers are ignored when lazy sampling is disabled. Lazy sampling without
+triggers raises `ValueError` during sampler initialization.
 
 ## `json_schema_to_gbnf`
 
@@ -230,232 +209,94 @@ def json_schema_to_gbnf(
 )
 ```
 
-Converts a JSON Schema string or dictionary into a GBNF grammar string.
-
-| Parameter     | Type                  | Default  | Description                                                                                         |
-| ------------- | --------------------- | -------- | --------------------------------------------------------------------------------------------------- |
-| `schema`      | `Union[str, dict]`    | required | JSON Schema input. Strings are parsed with `json.loads`; dictionaries are copied before conversion. |
-| `prop_order`  | `Optional[List[str]]` | `None`   | Optional property ordering used by object rule generation.                                          |
-| `allow_fetch` | `bool`                | `False`  | Allows remote HTTPS `$ref` fetching when enabled.                                                   |
-| `dotall`      | `bool`                | `False`  | Controls regex dot behavior during pattern conversion.                                              |
-| `raw_pattern` | `bool`                | `False`  | Controls how regex pattern rules are emitted.                                                       |
-
-Returns:
-
-| Type  | Description                    |
-| ----- | ------------------------------ |
-| `str` | Generated GBNF grammar string. |
-
-The function raises `TypeError` if `schema` is neither a JSON string nor a dictionary.
-
-### Example
+Returns the generated GBNF as a `str`. Conversion options match
+`from_json_schema`; this function does not configure roots or lazy triggers.
+A non-string, non-dictionary input raises `TypeError`. Other conversion errors
+are propagated without the factory method's `ValueError` wrapper.
 
 ```python
 from llama_cpp.llama_grammar import json_schema_to_gbnf
 
-schema = {
+gbnf = json_schema_to_gbnf({
     "type": "array",
     "items": {"type": "string"},
     "minItems": 1,
     "maxItems": 3,
-}
-
-gbnf = json_schema_to_gbnf(schema)
-
-print(gbnf)
+})
 ```
 
-## `SchemaConverter`
+## Conversion behavior
 
-```python
-class SchemaConverter
-```
+The converter implements a subset of JSON Schema, not a complete validator.
 
-Internal implementation class used by `json_schema_to_gbnf`.
+| Area | Behavior |
+| --- | --- |
+| Empty schema | `{}` accepts any JSON value, including nested occurrences. Use `{"type": "object"}` to require an object. |
+| Objects | Supports properties, required fields, and additional properties. When properties are declared, explicitly set `additionalProperties: true` to allow undeclared keys. |
+| Property names | Additional keys cannot reuse declared names, including equivalent JSON escape spellings. |
+| Arrays | Supports item schemas, tuple-like `prefixItems` or array-valued `items`, and item-count bounds for homogeneous arrays. `items` takes precedence over `prefixItems`. |
+| Strings | Supports length bounds, anchored regex patterns, and selected formats: date, time, date-time, and uuid/uuid1 through uuid5. |
+| Type inference | String length keywords can imply string type. Numeric bounds alone do not imply integer type. |
+| Integer bounds | Supports inclusive/exclusive bounds and rounds fractional bounds inward. |
+| Alternatives | `anyOf` and `oneOf` generate alternatives; `oneOf` does not enforce exclusive matching. |
+| Enum/const | Supports JSON values; `allOf` intersections compare structures and distinguish booleans from numbers. |
+| References | Traverses reachable schemas, supports reference chains, escaped JSON Pointers and root references, and preserves literal const/enum data. |
 
-`SchemaConverter` walks a JSON Schema dictionary, resolves references, builds grammar rules, and formats them into GBNF.
+Compatible object merges and enum/const intersections are supported in `allOf`,
+including nested intersections and optional type filtering. Empty intersections,
+conflicting property constraints, and unsupported general intersections raise
+errors. Pure reference cycles and recursive `allOf` are rejected; recursive
+object schemas can be represented.
 
-This class is useful for understanding how conversion works, but most users should use `LlamaGrammar.from_json_schema` or `json_schema_to_gbnf` instead.
+HTTPS references require `allow_fetch=True`. Named anchors and `$id` scope
+changes are not implemented. Regex backreferences, lookarounds, and lazy or
+possessive quantifiers are rejected. Regex character handling and additional-key
+exclusion use Unicode scalar values, including escaped surrogate pairs, but not
+unpaired surrogates. Unsupported formats such as `uri` and `email` do not add
+format-specific validation.
 
-> Warning: `SchemaConverter` appears to be an implementation detail. It should not be treated as the primary public API unless the project explicitly documents it as stable.
+## Internal conversion and reuse
 
-### Constructor
+Each `json_schema_to_gbnf` call creates a new `SchemaConverter`. Its internal
+state includes generated rules (`_rules`), resolved references (`_refs`), unique
+reference rule names (`_ref_rule_names`), and character-rule caches.
 
-```python
-def __init__(
-    self,
-    *,
-    prop_order,
-    allow_fetch,
-    dotall,
-    raw_pattern,
-)
-```
+Optional property suffixes are built once from right to left, avoiding repeated
+recursive traversal and list slicing. Rule registration preserves existing
+names and empty reference placeholders while using single dictionary lookups.
 
-| Parameter     | Type         | Description                                                             |
-| ------------- | ------------ | ----------------------------------------------------------------------- |
-| `prop_order`  | mapping-like | Property ordering map used when generating object rules.                |
-| `allow_fetch` | `bool`       | Enables or disables remote schema fetching for supported `$ref` values. |
-| `dotall`      | `bool`       | Controls regex dot behavior.                                            |
-| `raw_pattern` | `bool`       | Controls raw pattern handling.                                          |
+`_character_input_rules` bypasses normalization for repeated character ranges;
+`_character_rules` reuses rules for equivalent normalized ranges; `_hex_intervals`
+reuses hexadecimal grammar fragments. These caches belong to one converter and
+are discarded with it. Native samplers and token histories are never cached
+here. Reusing a `LlamaGrammar` definition across requests avoids repeating Schema
+to GBNF conversion; it does not reuse a previous request's native sampler state.
 
-### Important Internal State
+These optimizations reduce conversion work without changing property order,
+accepted output, or the public API. They do not change per-token sampling.
 
-| Attribute              | Type         | Description                                      |
-| ---------------------- | ------------ | ------------------------------------------------ |
-| `_prop_order`          | mapping-like | Stores property ordering preferences.            |
-| `_allow_fetch`         | `bool`       | Stores whether remote references may be fetched. |
-| `_dotall`              | `bool`       | Stores regex dot behavior.                       |
-| `_raw_pattern`         | `bool`       | Stores raw pattern handling behavior.            |
-| `_rules`               | `dict`       | Accumulates generated grammar rules.             |
-| `_refs`                | `dict`       | Stores resolved JSON Schema references.          |
-| `_refs_being_resolved` | `set`        | Tracks references currently being resolved.      |
+## Errors and lifecycle
 
-### Key Methods
+| Entry point | Error | Condition |
+| --- | --- | --- |
+| Text construction | `TypeError` | Grammar is not a string. |
+| Text construction | `ValueError` | Empty/blank grammar, embedded NUL, or invalid root/trigger inputs. |
+| `from_file` | `FileNotFoundError` | File does not exist. |
+| `from_file` | `IOError` | File cannot be read as UTF-8. |
+| `from_json_schema` | `ValueError` | Conversion or definition validation fails. |
+| `json_schema_to_gbnf` | `TypeError` | Input is neither a string nor a dictionary. |
+| Native sampler initialization | `RuntimeError` | Native GBNF parsing fails or the start rule is missing. |
 
-| Method               | Description                                                                              |
-| -------------------- | ---------------------------------------------------------------------------------------- |
-| `resolve_refs`       | Resolves local and supported HTTPS `$ref` references in a schema.                        |
-| `visit`              | Main schema visitor that generates grammar rules based on schema structure.              |
-| `format_grammar`     | Formats generated rules into a GBNF grammar string.                                      |
-| `_build_object_rule` | Builds object grammar rules from properties, required fields, and additional properties. |
-| `_visit_pattern`     | Converts supported regex patterns into GBNF rules.                                       |
-| `_add_rule`          | Adds or reuses a grammar rule name.                                                      |
-| `_add_primitive`     | Adds primitive rules and their dependencies.                                             |
+Root names must match `[A-Za-z0-9-]+`. Trigger strings must be non-empty and
+contain no NUL. Token IDs must be integers in `[0, 2**31)`; booleans are rejected.
+The model vocabulary determines whether a token ID is meaningful.
 
-## Supported JSON Schema Features
+The internal `GrammarSampler` supports a context manager and idempotent `close`.
+Its `apply`, `accept`, and `reset` methods reject use after closure. Applications
+normally let `Llama` manage these resources.
 
-Based on the current implementation, the converter includes handling for:
+## Related links
 
-* `type`
-* `properties`
-* `required`
-* `additionalProperties`
-* `$ref`
-* `oneOf`
-* `anyOf`
-* `allOf`
-* `const`
-* `enum`
-* `items`
-* `prefixItems`
-* `minItems`
-* `maxItems`
-* `pattern`
-* `format`
-* `minLength`
-* `maxLength`
-* integer bounds:
-
-  * `minimum`
-  * `exclusiveMinimum`
-  * `maximum`
-  * `exclusiveMaximum`
-
-String formats handled by built-in rules include:
-
-* `date`
-* `time`
-* `date-time`
-* UUID-like formats matching `uuid`, `uuid1`, `uuid2`, `uuid3`, `uuid4`, or `uuid5`
-
-The source includes a TODO comment for unsupported string formats such as `uri` and `email`.
-
-## Error Handling
-
-| API                             | Error               | Condition                                 |
-| ------------------------------- | ------------------- | ----------------------------------------- |
-| `LlamaGrammar.from_file`        | `FileNotFoundError` | Grammar file path does not exist.         |
-| `LlamaGrammar.from_file`        | `IOError`           | Grammar file cannot be read.              |
-| `LlamaGrammar.from_file`        | `ValueError`        | Grammar file is empty.                    |
-| `LlamaGrammar.from_json_schema` | `ValueError`        | JSON Schema to GBNF conversion fails.     |
-| `json_schema_to_gbnf`           | `TypeError`         | Schema input is neither `str` nor `dict`. |
-
-## Common Usage
-
-### Use a Built-in Grammar
-
-```python
-from llama_cpp.llama_grammar import LlamaGrammar, JSON_GBNF
-
-grammar = LlamaGrammar.from_string(JSON_GBNF)
-
-print(grammar.grammar)
-```
-
-### Load Grammar from a File
-
-```python
-from llama_cpp.llama_grammar import LlamaGrammar
-
-grammar = LlamaGrammar.from_file("./grammar.gbnf")
-
-print(grammar.grammar)
-```
-
-### Convert JSON Schema to Grammar
-
-```python
-from llama_cpp.llama_grammar import LlamaGrammar
-
-schema = {
-    "type": "object",
-    "properties": {
-        "answer": {"type": "string"},
-        "confidence": {"type": "number"},
-    },
-    "required": ["answer"],
-}
-
-grammar = LlamaGrammar.from_json_schema(
-    schema,
-    prop_order=["answer", "confidence"],
-)
-
-print(grammar.grammar)
-```
-
-### Convert JSON Schema Directly to GBNF
-
-```python
-from llama_cpp.llama_grammar import json_schema_to_gbnf
-
-schema = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
-            "items": {"type": "string"},
-        }
-    },
-}
-
-gbnf = json_schema_to_gbnf(schema)
-
-print(gbnf)
-```
-
-## Best Practices & Common Patterns
-
-* Use `LlamaGrammar.from_string` when you already have a GBNF grammar string.
-* Use `LlamaGrammar.from_file` when storing grammar definitions in `.gbnf` files.
-* Use `LlamaGrammar.from_json_schema` when generating grammars from JSON Schema input.
-* Use `json_schema_to_gbnf` directly when you only need the generated grammar string.
-* Keep JSON Schemas small and explicit when targeting constrained generation.
-* Use `prop_order` when output field order matters for stability.
-* Keep `allow_fetch=False` unless remote `$ref` fetching is explicitly needed.
-* Prefer public helpers over using `SchemaConverter` directly.
-* Do not rely on internal converter methods as stable public APIs.
-
-## Limitations
-
-* `SchemaConverter` is implementation-oriented and may change.
-* Remote `$ref` fetching is only attempted for HTTPS references and requires `allow_fetch=True`.
-* The source includes TODO notes for unsupported string formats such as `uri` and `email`.
-* Regex pattern conversion explicitly rejects unsupported pattern syntax such as lookaheads and non-greedy modifiers.
-* The exact runtime integration between `LlamaGrammar` and model generation should be verified from the relevant generation APIs before documenting end-to-end constrained generation behavior.
-
-## Related Links
-
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
+- [Grammar guide](../features/grammar.md)
+- [Llama core](../core/Llama.md)
+- [Wiki index](../index.md)
