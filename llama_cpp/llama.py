@@ -1900,6 +1900,8 @@ class Llama:
                 ignore_eos=ignore_eos,
                 logit_bias=self._convert_logit_bias(logit_bias),
                 grammar=grammar.grammar if grammar else "",
+                grammar_root=grammar.root if grammar else "root",
+                grammar_triggers=list(grammar.triggers) if grammar else [],
                 grammar_lazy=grammar_lazy,
 
                 # Reasoning Budget
@@ -2209,7 +2211,9 @@ class Llama:
             # Misc
             ignore_eos=ignore_eos,
             logit_bias=self._convert_logit_bias(logit_bias),
-            grammar=grammar._grammar if grammar else "",
+            grammar=grammar.grammar if grammar else "",
+            grammar_root=grammar.root if grammar else "root",
+            grammar_triggers=list(grammar.triggers) if grammar else [],
             grammar_lazy=grammar_lazy,
             seed=seed if seed is not None else self._seed,
 

@@ -2348,6 +2348,7 @@ class LlamaSamplingParams:
 
     logit_bias: List[llama_cpp.llama_logit_bias] = field(default_factory=list)
     logit_bias_eog: List[llama_cpp.llama_logit_bias] = field(default_factory=list)
+    grammar_root: str = "root"
 
     @property
     def has_logit_bias(self) -> bool:
@@ -2383,7 +2384,11 @@ class LlamaSamplingParams:
 
 class GrammarSampler:
 
-    def __init__(self, model, grammar_str, lazy=False, triggers=None):
+    def __init__(self, model, grammar_str, lazy=False, triggers=None, root="root"):
+
+        self.grammar = None
+        self.model = None
+        self.vocab = None
 
         if model is None:
             raise ValueError("model must not be None")
@@ -2391,26 +2396,58 @@ class GrammarSampler:
         self.model = model
         self.vocab = model.vocab
 
-        if not grammar_str:
-            raise ValueError("grammar_str must not be empty")
+        definition = LlamaGrammar.from_string(grammar_str, root=root, triggers=triggers)
+        triggers = definition.triggers
 
-        self.grammar = llama_cpp.llama_sampler_init_grammar(
-            self.vocab,
-            grammar_str.encode("utf-8"),
-            b"root"
-        )
+        if lazy:
+            if not triggers:
+                raise ValueError("lazy grammar requires at least one trigger")
+            patterns, tokens = [], []
+            for trigger in triggers or []:
+                if isinstance(trigger, str):
+                    if '\x00' in trigger:
+                        raise ValueError("trigger patterns must contain no NUL characters")
+                    patterns.append(trigger.encode("utf-8"))
+                elif type(trigger) is int:
+                    tokens.append(trigger)
+                else:
+                    raise TypeError("grammar triggers must be regex strings or token integers")
+            c_patterns = (ctypes.c_char_p * len(patterns))(*patterns)
+            c_tokens = (llama_cpp.llama_token * len(tokens))(*tokens)
+            self.grammar = llama_cpp.llama_sampler_init_grammar_lazy_patterns(
+                self.vocab, grammar_str.encode("utf-8"), root.encode("utf-8"),
+                c_patterns, len(patterns), c_tokens, len(tokens),
+            )
+        else:
+            self.grammar = llama_cpp.llama_sampler_init_grammar(
+                self.vocab, grammar_str.encode("utf-8"), root.encode("utf-8")
+            )
 
         if not self.grammar:
             raise RuntimeError("Failed to initialize grammar sampler")
 
     def apply(self, token_data):
+        self._require_open()
         llama_cpp.llama_sampler_apply(self.grammar, token_data)
 
     def accept(self, token):
+        self._require_open()
         llama_cpp.llama_sampler_accept(self.grammar, token)
 
     def reset(self):
+        self._require_open()
         llama_cpp.llama_sampler_reset(self.grammar)
+
+    def _require_open(self):
+        if not self.grammar:
+            raise RuntimeError("Grammar sampler is closed")
+
+    def __enter__(self):
+        self._require_open()
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.close()
 
     def close(self):
         if self.grammar:
@@ -2508,6 +2545,7 @@ class LlamaSamplingContext:
                 params.grammar,
                 params.grammar_lazy,
                 params.grammar_triggers,
+                root=params.grammar_root,
             )
 
     def _build_sampler_chain(self):
@@ -3630,7 +3668,9 @@ class LlamaSampler:
         model: LlamaModel,
         grammar_str: str,
         lazy: bool = False,
-        triggers: List[Union[str, int]] = None
+        triggers: List[Union[str, int]] = None,
+        *,
+        root: str = "root",
     ):
         """
         Adds a grammar sampler.
@@ -3638,10 +3678,13 @@ class LlamaSampler:
             grammar_str: The BNF grammar string.
             root: The root rule name.
             lazy: If True, enables lazy evaluation.
-            triggers: List of trigger words (str) or tokens (int) for lazy evaluation.
+            triggers: List of regex patterns (str) or token IDs (int) for lazy evaluation.
         """
         c_grammar_str = grammar_str.encode('utf-8')
-        c_root = "root".encode('utf-8')
+        definition = LlamaGrammar.from_string(grammar_str, root=root, triggers=triggers)
+        if lazy and not definition.triggers:
+            raise ValueError("lazy grammar requires at least one trigger")
+        c_root = root.encode('utf-8')
 
         self._keep_alive.append(c_grammar_str)
         self._keep_alive.append(c_root)

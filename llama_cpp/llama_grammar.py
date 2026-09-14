@@ -1,8 +1,13 @@
-"""Python implementation of llama grammar parser. Reference: vendor/llama.cpp/examples/json_schema_to_grammar.py"""
+"""GBNF definitions and JSON Schema conversion.
+
+Reference: vendor/llama.cpp/common/json-schema{,-to-grammar}.cpp.
+Native grammar parsing and sampling are owned by the sampling context.
+"""
 
 # flake8: noqa
 from pathlib import Path
-import itertools
+import copy
+import math
 import json
 import re
 import sys
@@ -19,20 +24,55 @@ LLAMA_GRAMMAR_DEFAULT_ROOT = "root"
 
 
 class LlamaGrammar:
-    def __init__(self, *args, _grammar: str, **kwargs):
+    """Reusable grammar definition; each sampling context owns its native state.
+
+    Construction checks text inputs, not GBNF syntax. The native sampler parses
+    the grammar when it is attached to a model. ``verbose`` is retained for API
+    compatibility on the factory methods.
+    """
+
+    def __init__(self, *args, _grammar: str, root: str = LLAMA_GRAMMAR_DEFAULT_ROOT, triggers: Optional[List[Union[str, int]]] = None, **kwargs):
+        if not isinstance(_grammar, str):
+            raise TypeError("grammar must be a string")
+        # Native APIs receive NUL-terminated strings.
+        if not _grammar.strip() or '\x00' in _grammar:
+            raise ValueError("grammar must be non-empty and contain no NUL characters")
+        if not isinstance(root, str) or not re.fullmatch(r'[A-Za-z0-9-]+', root):
+            raise ValueError("root must be a non-empty GBNF rule name")
         self._grammar = _grammar
-        self._root = LLAMA_GRAMMAR_DEFAULT_ROOT
+        self._root = root
+        # Snapshot triggers so caller edits cannot change this definition.
+        self._triggers = tuple(triggers or ())
+        for trigger in self._triggers:
+            if isinstance(trigger, str):
+                if not trigger or '\x00' in trigger:
+                    raise ValueError("trigger patterns must be non-empty and contain no NUL characters")
+            elif type(trigger) is not int or not 0 <= trigger < 2**31:
+                raise ValueError("triggers must be regex strings or non-negative int32 token IDs")
+
+    @property
+    def triggers(self) -> Tuple[Union[str, int], ...]:
+        """Regex patterns and token IDs used when sampling with grammar_lazy=True."""
+        return self._triggers
+
+    @property
+    def root(self) -> str:
+        """Start rule passed to the native grammar sampler."""
+        return self._root
 
     @property
     def grammar(self) -> str:
+        """GBNF source text, without model-specific sampling state."""
         return self._grammar
 
     @classmethod
-    def from_string(cls, grammar: str, verbose: bool = True) -> "LlamaGrammar":
-        return cls(_grammar=grammar)
+    def from_string(cls, grammar: str, verbose: bool = True, *, root: str = LLAMA_GRAMMAR_DEFAULT_ROOT, triggers: Optional[List[Union[str, int]]] = None) -> "LlamaGrammar":
+        """Wrap GBNF text; syntax is checked during native sampler initialization."""
+        return cls(_grammar=grammar, root=root, triggers=triggers)
 
     @classmethod
-    def from_file(cls, file: Union[str, Path], verbose: bool = True) -> "LlamaGrammar":
+    def from_file(cls, file: Union[str, Path], verbose: bool = True, *, root: str = LLAMA_GRAMMAR_DEFAULT_ROOT, triggers: Optional[List[Union[str, int]]] = None) -> "LlamaGrammar":
+        """Load a non-empty UTF-8 GBNF file."""
         file_path = Path(file)
 
         if not file_path.exists():
@@ -46,7 +86,7 @@ class LlamaGrammar:
         if not grammar_content.strip():
             raise ValueError(f"{cls.__name__}.from_file: grammar file is empty")
 
-        return cls.from_string(grammar_content, verbose=verbose)
+        return cls.from_string(grammar_content, verbose=verbose, root=root, triggers=triggers)
 
     @classmethod
     def from_json_schema(
@@ -56,14 +96,20 @@ class LlamaGrammar:
         allow_fetch: bool = False,
         dotall: bool = False,
         raw_pattern: bool = False,
-        verbose: bool = True
+        verbose: bool = True,
+        *,
+        triggers: Optional[List[Union[str, int]]] = None,
     ) -> "LlamaGrammar":
         """
-        Create a syntax object from a JSON Schema.
+        Convert a JSON Schema to GBNF with the default root rule.
 
         json_schema: A JSON Schema string or dictionary.
-        prop_order: Specifies the order in which fields are generated (helps improve the stability of small models).
-        verbose: Whether to log.
+        prop_order: Preferred property order; required properties come first.
+        allow_fetch: Allow HTTPS references during schema conversion.
+        dotall: Let regex dots match line breaks.
+        raw_pattern: Emit patterns without JSON string quoting.
+        verbose: Retained for API compatibility; currently has no effect.
+        triggers: Regex patterns or token IDs for lazy sampling.
         """
         try:
             gbnf_grammar_str = json_schema_to_gbnf(
@@ -73,7 +119,7 @@ class LlamaGrammar:
                 dotall=dotall,
                 raw_pattern=raw_pattern,
             )
-            return cls.from_string(gbnf_grammar_str, verbose=verbose)
+            return cls.from_string(gbnf_grammar_str, verbose=verbose, triggers=triggers)
         except Exception as e:
             raise ValueError(f"{cls.__name__}.from_json_schema: conversion failed: {e}")
 
@@ -499,9 +545,6 @@ GRAMMAR_LITERAL_ESCAPE_RE = re.compile(r'[\r\n"\\]')
 GRAMMAR_RANGE_LITERAL_ESCAPE_RE = re.compile(r'[\r\n"\]\-\\]')
 GRAMMAR_LITERAL_ESCAPES = {'\r': '\\r', '\n': '\\n', '"': '\\"', '-': '\\-', ']': '\\]', '\\': '\\\\'}
 
-NON_LITERAL_SET = set('|.()[]{}*+?')
-ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS = set('^$.[]()|{}*+?')
-
 class SchemaConverter:
     def __init__(self, *, prop_order, allow_fetch, dotall, raw_pattern):
         self._prop_order = prop_order
@@ -512,7 +555,8 @@ class SchemaConverter:
             'space': SPACE_RULE,
         }
         self._refs = {}
-        self._refs_being_resolved = set()
+        self._ref_rule_names = {}
+        self._character_rules = {}
 
     def _format_literal(self, literal):
         escaped = GRAMMAR_LITERAL_ESCAPE_RE.sub(
@@ -543,50 +587,113 @@ class SchemaConverter:
 
         return ''.join(('(', *recurse(0), ')'))
 
-    def _not_strings(self, strings):
-        class TrieNode:
-            def __init__(self):
-                self.children = {}
-                self.is_end_of_string = False
+    @staticmethod
+    def _ranges(ranges):
+        merged = []
+        for lo, hi in sorted(ranges):
+            if lo > hi:
+                continue
+            if merged and lo <= merged[-1][1] + 1:
+                merged[-1] = (merged[-1][0], max(hi, merged[-1][1]))
+            else:
+                merged.append((lo, hi))
+        return merged
 
-            def insert(self, string):
-                node = self
-                for c in string:
-                    node = node.children.setdefault(c, TrieNode())
-                node.is_end_of_string = True
-
-        trie = TrieNode()
-        for s in strings:
-            trie.insert(s)
-
-        char_rule = self._add_primitive('char', PRIMITIVE_RULES['char'])
-        out = ['["] ( ']
-
-        def visit(node):
-            rejects = []
-            first = True
-            for c in sorted(node.children.keys()):
-                child = node.children[c]
-                rejects.append(c)
-                if first:
-                    first = False
+    @classmethod
+    def _subtract_ranges(cls, ranges, excluded):
+        result = cls._ranges(ranges)
+        for start, end in cls._ranges(excluded):
+            parts = []
+            for lo, hi in result:
+                if hi < start or lo > end:
+                    parts.append((lo, hi))
                 else:
-                    out.append(' | ')
-                out.append(f'[{c}]')
-                if child.children:
-                    out.append(f' (')
-                    visit(child)
-                    out.append(')')
-                elif child.is_end_of_string:
-                    out.append(f' {char_rule}+')
-            if node.children:
-                if not first:
-                    out.append(' | ')
-                out.append(f'[^"{"".join(rejects)}] {char_rule}*')
-        visit(trie)
+                    if lo < start:
+                        parts.append((lo, start - 1))
+                    if hi > end:
+                        parts.append((end + 1, hi))
+            result = parts
+        return result
 
-        out.append(f' ){"" if trie.is_end_of_string else "?"} ["]')
-        return ''.join(out)
+    @staticmethod
+    def _hex_interval(lo, hi):
+        """Four hex digits with case-insensitive A-F, compressed by prefix."""
+        def build(low, high, digits):
+            if digits == 0:
+                return '""'
+            if low == 0 and high == 16 ** digits - 1:
+                return '[0-9a-fA-F]' + (f'{{{digits}}}' if digits > 1 else '')
+            block = 16 ** (digits - 1)
+            options = []
+            for first in range(low // block, high // block + 1):
+                ch = format(first, 'x')
+                head = f'[{ch}{ch.upper()}]' if first > 9 else f'"{ch}"'
+                tail = build(max(0, low - first * block), min(block - 1, high - first * block), digits - 1)
+                options.append(head + ' ' + tail)
+            return '(' + ' | '.join(options) + ')'
+        return build(lo, hi, 4)
+
+    def _character_rule(self, ranges, raw=False):
+        # Compare decoded characters, including equivalent JSON escape spellings.
+        ranges = self._subtract_ranges(ranges, [(0xD800, 0xDFFF)])
+        if not ranges:
+            raise ValueError('Character class matches no Unicode scalar values')
+        cache_key = (raw, tuple(ranges))
+        if cache_key in self._character_rules:
+            return self._character_rules[cache_key]
+        options = []
+        direct = ranges if raw else self._subtract_ranges(ranges, [(0, 31), (34, 34), (92, 92)])
+        if direct:
+            def point(value):
+                return chr(92) + ('u%04X' % value if value <= 0xFFFF else 'U%08X' % value)
+            options.append('[' + ''.join(point(lo) + ('-' + point(hi) if hi != lo else '') for lo, hi in direct) + ']')
+        if not raw:
+            short = {'"': chr(92) + '"', chr(92): chr(92) * 2, '/': chr(92) + '/',
+                     chr(8): chr(92) + 'b', chr(12): chr(92) + 'f', chr(10): chr(92) + 'n',
+                     chr(13): chr(92) + 'r', chr(9): chr(92) + 't'}
+            for ch, encoded in short.items():
+                if any(lo <= ord(ch) <= hi for lo, hi in ranges):
+                    options.append(self._format_literal(encoded))
+            marker = self._format_literal(chr(92) + 'u')
+            for lo, hi in ranges:
+                if lo <= 0xFFFF:
+                    options.append(marker + ' ' + self._hex_interval(lo, min(hi, 0xFFFF)))
+                if hi >= 0x10000:
+                    low, high = max(lo, 0x10000) - 0x10000, hi - 0x10000
+                    first, last = low >> 10, high >> 10
+                    blocks = [(first, first, low & 1023, (high & 1023) if first == last else 1023)]
+                    if last > first:
+                        if last > first + 1:
+                            blocks.append((first + 1, last - 1, 0, 1023))
+                        blocks.append((last, last, 0, high & 1023))
+                    for h0, h1, l0, l1 in blocks:
+                        options.append(marker + ' ' + self._hex_interval(0xD800 + h0, 0xD800 + h1) + ' ' +
+                                       marker + ' ' + self._hex_interval(0xDC00 + l0, 0xDC00 + l1))
+        name = self._add_rule(f'char-range-{len(self._character_rules)}', ' | '.join(options))
+        self._character_rules[cache_key] = name
+        return name
+
+    def _not_strings(self, strings):
+        """JSON string keys excluding exact decoded property names."""
+        trie = {}
+        for string in strings:
+            node = trie
+            for ch in string:
+                node = node.setdefault(ch, {})
+            node[None] = True
+        any_char = self._character_rule([(0, 0x10FFFF)])
+
+        def build(node):
+            children = sorted(ch for ch in node if ch is not None)
+            options = ['""'] if None not in node else []
+            remaining = self._subtract_ranges([(0, 0x10FFFF)], [(ord(ch), ord(ch)) for ch in children])
+            options.append(self._character_rule(remaining) + ' ' + any_char + '*')
+            for ch in children:
+                options.append(self._character_rule([(ord(ch), ord(ch))]) + ' (' + build(node[ch]) + ')')
+            return ' | '.join(options)
+
+        quote = self._format_literal('"')
+        return quote + ' (' + build(trie) + ') ' + quote
 
     def _add_rule(self, name, rule):
         esc_name = INVALID_RULE_CHARS_RE.sub('-', name)
@@ -601,58 +708,90 @@ class SchemaConverter:
         return key
 
     def resolve_refs(self, schema: dict, url: str):
-        '''
-            Resolves all $ref fields in the given schema, fetching any remote schemas,
-            replacing $ref with absolute reference URL and populating self._refs with the
-            respective referenced (sub)schema dictionaries.
-        '''
-        def visit(n: dict):
-            if isinstance(n, list):
-                return [visit(x) for x in n]
-            elif isinstance(n, dict):
-                ref = n.get('$ref')
-                if ref is not None and ref not in self._refs:
-                    if ref.startswith('https://'):
-                        assert self._allow_fetch, 'Fetching remote schemas is not allowed (use --allow-fetch for force)'
-                        import requests
+        """Resolve reachable schema nodes without traversing literal JSON data."""
+        from urllib.parse import unquote, urljoin
 
-                        frag_split = ref.split('#')
-                        base_url = frag_split[0]
+        documents = {url: schema}
+        visited = {}
 
-                        target = self._refs.get(base_url)
-                        if target is None:
-                            target = self.resolve_refs(requests.get(ref).json(), base_url)
-                            self._refs[base_url] = target
-
-                        if len(frag_split) == 1 or frag_split[-1] == '':
-                            return target
-                    elif ref.startswith('#/'):
-                        target = schema
-                        ref = f'{url}{ref}'
-                        n['$ref'] = ref
-                    else:
-                        raise ValueError(f'Unsupported ref {ref}')
-
-                    for sel in ref.split('#')[-1].split('/')[1:]:
-                        assert target is not None, f'Error resolving ref {ref}: {sel} not in {target}'
-                        if isinstance(target, list):
-                            try:
-                                sel_index = int(sel)
-                            except ValueError:
-                                raise ValueError(f'Error resolving ref {ref}: {sel} not in {target}')
-                            assert 0 <= sel_index < len(target), f'Error resolving ref {ref}: {sel} not in {target}'
-                            target = target[sel_index]
-                        else:
-                            assert sel in target, f'Error resolving ref {ref}: {sel} not in {target}'
-                            target = target[sel]
-
-                    self._refs[ref] = target
+        def walk(node, base):
+            if not isinstance(node, dict) or id(node) in visited:
+                return
+            visited[id(node)] = node
+            if '$ref' in node:
+                ref = node['$ref']
+                if not isinstance(ref, str):
+                    raise ValueError('$ref must be a string')
+                if ref.startswith('#'):
+                    document_url, fragment = base, ref[1:]
                 else:
-                    for v in n.values():
-                        visit(v)
+                    absolute = urljoin(base, ref)
+                    document_url, _, fragment = absolute.partition('#')
+                    if not document_url.startswith('https://'):
+                        raise ValueError(f'Unsupported ref {ref}')
+                if document_url not in documents:
+                    if not self._allow_fetch:
+                        raise ValueError('Fetching remote schemas is not allowed')
+                    import requests
+                    response = requests.get(document_url, timeout=30)
+                    response.raise_for_status()
+                    documents[document_url] = response.json()
+                fragment = unquote(fragment)
+                if fragment and not fragment.startswith('/'):
+                    raise ValueError(f'Unsupported reference anchor: {ref}')
+                canonical = document_url + '#' + fragment
+                node['$ref'] = canonical
+                if canonical not in self._refs:
+                    target = documents[document_url]
+                    for part in fragment.split('/')[1:]:
+                        if re.search(r'~(?![01])', part):
+                            raise ValueError(f'Invalid JSON Pointer in {ref}')
+                        key = part.replace('~1', '/').replace('~0', '~')
+                        if isinstance(target, dict) and key in target:
+                            target = target[key]
+                        elif isinstance(target, list) and re.fullmatch(r'0|[1-9][0-9]*', key) and int(key) < len(target):
+                            target = target[int(key)]
+                        else:
+                            raise ValueError(f'Cannot resolve {ref}: {key!r} not found')
+                    if not isinstance(target, dict):
+                        raise ValueError(f'Reference {ref} must target a schema object')
+                    # Register before descending so recursive objects can refer back.
+                    self._refs[canonical] = target
+                    walk(target, document_url)
+                return
+            # Match converter precedence; const/enum payloads are data, not schemas.
+            if 'allOf' in node:
+                children = list(node['allOf']) if isinstance(node['allOf'], list) else []
+                siblings = {k: v for k, v in node.items() if k != 'allOf'}
+                walk(siblings, base)
+            elif 'oneOf' in node or 'anyOf' in node:
+                children = node.get('oneOf', node.get('anyOf'))
+            elif 'const' in node or 'enum' in node:
+                return
+            else:
+                children = []
+                properties = node.get('properties', {})
+                if isinstance(properties, dict):
+                    children.extend(properties.values())
+                for key in ('additionalProperties', 'items', 'prefixItems', 'allOf'):
+                    value = node.get(key)
+                    children.extend(value if isinstance(value, list) else [value])
+            if isinstance(children, list):
+                for child in children:
+                    walk(child, base)
 
-            return n
-        return visit(schema)
+        walk(schema, url)
+        return schema
+
+    def _dereference(self, schema):
+        seen = set()
+        while isinstance(schema, dict) and '$ref' in schema:
+            ref = schema['$ref']
+            if ref in seen:
+                raise ValueError('Reference cycle contains no concrete schema')
+            seen.add(ref)
+            schema = self._refs[ref]
+        return schema
 
     def _generate_union_rule(self, name, alt_schemas):
         return ' | '.join((
@@ -661,183 +800,284 @@ class SchemaConverter:
         ))
 
     def _visit_pattern(self, pattern, name):
-        '''
-            Transforms a regular expression pattern into a GBNF rule.
+        """Translate anchored regex atoms to GBNF over decoded JSON characters."""
+        if not isinstance(pattern, str):
+            raise ValueError('pattern must be a string')
+        trailing_slashes = len(pattern[:-1]) - len(pattern[:-1].rstrip('\\'))
+        if not pattern.startswith('^') or not pattern.endswith('$') or trailing_slashes % 2:
+            raise ValueError('Pattern must start with "^" and end with "$"')
+        source, pos = pattern[1:-1], 0
+        universe = [(0, 0x10FFFF)]
+        classes = {
+            'd': [(48, 57)],
+            'w': [(48, 57), (65, 90), (95, 95), (97, 122)],
+            's': [(9, 13), (32, 32), (160, 160), (0x1680, 0x1680),
+                  (0x2000, 0x200A), (0x2028, 0x2029), (0x202F, 0x202F),
+                  (0x205F, 0x205F), (0x3000, 0x3000), (0xFEFF, 0xFEFF)],
+        }
 
-            Input: https://json-schema.org/understanding-json-schema/reference/regular_expressions
-            Output: https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md
+        def escaped(in_class=False):
+            nonlocal pos
+            pos += 1
+            if pos >= len(source):
+                raise ValueError('Trailing escape in pattern')
+            ch = source[pos]
+            pos += 1
+            if ch.lower() in classes:
+                ranges = classes[ch.lower()]
+                return self._subtract_ranges(universe, ranges) if ch.isupper() else ranges
+            controls = {'n': 10, 'r': 13, 't': 9, 'f': 12, 'v': 11}
+            if in_class:
+                controls['b'] = 8
+            if ch in controls:
+                return [(controls[ch], controls[ch])]
+            if ch in ('u', 'x'):
+                count = 4 if ch == 'u' else 2
+                digits = source[pos:pos+count]
+                if len(digits) != count or not re.fullmatch(r'[0-9a-fA-F]+', digits):
+                    raise ValueError('Invalid hexadecimal escape in pattern')
+                pos += count
+                value = int(digits, 16)
+                if 0xD800 <= value <= 0xDBFF and source[pos:pos+2] == '\\u':
+                    low_digits = source[pos+2:pos+6]
+                    if re.fullmatch(r'[0-9a-fA-F]{4}', low_digits):
+                        low = int(low_digits, 16)
+                        if 0xDC00 <= low <= 0xDFFF:
+                            value = 0x10000 + ((value - 0xD800) << 10) + low - 0xDC00
+                            pos += 6
+                if 0xD800 <= value <= 0xDFFF:
+                    raise ValueError('Unpaired surrogate in pattern')
+                return [(value, value)]
+            if ch in r'\^$.|?*+()[]{}-/"':
+                return [(ord(ch), ord(ch))]
+            raise ValueError(f'Unsupported regex escape: {chr(92)}{ch}')
 
-            Unsupported features: negative/positive lookaheads, greedy/non-greedy modifiers.
+        def class_atom():
+            nonlocal pos
+            if pos >= len(source):
+                raise ValueError('Unbalanced character class')
+            if source[pos] == '\\':
+                return escaped(in_class=True)
+            value = ord(source[pos])
+            pos += 1
+            return [(value, value)]
 
-            Mostly a 1:1 translation, except for {x} / {x,} / {x,y} quantifiers for which
-            we define sub-rules to keep the output lean.
-        '''
-
-        assert pattern.startswith('^') and pattern.endswith('$'), 'Pattern must start with "^" and end with "$"'
-        pattern = pattern[1:-1]
-        sub_rule_ids = {}
-
-        i = 0
-        length = len(pattern)
-
-        def to_rule(s: tuple[str, bool]) -> str:
-            (txt, is_literal) = s
-            return "\"" + txt + "\"" if is_literal else txt
-
-        def transform() -> tuple[str, bool]:
-            '''
-                Parse a unit at index i (advancing it), and return its string representation + whether it's a literal.
-            '''
-            nonlocal i
-            nonlocal pattern
-            nonlocal sub_rule_ids
-
-            start = i
-            # For each component of this sequence, store its string representation and whether it's a literal.
-            # We only need a flat structure here to apply repetition operators to the last item, and
-            # to merge literals at the and (we're parsing grouped ( sequences ) recursively and don't treat '|' specially
-            # (GBNF's syntax is luckily very close to regular expressions!)
-            seq: list[tuple[str, bool]] = []
-
-            def get_dot():
-                if self._dotall:
-                    rule = DOTALL
+        def expression(grouped=False):
+            nonlocal pos
+            alternatives, sequence = [], []
+            while pos < len(source):
+                ch = source[pos]
+                if ch == ')':
+                    if not grouped:
+                        raise ValueError('Unbalanced parentheses in pattern')
+                    break
+                if ch == '|':
+                    alternatives.append(' '.join(sequence) or '""')
+                    sequence = []
+                    pos += 1
+                    continue
+                if ch == '(':
+                    pos += 1
+                    if source[pos:pos+2] == '?:':
+                        pos += 2
+                    elif source[pos:pos+1] == '?':
+                        raise ValueError('Unsupported regex group syntax')
+                    atom = '(' + expression(grouped=True) + ')'
+                    if pos >= len(source) or source[pos] != ')':
+                        raise ValueError('Unbalanced parentheses in pattern')
+                    pos += 1
                 else:
-                    # Accept any character... except \n and \r line break chars (\x0A and \xOD)
-                    rule = DOT
-                return self._add_rule(f'dot', rule)
-
-            def join_seq():
-                nonlocal seq
-                ret = []
-                for is_literal, g in itertools.groupby(seq, lambda x: x[1]):
-                    if is_literal:
-                        ret.append((''.join(x[0] for x in g), True))
+                    if ch == '[':
+                        pos += 1
+                        negated = source[pos:pos+1] == '^'
+                        if negated:
+                            pos += 1
+                        ranges = []
+                        while pos < len(source) and source[pos] != ']':
+                            left = class_atom()
+                            if source[pos:pos+1] == '-' and source[pos+1:pos+2] not in ('', ']'):
+                                pos += 1
+                                right = class_atom()
+                                if len(left) != 1 or len(right) != 1 or left[0][0] != left[0][1] or right[0][0] != right[0][1] or left[0][0] > right[0][0]:
+                                    raise ValueError('Invalid character class range')
+                                left = [(left[0][0], right[0][0])]
+                            ranges.extend(left)
+                        if pos >= len(source):
+                            raise ValueError('Unbalanced character class')
+                        pos += 1
+                        if negated:
+                            ranges = self._subtract_ranges(universe, ranges)
+                    elif ch == '\\':
+                        ranges = escaped()
+                    elif ch == '.':
+                        ranges = universe if self._dotall else self._subtract_ranges(universe, [(10, 10), (13, 13), (0x2028, 0x2029)])
+                        pos += 1
+                    elif ch in '^$*+?{}':
+                        raise ValueError(f'Unsupported or misplaced regex operator: {ch}')
                     else:
-                        ret.extend(g)
-                if len(ret) == 1:
-                    return ret[0]
-                return (' '.join(to_rule(x) for x in seq), False)
+                        ranges = [(ord(ch), ord(ch))]
+                        pos += 1
+                    atom = self._character_rule(ranges, raw=self._raw_pattern)
+                if pos < len(source) and source[pos] in '*+?':
+                    atom += source[pos]
+                    pos += 1
+                elif source[pos:pos+1] == '{':
+                    match = re.match(r'\{(\d+)(,([0-9]*))?\}', source[pos:])
+                    if not match:
+                        raise ValueError('Invalid regex quantifier')
+                    minimum = int(match[1])
+                    maximum = (int(match[3]) if match[3] else None) if match[2] else minimum
+                    if maximum is not None and maximum < minimum:
+                        raise ValueError('Invalid regex quantifier range')
+                    atom = _build_repetition(atom, minimum, maximum) or '""'
+                    pos += len(match[0])
+                sequence.append(atom)
+            alternatives.append(' '.join(sequence) or '""')
+            return ' | '.join(alternatives)
 
-            while i < length:
-                c = pattern[i]
-                if c == '.':
-                    seq.append((get_dot(), False))
-                    i += 1
-                elif c == '(':
-                    i += 1
-                    if i < length:
-                        assert pattern[i] != '?', f'Unsupported pattern syntax "{pattern[i]}" at index {i} of /{pattern}/'
-                    seq.append((f'({to_rule(transform())})', False))
-                elif c == ')':
-                    i += 1
-                    assert start > 0 and pattern[start-1] == '(', f'Unbalanced parentheses; start = {start}, i = {i}, pattern = {pattern}'
-                    return join_seq()
-                elif c == '[':
-                    square_brackets = c
-                    i += 1
-                    while i < length and pattern[i] != ']':
-                        if pattern[i] == '\\':
-                            square_brackets += pattern[i:i+2]
-                            i += 2
-                        else:
-                            square_brackets += pattern[i]
-                            i += 1
-                    assert i < length, f'Unbalanced square brackets; start = {start}, i = {i}, pattern = {pattern}'
-                    square_brackets += ']'
-                    i += 1
-                    seq.append((square_brackets, False))
-                elif c == '|':
-                    seq.append(('|', False))
-                    i += 1
-                elif c in ('*', '+', '?'):
-                    seq[-1] = (to_rule(seq[-1]) + c, False)
-                    i += 1
-                elif c == '{':
-                    curly_brackets = c
-                    i += 1
-                    while i < length and pattern[i] != '}':
-                        curly_brackets += pattern[i]
-                        i += 1
-                    assert i < length, f'Unbalanced curly brackets; start = {start}, i = {i}, pattern = {pattern}'
-                    curly_brackets += '}'
-                    i += 1
-                    nums = [s.strip() for s in curly_brackets[1:-1].split(',')]
-                    min_times = 0
-                    max_times = None
-                    try:
-                        if len(nums) == 1:
-                            min_times = int(nums[0])
-                            max_times = min_times
-                        else:
-                            assert len(nums) == 2
-                            min_times = int(nums[0]) if nums[0] else 0
-                            max_times = int(nums[1]) if nums[1] else None
-                    except ValueError:
-                        raise ValueError(f'Invalid quantifier {curly_brackets} in /{pattern}/')
-
-                    (sub, sub_is_literal) = seq[-1]
-
-                    if not sub_is_literal:
-                        id = sub_rule_ids.get(sub)
-                        if id is None:
-                            id = self._add_rule(f'{name}-{len(sub_rule_ids) + 1}', sub)
-                            sub_rule_ids[sub] = id
-                        sub = id
-
-                    seq[-1] = (_build_repetition(f'"{sub}"' if sub_is_literal else sub, min_times, max_times), False)
-                else:
-                    literal = ''
-                    while i < length:
-                        if pattern[i] == '\\' and i < length - 1:
-                            next = pattern[i + 1]
-                            if next in ESCAPED_IN_REGEXPS_BUT_NOT_IN_LITERALS:
-                                i += 1
-                                literal += pattern[i]
-                                i += 1
-                            else:
-                                literal += pattern[i:i+2]
-                                i += 2
-                        elif pattern[i] == '"' and not self._raw_pattern:
-                            literal += '\\"'
-                            i += 1
-                        elif pattern[i] not in NON_LITERAL_SET and \
-                                (i == length - 1 or literal == '' or pattern[i+1] == '.' or pattern[i+1] not in NON_LITERAL_SET):
-                            literal += pattern[i]
-                            i += 1
-                        else:
-                            break
-                    if literal:
-                        seq.append((literal, True))
-
-            return join_seq()
-
-        return self._add_rule(
-            name,
-            to_rule(transform()) if self._raw_pattern \
-                else "\"\\\"\" (" + to_rule(transform()) + ") \"\\\"\"")
-
+        body = expression()
+        if not self._raw_pattern:
+            quote = self._format_literal('"')
+            body = quote + ' (' + body + ') ' + quote
+        return self._add_rule(name, body)
 
     def _resolve_ref(self, ref):
-        ref_fragment = ref.split('#')[-1]
-        ref_name = 'ref' + re.sub(r'[^a-zA-Z0-9-]+', '-', ref_fragment)
-        if ref_name not in self._rules and ref not in self._refs_being_resolved:
-            self._refs_being_resolved.add(ref)
-            resolved = self._refs[ref]
-            ref_name = self.visit(resolved, ref_name)
-            self._refs_being_resolved.remove(ref)
-        return ref_name
+        if ref not in self._ref_rule_names:
+            # Allocate by identity, not a lossy transformation of the pointer text.
+            name = f'schema-ref-{len(self._ref_rule_names)}'
+            while name in self._rules:
+                name += '-ref'
+            self._ref_rule_names[ref] = name
+            self._rules[name] = ''
+            resolved = self._dereference(self._refs[ref])
+            actual = self.visit(resolved, name)
+            if actual != name:
+                self._rules[name] = actual
+        return self._ref_rule_names[ref]
 
     def _generate_constant_rule(self, value):
         return self._format_literal(json.dumps(value))
 
+    @staticmethod
+    def _json_value_key(value):
+        if value is None:
+            return ('null',)
+        if isinstance(value, bool):
+            return ('boolean', value)
+        if isinstance(value, (int, float)):
+            if isinstance(value, float) and not math.isfinite(value):
+                raise ValueError('JSON numbers must be finite')
+            return ('number', value)
+        if isinstance(value, str):
+            return ('string', value)
+        if isinstance(value, list):
+            return ('array', tuple(SchemaConverter._json_value_key(v) for v in value))
+        if isinstance(value, dict):
+            return ('object', tuple(sorted((k, SchemaConverter._json_value_key(v)) for k, v in value.items())))
+        raise ValueError('Invalid JSON value in enum')
+
+    def _visit_all_of(self, schema, name, rule_name):
+        components = []
+        active = set()
+
+        def collect(node):
+            node = self._dereference(node)
+            if not isinstance(node, dict):
+                raise ValueError('allOf components must be schema objects')
+            if id(node) in active:
+                raise ValueError('Recursive allOf is not supported')
+            if 'allOf' in node:
+                active.add(id(node))
+                if not isinstance(node['allOf'], list) or not node['allOf']:
+                    raise ValueError('allOf must be a non-empty array')
+                siblings = {k: v for k, v in node.items() if k != 'allOf'}
+                if siblings:
+                    components.append(siblings)
+                for child in node['allOf']:
+                    collect(child)
+                active.remove(id(node))
+            else:
+                components.append(node)
+
+        collect(schema)
+        metadata = {'title', 'description', 'default', 'examples', '$defs', 'definitions', '$schema', '$id', '$comment'}
+        components = [{k: v for k, v in node.items() if k not in metadata} for node in components]
+        components = [node for node in components if node]
+        if not components:
+            return self.visit({}, name)
+        if all(set(node) <= {'enum', 'const', 'type'} for node in components) and any('enum' in node or 'const' in node for node in components):
+            alternatives = []
+            for node in components:
+                if 'enum' not in node and 'const' not in node:
+                    continue
+                values = node.get('enum', [node.get('const')])
+                if not isinstance(values, list) or not values:
+                    raise ValueError('enum must be a non-empty array')
+                keyed = {self._json_value_key(v): v for v in values}
+                if 'const' in node:
+                    keyed = {k: v for k, v in keyed.items() if k == self._json_value_key(node['const'])}
+                alternatives.append(keyed)
+            keys = set(alternatives[0]).intersection(*(set(v) for v in alternatives[1:]))
+            def matches_type(value, kind):
+                if isinstance(kind, list):
+                    return any(matches_type(value, item) for item in kind)
+                if kind == 'integer':
+                    return type(value) is int or (type(value) is float and value.is_integer())
+                expected = {'null': type(None), 'boolean': bool, 'string': str, 'array': list, 'object': dict}
+                if kind == 'number':
+                    return type(value) in (int, float)
+                if kind not in expected:
+                    raise ValueError(f'Unsupported allOf type {kind!r}')
+                return type(value) is expected[kind]
+            keys = {key for key in keys if all('type' not in node or matches_type(alternatives[0][key], node['type']) for node in components)}
+            if not keys:
+                raise ValueError('allOf has an empty enum intersection')
+            values = [value for key, value in alternatives[0].items() if key in keys]
+            return self._add_rule(rule_name, '(' + ' | '.join(self._generate_constant_rule(v) for v in values) + ')')
+        if len(components) == 1:
+            return self.visit(components[0], name)
+        allowed = {'type', 'properties', 'required', 'additionalProperties'}
+        if not all(set(node) <= allowed and node.get('type', 'object') == 'object' for node in components):
+            raise ValueError('Unsupported allOf intersection; combine constraints in a single schema')
+        properties, required = {}, set()
+        for node in components:
+            for key, value in node.get('properties', {}).items():
+                if key in properties and self._json_value_key(properties[key]) != self._json_value_key(value):
+                    raise ValueError(f'Unsupported allOf intersection for property {key!r}')
+                properties[key] = value
+            required.update(node.get('required', []))
+        for node in components:
+            additional = node.get('additionalProperties')
+            if additional is not None and additional is not True:
+                if additional is not False or set(node.get('properties', {})) != set(properties):
+                    raise ValueError('Unsupported allOf additionalProperties intersection')
+        if not required <= properties.keys():
+            raise ValueError('allOf requires properties without declared schemas')
+        allow_additional = all(node.get('additionalProperties') is True or
+                               ('properties' not in node and 'additionalProperties' not in node)
+                               for node in components)
+        return self._add_rule(rule_name, self._build_object_rule(list(properties.items()), required, name, True if allow_additional else None))
+
     def visit(self, schema, name):
+        if not isinstance(schema, dict):
+            raise ValueError(f'Schema at {name or "root"} must be an object')
+        for key in ('oneOf', 'anyOf', 'allOf', 'enum'):
+            if key in schema and (not isinstance(schema[key], list) or not schema[key]):
+                raise ValueError(f'{key} must be a non-empty array')
+        if schema.get('type') == []:
+            raise ValueError('type must not be empty')
+        for key in ('minLength', 'maxLength', 'minItems', 'maxItems'):
+            if key in schema and (type(schema[key]) is not int or schema[key] < 0):
+                raise ValueError(f'{key} must be a non-negative integer')
         schema_type = schema.get('type')
         schema_format = schema.get('format')
         rule_name = name + '-' if name in RESERVED_NAMES else name or 'root'
 
         if (ref := schema.get('$ref')) is not None:
             return self._add_rule(rule_name, self._resolve_ref(ref))
+
+        elif 'allOf' in schema:
+            return self._visit_all_of(schema, name, rule_name)
 
         elif 'oneOf' in schema or 'anyOf' in schema:
             return self._add_rule(rule_name, self._generate_union_rule(name, schema.get('oneOf') or schema['anyOf']))
@@ -859,44 +1099,8 @@ class SchemaConverter:
             properties = list(schema.get('properties', {}).items())
             return self._add_rule(rule_name, self._build_object_rule(properties, required, name, schema.get('additionalProperties')))
 
-        elif schema_type in (None, 'object', 'string') and 'allOf' in schema:
-            required = set()
-            properties = []
-            enum_sets = []
-            hybrid_name = name
-            def add_component(comp_schema, is_required):
-                if (ref := comp_schema.get('$ref')) is not None:
-                    comp_schema = self._refs[ref]
-
-                if 'properties' in comp_schema:
-                    for prop_name, prop_schema in comp_schema['properties'].items():
-                        properties.append((prop_name, prop_schema))
-                        if is_required:
-                            required.add(prop_name)
-
-                if 'enum' in comp_schema:
-                    enum_sets.append(set(comp_schema['enum']))
-
-            for t in schema['allOf']:
-                if 'anyOf' in t:
-                    for tt in t['anyOf']:
-                        add_component(tt, is_required=False)
-                else:
-                    add_component(t, is_required=True)
-
-            if enum_sets:
-                enum_intersection = enum_sets[0]
-                for s in enum_sets[1:]:
-                    enum_intersection &= s
-
-                if enum_intersection:
-                    rule = '(' + ' | '.join((self._generate_constant_rule(v) for v in sorted(enum_intersection))) + ')'
-                    return self._add_rule(rule_name, rule)
-
-            return self._add_rule(rule_name, self._build_object_rule(properties, required, hybrid_name, additional_properties=None))
-
-        elif schema_type in (None, 'array') and ('items' in schema or 'prefixItems' in schema):
-            items = schema.get('items', schema.get('prefixItems'))
+        elif schema_type == 'array' or (schema_type is None and ('items' in schema or 'prefixItems' in schema)):
+            items = schema.get('items', schema.get('prefixItems', {}))
             if isinstance(items, list):
                 return self._add_rule(
                     rule_name,
@@ -924,32 +1128,32 @@ class SchemaConverter:
             prim_name = f'{schema_format}-string'
             return self._add_rule(rule_name, self._add_primitive(prim_name, STRING_FORMAT_RULES[prim_name]))
 
-        elif schema_type == 'string' and ('minLength' in schema or 'maxLength' in schema):
+        elif schema_type in (None, 'string') and ('minLength' in schema or 'maxLength' in schema):
             char_rule = self._add_primitive('char', PRIMITIVE_RULES['char'])
             min_len = schema.get('minLength', 0)
             max_len = schema.get('maxLength')
 
             return self._add_rule(rule_name, r'"\"" ' + _build_repetition(char_rule, min_len, max_len) + r' "\""')
 
-        elif schema_type in (None, 'integer') and \
+        elif schema_type == 'integer' and \
                 ('minimum' in schema or 'exclusiveMinimum' in schema or 'maximum' in schema or 'exclusiveMaximum' in schema):
             min_value = None
             max_value = None
             if 'minimum' in schema:
-                min_value = schema['minimum']
+                min_value = math.ceil(schema['minimum'])
             elif 'exclusiveMinimum' in schema:
-                min_value = schema['exclusiveMinimum'] + 1
+                min_value = math.floor(schema['exclusiveMinimum']) + 1
             if 'maximum' in schema:
-                max_value = schema['maximum']
+                max_value = math.floor(schema['maximum'])
             elif 'exclusiveMaximum' in schema:
-                max_value = schema['exclusiveMaximum'] - 1
+                max_value = math.ceil(schema['exclusiveMaximum']) - 1
 
             out = ["("]
             _generate_min_max_int(min_value, max_value, out)
             out.append(")")
             return self._add_rule(rule_name, ''.join(out))
 
-        elif (schema_type == 'object') or (len(schema) == 0):
+        elif schema_type == 'object':
             return self._add_rule(rule_name, self._add_primitive('object', PRIMITIVE_RULES['object']))
 
         elif schema_type is None and isinstance(schema, dict):
@@ -986,6 +1190,7 @@ class SchemaConverter:
             )
         required_props = [k for k in sorted_props if k in required]
         optional_props = [k for k in sorted_props if k not in required]
+        additional_key = object()
 
         if additional_properties is not None and additional_properties != False:
             sub_name = f'{name}{"-" if name else ""}additional'
@@ -994,11 +1199,11 @@ class SchemaConverter:
             key_rule = self._add_primitive('string', PRIMITIVE_RULES['string']) if not sorted_props \
                 else self._add_rule(f'{sub_name}-k', self._not_strings(sorted_props))
 
-            prop_kv_rule_names["*"] = self._add_rule(
+            prop_kv_rule_names[additional_key] = self._add_rule(
                 f'{sub_name}-kv',
                 f'{key_rule} ":" space {value_rule}'
             )
-            optional_props.append("*")
+            optional_props.append(additional_key)
 
         if not required_props and not optional_props:
             return '"{" space "}"'
@@ -1016,12 +1221,12 @@ class SchemaConverter:
                 kv_rule_name = prop_kv_rule_names[k]
                 comma_ref = f'( "," space {kv_rule_name} )'
                 if first_is_optional:
-                    res = comma_ref + ('*' if k == '*' else '?')
+                    res = comma_ref + ('*' if k is additional_key else '?')
                 else:
-                    res = kv_rule_name + (' ' + comma_ref + "*" if k == '*' else '')
+                    res = kv_rule_name + (' ' + comma_ref + "*" if k is additional_key else '')
                 if len(rest) > 0:
                     res += ' ' + self._add_rule(
-                        f'{name}{"-" if name else ""}{k}-rest',
+                        f'{name}{"-" if name else ""}{"additional" if k is additional_key else k}-rest',
                         get_recursive_refs(rest, first_is_optional=True)
                     )
                 return res
@@ -1057,7 +1262,7 @@ def json_schema_to_gbnf(
     if isinstance(schema, str):
         schema = json.loads(schema)
     elif isinstance(schema, dict):
-        schema = dict(schema)
+        schema = copy.deepcopy(schema)
     else:
         raise TypeError("schema must be a JSON string or dictionary")
 
