@@ -29,7 +29,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 |---|---|
 | [Llama Cache](modules/LlamaCache.md) | Cache interfaces and implementations for reusing model state across repeated prompts. |
 | [Llama Embedding](modules/LlamaEmbedding.md) | Dedicated embedding APIs, configuration, output formats, and batching behavior. |
-| [Llama Grammar](modules/LlamaGrammar.md) | Grammar parsing and constrained-generation utilities. |
+| [Llama Grammar](modules/LlamaGrammar.md) | Grammar definitions, custom roots, lazy triggers, JSON Schema conversion, errors, and sampler ownership. |
 | [Llama Speculative Decoding](modules/LlamaSpeculative.md) | Stateful MTP, DFlash, DFlash2, DSpark, and n-gram engines; configuration, lifecycle, rollback, statistics, and benchmarks. |
 | [Logger](modules/Logger.md) | Python and native logging configuration, callbacks, levels, filtering, and output routing. |
 | [llama.cpp ctypes Bindings](modules/LlamaCppBindings.md) | Source-oriented reference for the low-level llama.cpp and ggml ctypes bindings. |
@@ -40,6 +40,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | Page | Description |
 |---|---|
 | [Embeddings and Reranking](features/embeddings-rerank.md) | End-to-end sentence embeddings, token-level vectors, normalization, streaming batches, similarity output, and cross-encoder reranking. |
+| [Grammar and Constrained Generation](features/grammar.md) | GBNF and JSON Schema usage, reusable definitions, lazy sampling, conversion optimizations, and supported behavior and limitations. |
 
 ### Examples
 
@@ -78,6 +79,12 @@ For embeddings and reranking:
 1. [Llama Embedding](modules/LlamaEmbedding.md)
 2. [Embeddings and Reranking](features/embeddings-rerank.md)
 
+For grammar-constrained generation:
+
+1. [Grammar and Constrained Generation](features/grammar.md)
+2. [Llama Grammar](modules/LlamaGrammar.md)
+3. [Llama](core/Llama.md)
+
 For speculative decoding:
 
 1. [Llama](core/Llama.md)
@@ -112,6 +119,7 @@ Completed pages currently linked from this index:
 - `modules/LlamaCppBindings.md`
 - `modules/MTMDCppBindings.md`
 - `features/embeddings-rerank.md`
+- `features/grammar.md`
 - `examples/dflash2-speculative-decoding.md`
 - `examples/audio/audio-tts.md`
 - `development/git-commit-generation-agent.md`
@@ -126,7 +134,7 @@ and checked against the implementation.
 
 - Basic and chat-completion examples
 - Vision and audio-input examples
-- Caching, grammar, multi-model, and tool-call feature guides
+- Caching, multi-model, and tool-call feature guides
 - Common and MCP type references
 - Troubleshooting and backend diagnostics
 
