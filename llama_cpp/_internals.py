@@ -2751,27 +2751,33 @@ class LlamaSamplingContext:
         ctx: LlamaContext,
         idx: int = -1,
         grammar_first: bool = True,
+        logits: Optional[npt.NDArray[np.single]] = None,
     ) -> int:
 
         # 1. Backend sampler shortcut. The accessor synchronizes pending work.
-        sampled = ctx.get_sampled_token_ith(idx)
+        sampled = ctx.get_sampled_token_ith(idx) if logits is None else llama_cpp.LLAMA_TOKEN_NULL
         if sampled != llama_cpp.LLAMA_TOKEN_NULL:
             if self.grammar_sampler:
                 raise RuntimeError("Backend sampling + grammar unsupported")
             return int(sampled)
 
         # 2. Build cur_p from the full-vocabulary fallback logits.
-        logits_ptr = ctx.get_logits_ith(idx)
-        cur_addr = ctypes.addressof(logits_ptr.contents)
-
-        if self._logits_ptr_addr != cur_addr:
-            self._logits_view = np.ctypeslib.as_array(
-                logits_ptr,
-                shape=(self.n_vocab,),
-            )
-            self._logits_ptr_addr = cur_addr
-
-        logits_array = self._logits_view
+        if logits is None:
+            logits_ptr = ctx.get_logits_ith(idx)
+            cur_addr = ctypes.addressof(logits_ptr.contents)
+            if self._logits_ptr_addr != cur_addr:
+                self._logits_view = np.ctypeslib.as_array(
+                    logits_ptr, shape=(self.n_vocab,),
+                )
+                self._logits_ptr_addr = cur_addr
+            logits_array = self._logits_view
+        else:
+            # A full native memory restore does not restore context outputs.
+            # Sample the independently owned snapshot without consulting any
+            # stale backend sampled token or output pointer.
+            if logits.shape != (self.n_vocab,):
+                raise ValueError("Sampling logits must contain the full vocabulary")
+            logits_array = logits
         # Backend sampling returns before this point. Allocate the full-vocabulary
         # CPU candidate array only when a CPU sampler/grammar fallback actually
         # needs it; this matters for vocabularies with hundreds of thousands of

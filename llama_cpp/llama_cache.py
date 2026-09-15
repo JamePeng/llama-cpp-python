@@ -175,14 +175,14 @@ class LlamaRAMCache(BaseLlamaCache):
         key = tuple(key)
         if key in self.cache_state:
             previous = self.cache_state.pop(key)
-            self._current_size -= previous.llama_state_size
+            self._current_size -= getattr(previous, "nbytes", previous.llama_state_size)
 
         self.cache_state[key] = value
-        self._current_size += value.llama_state_size
+        self._current_size += getattr(value, "nbytes", value.llama_state_size)
 
         while self._current_size > self.capacity_bytes and len(self.cache_state) > 0:
             _, popped_state = self.cache_state.popitem(last=False)
-            self._current_size -= popped_state.llama_state_size
+            self._current_size -= getattr(popped_state, "nbytes", popped_state.llama_state_size)
             self._current_size = max(0, self._current_size)
 
         if len(self.cache_state) == 0:
@@ -299,7 +299,7 @@ class LlamaTrieCache(BaseLlamaCache):
         if node.state is None:
             return # Node has no state
 
-        self._current_size -= node.state.llama_state_size
+        self._current_size -= getattr(node.state, "nbytes", node.state.llama_state_size)
         node.state = None
 
         # 3. Prune empty parent nodes backward
@@ -327,11 +327,11 @@ class LlamaTrieCache(BaseLlamaCache):
 
         # 2. Check if updating an existing item
         if node.state is not None:
-            self._current_size -= node.state.llama_state_size
+            self._current_size -= getattr(node.state, "nbytes", node.state.llama_state_size)
 
         # 3. Set new state and update O(1) size
         node.state = value
-        self._current_size += value.llama_state_size
+        self._current_size += getattr(value, "nbytes", value.llama_state_size)
 
         # 4. Update LRU tracker (O(1))
         if key_tuple in self.lru_tracker:

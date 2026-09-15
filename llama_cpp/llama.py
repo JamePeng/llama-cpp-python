@@ -880,6 +880,9 @@ class Llama:
         self.n_tokens = 0
         self._last_eval_output_start = 0
         self._last_eval_output_count = 0
+        self._restored_logits = None
+        self._prefilled_prompt = None
+        self._state_needs_speculative_reset = False
         self.input_ids: npt.NDArray[np.intc] = np.ndarray((self._n_ctx,), dtype=np.intc)
         self.scores: npt.NDArray[np.single] = np.ndarray((self._n_ctx if self._logits_all else 1, self._n_vocab), dtype=np.single)
 
@@ -1027,25 +1030,24 @@ class Llama:
 
     def close(self) -> None:
         """Explicitly free the model from memory."""
-        if getattr(self, "_sampling_ctx", None) is not None:
-            self._sampling_ctx.close()
-            self._sampling_ctx = None
+        resources = []
+        for name in ("_sampling_ctx", "speculative", "_candidates",
+                     "_hybrid_cache_mgr", "chat_handler", "_stack"):
+            resource = getattr(self, name, None)
+            if resource is not None and callable(getattr(resource, "close", None)):
+                resources.append(resource)
+            setattr(self, name, None)
 
-        if getattr(self, "speculative", None) is not None:
-            self.speculative.close()
-            self.speculative = None
-
-        if getattr(self, "_candidates", None) is not None:
-            self._candidates.close()
-            self._candidates = None
-
-        if getattr(self, "_hybrid_cache_mgr", None) is not None and hasattr(self._hybrid_cache_mgr, "close"):
-            self._hybrid_cache_mgr.close()
-            self._hybrid_cache_mgr = None
-
-        if hasattr(self, "chat_handler") and hasattr(self.chat_handler, "close"):
-            self.chat_handler.close()
-
+        # Release Python-owned output and history even if a native destructor
+        # raises. The public cache is borrowed: detach without clearing other
+        # callers' snapshots or closing their disk cache.
+        self._restored_logits = None
+        self._prefilled_prompt = None
+        self.cache = None
+        self.n_tokens = 0
+        self._last_eval_output_start = 0
+        self._last_eval_output_count = 0
+        self._state_needs_speculative_reset = False
         self.model_params =None
         self.context_params = None
         self.chat_handler = None
@@ -1057,9 +1059,10 @@ class Llama:
         self._c_tensor_split = None
         self._kv_overrides_array = None
 
-        if getattr(self, "_stack", None) is not None and hasattr(self._stack, "close"):
-            self._stack.close()
-            self._stack = None
+        # Preserve dependency order and attempt every close on failure.
+        with contextlib.ExitStack() as cleanup:
+            for resource in reversed(resources):
+                cleanup.callback(resource.close)
 
     def __del__(self) -> None:
         # __del__ can run after Python has started clearing module globals and
@@ -1288,6 +1291,9 @@ class Llama:
 
         self._last_eval_output_start = 0
         self._last_eval_output_count = 0
+        self._restored_logits = None
+        self._prefilled_prompt = None
+        self._state_needs_speculative_reset = False
 
         # Hybrid checkpoints contain snapshots of the state cleared above and
         # must not be reused after a reset.
@@ -1296,6 +1302,32 @@ class Llama:
 
         if self.speculative is not None:
             self.speculative.clear()
+
+    def _mark_prefilled_prompt(self) -> None:
+        """Hand off a freshly decoded MTMD prompt to exactly one generation."""
+        # MTMD batches have their own sparse output mapping. Own the last row
+        # instead of assuming Python token positions are native output indices.
+        self._restored_logits = np.ctypeslib.as_array(
+            self._ctx.get_logits_ith(-1), shape=(self._n_vocab,)
+        ).copy() if self.n_tokens else None
+        if self._restored_logits is not None:
+            self.scores[self.n_tokens - 1 if self._logits_all else 0] = self._restored_logits
+        self._last_eval_output_start = self.n_tokens - 1
+        self._last_eval_output_count = int(self.n_tokens > 0)
+        self._prefilled_prompt = tuple(self.input_ids[:self.n_tokens])
+        self._state_needs_speculative_reset = False
+
+    def _sample_output(self, sampler, token_index: int) -> int:
+        output_index = token_index - self._last_eval_output_start
+        if not 0 <= output_index < self._last_eval_output_count:
+            raise RuntimeError(
+                "Sampling output is unavailable for this token; decode a valid "
+                "suffix or regenerate the prompt before sampling"
+            )
+        logits = getattr(self, "_restored_logits", None)
+        if logits is not None:
+            return sampler.sample(self._ctx, idx=output_index, logits=logits)
+        return sampler.sample(self._ctx, idx=output_index)
 
     def abort(self) -> None:
         """
@@ -1594,6 +1626,9 @@ class Llama:
         # native llama_decode call. Invalid ids may otherwise reach the C/C++ backend
         # and cause hard crashes instead of Python exceptions.
         self._validate_eval_tokens(tokens)
+        self._restored_logits = None
+        self._prefilled_prompt = None
+        self._last_eval_output_count = 0
 
         # Context Shift: Prevent OOM by discarding older tokens when context limit is reached.
         if self.n_tokens + n_eval > self._n_ctx:
@@ -1937,11 +1972,10 @@ class Llama:
 
             s_ctx = LlamaSamplingContext(params, self._model)
 
-        ridx = idx - self.n_tokens if idx is not None else -1
         assert s_ctx is not None
 
         try:
-            token = s_ctx.sample(self._ctx, ridx)
+            token = self._sample_output(s_ctx, self.n_tokens - 1 if idx is None else idx)
         finally:
             if is_temp_ctx:
                 s_ctx.close()
@@ -2064,6 +2098,24 @@ class Llama:
             The generated tokens.
         """
         original_tokens = list(tokens)
+        prefilled = getattr(self, "_prefilled_prompt", None)
+        self._prefilled_prompt = None
+        use_prefill = (
+            reset and prefilled is not None and tuple(original_tokens) == prefilled
+            and len(original_tokens) == self.n_tokens
+            and self._last_eval_output_count > 0
+        )
+        if use_prefill:
+            # MTMD already decoded the prompt, including embeddings which
+            # cannot be reconstructed by replaying its virtual negative IDs.
+            reset = False
+            tokens = []
+        if getattr(self, "_state_needs_speculative_reset", False):
+            if self.speculative is not None and not reset:
+                raise RuntimeError(
+                    "LlamaState does not restore draft state; start speculative "
+                    "generation with reset=True and the full text prompt"
+                )
         # The Python MTP engine maintains a second context and pending hidden
         # state. Until speculative checkpoints are persisted alongside the
         # public prompt cache, rebuild both contexts together for a new reset
@@ -2124,7 +2176,7 @@ class Llama:
                             if self.verbose:
                                 print(f"Llama.generate: Hybrid model rollback triggered.", file=sys.stderr)
 
-                            best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(original_tokens, 0)
+                            best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(original_tokens[:-1], 0)
                             if best_ckpt is not None and self._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
                                 actual_prefix = best_ckpt.pos
                             else:
@@ -2134,6 +2186,8 @@ class Llama:
                                 self._ctx.memory_clear(True)
 
                             self.n_tokens = actual_prefix
+                            self._restored_logits = None
+                            self._last_eval_output_count = 0
                             tokens = original_tokens[actual_prefix:]
                             if self.verbose:
                                 print(
@@ -2518,7 +2572,7 @@ class Llama:
                             f"{self._last_eval_output_start}, output_count="
                             f"{self._last_eval_output_count}"
                         )
-                    token = self._sampling_ctx.sample(self._ctx, idx=output_idx)
+                    token = self._sample_output(self._sampling_ctx, sample_idx)
                     self._sampling_ctx.accept(token, False if grammar is None else True)
 
                     sample_idx += 1
@@ -4556,7 +4610,39 @@ prompt: The prompt to generate text from.
     def __setstate__(self, state):
         self.__init__(**state)
 
+    def _state_compatibility(self) -> Dict[str, Any]:
+        """Conservative same-model/context check, not a model content hash."""
+        model_stat = os.stat(self.model_path)
+        return {
+            "model_path": os.path.normcase(os.path.abspath(self.model_path)),
+            "model_size": model_stat.st_size,
+            "model_mtime_ns": model_stat.st_mtime_ns,
+            "n_ctx": self._n_ctx,
+            "n_vocab": self._n_vocab,
+            "logits_all": self._logits_all,
+            **{name: getattr(self.context_params, name) for name in (
+                "type_k", "type_v", "n_seq_max", "n_rs_seq", "rope_scaling_type",
+                "rope_freq_base", "rope_freq_scale", "attention_type",
+            )},
+        }
+
     def save_state(self) -> LlamaState:
+        """Own a memory snapshot and last output; sampler/draft state is not saved."""
+        if getattr(self, "_speculative_verifying", False):
+            raise RuntimeError("Cannot save LlamaState during speculative verification")
+        last_logits = None
+        if self.n_tokens > 0 and (
+            self._last_eval_output_start <= self.n_tokens - 1
+            < self._last_eval_output_start + self._last_eval_output_count
+        ):
+            restored = getattr(self, "_restored_logits", None)
+            # LlamaState takes ownership by copying below. Native state export
+            # serializes memory without changing the decoded output rows.
+            last_logits = (restored if restored is not None else
+                np.ctypeslib.as_array(
+                    self._ctx.get_logits_ith(self.n_tokens - 1 - self._last_eval_output_start),
+                    shape=(self._n_vocab,),
+                ))
         if self.verbose:
             print("Llama.save_state: saving llama state", file=sys.stderr)
 
@@ -4577,12 +4663,13 @@ prompt: The prompt to generate text from.
             print(f"Llama.save_state: copied llama state: {n_bytes}", file=sys.stderr)
 
         # Safety check to prevent buffer overflow issues.
-        if int(n_bytes) > int(state_size):
+        if not 0 < int(n_bytes) <= int(state_size):
             raise RuntimeError("Failed to copy llama state data")
 
         # Directly read 'n_bytes' from the buffer's memory address to create the Python bytes object.
         # Significantly reducing memory overhead by avoiding an intermediate array allocation.
         llama_state_bytes = ctypes.string_at(ctypes.addressof(llama_state), int(n_bytes))
+        del llama_state  # Release the export buffer before copying score arrays.
         if self.verbose:
             print(
                 f"Llama.save_state: saving {n_bytes} bytes of llama state",
@@ -4591,41 +4678,85 @@ prompt: The prompt to generate text from.
 
         # Create and return the snapshot object.
         return LlamaState(
-            scores=self._scores.copy(),
-            input_ids=self.input_ids.copy(),
+            scores=(self.scores[:self.n_tokens] if self._logits_all else
+                    last_logits.reshape(1, -1) if last_logits is not None else
+                    np.empty((0, self._n_vocab), dtype=np.single)),
+            input_ids=self.input_ids[:self.n_tokens],
             n_tokens=self.n_tokens,
             llama_state=llama_state_bytes,
             llama_state_size=n_bytes,
             seed=self._seed,
+            last_logits=last_logits,
+            compatibility=self._state_compatibility(),
         )
 
     def load_state(self, state: LlamaState) -> None:
-        # Restore metadata: input tokens, token count, and RNG seed.
-        self.input_ids = state.input_ids.copy()
+        """Restore memory and optional owned output, starting a new sampler session."""
+        if getattr(self, "_speculative_verifying", False):
+            raise RuntimeError("Cannot load LlamaState during speculative verification")
+        compatibility = getattr(state, "compatibility", None)
+        if compatibility is not None and compatibility != self._state_compatibility():
+            raise ValueError("LlamaState model/context configuration does not match")
+        if not 0 <= state.n_tokens <= self._n_ctx:
+            raise ValueError("LlamaState token count exceeds the context")
+        if state.llama_state_size <= 0 or state.llama_state_size != len(state.llama_state):
+            raise ValueError("LlamaState native byte size is invalid")
+        ids = np.asarray(state.input_ids)
+        scores = np.asarray(state.scores)
+        if ids.ndim != 1 or len(ids) < state.n_tokens or not np.issubdtype(ids.dtype, np.integer):
+            raise ValueError("LlamaState input_ids are invalid")
+        if scores.ndim != 2 or scores.shape[1] != self._n_vocab:
+            raise ValueError("LlamaState scores have an incompatible vocabulary")
+        last_logits = getattr(state, "last_logits", None)
+        if last_logits is not None:
+            if np.shape(last_logits) != (self._n_vocab,) or state.n_tokens == 0:
+                raise ValueError("LlamaState last_logits are invalid")
+            last_logits = np.array(last_logits, dtype=np.single, copy=True)
+        # Allocate and validate before mutating either side. Native reads can
+        # partially mutate memory on failure, so failure leaves a cleared model.
+        new_ids = np.zeros(self._n_ctx, dtype=np.intc)
+        new_ids[:state.n_tokens] = ids[:state.n_tokens]
+        if self._logits_all:
+            limit = min(state.n_tokens, len(scores))
+            new_scores = np.asarray(scores[:limit], dtype=np.single)
+        else:
+            new_scores = np.asarray(scores[-1:], dtype=np.single)
+        # Normal snapshots own separate float32 arrays. Only copy for dtype
+        # conversion above or manually constructed aliases of the live buffer.
+        if np.may_share_memory(new_scores, self.scores):
+            new_scores = new_scores.copy()
+        state_size = state.llama_state_size
+        # Native input is const and consumed synchronously. Keep immutable bytes
+        # alive for the call rather than duplicating the entire memory snapshot.
+        state_bytes = bytes(state.llama_state)
+        llama_state = ctypes.cast(ctypes.c_char_p(state_bytes), ctypes.POINTER(ctypes.c_uint8))
+        try:
+            if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                self._hybrid_cache_mgr.clear()
+            if self.speculative is not None:
+                self.speculative.clear()
+            if getattr(self, "_sampling_ctx", None) is not None:
+                self._sampling_ctx.close()
+                self._sampling_ctx = None
+            if llama_cpp_lib.llama_state_set_data(self._ctx.ctx, llama_state, state_size) != state_size:
+                raise RuntimeError("Failed to set llama state data")
+        except Exception:
+            self.reset()
+            raise
+        self.input_ids = new_ids
+        # Reuse the context-sized allocation after successful native restore.
+        # Snapshot scores normally need no additional allocation.
+        self.scores.fill(0)
+        self.scores[:len(new_scores)] = new_scores
+        if last_logits is not None:
+            self.scores[state.n_tokens - 1 if self._logits_all else 0] = last_logits
         self.n_tokens = state.n_tokens
         self._seed = state.seed
-        # Restore Logits (Scores) handling different memory configurations.
-        if self._logits_all:
-            # Case A: Full history mode. Restore as many rows as possible.
-            available_rows = state.scores.shape[0]
-            # Prevent index out of bounds by taking the minimum valid length.
-            limit = min(self.n_tokens, available_rows)
-            # Restore valid history and clear any remaining "future" slots.
-            self.scores[:limit, :] = state.scores[:limit, :]
-            self.scores[limit:, :] = 0.0
-        else:
-            # Case B: Optimized mode (1-row buffer).
-            # Only restore the last token's logits if available.
-            if state.scores.shape[0] > 0:
-                self.scores[0, :] = state.scores[-1, :]
-
-        state_size = state.llama_state_size
-        LLamaStateArrayType = ctypes.c_uint8 * state_size
-        # Copy the raw bytes from the Python object into a C-compatible buffer.
-        llama_state = LLamaStateArrayType.from_buffer_copy(state.llama_state)
-
-        if llama_cpp_lib.llama_state_set_data(self._ctx.ctx, llama_state, state_size) != state_size:
-            raise RuntimeError("Failed to set llama state data")
+        self._prefilled_prompt = None
+        self._restored_logits = last_logits
+        self._last_eval_output_start = max(0, self.n_tokens - 1)
+        self._last_eval_output_count = int(last_logits is not None)
+        self._state_needs_speculative_reset = self.speculative is not None
 
     def n_ctx(self) -> int:
         """Return the context window size."""
@@ -4926,6 +5057,11 @@ prompt: The prompt to generate text from.
 
 
 class LlamaState:
+    """Owned host snapshot with optional last output and compatibility metadata.
+
+    This is not an exact sampler/draft continuation or a device checkpoint.
+    Arrays are independent of the source context and remain pickleable.
+    """
     def __init__(
         self,
         input_ids: npt.NDArray[np.intc],
@@ -4934,13 +5070,25 @@ class LlamaState:
         llama_state: bytes,
         llama_state_size: int,
         seed: int,
+        *,
+        last_logits: Optional[npt.NDArray[np.single]] = None,
+        compatibility: Optional[Dict[str, Any]] = None,
     ):
-        self.input_ids = input_ids
-        self.scores = scores
+        self.input_ids = input_ids.copy()
+        self.scores = scores.copy()
         self.n_tokens = n_tokens
-        self.llama_state = llama_state
+        self.llama_state = bytes(llama_state)
         self.llama_state_size = llama_state_size
         self.seed = seed
+        self.last_logits = None if last_logits is None else last_logits.copy()
+        self.compatibility = None if compatibility is None else dict(compatibility)
+
+    @property
+    def nbytes(self) -> int:
+        """Owned payload bytes, excluding Python object/allocator overhead."""
+        logits = getattr(self, "last_logits", None)
+        return (len(self.llama_state) + self.input_ids.nbytes + self.scores.nbytes
+                + (0 if logits is None else logits.nbytes))
 
 
 LogitsProcessor = Callable[
