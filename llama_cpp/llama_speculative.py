@@ -406,6 +406,8 @@ class LlamaSpecEngine(abc.ABC):
     owned by :class:`Llama`.
     """
 
+    supports_predecoded_media = False
+
     def begin(self, prompt_tokens: Sequence[int], seq_id: int = 0) -> None:
         """Initialize request state from the already-decoded prompt tokens.
 
@@ -552,6 +554,8 @@ class LlamaNGramMapDecoding(LlamaSpecEngine):
 
     Aligned with llama.cpp's underlying ngram-map k/k4v algorithm.
     """
+
+    supports_predecoded_media = True
 
     def __init__(
         self,
@@ -899,6 +903,12 @@ class LlamaNGramMapDecoding(LlamaSpecEngine):
             self._last_draft_key = search_key
             self._last_draft_value = best_value
 
+        # Media ledger IDs are opaque markers, never decoder input. Preserve
+        # positions in the history but stop a proposed continuation at media.
+        for i, token in enumerate(draft):
+            if token < 0:
+                draft = draft[:i]
+                break
         self._last_draft_len = len(draft)
         if self._last_draft_len <= 0:
             self._last_draft_key = None

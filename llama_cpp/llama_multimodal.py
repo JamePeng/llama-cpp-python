@@ -1751,10 +1751,20 @@ class MTMDChatHandler(MTMDBaseHandler):
             if self.verbose:
                 print(f"{self.log_prefix}(__call__): Prepared virtual token ledger of length {len(full_prompt_ids)}.", file=sys.stderr)
 
+            if llama.speculative is not None and not getattr(
+                llama.speculative, "supports_predecoded_media", False
+            ):
+                raise NotImplementedError(
+                    "This speculative engine cannot consume MTMD prefilled prompts; "
+                    "use NGRAM_MAP_K/K4V or disable speculative decoding for this handler"
+                )
+            llama._prefilled_prompt = None
+            llama._restored_logits = None
+
             # 3. KV Cache Synchronization & State Rollback
             # Compares the virtual ledger with physical history to prevent Cache Poisoning.
             current_history = llama.input_ids[:llama.n_tokens].tolist()
-            longest_prefix = llama.longest_token_prefix(current_history, full_prompt_ids, self.verbose)
+            longest_prefix = llama.longest_token_prefix(current_history, full_prompt_ids[:-1], self.verbose)
 
             if longest_prefix < llama.n_tokens:
                 if llama.is_hybrid and llama._hybrid_cache_mgr is not None:
@@ -1763,7 +1773,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                             print(f"{self.log_prefix}(__call__): Hybrid prefix mismatch (matched {longest_prefix}/{llama.n_tokens}). "
                                 f"Searching for nearest checkpoint...", file=sys.stderr)
 
-                        best_ckpt = llama._hybrid_cache_mgr.find_best_checkpoint(full_prompt_ids, seq_id=0)
+                        best_ckpt = llama._hybrid_cache_mgr.find_best_checkpoint(full_prompt_ids[:-1], seq_id=0)
                         if best_ckpt and llama._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
                             llama.n_tokens = best_ckpt.pos
                             if self.verbose:
@@ -1904,6 +1914,8 @@ class MTMDChatHandler(MTMDBaseHandler):
 
             # Extract the final, perfectly synchronized prompt sequence
             prompt = llama.input_ids[: llama.n_tokens].tolist()
+            if prompt_evaluated:
+                llama._mark_prefilled_prompt()
 
             # End-of-Turn Checkpoint
             # Anchors the state ONLY after the entire multi-modal turn is processed
