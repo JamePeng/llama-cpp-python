@@ -426,6 +426,7 @@ class HybridCheckpointCache(BaseLlamaCache):
         if ctx is None:
             raise ValueError("HybridCheckpointCache(__init__): Failed to create HybridCheckpointCache with a null model context")
         self._ctx = ctx
+        self._context_ref = None
         self.on_device = on_device
         self.verbose = verbose
 
@@ -522,6 +523,7 @@ class HybridCheckpointCache(BaseLlamaCache):
 
     def close(self):
         self.clear()
+        self._context_ref = None
         self._ctx = None
         self._get_size_ext = None
         self._get_data_ext = None
@@ -536,6 +538,29 @@ class HybridCheckpointCache(BaseLlamaCache):
 
     # Helper tools
 
+    def _invalidate_related(self, seq_id: int, suffix_start=None, device_only=False):
+        owner = self._context_ref() if self._context_ref is not None else None
+        if owner is not None:
+            owner._invalidate_checkpoints(
+                seq_id, suffix_start=suffix_start, device_only=device_only
+            )
+        else:
+            self._invalidate_memory(seq_id, suffix_start)
+
+    def _invalidate_memory(
+        self, seq_id: int = -1, suffix_start: Optional[int] = None,
+        keep_seq_id: Optional[int] = None,
+    ) -> None:
+        """Drop partial snapshots whose native prefix is no longer available."""
+        self.checkpoints[:] = [
+            cp for cp in self.checkpoints
+            if (seq_id >= 0 and cp.seq_id != seq_id)
+            or cp.seq_id == keep_seq_id
+            or (suffix_start is not None and cp.pos_max is not None
+                and 0 <= cp.pos_max < suffix_start)
+        ]
+        self._current_size = sum(cp.size for cp in self.checkpoints)
+
     def _hash_prefix(self, tokens: List[int], length: int) -> str:
         """
         Computes a SHA-256 hash for a sequence of tokens up to the specified length.
@@ -546,27 +571,6 @@ class HybridCheckpointCache(BaseLlamaCache):
         length = min(length, len(tokens))
         data = array.array('i', tokens[:length]).tobytes()
         return hashlib.sha256(data).hexdigest()[:32]
-
-    def _replace_checkpoint_for_seq_id(self, seq_id: int) -> None:
-        """
-        Removes all Python-side checkpoints for one seq_id.
-
-        Required for on_device=True because llama.cpp stores the device tensor
-        payload per seq_id, not per Python checkpoint object.
-        """
-        kept: list[HybridCheckpoint] = []
-        removed_size = 0
-
-        for cp in self.checkpoints:
-            if cp.seq_id == seq_id:
-                removed_size += cp.size
-            else:
-                kept.append(cp)
-
-        self.checkpoints = kept
-        self._current_size -= removed_size
-        if self._current_size < 0:
-            self._current_size = 0
 
     def _evict_checkpoints_if_needed(self) -> None:
         """
@@ -650,7 +654,7 @@ class HybridCheckpointCache(BaseLlamaCache):
         # the new checkpoint. The underlying llama.cpp device buffer for this seq_id
         # will be overwritten by the get_data_ext() call.
         if self.on_device:
-            self._replace_checkpoint_for_seq_id(seq_id)
+            self._invalidate_related(seq_id, device_only=True)
 
         flags = self._flags
 
@@ -677,7 +681,7 @@ class HybridCheckpointCache(BaseLlamaCache):
             return False
 
         # Note: This deep copy isolates the state from subsequent C++ backend mutations
-        data_bytes = bytes(buffer[:n_written])
+        data_bytes = bytes(buffer)
         hash_val = self._hash_prefix(tokens, current_pos)
 
         # Token count and backend memory positions are not interchangeable for all
@@ -724,29 +728,18 @@ class HybridCheckpointCache(BaseLlamaCache):
                 print(f"HybridCheckpointCache(restore_checkpoint): [Error] Sequence ID mismatch: checkpoint has {cp.seq_id}, requested {seq_id}", file=sys.stderr)
             return False
 
-        # 2. Guard against stale on-device checkpoint objects.
-        #
-        # In on_device mode, Python does not own the full checkpoint tensor payload.
-        # llama.cpp keeps the large tensor payload in llama_context-owned device
-        # buffers keyed by seq_id. Saving a newer checkpoint for the same seq_id may
-        # overwrite that device-side payload while an old HybridCheckpoint object can
-        # still exist outside this cache.
-        #
-        # Only checkpoint objects still tracked by this cache are considered valid.
-        # This avoids restoring old Python metadata together with newer device tensors.
-        if self.on_device and cp not in self.checkpoints:
+        # Host partial snapshots also borrow the current attention prefix.
+        if self._ctx is None or not any(item is cp for item in self.checkpoints):
             if self.verbose:
                 print(
-                    "HybridCheckpointCache(restore_checkpoint): stale on-device checkpoint; "
-                    "refusing restore because device payload may have been overwritten.",
+                    "HybridCheckpointCache(restore_checkpoint): stale checkpoint; refusing restore.",
                     file=sys.stderr,
                 )
             return False
 
         flags = self._flags
 
-        # 3. Verify the underlying C++ context still expects the exact same state size.
-        # This prevents buffer overflows if the backend context was unexpectedly altered or reallocated.
+        # Size is a compatibility check, not proof that the KV prefix is valid.
         current_size = self._get_size_ext(self._ctx, seq_id, flags)
         if current_size != cp.size:
             if self.verbose:
@@ -754,28 +747,22 @@ class HybridCheckpointCache(BaseLlamaCache):
                       f"expected checkpoint size={cp.size}, got current size={current_size} -> possible invalidation")
             return False
 
-        # 4. Copy data back to a ctypes buffer and push to the C++ backend
         buffer = (ctypes.c_uint8 * cp.size).from_buffer_copy(cp.data)
-        ret = self._set_data_ext(
-            self._ctx, buffer, cp.size, seq_id, flags
-        )
-        success = (ret == cp.size)
-
-        # PARTIAL_ONLY restores only the non-truncatable part of hybrid/SWA
-        # memory. Remove the suffix from the remaining attention memory before
-        # callers replay tokens. New checkpoints always carry pos_max; the
-        # token-based fallback keeps manually-created legacy checkpoints usable.
-        if success:
-            suffix_start = cp.pos_max + 1 if cp.pos_max is not None else cp.pos
-            memory = self._get_memory(self._ctx)
-            success = bool(self._memory_seq_rm(memory, seq_id, suffix_start, -1))
-
-            if not success and self.verbose:
-                print(
-                    "HybridCheckpointCache(restore_checkpoint): [Error] "
-                    f"failed to remove memory suffix from position {suffix_start}",
-                    file=sys.stderr,
-                )
+        suffix_start = cp.pos_max + 1 if cp.pos_max is not None else cp.pos
+        try:
+            success = self._set_data_ext(
+                self._ctx, buffer, cp.size, seq_id, flags
+            ) == cp.size
+            if success:
+                success = bool(self._memory_seq_rm(
+                    self._get_memory(self._ctx), seq_id, suffix_start, -1
+                ))
+        except BaseException:
+            self._invalidate_related(seq_id)
+            raise
+        # Restore and suffix cleanup form one transaction. Partial failure
+        # invalidates the old history even when the caller retained objects.
+        self._invalidate_related(seq_id, suffix_start if success else None)
 
         if self.verbose:
             mode = "device" if self.on_device else "host"
