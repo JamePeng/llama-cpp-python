@@ -1579,10 +1579,12 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
 
+        self._checkpoint_owner = object()
         started = time.perf_counter()
         try:
             position = self.draft_context.memory_seq_pos_max(seq_id)
             checkpoint: Dict[str, Any] = {
+                "owner": self._checkpoint_owner,
                 "position": position,
                 "mode": "native",
                 "buffer": None,
@@ -1646,6 +1648,10 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
 
+        owner = getattr(self, "_checkpoint_owner", None)
+        if owner is None or checkpoint.get("owner") is not owner:
+            raise RuntimeError("Draft checkpoint is stale or belongs to another engine")
+
         started = time.perf_counter()
         try:
             if checkpoint["mode"] == "on-device":
@@ -1669,6 +1675,9 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
             self.verify_tokens.clear()
             self.verify_positions.clear()
+        except BaseException:
+            self._checkpoint_owner = None
+            raise
         finally:
             self._checkpoint_stats["restores"] += 1
             self._checkpoint_stats["restore_seconds"] += (
@@ -1708,6 +1717,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 
     def clear(self) -> None:
         """Clear request-local MTP state while keeping native resources loaded."""
+        self._checkpoint_owner = None
         if self._closed:
             return
         self._pending_verification_checkpoint = None
@@ -1720,6 +1730,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 
     def close(self) -> None:
         """Idempotently release MTP batches, context, sampler, and owned model."""
+        self._checkpoint_owner = None
         if self._closed:
             return
         self._closed = True
@@ -2310,9 +2321,11 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             raise NotImplementedError(
                 "DFlash speculative decoding currently supports seq_id=0"
             )
+        self._checkpoint_owner = object()
         started = time.perf_counter()
         try:
             checkpoint: Dict[str, Any] = {
+                "owner": self._checkpoint_owner,
                 "position": self.draft_context.memory_seq_pos_max(seq_id),
                 "mode": "native",
                 "buffer": None,
@@ -2371,6 +2384,10 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             raise NotImplementedError(
                 "DFlash speculative decoding currently supports seq_id=0"
             )
+        owner = getattr(self, "_checkpoint_owner", None)
+        if owner is None or checkpoint.get("owner") is not owner:
+            raise RuntimeError("Draft checkpoint is stale or belongs to another engine")
+
         started = time.perf_counter()
         try:
             if checkpoint["mode"] == "on-device":
@@ -2404,6 +2421,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 (0, self.n_embd_enc), dtype=np.float32
             )
             self._active_verification_checkpoint = None
+        except BaseException:
+            self._checkpoint_owner = None
+            raise
         finally:
             self._checkpoint_stats["restores"] += 1
             self._checkpoint_stats["restore_seconds"] += (
@@ -2629,6 +2649,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
     def clear(self) -> None:
         """Clear request-local draft cache and verification bookkeeping."""
+        self._checkpoint_owner = None
         if self._closed:
             return
         self._pending_verification_checkpoint = None
@@ -2643,6 +2664,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
     def close(self) -> None:
         """Idempotently release all DFlash/DSpark native resources."""
+        self._checkpoint_owner = None
         if self._closed:
             return
         self._closed = True
