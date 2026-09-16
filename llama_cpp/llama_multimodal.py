@@ -1747,6 +1747,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             add_generation_prompt=add_generation_prompt,
         )
 
+        prefill_started = False
         try:
             if self.verbose:
                 print(f"{self.log_prefix}(__call__): Prepared virtual token ledger of length {len(full_prompt_ids)}.", file=sys.stderr)
@@ -1758,6 +1759,9 @@ class MTMDChatHandler(MTMDBaseHandler):
                     "This speculative engine cannot consume MTMD prefilled prompts; "
                     "use NGRAM_MAP_K/K4V or disable speculative decoding for this handler"
                 )
+            prefill_started = True
+            llama._last_eval_output_start = 0
+            llama._last_eval_output_count = 0
             llama._prefilled_prompt = None
             llama._restored_logits = None
 
@@ -1781,19 +1785,17 @@ class MTMDChatHandler(MTMDBaseHandler):
                         else:
                             if self.verbose:
                                 print(f"{self.log_prefix}(__call__): No suitable checkpoint found or restore failed. Clearing hybrid cache entirely.", file=sys.stderr)
-                            llama._hybrid_cache_mgr.clear()
-                            llama._ctx.memory_clear(True)
-                            llama.n_tokens = 0
+                            llama.reset()
                     else:
                         if self.verbose:
                             print(f"{self.log_prefix}(__call__): Hybrid cache enabled but max_checkpoints is 0. Clearing cache entirely.", file=sys.stderr)
-                        llama._hybrid_cache_mgr.clear()
-                        llama._ctx.memory_clear(True)
-                        llama.n_tokens = 0
+                        llama.reset()
                 else:
                     if self.verbose:
                         print(f"{self.log_prefix}(__call__): Prefix mismatch. Truncating KV cache from {llama.n_tokens} to {longest_prefix}.", file=sys.stderr)
-                    llama._ctx.memory_seq_rm(0, longest_prefix, -1)
+                    llama._memory_seq_rm_or_raise(
+                        0, longest_prefix, -1, "MTMD prompt rollback"
+                    )
                     llama.n_tokens = longest_prefix
 
             n_past = llama.n_tokens
@@ -1864,11 +1866,16 @@ class MTMDChatHandler(MTMDBaseHandler):
                             if n_discard <= 0:
                                 raise RuntimeError(f"{self.log_prefix}(__call__): Critical Overflow. Not enough unpinned tokens to discard for Context Shift.")
 
+                            if n_past - n_discard + chunk_n_tokens > llama.n_ctx():
+                                raise RuntimeError(f"{self.log_prefix}(__call__): Media chunk cannot fit alongside the retained context.")
+
                             if self.verbose:
                                 print(f"{self.log_prefix}(__call__): OOM risk detected. Shifting multimodal context: keeping {n_keep}, discarding {n_discard}...", file=sys.stderr)
 
                             # Execute physical memory shift
-                            llama._ctx.memory_seq_rm(0, n_keep, n_keep + n_discard)
+                            llama._memory_seq_rm_or_raise(
+                                0, n_keep, n_keep + n_discard, "MTMD context shift"
+                            )
                             llama._ctx.memory_seq_add(0, n_keep + n_discard, n_past, -n_discard)
 
                             # Shift python virtual array to match
@@ -1894,6 +1901,9 @@ class MTMDChatHandler(MTMDBaseHandler):
 
                     if result != 0:
                         raise ValueError(f"{self.log_prefix}(mtmd_helper_eval_chunk_single): Media evaluation failed with error code {result}.")
+
+                    if not n_past <= new_n_past.value <= llama.n_ctx():
+                        raise ValueError(f"{self.log_prefix}(mtmd_helper_eval_chunk_single): Invalid output position {new_n_past.value}.")
 
                     # Update Ledger with "Negative Reverse Vocabulary" IDs
                     llama.input_ids[n_past : new_n_past.value] = media_id
@@ -1932,6 +1942,11 @@ class MTMDChatHandler(MTMDBaseHandler):
                     tokens=prompt,
                     seq_id=0
                 )
+        except BaseException:
+            # A helper can commit earlier ubatches before reporting failure.
+            if prefill_started:
+                llama.reset()
+            raise
         finally:
             # Generation no longer needs these resources once prompt evaluation ends.
             self._free_mtmd_resources(chunks, bitmap_cleanup)
