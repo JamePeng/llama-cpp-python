@@ -819,6 +819,7 @@ class Llama:
                 on_device=self.checkpoint_on_device,
                 verbose=self.verbose,
             )
+            self._ctx._register_checkpoint_cache(self._hybrid_cache_mgr)
         else:
             self._hybrid_cache_mgr = None
 
@@ -1295,11 +1296,6 @@ class Llama:
         self._prefilled_prompt = None
         self._state_needs_speculative_reset = False
 
-        # Hybrid checkpoints contain snapshots of the state cleared above and
-        # must not be reused after a reset.
-        if self.is_hybrid and self._hybrid_cache_mgr is not None:
-            self._hybrid_cache_mgr.clear()
-
         if self.speculative is not None:
             self.speculative.clear()
 
@@ -1423,11 +1419,13 @@ class Llama:
                     ) from reset_exc
                 raise
             except Exception as exc:
+                failed_pos = self.n_tokens
+                self.reset()
                 min_pos = min(current_batch_size, 128)
                 preview = chunk[:min_pos]
                 raise RuntimeError(
                     "Llama.eval(decode): Fatal Decode Error at Pos "
-                    f"{self.n_tokens}, Batch size {current_batch_size}, "
+                    f"{failed_pos}, Batch size {current_batch_size}, "
                     f"chunk[:{min_pos}]={preview}: {exc}"
                 ) from exc
             finally:
@@ -2096,6 +2094,9 @@ class Llama:
 
         Yields:
             The generated tokens.
+
+        KeyboardInterrupt during the generation loop cancels the request and
+        clears partial state. Completion APIs report finish_reason="abort".
         """
         original_tokens = list(tokens)
         prefilled = getattr(self, "_prefilled_prompt", None)
@@ -2120,15 +2121,8 @@ class Llama:
         # state. Until speculative checkpoints are persisted alongside the
         # public prompt cache, rebuild both contexts together for a new reset
         # generation instead of reusing only the target KV cache.
-        if reset and self.speculative is not None:
-            self.n_tokens = 0
-            self._ctx.memory_clear(True)
-            self.speculative.clear()
-            if self.is_hybrid and self._hybrid_cache_mgr is not None:
-                self._hybrid_cache_mgr.clear()
-
         # Check for kv cache prefix match
-        if reset and self.n_tokens > 0:
+        if reset and self.speculative is None and self.n_tokens > 0:
             # 1. First, check for a 100% exact match of the entire sequence
             full_match_prefix = self.longest_token_prefix(self._input_ids, tokens, self.verbose)
 
@@ -2182,7 +2176,6 @@ class Llama:
                             else:
                                 # Fallback: No checkpoint found, must fully clear the context to prevent poisoning
                                 actual_prefix = 0
-                                self._hybrid_cache_mgr.clear()
                                 self._ctx.memory_clear(True)
 
                             self.n_tokens = actual_prefix
@@ -2625,7 +2618,6 @@ class Llama:
                     # Rollback Check: A previously evaluated token (e.g. from speculative decoding)
                     # mismatched the newly sampled token. We must rollback the KV cache.
                     if sample_idx < self.n_tokens and token != self._input_ids[sample_idx]:
-                        self.n_tokens = sample_idx
                         if self.speculative is not None:
                             speculative_rollbacks += 1
                         if self.is_hybrid:
@@ -2633,7 +2625,7 @@ class Llama:
                                 if use_native_speculative_rollback:
                                     speculative_native_rollbacks += 1
                                     if not self._ctx.memory_seq_rm(
-                                        0, self.n_tokens, -1
+                                        0, sample_idx, -1
                                     ):
                                         raise RuntimeError(
                                             "Native recurrent-state speculative rollback failed"
@@ -2645,6 +2637,7 @@ class Llama:
                                             seq_id=0,
                                         )
                                     )
+                                    self.n_tokens = sample_idx
                                 else:
                                     speculative_checkpoint_rollbacks += 1
                                     assert self._hybrid_cache_mgr is not None
@@ -2681,33 +2674,32 @@ class Llama:
                                 verification_active = False
                             else:
                                 best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(
-                                    self._input_ids[:self.n_tokens].tolist(), 0
+                                    self._input_ids[:sample_idx].tolist(), 0
                                 )
                                 if best_ckpt and self._hybrid_cache_mgr.restore_checkpoint(
                                     best_ckpt, seq_id=0
                                 ):
                                     self.n_tokens = best_ckpt.pos
                                 else:
-                                    self._hybrid_cache_mgr.clear()
-                                    self._ctx.memory_clear(True)
-                                    self.n_tokens = 0
+                                    self.reset()
                         else:
                             if self.verbose and self.speculative is None:
-                                print(f"Llama.generate: Draft token rejected. Truncating context to {self.n_tokens}.", file=sys.stderr)
+                                print(f"Llama.generate: Draft token rejected. Truncating context to {sample_idx}.", file=sys.stderr)
                             if self.speculative is not None:
                                 speculative_native_rollbacks += 1
                             self._memory_seq_rm_or_raise(
                                 0,
-                                self.n_tokens,
+                                sample_idx,
                                 -1,
                                 "Llama.generate speculative rollback",
                             )
                             if self.speculative is not None:
                                 time_speculative_accept(
                                     lambda: self.speculative.truncate(
-                                        self.n_tokens, seq_id=0
+                                        sample_idx, seq_id=0
                                     )
                                 )
+                            self.n_tokens = sample_idx
 
                         break
 
@@ -2764,6 +2756,19 @@ class Llama:
                                 : self._n_ctx - self.n_tokens - len(tokens)
                             ]
                         )
+        except KeyboardInterrupt:
+            # Ctrl+C can arrive while a logits accessor synchronizes queued
+            # decode work. Discard partial state instead of attempting rollback.
+            verification_active = False
+            self.reset()
+            self._abort_event.set()
+            if self.verbose:
+                print(
+                    "Llama.generate: KeyboardInterrupt received; generation cancelled, "
+                    "context state cleared (finish_reason=abort).",
+                    file=sys.stderr,
+                )
+            return
         except internals.LlamaDecodeAbort:
             # Convert the recoverable native control-flow signal into normal
             # generator termination. _decode_eval_batch() has already cleared
@@ -2772,6 +2777,11 @@ class Llama:
             self._abort_event.set()
             verification_active = False
             return
+        except Exception:
+            # Failed rollback may have changed target or draft memory already.
+            verification_active = False
+            self.reset()
+            raise
         finally:
             self._speculative_verifying = False
             if verification_active and self.speculative is not None:
@@ -2987,9 +2997,11 @@ class Llama:
                     f"checkpoint {speculative_checkpoint_rollbacks:,})",
                 ]
                 print("\n".join(stats_lines), file=sys.stderr)
-            # Ensure the final state is checkpointed for hybrid models when generation finishes or is interrupted
+            # Preserve a usable final prefix, but do not allocate an empty
+            # checkpoint after cancellation or failure has reset the context.
             if (
                 self.is_hybrid
+                and self.n_tokens > 0
                 and self._hybrid_cache_mgr is not None
                 and self._hybrid_cache_mgr.max_checkpoints > 0
                 and interrupted_verification_reconciled
@@ -3078,7 +3090,8 @@ class Llama:
 
         Returns:
             Sequence embeddings, token-level embeddings for pooling type NONE,
-            or scalar/vector scores for pooling type RANK.
+            or scalar/vector scores for pooling type RANK. RANK scores are not
+            normalized. Token counts reflect inputs after truncation.
         """
         if self.context_params.embeddings is False:
             raise RuntimeError(
@@ -3094,6 +3107,7 @@ class Llama:
         is_rank = pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_RANK
         is_none = pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_NONE
 
+        # Ranking heads can have a different output width from the hidden size.
         out_dim = (
             llama_cpp_lib.llama_model_n_cls_out(self._model.model)
             if is_rank
@@ -3101,7 +3115,8 @@ class Llama:
         )
 
         # Preserve the historical bool API while accepting llama.cpp's integer
-        # normalization modes used by LlamaEmbedding.
+        # normalization modes used by LlamaEmbedding. Check bool first because
+        # bool subclasses int: False means -1 (NONE), True means 2 (EUCLIDEAN).
         if isinstance(normalize, bool):
             normalize_mode = 2 if normalize else -1
         elif isinstance(normalize, int):
@@ -3111,28 +3126,39 @@ class Llama:
 
         def normalize_vector(vector: Sequence[float]) -> List[float]:
             values = list(vector)
+            # -1 (NONE): preserve the original vector. RANK always preserves
+            # raw classification scores regardless of the requested mode.
             if normalize_mode == -1 or is_rank:
                 return values
 
             array = np.asarray(values, dtype=np.float32)
+            # Compute y = scale * x / norm(x).
             if normalize_mode == 0:
+                # 0 (MAX_INT16): y = 32760 * x / max(abs(x)). The result
+                # remains floating point; this is scaling, not int16 quantization.
                 norm = float(np.max(np.abs(array))) if array.size else 0.0
                 scale = 32760.0
             elif normalize_mode == 1:
+                # 1 (TAXICAB / L1): y = x / sum(abs(x)).
                 norm = float(np.sum(np.abs(array)))
                 scale = 1.0
             elif normalize_mode == 2:
+                # 2 (EUCLIDEAN / L2): y = x / sqrt(sum(x_i ** 2)).
                 norm = float(np.linalg.norm(array))
                 scale = 1.0
             elif normalize_mode > 2:
+                # p > 2 (PNORM): y = x / (sum(abs(x_i) ** p)) ** (1/p).
+                # The mode itself is p; NORM_MODE_PNORM = 6 selects the L6 norm.
                 norm = float(
                     np.sum(np.abs(array) ** normalize_mode)
                     ** (1.0 / normalize_mode)
                 )
                 scale = 1.0
             else:
+                # Other negative modes retain the existing passthrough behavior.
                 return values
 
+            # Zero vectors remain zero rather than producing NaNs on division.
             if norm == 0.0:
                 return values
             return ((array / norm) * scale).tolist()
@@ -3146,122 +3172,136 @@ class Llama:
             inputs = input
             is_single = False
 
-        self._batch.reset()
-        llama_cpp_lib.llama_memory_clear(
-            llama_cpp_lib.llama_get_memory(ctx), True
-        )
-
-        perf_enabled = not self.context_params.no_perf
-        if perf_enabled:
-            self._ctx.reset_timings()
-
-        data: List[Any] = []
-        seq_sizes: List[int] = []
-        total_tokens = 0
-
-        def decode_batch() -> None:
-            nonlocal seq_sizes
-            if not seq_sizes:
-                return
-
-            self._ctx.decode(self._batch)
-
-            if is_none:
-                token_index = 0
-                for size in seq_sizes:
-                    token_embeddings: List[List[float]] = []
-                    for _ in range(size):
-                        ptr = llama_cpp_lib.llama_get_embeddings_ith(
-                            ctx, token_index
-                        )
-                        token_embeddings.append(
-                            [0.0] * out_dim
-                            if ptr is None
-                            else normalize_vector(ptr[:out_dim])
-                        )
-                        token_index += 1
-                    data.append(token_embeddings)
-            else:
-                for seq_id in range(len(seq_sizes)):
-                    ptr = llama_cpp_lib.llama_get_embeddings_seq(ctx, seq_id)
-                    if ptr is None:
-                        embedding = [0.0] * out_dim
-                    else:
-                        embedding = list(ptr[:out_dim])
-
-                    if is_rank:
-                        data.append(
-                            embedding[0] if len(embedding) == 1 else embedding
-                        )
-                    else:
-                        data.append(normalize_vector(embedding))
-
-            self._batch.reset()
-            llama_cpp_lib.llama_memory_clear(
-                llama_cpp_lib.llama_get_memory(ctx), True
-            )
-            seq_sizes = []
-
-        for item in inputs:
-            if isinstance(item, str):
-                tokens = self.tokenize(item.encode("utf-8"))
-            elif isinstance(item, list) and (
-                not item or isinstance(item[0], int)
-            ):
-                tokens = item
-            else:
-                raise ValueError("Input item must be str or List[int]")
-
-            max_tokens = min(n_ctx, n_batch)
-            if truncate and len(tokens) > max_tokens:
-                tokens = tokens[:max_tokens]
-
-            n_tokens = len(tokens)
-            total_tokens += n_tokens
-
-            if n_tokens > n_batch:
-                raise ValueError(
-                    f"Requested tokens ({n_tokens}) exceed batch size of {n_batch}"
-                )
-
-            if n_tokens == 0:
-                # Keep result ordering stable when an empty pre-tokenized input
-                # follows sequences that are still waiting to be decoded.
-                decode_batch()
-                data.append(0.0 if is_rank else [])
-                continue
-
-            if (
-                self._batch.n_tokens() + n_tokens > n_batch
-                or len(seq_sizes) >= n_seq_max
-            ):
-                decode_batch()
-
-            seq_id = len(seq_sizes)
-            logits_array = (
-                [True] * n_tokens
-                if is_none
-                else [False] * (n_tokens - 1) + [True]
-            )
-            self._batch.add_sequence(
-                token_array=tokens,
-                pos_array=list(range(n_tokens)),
-                seq_ids=[seq_id],
-                logits_array=logits_array,
-            )
-            seq_sizes.append(n_tokens)
-
-        decode_batch()
-
-        if self.verbose and perf_enabled:
-            self._ctx.print_timings()
-
-        output = data[0] if is_single else data
+        # Embedding batches reuse sequence IDs and positions from zero, so old
+        # generation memory, output mappings and draft state cannot be retained.
         self.reset()
+        try:
+            self._batch.reset()
 
-        if return_count:
-            return output, total_tokens
-        return output
+            perf_enabled = not self.context_params.no_perf
+            if perf_enabled:
+                self._ctx.reset_timings()
+
+            data: List[Any] = []
+            seq_sizes: List[int] = []
+            total_tokens = 0
+
+            def decode_batch() -> None:
+                nonlocal seq_sizes
+                if not seq_sizes:
+                    return
+
+                if self._ctx.decode(self._batch) != 0:
+                    raise RuntimeError("Embedding decode failed: no KV slot available")
+
+                if is_none:
+                    # Every token requests an output; rows follow batch order.
+                    # Split the flat output stream back into its input sequences.
+                    token_index = 0
+                    for size in seq_sizes:
+                        token_embeddings: List[List[float]] = []
+                        for _ in range(size):
+                            ptr = llama_cpp_lib.llama_get_embeddings_ith(
+                                ctx, token_index
+                            )
+                            token_embeddings.append(
+                                [0.0] * out_dim
+                                if ptr is None
+                                else normalize_vector(ptr[:out_dim])
+                            )
+                            token_index += 1
+                        data.append(token_embeddings)
+                else:
+                    # The backend pools each sequence according to its pooling
+                    # type. Read by sequence ID, not by the last token's row.
+                    for seq_id in range(len(seq_sizes)):
+                        ptr = llama_cpp_lib.llama_get_embeddings_seq(ctx, seq_id)
+                        if ptr is None:
+                            embedding = [0.0] * out_dim
+                        else:
+                            embedding = list(ptr[:out_dim])
+
+                        if is_rank:
+                            data.append(
+                                embedding[0] if len(embedding) == 1 else embedding
+                            )
+                        else:
+                            data.append(normalize_vector(embedding))
+
+                # Output pointers are borrowed: copy all vectors before clearing
+                # memory and reusing the sequence IDs in the next batch.
+                self._batch.reset()
+                self._ctx.memory_clear(True)
+                seq_sizes = []
+
+            for item in inputs:
+                if isinstance(item, str):
+                    tokens = self.tokenize(item.encode("utf-8"))
+                elif isinstance(item, list) and (
+                    not item or isinstance(item[0], int)
+                ):
+                    tokens = item
+                else:
+                    raise ValueError("Input item must be str or List[int]")
+
+                max_tokens = min(n_ctx, n_batch)
+                if truncate and len(tokens) > max_tokens:
+                    tokens = tokens[:max_tokens]
+
+                n_tokens = len(tokens)
+                total_tokens += n_tokens
+
+                if n_tokens > n_batch:
+                    raise ValueError(
+                        f"Requested tokens ({n_tokens}) exceed batch size of {n_batch}"
+                    )
+
+                if n_tokens == 0:
+                    # Keep result ordering stable when an empty pre-tokenized input
+                    # follows sequences that are still waiting to be decoded.
+                    decode_batch()
+                    data.append(0.0 if is_rank else [])
+                    continue
+
+                # Pack whole inputs subject to both token and sequence capacity;
+                # splitting an input across clears would break sequence pooling.
+                if (
+                    self._batch.n_tokens() + n_tokens > n_batch
+                    or len(seq_sizes) >= n_seq_max
+                ):
+                    decode_batch()
+
+                seq_id = len(seq_sizes)
+                # The batch logits mask also selects embedding outputs: NONE
+                # needs every token, while pooled output needs one per sequence.
+                logits_array = (
+                    [True] * n_tokens
+                    if is_none
+                    else [False] * (n_tokens - 1) + [True]
+                )
+                self._batch.add_sequence(
+                    token_array=tokens,
+                    pos_array=list(range(n_tokens)),
+                    seq_ids=[seq_id],
+                    logits_array=logits_array,
+                )
+                seq_sizes.append(n_tokens)
+
+            decode_batch()
+
+            if self.verbose and perf_enabled:
+                self._ctx.print_timings()
+
+            output = data[0] if is_single else data
+
+            if return_count:
+                return output, total_tokens
+            return output
+        finally:
+            # A failed decode can leave earlier ubatches committed. Reset both
+            # native and Python state even when no embedding result is returned.
+            self.reset()
+            self._batch.reset()
 
     def _create_completion(
         self,
@@ -4731,14 +4771,12 @@ prompt: The prompt to generate text from.
         state_bytes = bytes(state.llama_state)
         llama_state = ctypes.cast(ctypes.c_char_p(state_bytes), ctypes.POINTER(ctypes.c_uint8))
         try:
-            if self.is_hybrid and self._hybrid_cache_mgr is not None:
-                self._hybrid_cache_mgr.clear()
             if self.speculative is not None:
                 self.speculative.clear()
             if getattr(self, "_sampling_ctx", None) is not None:
                 self._sampling_ctx.close()
                 self._sampling_ctx = None
-            if llama_cpp_lib.llama_state_set_data(self._ctx.ctx, llama_state, state_size) != state_size:
+            if self._ctx.set_state_data(llama_state, state_size) != state_size:
                 raise RuntimeError("Failed to set llama state data")
         except Exception:
             self.reset()
