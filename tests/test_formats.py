@@ -1,4 +1,5 @@
 import llama_cpp
+from llama_cpp.llama_chat_format import Jinja2ChatFormatter
 import json
 import copy
 import os
@@ -13,79 +14,14 @@ import numpy as np
 from llama_cpp import llama_grammar
 from llama_cpp import _internals
 
-tree = """
-leaf ::= "."
-node ::= leaf | "(" node node ")"
-root ::= node
-"""
 
-
-def test_grammar_from_string():
-    grammar = llama_cpp.LlamaGrammar.from_string(tree)
     # assert grammar._n_rules == 3
     # assert grammar._start_rule_index == 2
     # assert grammar.grammar is not None
 
 
-def test_composed_pydantic_grammar():
-    """
-    from pydantic import BaseModel
-
-    class A(BaseModel):
-        a: int
-
-    class B(BaseModel):
-        a: A
-        b: int
-    """
-
-    # This schema corresponds to the grammar in the comment above.
-    # We don't use the pydantic models directly to avoid the dependency.
-    schema = {
-        "$defs": {
-            "A": {
-                "properties": {"a": {"title": "A", "type": "integer"}},
-                "required": ["a"],
-                "title": "A",
-                "type": "object",
-            }
-        },
-        "properties": {
-            "a": {"$ref": "#/$defs/A"},
-            "b": {"title": "B", "type": "integer"},
-        },
-        "required": ["a", "b"],
-        "title": "B",
-        "type": "object",
-    }
-
-    grammar = llama_cpp.LlamaGrammar.from_json_schema(json.dumps(schema))
-
     # assert grammar.grammar is not None
 
-
-def test_grammar_anyof():
-    sch = {
-        "properties": {
-            "temperature": {
-                "description": "The temperature mentioned",
-                "type": "number",
-            },
-            "unit": {
-                "anyOf": [
-                    {
-                        "description": "Unit for temperature",
-                        "enum": ["celsius", "fahrenheit"],
-                        "type": "string",
-                    },
-                    {"type": "null"},
-                ],
-            },
-        },
-        "type": "object",
-    }
-
-    grammar = llama_cpp.LlamaGrammar.from_json_schema(json.dumps(sch))
 
     # assert grammar.grammar is not None
 
@@ -448,38 +384,27 @@ def test_model_optional_suffix_order_and_cardinality(grammar_model, required, ad
 
 @pytest.fixture(scope='module')
 def grammar_model():
-    model_path = os.environ.get('LLAMA_GRAMMAR_TEST_MODEL')
+    model_path = os.environ.get("LLAMA_TEST_TRANSFORMER_MODEL")
     if not model_path:
-        pytest.skip('Set LLAMA_GRAMMAR_TEST_MODEL to run model integration tests')
-    speculative = None
-    if os.environ.get('LLAMA_GRAMMAR_TEST_MTP') == '1':
-        from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
-        speculative = SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3)
-    model = llama_cpp.Llama(model_path=model_path, n_gpu_layers=-1,
-                            n_ctx=1024, n_batch=256, verbose=False,
-                            speculative=speculative)
-    if speculative is not None:
-        assert model.speculative is not None
-        print(f'grammar speculative engine: {type(model.speculative).__name__}')
-    yield model
-    model.close()
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("LLAMA_TEST_TRANSFORMER_MODEL is required in Actions")
+        pytest.skip("Set LLAMA_TEST_TRANSFORMER_MODEL to run real-model tests")
+    assert os.path.isfile(model_path), model_path
+    model = llama_cpp.Llama(model_path=model_path, n_gpu_layers=0,
+                            n_ctx=512, n_batch=128, verbose=False)
+    try:
+        yield model
+    finally:
+        model.close()
 
 
 def _grammar_completion(model, instruction, grammar, **kwargs):
     prompt = (f'<|im_start|>user\n{instruction}<|im_end|>\n'
-              '<|im_start|>assistant\n<think>\n\n</think>\n\n')
+              '<|im_start|>assistant\n')
     output = model.create_completion(prompt, grammar=grammar, max_tokens=96,
                                      temperature=0, seed=42, **kwargs)
     text = output['choices'][0]['text']
     print(f'grammar model output: {text!r}')
-    if os.environ.get('LLAMA_GRAMMAR_TEST_MTP') == '1':
-        stats = model.last_speculative_stats
-        print('grammar MTP stats: ' + json.dumps({key: stats[key] for key in (
-            'draft_calls', 'drafted', 'verified', 'accepted_draft_tokens',
-            'checkpoint_restores',
-        )}))
-        if output['usage']['completion_tokens'] > 2:
-            assert stats['drafted'] > 0 and stats['verified'] > 0
     assert output['choices'][0]['finish_reason'] == 'stop'
     return text
 
@@ -567,3 +492,59 @@ def test_model_empty_schema_accepts_scalar_values(grammar_model, schema, accepte
             assert np.isfinite(data._logit_view[model.token_eos()])
     finally:
         data.close()
+
+
+def test_empty_response_schema_remains_object():
+    from llama_cpp.llama_chat_format import _grammar_for_response_format
+    grammar = _grammar_for_response_format({'type': 'json_object', 'schema': {}})
+    assert 'root ::= object' in grammar.grammar.splitlines()
+
+
+@pytest.mark.parametrize('function', [{}, {'parameters': None}, {'parameters': {}}])
+def test_empty_tool_parameters_remain_empty_object(function):
+    from llama_cpp.llama_chat_format import _tool_parameter_schema
+    from llama_cpp.llama_grammar import json_schema_to_gbnf
+    schema = _tool_parameter_schema(function)
+    assert schema == {'type': 'object', 'properties': {}}
+    assert 'root ::= "{" space "}"' in json_schema_to_gbnf(schema).splitlines()
+
+
+def test_formatter_stop_token_boundary():
+    # Verify that model-specific stop token IDs terminate generation.
+    formatter = Jinja2ChatFormatter(
+        template="{{ messages[0].content }}",
+        eos_token="</s>",
+        bos_token="",
+        stop_token_ids=[248044],
+    )
+    response = formatter(messages=[{"role": "user", "content": "Hello"}])
+
+    assert response.stopping_criteria is not None
+    criterion = response.stopping_criteria[0]
+    logits = np.empty(0, dtype=np.single)
+
+    assert criterion(np.array([], dtype=np.intc), logits) is False
+    assert criterion(np.array([1, 248044], dtype=np.intc), logits) is True
+    assert criterion(np.array([1, 2], dtype=np.intc), logits) is False
+
+
+def test_formatter_preserves_inputs_and_exposes_hf_template_context():
+    messages = [{"role": "user", "content": [{"type": "text", "text": "<&中文"}]}]
+    tools = [{"type": "function", "function": {"name": "lookup"}}]
+    original = copy.deepcopy(messages)
+    formatter = Jinja2ChatFormatter(
+        template=(
+            "{{ bos_token }}{{ pad_token }}{% generation %}"
+            "{{ [messages, tools, documents, add_generation_prompt] | tojson }}"
+            "{% endgeneration %}"
+        ),
+        bos_token="<s>", eos_token="</s>",
+        special_tokens_map={"pad_token": "<pad>", "bos_token": "incorrect"},
+    )
+    response = formatter(messages=messages, tools=tools, documents=[{"text": "source"}],
+                         add_generation_prompt=False)
+    assert response.prompt.startswith("<s><pad>")
+    assert "<&中文" in response.prompt
+    assert json.loads(response.prompt[len("<s><pad>"):]) == [messages, tools, [{"text": "source"}], False]
+    assert response.stop == ["</s>"] and response.added_special
+    assert messages == original

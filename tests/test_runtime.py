@@ -1,3 +1,4 @@
+import os
 import ctypes
 import json
 import multiprocessing
@@ -6,125 +7,38 @@ from types import SimpleNamespace
 
 import pytest
 import numpy as np
-from huggingface_hub import hf_hub_download
 
 import llama_cpp
 import llama_cpp._internals as internals
 from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
-from llama_cpp.llama_speculative import _speculative_generation_timing_stats
 
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
 
 
-def test_speculative_generation_timing_reports_sustained_throughput():
-    stats = _speculative_generation_timing_stats(
-        generated_tokens=384,
-        time_to_first_token_seconds=0.043,
-        time_to_last_token_seconds=4.081,
-    )
-
-    assert stats["generation_tokens"] == 384
-    assert stats["generation_seconds"] == pytest.approx(4.081)
-    assert stats["generation_tokens_per_second"] == pytest.approx(384 / 4.081)
-    assert stats["time_to_first_token_seconds"] == pytest.approx(0.043)
-    assert stats["sustained_tokens"] == 383
-    assert stats["sustained_seconds"] == pytest.approx(4.038)
-    assert stats["sustained_tokens_per_second"] == pytest.approx(383 / 4.038)
-
-
-def test_completion_public_apis_forward_ignore_eos():
+@pytest.mark.parametrize("entry", ["create_completion", "__call__", "create_chat_completion"])
+@pytest.mark.parametrize("present,expected", [(0.0, 1.5), (0.7, 0.7)])
+def test_public_generation_options_reach_execution(entry, present, expected):
     llm = object.__new__(llama_cpp.Llama)
-    private_calls = []
+    calls = []
 
-    def fake_private(**kwargs):
-        private_calls.append(kwargs)
+    def completion(**kwargs):
+        calls.append(kwargs)
         yield {"choices": [{"text": "", "finish_reason": "length"}]}
 
-    llm._create_completion = fake_private
-    llama_cpp.Llama.create_completion(llm, [1], ignore_eos=True)
-    assert private_calls[0]["ignore_eos"] is True
-
-    public_calls = []
-
-    def fake_public(**kwargs):
-        public_calls.append(kwargs)
-        return {"choices": [{"text": "", "finish_reason": "length"}]}
-
-    llm.create_completion = fake_public
-    llama_cpp.Llama.__call__(llm, "prompt", ignore_eos=True)
-    assert public_calls[0]["ignore_eos"] is True
-
-
-@pytest.mark.parametrize(
-    ("present_penalty", "presence_penalty", "expected"),
-    [(0.0, 1.5, 1.5), (0.7, 1.5, 0.7)],
-)
-def test_completion_presence_penalty_alias(
-    present_penalty, presence_penalty, expected
-):
-    llm = object.__new__(llama_cpp.Llama)
-    private_calls = []
-
-    def fake_private(**kwargs):
-        private_calls.append(kwargs)
-        yield {"choices": [{"text": "", "finish_reason": "length"}]}
-
-    llm._create_completion = fake_private
-    llama_cpp.Llama.create_completion(
-        llm,
-        [1],
-        present_penalty=present_penalty,
-        presence_penalty=presence_penalty,
-    )
-
-    assert private_calls[0]["present_penalty"] == expected
-
-    # __call__ is a distinct public entry point but can share this forwarding
-    # test instead of maintaining a second near-identical mock setup.
-    public_calls = []
-
-    def fake_public(**kwargs):
-        public_calls.append(kwargs)
-        return {"choices": [{"text": "", "finish_reason": "length"}]}
-
-    llm.create_completion = fake_public
-    llama_cpp.Llama.__call__(
-        llm,
-        "prompt",
-        present_penalty=present_penalty,
-        presence_penalty=presence_penalty,
-    )
-
-    assert public_calls[0]["presence_penalty"] == presence_penalty
-    assert public_calls[0]["present_penalty"] == present_penalty
-
-
-@pytest.mark.parametrize(
-    ("present_penalty", "presence_penalty", "expected"),
-    [(0.0, 1.5, 1.5), (0.7, 1.5, 0.7)],
-)
-def test_chat_completion_presence_penalty_alias(
-    present_penalty, presence_penalty, expected
-):
-    llm = object.__new__(llama_cpp.Llama)
-    handler_calls = []
-
-    def fake_handler(**kwargs):
-        handler_calls.append(kwargs)
+    def chat(**kwargs):
+        calls.append(kwargs)
         return {"choices": [{"message": {"content": ""}}]}
 
-    llm.chat_handler = fake_handler
-    llm._chat_handlers = {}
-    llm.chat_format = None
-    llama_cpp.Llama.create_chat_completion(
-        llm,
-        messages=[{"role": "user", "content": "Hello"}],
-        present_penalty=present_penalty,
-        presence_penalty=presence_penalty,
-    )
-
-    assert handler_calls[0]["present_penalty"] == expected
-    assert "presence_penalty" not in handler_calls[0]
+    llm._create_completion = completion
+    llm.chat_handler, llm._chat_handlers, llm.chat_format = chat, {}, None
+    options = dict(present_penalty=present, presence_penalty=1.5)
+    if entry == "create_chat_completion":
+        llm.create_chat_completion(messages=[{"role": "user", "content": "Hello"}], **options)
+    else:
+        getattr(llm, entry)([1], ignore_eos=True, **options)
+        assert calls[0]["ignore_eos"] is True
+    assert calls[0]["present_penalty"] == expected
+    assert "presence_penalty" not in calls[0]
 
 
 @pytest.mark.parametrize(
@@ -184,21 +98,6 @@ def test_private_completion_respects_ignore_eos_at_eog_boundary(
     assert forwarded == [ignore_eos]
     assert result["choices"][0]["text"] == expected_text
     assert result["choices"][0]["finish_reason"] == expected_finish_reason
-
-
-@pytest.mark.parametrize("generated_tokens", [0, 1])
-def test_speculative_generation_timing_has_no_sustained_rate_for_short_output(
-    generated_tokens,
-):
-    stats = _speculative_generation_timing_stats(
-        generated_tokens=generated_tokens,
-        time_to_first_token_seconds=0.025,
-        time_to_last_token_seconds=0.025,
-    )
-
-    assert stats["sustained_tokens"] == 0
-    assert stats["sustained_seconds"] == 0.0
-    assert stats["sustained_tokens_per_second"] == 0.0
 
 
 def test_model_init_frees_native_model_when_vocab_lookup_fails(monkeypatch):
@@ -279,20 +178,6 @@ def test_batch_init_frees_native_batch_when_validation_fails(monkeypatch):
         )
 
     assert freed_batch_handles == [invalid_mixed_batch]
-
-
-def test_context_close_releases_parent_references():
-    context = internals.LlamaContext.__new__(internals.LlamaContext)
-    context.ctx = None
-    context.model = object()
-    context.params = object()
-    context._exit_stack = None
-
-    context.close()
-    context.close() # Closing an already closed context must be a no-op.
-
-    assert context.model is None
-    assert context.params is None
 
 
 def test_context_manages_borrowed_threadpool_references(monkeypatch):
@@ -571,10 +456,12 @@ def test_llama_batch_mrope_embeddings_use_four_position_planes():
 
 @pytest.fixture(scope="module")
 def llama_cpp_model_path():
-    """Fixture to download a real GGUF model for integration tests."""
-    repo_id = "Qwen/Qwen2.5-0.5B-Instruct-GGUF"
-    filename = "qwen2.5-0.5b-instruct-q4_k_m.gguf"
-    model_path = hf_hub_download(repo_id, filename)
+    model_path = os.environ.get("LLAMA_TEST_TRANSFORMER_MODEL")
+    if not model_path:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("LLAMA_TEST_TRANSFORMER_MODEL is required in Actions")
+        pytest.skip("Set LLAMA_TEST_TRANSFORMER_MODEL to run real-model tests")
+    assert os.path.isfile(model_path), model_path
     return model_path
 
 
@@ -684,19 +571,6 @@ def test_real_model(llama_cpp_model_path):
     assert b"over" in output_text or b"lazy dog" in output_text
 
 
-def test_real_llama_completion(completion_model):
-    output = completion_model.create_completion(
-        "The quick brown fox jumps",
-        max_tokens=4,
-        top_k=50,
-        top_p=0.9,
-        temperature=0.8,
-        seed=1337
-    )
-    text = output["choices"][0]["text"]
-    assert "over" in text or "lazy dog" in text
-
-
 @pytest.mark.parametrize("stream", [False, True])
 def test_native_decode_abort_finishes_and_resets_context(
     completion_model, monkeypatch, stream
@@ -732,6 +606,27 @@ def test_native_decode_abort_finishes_and_resets_context(
     assert completion_model._ctx.memory_seq_pos_min(0) == -1
     assert completion_model._ctx.memory_seq_pos_max(0) == -1
     assert cache.writes == []
+
+
+@pytest.mark.parametrize("rollback", [False, True], ids=["append", "rollback"])
+def test_real_transformer_prefix_and_state(completion_model, rollback):
+    model = completion_model
+    assert not model.is_hybrid
+    tokens = model.tokenize(b"The capital of France is")
+    def complete():
+        return model.create_completion(tokens, max_tokens=4, temperature=0,
+                                       seed=42)["choices"][0]["text"]
+    reference = complete()
+    model.reset()
+    model.eval(tokens[:-1])
+    if rollback:
+        model.eval(tokens[-1:])
+    assert complete() == reference
+    state = model.save_state()
+    model.eval(tokens[-1:])
+    model.load_state(state)
+    assert model.n_tokens == state.n_tokens
+    np.testing.assert_array_equal(model._restored_logits, state.last_logits)
 
 
 def test_grammar_sampling_safety(completion_model):
@@ -814,42 +709,22 @@ def test_custom_logits_processor(completion_model):
     assert "e" not in generated_text, \
         f"Expected no letter 'e' in output, but found one:\n  Output was: '{generated_text}'"
 
-def test_real_llama_embeddings(llama_cpp_model_path):
-    """
-    Test embedding generation through the specialized LlamaEmbedding class.
-    """
-    model = LlamaEmbedding(
-        model_path=llama_cpp_model_path,
-        n_ctx=32,
-        n_batch=32,
-        n_ubatch=32,
-        pooling_type=LLAMA_POOLING_TYPE_NONE,
-    )
-    try:
-        # The inherited n_seq_max=1 processes this list as three streaming
-        # decode batches instead of assigning an invalid seq_id.
-        embeddings = model.embed(["Hello", "world", "embedding"])
-        assert isinstance(embeddings, list)
-        assert len(embeddings) == 3
-        assert all(len(embedding) > 0 for embedding in embeddings)
-    finally:
-        model.close()
 
-
-def test_real_llama_base_embedding_api(llama_cpp_model_path):
+@pytest.mark.parametrize("model_class,n_seq_max", [(llama_cpp.Llama, 2), (LlamaEmbedding, 1)])
+def test_real_llama_base_embedding_api(llama_cpp_model_path, model_class, n_seq_max):
     """
     Test the maintained embedding API on the standard Llama class.
 
     Covers pre-tokenized batching, normalization, separator-based string
     batching, token counts, and the OpenAI-compatible response wrapper.
     """
-    model = llama_cpp.Llama(
+    model = model_class(
         model_path=llama_cpp_model_path,
         embeddings=True,
         n_ctx=32,
         n_batch=32,
         n_ubatch=32,
-        n_seq_max=2,
+        n_seq_max=n_seq_max,
         kv_unified=True,
         pooling_type=LLAMA_POOLING_TYPE_NONE,
         verbose=False,

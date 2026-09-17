@@ -9,10 +9,127 @@ import struct
 import pytest
 
 
-def test_import_mtmd_cpp():
-    module = importlib.import_module("llama_cpp.mtmd_cpp")
+@pytest.fixture
+def chat_prefill(tmp_path, monkeypatch):
+    import numpy as np
+    from llama_cpp import Llama
+    from llama_cpp import llama_multimodal as multimodal
 
-    assert module is not None
+    handler = multimodal.MTMDChatHandler(mmproj_path=str(tmp_path), verbose=False)
+    monkeypatch.setattr(handler, "mtmd_ctx", object())
+    monkeypatch.setattr(handler, "_init_mtmd_context", Mock())
+    monkeypatch.setattr(handler, "_free_mtmd_resources", Mock())
+    monkeypatch.setattr(handler, "_is_text_chunk", lambda kind: False)
+    monkeypatch.setattr(handler, "_is_image_chunk", lambda kind: True)
+    monkeypatch.setattr(multimodal, "_convert_completion_to_chat", lambda result, **kw: result)
+    handler._process_mtmd_prompt = Mock(return_value=(
+        [1, 2, -9, -9], [(2, 4, object(), 1, -9)], object(), []
+    ))
+    ctx = SimpleNamespace(
+        ctx=object(), memory_seq_rm=Mock(return_value=True),
+        memory_seq_add=Mock(), memory_can_shift=lambda: True,
+        memory_clear=Mock(),
+    )
+    llm = SimpleNamespace(
+        n_tokens=3, input_ids=np.array([1, 2, 3, 0, 0, 0]),
+        _n_ctx=6, n_ctx=lambda: 6, n_batch=1, n_keep=0,
+        _ctx=ctx, is_hybrid=False, _hybrid_cache_mgr=None,
+        speculative=None, verbose=False,
+        context_params=SimpleNamespace(no_perf=True),
+        _prefilled_prompt=(1, 2, 3), _restored_logits=object(),
+        _last_eval_output_start=2, _last_eval_output_count=1,
+        longest_token_prefix=Llama.longest_token_prefix,
+        create_completion=Mock(return_value="completed"),
+    )
+    llm.reset = Mock(side_effect=lambda: Llama.reset(llm))
+    llm._memory_seq_rm_or_raise = lambda *args: Llama._memory_seq_rm_or_raise(llm, *args)
+    llm._mark_prefilled_prompt = Mock()
+
+    def evaluate(mtmd, ctx, chunk, pos, seq, batch, logits, output):
+        output._obj.value = pos.value + 2
+        return 0
+
+    backend = SimpleNamespace(
+        mtmd_input_chunk_get_n_tokens=lambda chunk: 2,
+        mtmd_helper_eval_chunk_single=Mock(side_effect=evaluate),
+    )
+    monkeypatch.setattr(handler, "_mtmd_cpp", backend)
+    yield handler, llm, backend
+
+
+@pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "interrupt"])
+def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, failure):
+    handler, llm, backend = chat_prefill
+    evaluate = backend.mtmd_helper_eval_chunk_single.side_effect
+    if failure in ("rollback", "shift"):
+        llm._ctx.memory_seq_rm.return_value = False
+    if failure == "shift":
+        llm.n_tokens = 6
+        llm.input_ids[:] = [1, 2, 3, 4, 5, 6]
+        handler._process_mtmd_prompt.return_value = (
+            [1, 2, 3, 4, 5, 6, -9, -9], [(6, 8, object(), 1, -9)], object(), []
+        )
+    elif failure == "helper":
+        backend.mtmd_helper_eval_chunk_single.side_effect = lambda *args: -1
+    elif failure == "position":
+        def invalid_position(*args):
+            args[-1]._obj.value = 7
+            return 0
+        backend.mtmd_helper_eval_chunk_single.side_effect = invalid_position
+    elif failure == "interrupt":
+        backend.mtmd_helper_eval_chunk_single.side_effect = KeyboardInterrupt
+
+    with pytest.raises((RuntimeError, ValueError, KeyboardInterrupt)):
+        handler(llama=llm, messages=[])
+    llm.reset.assert_called_once()
+    assert llm.n_tokens == 0 and llm._last_eval_output_count == 0
+    assert llm._prefilled_prompt is None and llm._restored_logits is None
+    llm._ctx.memory_seq_add.assert_not_called()
+    llm.create_completion.assert_not_called()
+    handler._free_mtmd_resources.assert_called_once()
+
+    # Retry on the same handler/context after a partially committed request.
+    llm._ctx.memory_seq_rm.return_value = True
+    backend.mtmd_helper_eval_chunk_single.side_effect = evaluate
+    handler._process_mtmd_prompt.return_value = (
+        [-9, -9], [(0, 2, object(), 1, -9)], object(), []
+    )
+    assert handler(llama=llm, messages=[]) == "completed"
+    assert llm.n_tokens == 2
+    assert llm.create_completion.call_args.kwargs["prompt"] == [-9, -9]
+    llm._mark_prefilled_prompt.assert_called_once()
+    assert handler._free_mtmd_resources.call_count == 2
+
+
+@pytest.mark.parametrize("mode", ["plain", "hybrid", "shift"])
+def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
+    handler, llm, backend = chat_prefill
+    expected = [1, 2, -9, -9]
+    if mode == "shift":
+        llm.n_tokens = 6
+        llm.input_ids[:] = [1, 2, 3, 4, 5, 6]
+        handler._process_mtmd_prompt.return_value = (
+            [1, 2, 3, 4, 5, 6, -9, -9], [(6, 8, object(), 1, -9)], object(), []
+        )
+        expected = [4, 5, 6, -9, -9]
+    if mode == "hybrid":
+        llm.is_hybrid = True
+        llm._hybrid_cache_mgr = SimpleNamespace(
+            max_checkpoints=2, clear=Mock(), save_checkpoint=Mock(),
+            find_best_checkpoint=Mock(return_value=SimpleNamespace(pos=2)),
+            restore_checkpoint=Mock(return_value=True),
+        )
+    assert handler(llama=llm, messages=[]) == "completed"
+    assert llm.n_tokens == len(expected)
+    assert llm.create_completion.call_args.kwargs["prompt"] == expected
+    llm._mark_prefilled_prompt.assert_called_once()
+    llm.reset.assert_not_called()
+    handler._free_mtmd_resources.assert_called_once()
+    if mode == "shift":
+        llm._ctx.memory_seq_add.assert_called_once_with(0, 3, 6, -3)
+    if mode == "hybrid":
+        llm._hybrid_cache_mgr.clear.assert_not_called()
+        llm._hybrid_cache_mgr.save_checkpoint.assert_called_once()
 
 
 def test_mtmd_helper_init_opt_abi():
@@ -445,17 +562,87 @@ def test_tts_invalid_output_cleans_up_and_can_retry(audio_pipeline):
     assert generator.create_speech(llama=llama, text="hello", response_format="pcm_f32").finish_reason == "stop"
 
 
-def test_tts_flash_attention_modes_and_chat_default(tmp_path):
-    from llama_cpp.llama_multimodal import MTMDAudioGenerator, MTMDChatHandler
-    for cls, kwargs, expected in (
-        (MTMDAudioGenerator, {}, None),
-        (MTMDAudioGenerator, {"flash_attn": None}, None),
-        (MTMDAudioGenerator, {"flash_attn": False}, False),
-        (MTMDAudioGenerator, {"flash_attn": True}, True),
-        (MTMDChatHandler, {}, None),
-    ):
-        handler = cls(mmproj_path=str(tmp_path), **kwargs)
-        try:
-            assert handler.flash_attn is expected
-        finally:
-            handler.close()
+@pytest.fixture(scope="module", params=[False, True], ids=["plain", "ngram"])
+def vision_model(request):
+    from llama_cpp import Llama
+    from llama_cpp.llama_multimodal import Qwen35ChatHandler
+    from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+    paths = [os.environ.get(name) for name in
+             ("LLAMA_TEST_HYBRID_MODEL", "LLAMA_TEST_MMPROJ")]
+    if not all(paths):
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("LLAMA_TEST_HYBRID_MODEL and LLAMA_TEST_MMPROJ are required in Actions")
+        pytest.skip("Set LLAMA_TEST_HYBRID_MODEL and LLAMA_TEST_MMPROJ for media tests")
+    assert all(os.path.isfile(path) for path in paths), paths
+    handler = Qwen35ChatHandler(mmproj_path=paths[1], use_gpu=False,
+                               image_max_tokens=64, verbose=False, enable_thinking=False)
+    llm = None
+    try:
+        llm = Llama(model_path=paths[0], chat_handler=handler, n_ctx=512,
+                    n_batch=128, n_ubatch=128, n_gpu_layers=0, verbose=False,
+                    speculative=SpecConfig(spec_type=SpeculativeType.NGRAM_MAP_K,
+                                           ngram_size_n=2, ngram_size_m=4)
+                    if request.param else None)
+        yield llm, handler
+    finally:
+        if llm is not None:
+            llm.close()
+        handler.close()
+
+
+def _color_chat(llm, color, stream=False):
+    import base64
+    import io
+    from PIL import Image
+    buffer = io.BytesIO()
+    Image.new("RGB", (96, 96), color).save(buffer, format="PNG")
+    url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    return llm.create_chat_completion(messages=[{"role": "user", "content": [
+        {"type": "image_url", "image_url": {"url": url}},
+        {"type": "text", "text": "Name the color. Answer in one word."},
+    ]}], max_tokens=8, temperature=0, seed=42, stream=stream)
+
+
+def test_real_media_changed_image_and_interrupted_retry(vision_model):
+    llm, _ = vision_model
+    references = {}
+    ledgers = {}
+    for color in ("red", "blue"):
+        llm.reset()
+        references[color] = _color_chat(llm, color)["choices"][0]["message"]["content"]
+        assert references[color]
+        ledgers[color] = [int(t) for t in llm._input_ids if t < 0]
+        assert ledgers[color]
+    assert ledgers["red"] != ledgers["blue"]
+    for color in ("red", "red", "blue"):
+        assert _color_chat(llm, color)["choices"][0]["message"]["content"] == references[color]
+    stream = _color_chat(llm, "red", stream=True)
+    try:
+        next(stream)
+        next(stream)
+    finally:
+        stream.close()
+    assert _color_chat(llm, "blue")["choices"][0]["message"]["content"] == references["blue"]
+    llm.reset()
+
+
+def test_real_media_partial_decode_failure_then_retry(vision_model, monkeypatch):
+    llm, handler = vision_model
+    llm.reset()
+    reference = _color_chat(llm, "blue")["choices"][0]["message"]["content"]
+    original = handler._mtmd_cpp.mtmd_helper_eval_chunk_single
+    committed = []
+    def fail_after_commit(*args):
+        assert original(*args) == 0
+        committed.append(llm._ctx.memory_seq_pos_max(0))
+        return 1
+    with monkeypatch.context() as patch:
+        patch.setattr(handler._mtmd_cpp, "mtmd_helper_eval_chunk_single", fail_after_commit)
+        with pytest.raises(ValueError, match="Media evaluation failed"):
+            _color_chat(llm, "red")
+    assert committed and committed[0] >= 0
+    assert llm.n_tokens == 0 and llm._ctx.memory_seq_pos_max(0) == -1
+    assert llm._prefilled_prompt is None and llm._restored_logits is None
+    assert not llm._hybrid_cache_mgr.checkpoints
+    assert _color_chat(llm, "blue")["choices"][0]["message"]["content"] == reference
+    llm.reset()

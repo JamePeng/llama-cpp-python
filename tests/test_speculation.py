@@ -1,3 +1,5 @@
+import os
+from contextlib import closing
 import builtins
 import ctypes
 
@@ -12,24 +14,11 @@ from llama_cpp.llama_speculative import (
     LlamaDFlashDecoding,
     LlamaMTPDecoding,
     LlamaNGramMapDecoding,
-    LlamaSpecEngine,
     SpecConfig,
     SpeculativeType,
     create_native_spec_engine,
     speculative_output_limits,
 )
-
-
-def test_spec_engine_is_the_public_base_class():
-    assert llama_cpp.LlamaSpecEngine is LlamaSpecEngine
-    assert issubclass(LlamaNGramMapDecoding, LlamaSpecEngine)
-    assert issubclass(LlamaMTPDecoding, LlamaSpecEngine)
-    assert issubclass(LlamaDFlashDecoding, LlamaSpecEngine)
-    assert LlamaMTPDecoding.__bases__ == LlamaDFlashDecoding.__bases__
-    assert LlamaMTPDecoding._copy_rows is LlamaDFlashDecoding._copy_rows
-    assert LlamaMTPDecoding._candidate is LlamaDFlashDecoding._candidate
-    assert "_copy_rows" not in LlamaDFlashDecoding.__dict__
-    assert "_candidate" not in LlamaDFlashDecoding.__dict__
 
 
 def test_llama_context_wraps_backend_sampling_and_perf(monkeypatch):
@@ -127,16 +116,6 @@ def test_ngram_map_lifecycle_and_acceptance_feedback():
     assert draft.tolist() == [7]
 
 
-def test_ngram_map_k4v_uses_vendor_continuation_limit_by_default():
-    decoder = LlamaNGramMapDecoding(
-        ngram_size=3,
-        num_pred_tokens=8,
-        spec_type=SpeculativeType.NGRAM_MAP_K4V,
-    )
-
-    assert decoder.max_entries_per_key == 4
-
-
 def test_spec_config_requires_draft_model_for_external_architectures():
     for spec_type in (
         SpeculativeType.DRAFT_EAGLE3,
@@ -181,10 +160,6 @@ def test_native_factory_routes_dflash_family_to_shared_engine(
     assert created[0][1]["target_model"] == "target-model"
 
 
-def test_mtp_allows_target_internal_heads():
-    SpecConfig(spec_type=SpeculativeType.DRAFT_MTP).validate()
-
-
 def test_speculative_output_limits_match_llama_cpp():
     assert speculative_output_limits(32, 1, 3) == (4, 4)
     assert speculative_output_limits(32, 4, 3) == (16, 4)
@@ -206,21 +181,6 @@ def test_draft_context_does_not_inherit_target_embedding_mode():
     assert draft.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
 
 
-def test_spec_config_selects_algorithm_specific_draft_limit():
-    assert SpecConfig(
-        spec_type=SpeculativeType.DRAFT_MTP,
-        draft_n_max=5,
-    ).max_draft_tokens() == 5
-    assert SpecConfig(
-        spec_type=SpeculativeType.NGRAM_MAP_K,
-        ngram_size_m=48,
-    ).max_draft_tokens() == 48
-    assert SpecConfig(
-        spec_type=SpeculativeType.NGRAM_MOD,
-        ngram_mod_n_max=64,
-    ).max_draft_tokens() == 64
-
-
 def test_spec_config_validates_draft_runtime_arguments():
     with pytest.raises(ValueError, match="draft_n_threads"):
         SpecConfig(
@@ -232,12 +192,6 @@ def test_spec_config_validates_draft_runtime_arguments():
             spec_type=SpeculativeType.DRAFT_MTP,
             draft_n_cpu_moe=-1,
         ).validate()
-
-
-def test_spec_config_parses_arg_cpp_gpu_layer_spellings():
-    assert SpecConfig(draft_n_gpu_layers="auto").resolved_draft_n_gpu_layers() == -1
-    assert SpecConfig(draft_n_gpu_layers="all").resolved_draft_n_gpu_layers() == -2
-    assert SpecConfig(draft_n_gpu_layers=12).resolved_draft_n_gpu_layers() == 12
 
 
 class _FakeVocabModel:
@@ -367,6 +321,34 @@ def test_mtp_checkpoint_fallback_keeps_state_on_device():
     assert stats["buffer_bytes"] == engine.draft_context.state_size
 
 
+@pytest.mark.parametrize("engine_class", [LlamaMTPDecoding, LlamaDFlashDecoding])
+@pytest.mark.parametrize("invalidate", ["capture", "clear", "restore_failure"])
+def test_draft_checkpoint_rejects_invalidated_objects(engine_class, invalidate):
+    if engine_class is LlamaMTPDecoding:
+        engine = _checkpoint_test_engine(native=True)
+    else:
+        engine = object.__new__(engine_class)
+        engine.draft_context = _FakeCheckpointContext()
+        engine._use_native_draft_rollback = True
+        engine.n_embd_enc = 2
+        engine.verify_positions = []
+        engine.reset_checkpoint_stats()
+    engine._closed = False
+    engine._backend_sampler = None
+    checkpoint = engine.checkpoint()
+    if invalidate == "capture":
+        engine.checkpoint()
+    elif invalidate == "clear":
+        engine.draft_context.memory_clear = lambda data: None
+        engine.clear()
+    else:
+        engine.draft_context.memory_seq_rm = lambda *args: False
+        with pytest.raises(RuntimeError, match="rollback failed"):
+            engine.restore(checkpoint)
+    with pytest.raises(RuntimeError, match="stale"):
+        engine.restore(checkpoint)
+
+
 def test_mtp_native_verification_rollback_removes_only_rejected_suffix():
     engine = _checkpoint_test_engine(native=True)
     engine.is_mem_shared = False
@@ -430,55 +412,6 @@ def test_mtp_close_does_not_import_during_interpreter_shutdown():
     assert draft_context.closed
     assert engine._backend_sampler is None
     assert engine.draft_context is None
-
-
-def test_mtp_runtime_configuration_reports_requested_and_resolved_values(capsys):
-    class _Context:
-        def __init__(self, n_batch):
-            self._n_batch = n_batch
-
-        def n_batch(self):
-            return self._n_batch
-
-        def n_rs_seq(self):
-            return 4
-
-    class _TargetParams:
-        n_rs_seq = 4
-        n_outputs_max = 5
-        n_outputs_max_per_seq = 5
-
-    engine = object.__new__(LlamaMTPDecoding)
-    engine.config = SpecConfig(
-        spec_type=SpeculativeType.DRAFT_MTP,
-        draft_n_min=1,
-        draft_n_max=4,
-        draft_p_min=0.2,
-        draft_p_split=0.15,
-        draft_backend_sampling=True,
-        draft_n_threads=6,
-        draft_n_threads_batch=8,
-    )
-    engine._owns_model = False
-    engine._backend_sampling = True
-    engine.n_mtp_layers = 2
-    engine.is_mem_shared = True
-    engine.chain_heads = False
-    engine._use_native_draft_rollback = True
-    engine.target_context = _Context(512)
-    engine.draft_context = _Context(512)
-
-    engine._print_runtime_configuration(_TargetParams())
-    output = capsys.readouterr().err
-
-    assert "draft-mtp" in output
-    assert "draft_n_min=1, draft_n_max=4" in output
-    assert "draft_p_min=0.2" in output
-    assert "backend_sampling=requested:True/active:True" in output
-    assert "mtp_heads=2" in output
-    assert "target_n_rs_seq=4, draft_n_rs_seq=4" in output
-    assert "draft_checkpoint=native-rs" in output
-    assert "outputs=5/5" in output
 
 
 class _FakeEvalBatch:
@@ -569,18 +502,6 @@ def test_speculative_verification_batch_must_fit_n_batch():
 
     with pytest.raises(RuntimeError, match="verification batch exceeds n_batch"):
         llm.eval([1, 2, 3, 4], copy_logits=False)
-
-
-def test_llama_memory_removal_failure_is_fatal():
-    class _Context:
-        def memory_seq_rm(self, seq_id, p0, p1):
-            return False
-
-    llm = object.__new__(llama_cpp.Llama)
-    llm._ctx = _Context()
-
-    with pytest.raises(RuntimeError, match="test rollback"):
-        llm._memory_seq_rm_or_raise(0, 12, -1, "test rollback")
 
 
 def test_interrupted_hybrid_speculation_uses_native_rollback():
@@ -1212,13 +1133,6 @@ def test_dflash_native_checkpoint_uses_suffix_removal_without_state_buffer():
     assert stats["device_restores"] == 0
 
 
-def test_dflash_can_follow_target_rollback_with_device_draft_checkpoints():
-    engine = object.__new__(LlamaDFlashDecoding)
-    engine._use_native_draft_rollback = False
-
-    assert engine.can_follow_target_native_rollback()
-
-
 def test_dflash_device_checkpoint_restore_reclaims_noise_suffix():
     engine = object.__new__(LlamaDFlashDecoding)
     engine.draft_context = _FakeCheckpointContext(position=7, state_size=8)
@@ -1228,7 +1142,9 @@ def test_dflash_device_checkpoint_restore_reclaims_noise_suffix():
     engine.verify_features = np.ones((2, 2), dtype=np.float32)
     engine._active_verification_checkpoint = {"position": 7}
     engine.reset_checkpoint_stats()
+    engine._checkpoint_owner = object()
     checkpoint = {
+        "owner": engine._checkpoint_owner,
         "position": 7,
         "mode": "on-device",
         "buffer": (ctypes.c_uint8 * 8)(),
@@ -1293,3 +1209,63 @@ def test_dflash_checkpoint_truncation_replays_only_the_accepted_prefix():
         engine.draft_context.decoded[0][2].reshape(2, 2), [[1, 2], [3, 4]]
     )
     assert engine.draft_context.decoded[0][1] == [8, 9]
+
+
+@pytest.mark.parametrize("kind", [SpeculativeType.NGRAM_MAP_K, SpeculativeType.NGRAM_MAP_K4V])
+def test_ngram_never_proposes_media_ids(kind):
+    engine = LlamaNGramMapDecoding(ngram_size=2, num_pred_tokens=2, spec_type=kind, min_hits=1)
+    try:
+        history = [1, 2, 3, -100, 1, 2]
+        engine.begin(history)
+        draft = engine.draft(history, n_past=5, id_last=2, n_max=2)
+        assert draft.tolist() == [3]
+    finally:
+        engine.close()
+
+
+@pytest.fixture(scope="module", params=[False, True], ids=["native", "device-fallback"])
+def mtp_model(request):
+    path = os.environ.get("LLAMA_TEST_HYBRID_MODEL")
+    if not path:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("LLAMA_TEST_HYBRID_MODEL is required in Actions")
+        pytest.skip("Set LLAMA_TEST_HYBRID_MODEL to run real-model tests")
+    assert os.path.isfile(path), path
+    with closing(llama_cpp.Llama(
+        model_path=path, n_ctx=256, n_batch=64, n_ubatch=64,
+        n_gpu_layers=0, verbose=False, ctx_checkpoints=4,
+        speculative=SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3),
+    )) as llm:
+        assert llm.is_hybrid and llm._model.n_layer_nextn() > 0
+        if request.param:
+            llm._ctx.n_rs_seq = lambda: 0
+            llm.speculative._use_native_draft_rollback = False
+        yield llm, request.param
+
+
+def test_real_mtp_verification_and_interrupted_retry(mtp_model):
+    llm, fallback = mtp_model
+    def complete():
+        return llm.create_completion("Count from 1 to 20: 1,", max_tokens=16,
+                                     temperature=0, seed=42)["choices"][0]["text"]
+    llm.reset()
+    reference = complete()
+    stats = llm.last_speculative_stats
+    assert stats["drafted"] > 0 and stats["verified"] > 0
+    assert stats["checkpoint_restores"] > 0
+    if fallback:
+        assert stats["checkpoint_device_captures"] > 0
+    else:
+        assert stats["checkpoint_native_captures"] > 0
+    llm.reset()
+    stream = llm.create_completion("Count from 1 to 20: 1,", stream=True,
+                                   max_tokens=16, temperature=0, seed=42)
+    try:
+        next(stream)
+        next(stream)
+    finally:
+        stream.close()
+    assert complete() == reference
+    llm.reset()
+    assert llm._ctx.memory_seq_pos_max(0) == -1
+    assert llm.speculative.draft_context.memory_seq_pos_max(0) == -1

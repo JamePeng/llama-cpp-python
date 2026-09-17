@@ -12,13 +12,62 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  REPO_ID: Qwen/Qwen2.5-0.5B-Instruct-GGUF
-  MODEL_FILE: qwen2.5-0.5b-instruct-q4_k_m.gguf
-  HF_HOME: ${{ github.workspace }}/hf_cache
+  TRANSFORMER_REVISION: 9217f5db79a29953eb74d5343926648285ec7e67
+  HYBRID_REVISION: b0f773d6323ab08f262f88f53f73a8d869b59635
 
 jobs:
+  prepare-models:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+
+      - name: Cache test models
+        id: models
+        uses: actions/cache@v5
+        with:
+          path: test-models
+          key: test-models-q8proj-v1-${{ env.TRANSFORMER_REVISION }}-${{ env.HYBRID_REVISION }}
+
+      - name: Install download dependency
+        if: steps.models.outputs.cache-hit != 'true'
+        run: python -m pip install huggingface-hub
+
+      - name: Download pinned models once
+        if: steps.models.outputs.cache-hit != 'true'
+        shell: python
+        run: |
+          import os
+          from huggingface_hub import hf_hub_download
+
+          models = [
+              ("Qwen/Qwen2.5-0.5B-Instruct-GGUF",
+               "qwen2.5-0.5b-instruct-q4_k_m.gguf", os.environ["TRANSFORMER_REVISION"]),
+              ("JamePeng2023/Qwen3.5-0.8B-GGUF",
+               "Qwen3.5-0.8B-Q4_K_M.gguf", os.environ["HYBRID_REVISION"]),
+              ("JamePeng2023/Qwen3.5-0.8B-GGUF",
+               "mmproj-Qwen3.5-0.8b-Q8_0.gguf", os.environ["HYBRID_REVISION"]),
+          ]
+          for repo, filename, revision in models:
+              hf_hub_download(repo, filename, revision=revision, local_dir="test-models")
+
+      - name: Share models with all test environments
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-models
+          path: test-models/*.gguf
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+
   # Combined job for Linux, Windows, and Apple Silicon macOS
   build-and-test:
+    needs: prepare-models
+    env:
+      LLAMA_TEST_TRANSFORMER_MODEL: ${{ github.workspace }}/test-models/qwen2.5-0.5b-instruct-q4_k_m.gguf
+      LLAMA_TEST_HYBRID_MODEL: ${{ github.workspace }}/test-models/Qwen3.5-0.8B-Q4_K_M.gguf
+      LLAMA_TEST_MMPROJ: ${{ github.workspace }}/test-models/mmproj-Qwen3.5-0.8b-Q8_0.gguf
     runs-on: ${{ matrix.os }}
     strategy:
       # Don't cancel other jobs in the matrix if one fails
@@ -53,20 +102,11 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Cache HuggingFace model
-        id: model-cache
-        uses: actions/cache@v5
+      - name: Download prepared test models
+        uses: actions/download-artifact@v5
         with:
-          path: ${{ env.HF_HOME }}
-          key: ${{ runner.os }}-model-${{ env.REPO_ID }}-${{ env.MODEL_FILE }}
-
-      - name: Download model if not cached
-        # Only run this step if the cache was not found
-        if: steps.model-cache.outputs.cache-hit != 'true'
-        run: |
-          uv pip install --system huggingface-hub
-          hf download ${{ env.REPO_ID }} ${{ env.MODEL_FILE }}
-        shell: bash
+          name: test-models
+          path: test-models
 
       - name: Install dependencies and Build
         env:
