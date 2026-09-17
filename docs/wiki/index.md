@@ -16,6 +16,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | Page | Description |
 |---|---|
 | [Installation](install.md) | Build and source-installation guide covering Python setup, CMake options, native backends, hardware acceleration, rebuilds, and verification. |
+| [Runtime Troubleshooting](troubleshooting.md) | Cache misses, stale snapshots, cancellation, media failures, and embedding state changes. |
 
 ### Core API
 
@@ -39,6 +40,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 
 | Page | Description |
 |---|---|
+| [Caching and State Reuse](features/caching.md) | Live prefixes, full snapshots, partial checkpoints, ownership, and cache misses. |
 | [Embeddings and Reranking](features/embeddings-rerank.md) | End-to-end sentence embeddings, token-level vectors, normalization, streaming batches, similarity output, and cross-encoder reranking. |
 | [Grammar and Constrained Generation](features/grammar.md) | GBNF and JSON Schema usage, reusable definitions, lazy sampling, conversion optimizations, and supported behavior and limitations. |
 
@@ -46,6 +48,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 
 | Page | Description |
 |---|---|
+| [Qwen3.5 Image Chat](examples/vision/vision-qwen.md) | Matching model/projector setup, image requests, n-gram speculation, and prefill recovery. |
 | [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md) | Configure a DFlash2 sidecar, validate selector execution, compare ordinary and speculative output, and tune draft length. |
 | [MTMD Speech Synthesis](examples/audio/audio-tts.md) | Generate speech with Qwen3-TTS Base or Pocket TTS; configure reference audio and FA, and explore CLI and Streamlit examples. |
 
@@ -120,6 +123,9 @@ Completed pages currently linked from this index:
 - `modules/MTMDCppBindings.md`
 - `features/embeddings-rerank.md`
 - `features/grammar.md`
+- `features/caching.md`
+- `examples/vision/vision-qwen.md`
+- `troubleshooting.md`
 - `examples/dflash2-speculative-decoding.md`
 - `examples/audio/audio-tts.md`
 - `development/git-commit-generation-agent.md`
@@ -133,10 +139,10 @@ and checked against the implementation.
 ### Planned areas
 
 - Basic and chat-completion examples
-- Vision and audio-input examples
-- Caching, multi-model, and tool-call feature guides
+- Additional vision models and audio-input examples
+- Multi-model and tool-call feature guides
 - Common and MCP type references
-- Troubleshooting and backend diagnostics
+- Additional backend diagnostics
 
 ---
 

@@ -5,7 +5,7 @@ source_files:
   - README.md
   - vendor/llama.cpp/docs/build.md
   - vendor/llama.cpp/docs/backend/
-last_updated: 2026-06-02
+last_updated: 2026-09-17
 author: JamePeng
 version_target: "latest"
 ---
@@ -725,9 +725,15 @@ Common local development commands:
 git clone https://github.com/JamePeng/llama-cpp-python --recursive
 cd llama-cpp-python
 python -m pip install --upgrade pip
-python -m pip install -e .
+python -m pip install -e ".[test]"
 python -m pytest
 ```
+
+For local model-backed checks, set `LLAMA_TEST_TRANSFORMER_MODEL`,
+`LLAMA_TEST_HYBRID_MODEL`, and `LLAMA_TEST_MMPROJ` to compatible local GGUF paths.
+Unconfigured model checks are skipped locally; a configured missing file or a
+load failure is an error. Actions requires these paths and prepares pinned
+models in one job, then shares a model artifact across its environment matrix.
 
 The repository also includes a `Makefile` with useful targets:
 

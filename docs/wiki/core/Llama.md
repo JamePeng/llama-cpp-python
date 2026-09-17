@@ -3,9 +3,11 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-09-03
+last_updated: 2026-09-17
 version_target: "latest"
 ---
+
+# Llama
 
 ## Overview
 
@@ -145,7 +147,7 @@ mapping:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `chat_format` | `Optional[str]` | `None` | String specifying the chat template (e.g., `"llama-2"`, `"chatml"`). Guessed from GGUF if None. |
-| `chat_handler` | `Optional[LlamaChatCompletionHandler]` | `None` | Optional custom handler. See [[ChatHandlers]]. |
+| `chat_handler` | `Optional[LlamaChatCompletionHandler]` | `None` | Optional custom handler. See [Qwen image chat](../examples/vision/vision-qwen.md) for a custom multimodal handler. |
 | `chat_template_name` | `Optional[str]` | `None` | Named chat template passed to the generic MTMD handler created by `mmproj_path`. |
 | `chat_handler_kwargs` | `Dict[str, Any]` | `{}` | Additional keyword arguments passed to the generic MTMD chat handler created by `mmproj_path`. |
 | `tokenizer` | `Optional[BaseLlamaTokenizer]` | `None` | Override the tokenizer used by the high-level API. By default, `LlamaTokenizer` wraps the loaded model vocabulary. |
@@ -332,6 +334,9 @@ because llama.cpp may already have committed an unknown number of physical
 micro-batches while the Python token ledger still represents the pre-call
 state.
 
+Fatal decode exceptions also reset the high-level model before propagating.
+The reported error position refers to the cursor before cleanup.
+
 ### `reset`
 
 Clears the evaluated sequence state owned by the active context. This includes
@@ -339,6 +344,40 @@ native KV/recurrent memory, the Python token cursor, cached output boundaries,
 hybrid checkpoints, and speculative-engine state. It does not unload model
 weights, reset sampling configuration, or clear a separately configured
 prompt-cache object.
+
+### `save_state()` and `load_state(state)`
+
+`save_state()` returns a `LlamaState` containing owned native state bytes, the
+committed token prefix, copied score arrays, seed, optional last valid logits,
+and model/context compatibility metadata. `LlamaState.nbytes` counts its owned
+payload, excluding Python object and allocator overhead. The snapshot remains
+usable after the source context changes or closes, subject to compatibility at
+restore time; it can be pickled and holds no live native handle.
+
+The snapshot does not contain sampler history, sampler RNG progression, or the
+draft engine's context and hidden/features state. Restoring the seed does not
+make this an exact stochastic continuation. With `logits_all=False`, the score
+payload normally contains only the last valid output row. A snapshot without
+valid last logits cannot be sampled immediately; evaluate new tokens first.
+
+`load_state()` validates token counts, buffer sizes, array shapes, and any stored
+compatibility metadata before native mutation. Metadata includes the model path,
+file size and modification time, context capacity, vocabulary size, and selected
+context parameters; it is not a portable model fingerprint. Do not rely on
+snapshots as an interchange format across model files or native library builds.
+Legacy snapshots without compatibility metadata still receive structural checks.
+
+Restoration clears draft state and the previous sampler, invalidates registered
+hybrid checkpoints, and restores the token cursor and owned output. Validation
+errors leave the live state untouched; ordinary exceptions during restoration reset
+the context because the native read may already have changed it. Both save and
+load reject calls during speculative verification.
+The direct `load_state()` cleanup catches `Exception`, not `KeyboardInterrupt`.
+
+After loading into a model with a speculative engine, start a new request with
+`reset=True` and the full text prompt. `generate(reset=False)` is rejected because
+target-only snapshots cannot restore the matching draft state. For ordinary text
+models, see the [snapshot example](../features/caching.md#saving-a-text-prefix).
 
 ### `abort`
 
@@ -354,16 +393,23 @@ For `create_completion()` and chat handlers that delegate to the standard text
 completion path, both streaming and non-streaming responses finish with
 `"finish_reason": "abort"`. A native mid-decode abort also performs a full
 context reset, because completed micro-batches cannot be inferred reliably.
-Consequently, the interrupted request loses its reusable KV/checkpoint state
-and is not written to the configured prompt cache. Text already emitted by a
-stream remains valid output, but a later request must evaluate its prompt
-again.
+After a native mid-decode abort, the interrupted request loses its reusable
+KV/checkpoint state. Aborted requests are not written to the configured prompt
+cache. Text already emitted by a stream remains valid output; after a full
+reset, a later request must evaluate its prompt again.
 
 For a native mid-decode abort, `generate()` ends iteration normally after the
 reset. If cancellation is observed only at a Python generation boundary, it can
 stop without forcing that full reset. Direct `eval()` and
 `LlamaContext.decode()` callers instead receive `LlamaDecodeAbort`; the latter
 is an advanced internal API and does not perform the high-level reset itself.
+
+A `KeyboardInterrupt` raised inside the `generate()` loop also clears partial
+state and ends generation normally. Completion responses report `"abort"`;
+`verbose=True` prints a cancellation diagnostic to stderr. This catch does not
+cover arbitrary caller code, model construction, or direct `eval()` calls.
+After a reset leaves no evaluated tokens, generation cleanup does not allocate
+an empty hybrid checkpoint.
 
 Call `abort()` from another thread, such as a timeout timer or UI cancellation
 handler. Do not use one `Llama` instance for concurrent generation requests;
@@ -443,7 +489,11 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 1. **Context Shifting & Prompt Caching**:
 
    By default, `generate(reset=True)` and `create_completion()` check for the
-   longest matching prefix in existing context memory. To maximize speed, keep
+   longest matching prefix in existing context memory when speculation is disabled.
+   If the live context ends exactly at the matching prefix, only the new suffix
+   is evaluated. If old context extends beyond the match, generation first
+   truncates or restores the appropriate prefix. Fresh speculative requests
+   reset target and engine together instead. To maximize reuse, keep
    system prompts static and only append new dialogue to avoid re-evaluating the
    entire history. If the context limit is reached during `eval`, the model
    attempts a Context Shift, discarding older tokens while preserving up to
@@ -458,7 +508,12 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
     New code should pass `SpecConfig` through the `speculative` argument. This enables the stateful begin/draft/process/accept lifecycle, including verification batches, acceptance feedback, recurrent-state rollback, and per-run statistics.
 
-    The current implementation is text-only and uses sequence ID `0`. It supports built-in and external MTP, external DFlash, DFlash2, and DSpark drafts, plus the `NGRAM_MAP_K` and `NGRAM_MAP_K4V` lookup engines. Multimodal pseudo-tokens and MTMD embedding batches are not yet supported by this path.
+    Current engines use sequence ID `0`. MTP is text-only. `NGRAM_MAP_K` and
+    `NGRAM_MAP_K4V` can consume a completed MTMD prompt handoff; negative media
+    IDs remain in history, but proposals stop before the first negative ID.
+    DFlash-family
+    embedding-batch support is a lower-level capability and does not establish
+    general MTMD chat support. See the [support boundaries](../modules/LlamaSpeculative.md#native-draft-positions-and-image-batches).
 
     **Built-in MTP heads**
 
@@ -543,7 +598,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
     MTP and n-gram draft lengths are independent: draft-family engines use `draft_n_max`, while K/K4V use `ngram_size_m`. The implementation keeps the complete `[last_verified_token, draft...]` verification batch together and limits the effective draft length to `n_batch - 1`.
 
-    After a generation, `llm.last_speculative_stats` exposes acceptance, phase timing, checkpoint, rollback, TTFT, and sustained-generation measurements. See [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] for configuration details, supported engines, benchmark commands, and the exact meaning of each statistic.
+    After a generation, `llm.last_speculative_stats` exposes acceptance, phase timing, checkpoint, rollback, TTFT, and sustained-generation measurements. See [Llama Speculative Decoding](../modules/LlamaSpeculative.md) for configuration details, supported engines, benchmark commands, and the exact meaning of each statistic.
 
 4. **Dynamic LoRA Routing**:
 
@@ -576,7 +631,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
    `HybridCheckpointCache` supports two checkpoint storage modes:
 
-   - **Host checkpoint mode** (`checkpoint_on_device=False`, default): checkpoint payloads are serialized into Python-owned bytes. This supports multiple historical checkpoints per `seq_id`, which is useful for multi-turn reuse and deeper rollback history.
+   - **Host checkpoint mode** (`checkpoint_on_device=False`, default): checkpoint payloads are serialized into Python-owned bytes. Multiple historical checkpoints per `seq_id` may coexist, but their attention prefixes must remain valid in the live context; these are partial snapshots, not independent full-context copies.
    - **Device checkpoint mode** (`checkpoint_on_device=True`): checkpoint tensor payloads are stored in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Python only keeps the host-visible serialized portion. This reduces device-to-host tensor copy overhead, but only one active checkpoint per `seq_id` is safe because device payloads are keyed by `seq_id`.
 
    These prompt-cache checkpoints are distinct from the native recurrent snapshots used by MTP speculative decoding. MTP reserves recurrent snapshot slots from `draft_n_max`. N-gram engines do not own a native draft context, so rejection on a Hybrid/Recurrent target depends on `HybridCheckpointCache`; keep `ctx_checkpoints` greater than zero for that combination, preferably with on-device storage.
@@ -853,6 +908,12 @@ the model documentation requires a specific sequence pooling strategy.
 `LLAMA_POOLING_TYPE_NONE` is token-level output and should not be used when one
 vector per input document is expected.
 
+Embedding requests reset existing generation, output, checkpoint, and draft
+state before decoding. Cleanup runs on success and on exceptions after execution
+begins. Outputs are copied before native memory is cleared; callers may retain
+the returned vectors. Do not interleave embedding requests with an active
+stream on the same instance.
+
 ### `create_embedding(input, model=None, normalize=False, truncate=True)`
 
 Wrap sequence or token-level embedding output in an OpenAI-compatible response:
@@ -906,7 +967,7 @@ for formatting query/document pairs.
 * [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
 * [[Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
 * [[Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
-* [[Llama Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaSpeculative.md)] - Configuring stateful MTP, DFlash, DFlash2, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
+* [Llama Speculative Decoding](../modules/LlamaSpeculative.md) - Configuring stateful MTP, DFlash, DFlash2, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
 * [[llama.cpp ctypes Bindings](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCppBindings.md)] - Source pointers for the low-level llama.cpp and ggml bindings.
 * [[DFlash2 Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md)] - Runnable Qwen3.8 DFlash2 configuration, validation, benchmark, and tuning workflow.
 * [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).

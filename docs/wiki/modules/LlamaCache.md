@@ -2,7 +2,7 @@
 title: Llama Cache
 module_name: llama_cpp.llama_cache
 source_file: llama_cpp/llama_cache.py
-last_updated: 2026-05-06
+last_updated: 2026-09-17
 version_target: "latest"
 ---
 
@@ -30,13 +30,13 @@ The public compatibility alias is:
 
 ```python
 LlamaCache = LlamaTrieCache
-````
+```
 
 This means that code importing `LlamaCache` receives the trie-based cache implementation.
 
 Defined in: `llama_cpp/llama_cache.py`
 
-Related pages: [[Llama]], [[Caching]], [[State Save Load]], [[Hybrid Models]]
+Related pages: [Llama](../core/Llama.md), [Caching and state reuse](../features/caching.md).
 
 ---
 
@@ -55,7 +55,7 @@ There are two main caching strategies:
    * `LlamaTrieCache`
    * `LlamaCache`
 
-   These caches map token sequences to `llama_core.LlamaState` objects. When queried, they do not require an exact match. Instead, they return the state associated with the longest cached token prefix.
+   These caches map token sequences to `llama_core.LlamaState` objects. RAM and disk lookup select the cached key with the longest nonempty common prefix, even if that key later diverges from the query. Trie lookup requires the complete cached key to be a prefix of the query. All return the stored snapshot without truncating it.
 
 2. **Hybrid / recurrent checkpoint caching**
 
@@ -83,9 +83,9 @@ There are two main caching strategies:
 
 ---
 
-# `BaseLlamaCache`
+## `BaseLlamaCache`
 
-## Overview
+### Overview
 
 `BaseLlamaCache` is the abstract base class for llama.cpp cache implementations.
 
@@ -102,7 +102,7 @@ Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 `BaseLlamaCache` acts as the shared contract for cache implementations used by higher-level llama-cpp-python runtime code.
 
@@ -115,7 +115,7 @@ It is not intended to be used directly. Users should instantiate one of the conc
 
 ---
 
-## Constructor: `__init__`
+### Constructor: `__init__`
 
 ```python
 def __init__(self, capacity_bytes: int = (2 << 30)):
@@ -128,7 +128,7 @@ def __init__(self, capacity_bytes: int = (2 << 30)):
 
 ---
 
-## Instance Variables
+### Instance Variables
 
 | Name             | Type  | Description                                                                                                  |
 | ---------------- | ----- | ------------------------------------------------------------------------------------------------------------ |
@@ -136,9 +136,9 @@ def __init__(self, capacity_bytes: int = (2 << 30)):
 
 ---
 
-## Properties
+### Properties
 
-### `cache_size`
+#### `cache_size`
 
 ```python
 @property
@@ -153,9 +153,9 @@ Concrete implementations define how this value is calculated.
 
 ---
 
-## Core Methods
+### Core Methods
 
-### `_find_longest_prefix_key`
+#### `_find_longest_prefix_key`
 
 ```python
 def _find_longest_prefix_key(
@@ -173,7 +173,7 @@ Concrete subclasses may override it.
 
 ---
 
-### `__getitem__`
+#### `__getitem__`
 
 ```python
 @abstractmethod
@@ -187,7 +187,7 @@ The expected behavior is longest-prefix matching rather than strict exact-key lo
 
 ---
 
-### `__contains__`
+#### `__contains__`
 
 ```python
 @abstractmethod
@@ -199,7 +199,7 @@ Returns whether the cache contains a matching token prefix for the given key.
 
 ---
 
-### `__setitem__`
+#### `__setitem__`
 
 ```python
 @abstractmethod
@@ -215,19 +215,19 @@ Stores a `LlamaState` under a token sequence.
 
 ---
 
-# `LlamaRAMCache`
+## `LlamaRAMCache`
 
-## Overview
+### Overview
 
 `LlamaRAMCache` is an in-memory cache for `llama_core.LlamaState` objects.
 
-It stores token sequences in an `OrderedDict` and maintains an LRU eviction policy. Lookup is based on the longest cached token prefix.
+It stores token sequences in an `OrderedDict` and maintains an LRU eviction policy. Lookup selects the cached key with the longest nonempty common prefix with the query; the key need not be wholly contained in the query.
 
 Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 `LlamaRAMCache` is useful when users want fast in-process caching without writing state to disk.
 
@@ -235,7 +235,7 @@ It keeps all cached states in Python memory. This makes retrieval simple, but me
 
 ---
 
-## Constructor: `__init__`
+### Constructor: `__init__`
 
 ```python
 def __init__(self, capacity_bytes: int = (2 << 30), verbose: bool = False):
@@ -249,7 +249,7 @@ def __init__(self, capacity_bytes: int = (2 << 30), verbose: bool = False):
 
 ---
 
-## Instance Variables
+### Instance Variables
 
 | Name             | Type                                                  | Description                                                                                                     |
 | ---------------- | ----------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
@@ -260,9 +260,9 @@ def __init__(self, capacity_bytes: int = (2 << 30), verbose: bool = False):
 
 ---
 
-## Properties
+### Properties
 
-### `cache_size`
+#### `cache_size`
 
 ```python
 @property
@@ -274,9 +274,9 @@ Returns the current tracked memory usage of the cache in bytes.
 
 ---
 
-## Core Methods
+### Core Methods
 
-### `_find_longest_prefix_key`
+#### `_find_longest_prefix_key`
 
 ```python
 def _find_longest_prefix_key(
@@ -294,7 +294,7 @@ This implementation scans every key in `cache_state` and calls:
 llama_core.Llama.longest_token_prefix(k, key, self.verbose)
 ```
 
-### Complexity
+#### Complexity
 
 | Operation     | Complexity |
 | ------------- | ---------: |
@@ -309,7 +309,7 @@ Where:
 
 ---
 
-### `__getitem__`
+#### `__getitem__`
 
 ```python
 def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
@@ -322,14 +322,14 @@ Behavior:
 
 1. Raises `KeyError("Cache is empty")` if the cache has no entries.
 2. Converts the input key to a tuple.
-3. Finds the longest cached prefix.
+3. Finds the cached key with the longest nonempty common prefix.
 4. Raises `KeyError("Key not found")` if no matching prefix exists.
 5. Moves the matched key to the end of `cache_state` to mark it as recently used.
 6. Returns the matched `LlamaState`.
 
 ---
 
-### `__contains__`
+#### `__contains__`
 
 ```python
 def __contains__(self, key: Sequence[int]) -> bool:
@@ -342,7 +342,7 @@ Returns `False` if the cache is empty.
 
 ---
 
-### `__setitem__`
+#### `__setitem__`
 
 ```python
 def __setitem__(self, key: Sequence[int], value: "llama_core.LlamaState"):
@@ -356,7 +356,7 @@ Behavior:
 1. Converts `key` to a tuple.
 2. If the key already exists, deletes the old entry.
 3. Inserts the new `LlamaState`.
-4. Adds `value.llama_state_size` to `_current_size`.
+4. Adds `value.nbytes` to `_current_size`, falling back to `value.llama_state_size` for legacy state objects.
 5. Evicts least-recently-used entries while `_current_size > capacity_bytes`.
 6. Resets `_current_size` to `0` if the cache becomes empty.
 
@@ -364,7 +364,7 @@ Behavior:
 
 ---
 
-## Example
+### Example
 
 ```python
 from llama_cpp import Llama
@@ -382,7 +382,7 @@ print(response["choices"][0]["text"])
 
 ---
 
-## Best Practices
+### Best Practices
 
 * Use `LlamaRAMCache` when cache speed is more important than persistence.
 * Keep `capacity_bytes` below available system memory.
@@ -391,19 +391,19 @@ print(response["choices"][0]["text"])
 
 ---
 
-# `LlamaDiskCache`
+## `LlamaDiskCache`
 
-## Overview
+### Overview
 
 `LlamaDiskCache` is a disk-backed cache for `llama_core.LlamaState` objects.
 
-It delegates storage, size limits, and LRU-style eviction behavior to the external `diskcache` library.
+It delegates storage, size limits, and eviction behavior to the external `diskcache` library without explicitly selecting an eviction policy.
 
 Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 `LlamaDiskCache` is useful when cached model states should persist beyond the current Python process or when RAM usage should be limited.
 
@@ -411,7 +411,7 @@ Compared with `LlamaRAMCache`, it may reduce memory pressure but can be slower d
 
 ---
 
-## Constructor: `__init__`
+### Constructor: `__init__`
 
 ```python
 def __init__(
@@ -431,7 +431,7 @@ def __init__(
 
 ---
 
-## Instance Variables
+### Instance Variables
 
 | Name             | Type              | Description                                                                  |
 | ---------------- | ----------------- | ---------------------------------------------------------------------------- |
@@ -442,9 +442,9 @@ def __init__(
 
 ---
 
-## Properties
+### Properties
 
-### `cache_size`
+#### `cache_size`
 
 ```python
 @property
@@ -456,9 +456,9 @@ Returns the current disk cache volume in bytes using `diskcache.Cache.volume()`.
 
 ---
 
-## Core Methods
+### Core Methods
 
-### `_find_longest_prefix_key`
+#### `_find_longest_prefix_key`
 
 ```python
 def _find_longest_prefix_key(
@@ -477,7 +477,7 @@ Behavior:
 3. Uses `llama_core.Llama.longest_token_prefix(k, key, self.verbose)` to compare each cached key.
 4. Stops early if a perfect match is found.
 
-### Complexity
+#### Complexity
 
 | Operation              |                            Complexity |
 | ---------------------- | ------------------------------------: |
@@ -487,7 +487,7 @@ Behavior:
 
 ---
 
-### `__getitem__`
+#### `__getitem__`
 
 ```python
 def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
@@ -505,11 +505,11 @@ Behavior:
 5. Raises `KeyError("Key not found")` if no match exists.
 6. Reads and returns the cached `LlamaState`.
 
-The implementation notes that this read is non-destructive and automatically updates access time for LRU behavior through `diskcache`.
+The read is non-destructive. Access tracking and eviction follow the effective `diskcache` settings; this wrapper does not explicitly enable an LRU policy.
 
 ---
 
-### `__contains__`
+#### `__contains__`
 
 ```python
 def __contains__(self, key: Sequence[int]) -> bool:
@@ -520,7 +520,7 @@ Returns whether the cache has any longest-prefix match for the given token seque
 
 ---
 
-### `__setitem__`
+#### `__setitem__`
 
 ```python
 def __setitem__(self, key: Sequence[int], value: "llama_core.LlamaState"):
@@ -539,7 +539,7 @@ Behavior:
 
 ---
 
-## Example
+### Example
 
 ```python
 from llama_cpp import Llama
@@ -562,7 +562,7 @@ print(response["choices"][0]["text"])
 
 ---
 
-## Best Practices
+### Best Practices
 
 * Use `LlamaDiskCache` when cache persistence is useful.
 * Place `cache_dir` on a fast local SSD when possible.
@@ -571,7 +571,7 @@ print(response["choices"][0]["text"])
 
 ---
 
-## Common Pitfalls
+### Common Pitfalls
 
 * Disk-backed caching can be slower than RAM caching.
 * The cache depends on the third-party `diskcache` package.
@@ -580,9 +580,9 @@ print(response["choices"][0]["text"])
 
 ---
 
-# `TrieNode`
+## `TrieNode`
 
-## Overview
+### Overview
 
 `TrieNode` is an internal helper class used by `LlamaTrieCache`.
 
@@ -592,7 +592,7 @@ Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 `TrieNode` is not intended to be used directly by users.
 
@@ -603,7 +603,7 @@ It stores:
 
 ---
 
-## Constructor: `__init__`
+### Constructor: `__init__`
 
 ```python
 def __init__(self):
@@ -614,7 +614,7 @@ The constructor takes no parameters.
 
 ---
 
-## Instance Variables
+### Instance Variables
 
 | Name       | Type                              | Description                                                                               |
 | ---------- | --------------------------------- | ----------------------------------------------------------------------------------------- |
@@ -623,9 +623,9 @@ The constructor takes no parameters.
 
 ---
 
-# `LlamaTrieCache`
+## `LlamaTrieCache`
 
-## Overview
+### Overview
 
 `LlamaTrieCache` is a trie-based cache implementation for `llama_core.LlamaState` objects.
 
@@ -635,7 +635,7 @@ Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 `LlamaTrieCache` is the preferred cache implementation for efficient prefix lookup.
 
@@ -653,7 +653,7 @@ LlamaCache = LlamaTrieCache
 
 ---
 
-## Constructor: `__init__`
+### Constructor: `__init__`
 
 ```python
 def __init__(self, capacity_bytes: int = (2 << 30)):
@@ -666,7 +666,7 @@ def __init__(self, capacity_bytes: int = (2 << 30)):
 
 ---
 
-## Instance Variables
+### Instance Variables
 
 | Name             | Type                                     | Description                                                                       |
 | ---------------- | ---------------------------------------- | --------------------------------------------------------------------------------- |
@@ -677,9 +677,9 @@ def __init__(self, capacity_bytes: int = (2 << 30)):
 
 ---
 
-## Properties
+### Properties
 
-### `cache_size`
+#### `cache_size`
 
 ```python
 @property
@@ -693,9 +693,9 @@ This is an `O(1)` operation.
 
 ---
 
-## Core Methods
+### Core Methods
 
-### `_find_longest_prefix_node`
+#### `_find_longest_prefix_node`
 
 ```python
 def _find_longest_prefix_node(
@@ -717,7 +717,7 @@ The first item is the matching trie node.
 
 The second item is the matching cached key.
 
-### Behavior
+#### Behavior
 
 1. Starts at the root node.
 2. Checks whether the empty prefix has a cached state.
@@ -725,7 +725,7 @@ The second item is the matching cached key.
 4. Updates the best match each time it reaches a node with a stored state.
 5. Stops when the token path no longer exists.
 
-### Complexity
+#### Complexity
 
 | Operation     | Complexity |
 | ------------- | ---------: |
@@ -735,7 +735,7 @@ Where `K` is the length of the requested token sequence.
 
 ---
 
-### `__getitem__`
+#### `__getitem__`
 
 ```python
 def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
@@ -754,7 +754,7 @@ Behavior:
 
 ---
 
-### `__contains__`
+#### `__contains__`
 
 ```python
 def __contains__(self, key: Sequence[int]) -> bool:
@@ -767,7 +767,7 @@ This lookup is `O(K)`.
 
 ---
 
-### `_prune`
+#### `_prune`
 
 ```python
 def _prune(self, key: Tuple[int, ...]):
@@ -788,7 +788,7 @@ Behavior:
 
 ---
 
-### `__setitem__`
+#### `__setitem__`
 
 ```python
 def __setitem__(self, key: Sequence[int], value: "llama_core.LlamaState"):
@@ -803,13 +803,13 @@ Behavior:
 2. Creates trie nodes for each token if needed.
 3. If the terminal node already has a state, subtracts the old state size.
 4. Stores the new state.
-5. Adds `value.llama_state_size` to `_current_size`.
+5. Adds `value.nbytes` to `_current_size`, falling back to `value.llama_state_size` for legacy state objects.
 6. Updates `lru_tracker`.
 7. Evicts least-recently-used items while `_current_size > capacity_bytes`.
 
 ---
 
-## Example
+### Example
 
 ```python
 from llama_cpp import Llama
@@ -829,7 +829,7 @@ Because `LlamaCache` is an alias for `LlamaTrieCache`, this example uses the tri
 
 ---
 
-## Performance Characteristics
+### Performance Characteristics
 
 | Cache            | Prefix Lookup |             LRU Tracking | Storage |
 | ---------------- | ------------: | -----------------------: | ------- |
@@ -844,7 +844,7 @@ Where:
 
 ---
 
-## Best Practices
+### Best Practices
 
 * Prefer `LlamaCache` for general use, because it currently aliases `LlamaTrieCache`.
 * Use `LlamaTrieCache` directly when you want explicit control over the cache implementation.
@@ -853,18 +853,18 @@ Where:
 
 ---
 
-## Common Pitfalls
+### Common Pitfalls
 
 * The cache still stores full `LlamaState` objects, which may be large.
-* `capacity_bytes` is based on `value.llama_state_size`; this assumes each stored state reports its size accurately.
+* RAM and trie capacity accounting uses `LlamaState.nbytes`: native state bytes plus owned token, score, and last-logit arrays. It excludes Python object and container overhead. Legacy objects fall back to `llama_state_size`. Disk usage instead comes from `diskcache.Cache.volume()`.
 * `TrieNode` is internal and should not be manipulated directly.
 * Eviction removes entries from both `lru_tracker` and the trie.
 
 ---
 
-# `LlamaCache`
+## `LlamaCache`
 
-## Overview
+### Overview
 
 `LlamaCache` is a backward-compatible alias for `LlamaTrieCache`.
 
@@ -876,7 +876,7 @@ This means users can import `LlamaCache` and receive the trie-based implementati
 
 ---
 
-## Example
+### Example
 
 ```python
 from llama_cpp import Llama
@@ -892,7 +892,7 @@ llm = Llama(
 
 ---
 
-## Migration Notes
+### Migration Notes
 
 Older code may expect `LlamaCache` to refer to another cache implementation.
 
@@ -906,9 +906,9 @@ from llama_cpp.llama_cache import LlamaTrieCache as LlamaCache
 
 ---
 
-# `HybridCheckpoint`
+## `HybridCheckpoint`
 
-## Overview
+### Overview
 
 `HybridCheckpoint` is a dataclass representing one saved snapshot of a Hybrid or Recurrent model state.
 
@@ -918,7 +918,7 @@ Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 Hybrid or recurrent models may require sequence-state rollback rather than standard KV-cache truncation.
 
@@ -926,12 +926,12 @@ Hybrid or recurrent models may require sequence-state rollback rather than stand
 
 Its `data` field has different ownership semantics depending on the cache mode:
 
-* In host mode (`on_device=False`), `data` contains the full host-side serialized checkpoint state.
+* In host mode (`on_device=False`), `data` owns the host-serialized partial checkpoint; the attention prefix remains in the live context.
 * In device mode (`on_device=True`), `data` contains only the host-visible serialized portion. The large tensor payload is stored in `llama_context`-owned device buffers by llama.cpp, keyed by `seq_id`.
 
 ---
 
-## Dataclass Definition
+### Dataclass Definition
 
 ```python
 @dataclass
@@ -943,16 +943,16 @@ class HybridCheckpoint:
     seq_id: int
     pos_min: int = -1
     pos_max: Optional[int] = None
-````
+```
 
 ---
 
-## Fields
+### Fields
 
 | Field      | Type    | Description                                                                                                                                 |
 | ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `pos`      | `int`   | Token position where this checkpoint was taken.                                                                                             |
-| `data`     | `bytes` | Serialized checkpoint payload visible to Python. In host mode this is the full state; in device mode this is only the host-visible portion. |
+| `data`     | `bytes` | Serialized checkpoint payload visible to Python. In host mode this is the serialized partial state; in device mode this is only the host-visible portion. |
 | `hash_val` | `str`   | SHA-256 hash prefix used to verify exact token-prefix matching.                                                                             |
 | `size`     | `int`   | Number of bytes written by `llama_state_seq_get_data_ext`.                                                                                  |
 | `seq_id`   | `int`   | Sequence id used by llama.cpp sequence-state APIs.                                                                                          |
@@ -961,7 +961,7 @@ class HybridCheckpoint:
 
 ---
 
-## Notes
+### Notes
 
 `HybridCheckpoint` objects are normally created by `HybridCheckpointCache.save_checkpoint`.
 
@@ -971,9 +971,9 @@ In device mode, old `HybridCheckpoint` Python objects may become stale if a newe
 
 ---
 
-# `HybridCheckpointCache`
+## `HybridCheckpointCache`
 
-## Overview
+### Overview
 
 `HybridCheckpointCache` manages Hybrid/Recurrent model state checkpoints.
 
@@ -983,8 +983,8 @@ The cache supports two operating modes:
 
 1. **Host mode** (`on_device=False`)
 
-   * Full checkpoint payloads are materialized as Python-owned `bytes`.
-   * Multiple historical checkpoints per `seq_id` are safe.
+   * Partial checkpoint payloads are materialized as Python-owned `bytes`.
+   * Multiple historical checkpoints per `seq_id` can coexist while their native prefixes remain valid.
    * This is the default mode and is useful for multi-turn rollback or deeper prefix reuse.
 
 2. **Device mode** (`on_device=True`)
@@ -999,7 +999,7 @@ Defined in: `llama_cpp/llama_cache.py`
 
 ---
 
-## Role in the API
+### Role in the API
 
 `HybridCheckpointCache` is a specialized cache manager for Hybrid/Recurrent model rollback.
 
@@ -1015,7 +1015,7 @@ It is not a drop-in replacement for `LlamaRAMCache`, `LlamaDiskCache`, or `Llama
 
 ---
 
-## Constructor: `__init__`
+### Constructor: `__init__`
 
 ```python
 def __init__(
@@ -1037,7 +1037,7 @@ def __init__(
 
 ---
 
-## Constructor Behavior
+### Constructor Behavior
 
 The constructor raises `ValueError` if `ctx` is `None`.
 
@@ -1047,7 +1047,7 @@ When `on_device=True`, the cache forwards `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE` to l
 
 ---
 
-## Instance Variables
+### Instance Variables
 
 | Name              | Type                            | Description                                                                                                                                                   |
 | ----------------- | ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -1064,9 +1064,9 @@ When `on_device=True`, the cache forwards `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE` to l
 
 ---
 
-## Properties
+### Properties
 
-### `cache_size`
+#### `cache_size`
 
 ```python
 @property
@@ -1082,9 +1082,9 @@ In device mode, this reports only the host-visible portion returned by llama.cpp
 
 ---
 
-## Core Methods
+### Core Methods
 
-### `clear`
+#### `clear`
 
 ```python
 def clear(self):
@@ -1105,7 +1105,7 @@ HybridCheckpointCache(clear): cleared
 
 ---
 
-### `close`
+#### `close`
 
 ```python
 def close(self):
@@ -1124,7 +1124,7 @@ This method does not free the llama.cpp context itself, because the context is b
 
 ---
 
-### `__del__`
+#### `__del__`
 
 ```python
 def __del__(self) -> None:
@@ -1135,7 +1135,7 @@ Finalizer that calls `close`.
 
 ---
 
-### `_hash_prefix`
+#### `_hash_prefix`
 
 ```python
 def _hash_prefix(self, tokens: List[int], length: int) -> str:
@@ -1156,28 +1156,28 @@ This hash is used to ensure checkpoints are restored only when the token prefix 
 
 ---
 
-### `_replace_checkpoint_for_seq_id`
+#### Context mutation and checkpoint lifetime
 
-```python
-def _replace_checkpoint_for_seq_id(self, seq_id: int) -> None:
-    ...
-```
+`Llama` registers its hybrid cache with the owning `LlamaContext` through weak
+references. This registration neither keeps a discarded cache alive nor extends
+the native context's lifetime. Closing the context closes its registered caches
+before freeing native resources.
 
-Removes all Python-side checkpoint entries for one `seq_id`.
+Wrapped memory clears and state loads invalidate affected checkpoints. Sequence
+removal preserves an earlier checkpoint only when its recorded native range is
+strictly before the removed suffix; shifts, copies, and sequence retention also
+invalidate affected entries. Device capture invalidates older device snapshots
+for the same sequence across registered caches before overwriting the slot.
 
-This is required in device mode because llama.cpp stores the device tensor payload per `seq_id`, not per Python checkpoint object. Keeping multiple checkpoint metadata entries for the same `seq_id` would be unsafe.
-
-Behavior:
-
-1. Iterates over all checkpoint entries.
-2. Removes entries whose `seq_id` matches the requested `seq_id`.
-3. Preserves entries for other sequence ids.
-4. Subtracts removed checkpoint sizes from `_current_size`.
-5. Clamps `_current_size` to `0` if needed.
+These notifications cover registered caches on the same context. Raw C API
+calls, automatic SWA eviction, and dependencies on another context's shared KV
+memory are not automatically tracked. Advanced callers performing these
+operations must coordinate cache invalidation themselves. A cache constructed
+from a raw context pointer is not automatically registered.
 
 ---
 
-### `_evict_checkpoints_if_needed`
+#### `_evict_checkpoints_if_needed`
 
 ```python
 def _evict_checkpoints_if_needed(self) -> None:
@@ -1200,7 +1200,7 @@ Behavior:
 
 ---
 
-### `find_best_checkpoint`
+#### `find_best_checkpoint`
 
 ```python
 def find_best_checkpoint(
@@ -1231,7 +1231,7 @@ Behavior:
 
 ---
 
-### `save_checkpoint`
+#### `save_checkpoint`
 
 ```python
 def save_checkpoint(
@@ -1253,10 +1253,10 @@ Returns `False` if:
 * The backend reports state size `0`.
 * State extraction writes an unexpected number of bytes.
 
-### Behavior
+#### Behavior
 
 1. Returns immediately if `max_checkpoints <= 0`.
-2. In device mode, removes old Python-side checkpoint metadata for the same `seq_id`.
+2. In device mode, invalidates older device checkpoints for the same `seq_id`, including those in other registered caches on this context.
 3. Uses `_flags` to select partial-only state serialization, optionally with `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`.
 4. Calls `_get_size_ext` to query the required host-visible buffer size.
 5. Allocates a `ctypes.c_uint8` buffer.
@@ -1267,7 +1267,7 @@ Returns `False` if:
 10. Increments `_current_size`.
 11. Evicts old checkpoint entries using FIFO order if the number of entries exceeds `max_checkpoints`.
 
-### Important Performance Note
+#### Important Performance Note
 
 The implementation intentionally bypasses checkpoint extraction when `max_checkpoints <= 0`.
 
@@ -1277,7 +1277,7 @@ When `on_device=True`, llama.cpp may keep large tensor payloads in context-owned
 
 ---
 
-### `restore_checkpoint`
+#### `restore_checkpoint`
 
 ```python
 def restore_checkpoint(
@@ -1295,41 +1295,48 @@ Returns `True` if restoration succeeds.
 Returns `False` if:
 
 * The checkpoint sequence id does not match the requested `seq_id`.
-* `on_device=True` and the checkpoint object is no longer tracked by this cache.
+* The cache is closed, or the exact checkpoint object is no longer tracked by it, in either host or device mode.
 * The current backend state size differs from the checkpoint size.
 * The backend does not report the expected number of restored bytes.
 * The backend cannot remove the memory suffix after the restored native `pos_max`.
 
-### Behavior
+#### Behavior
 
 1. Verifies `cp.seq_id == seq_id`.
-2. In device mode, rejects stale checkpoint objects that are no longer tracked by this cache.
+2. Rejects a closed cache or a checkpoint whose object identity is absent from its registry.
 3. Queries current expected host-visible state size from the backend.
 4. Verifies it matches `cp.size`.
 5. Copies checkpoint bytes into a ctypes buffer.
 6. Calls `_set_data_ext` to restore the state.
 7. Removes the remaining attention-memory suffix beginning at `cp.pos_max + 1`.
-8. Returns whether both state restoration and suffix removal succeeded.
+8. On success, invalidates checkpoints at or beyond the restored suffix across registered caches on the same context.
+9. If native restoration or suffix removal fails, invalidates affected sequence checkpoints because native state may already have changed. Exceptions from these operations are propagated. Preliminary rejection in steps 1–4 does not invalidate current checkpoints.
+10. Returns whether both state restoration and suffix removal succeeded. High-level callers reset or rebuild after failure.
 
 The native memory range is stored separately from `pos` because token counts do not
 always map one-to-one to backend positions, notably for multimodal inputs, custom
 position IDs, and SWA models.
 
-### Stale Checkpoint Guard
+#### Stale Checkpoint Guard
 
 In device mode, Python does not own the full checkpoint tensor payload. The large tensor payload is stored inside `llama_context` device buffers keyed by `seq_id`.
 
 If a newer checkpoint is saved for the same `seq_id`, an older `HybridCheckpoint` Python object may still exist outside the cache, but its device-side tensor payload may have been overwritten.
 
-For this reason, `restore_checkpoint` refuses on-device checkpoint objects that are no longer tracked by the cache. This avoids restoring old Python metadata together with newer device tensors.
+Host checkpoints also depend on attention memory that remains in the live
+context: they use `PARTIAL_ONLY`, not a complete `LlamaState` snapshot.
+`restore_checkpoint` therefore requires the exact object to remain registered
+in both modes. Retaining a Python reference does not preserve its validity after
+clear, eviction, invalidation, or closure. Matching serialized sizes alone does
+not establish that the required prefix is still available.
 
 ---
 
-## Disabled Dictionary Interface
+### Disabled Dictionary Interface
 
 `HybridCheckpointCache` inherits from `BaseLlamaCache`, but it intentionally disables the dictionary-style methods.
 
-### `__getitem__`
+#### `__getitem__`
 
 ```python
 def __getitem__(self, key):
@@ -1338,7 +1345,7 @@ def __getitem__(self, key):
     )
 ```
 
-### `__setitem__`
+#### `__setitem__`
 
 ```python
 def __setitem__(self, key, value):
@@ -1347,7 +1354,7 @@ def __setitem__(self, key, value):
     )
 ```
 
-### `__contains__`
+#### `__contains__`
 
 ```python
 def __contains__(self, key):
@@ -1360,7 +1367,7 @@ Users should use checkpoint-specific methods instead.
 
 ---
 
-## Example: Host-backed Checkpoints
+### Example: Host-backed Checkpoints
 
 ```python
 from llama_cpp.llama_cache import HybridCheckpointCache
@@ -1390,11 +1397,11 @@ if saved:
         print("Restored:", restored)
 ```
 
-Host mode stores full serialized checkpoint payloads in Python-owned `bytes`. Multiple historical checkpoints per `seq_id` are safe.
+Host mode owns the serialized partial payload in Python `bytes`. Multiple historical checkpoints per `seq_id` can coexist while their required native prefixes remain valid.
 
 ---
 
-## Example: Device-backed Checkpoints
+### Example: Device-backed Checkpoints
 
 ```python
 from llama_cpp.llama_cache import HybridCheckpointCache
@@ -1432,7 +1439,7 @@ Only one active checkpoint per `seq_id` is safe.
 
 ---
 
-## Best Practices
+### Best Practices
 
 * Use `HybridCheckpointCache` only for Hybrid or recurrent model workflows that require hidden-state rollback.
 * Keep `on_device=False` when you need multiple historical checkpoints for the same `seq_id`.
@@ -1440,18 +1447,18 @@ Only one active checkpoint per `seq_id` is safe.
 * Set `max_checkpoints=0` for single-turn workflows where rollback is not needed.
 * Keep `max_checkpoints` small if checkpoint states are large.
 * Use `find_best_checkpoint` before calling `restore_checkpoint`.
-* Do not hold and restore old on-device `HybridCheckpoint` objects after newer checkpoints have been saved for the same `seq_id`.
+* Do not restore checkpoint objects removed from the cache, even if another Python reference still keeps them alive.
 * Do not use dictionary-style cache access with this class.
 
 ---
 
-## Common Pitfalls
+### Common Pitfalls
 
 * Passing `ctx=None` raises `ValueError`.
 * `max_checkpoints <= 0` disables checkpointing.
 * Restoring a checkpoint with the wrong `seq_id` fails.
 * Restore fails if the current backend state size no longer matches the checkpoint size.
-* In device mode, old `HybridCheckpoint` objects can become stale after a newer checkpoint is saved for the same `seq_id`.
+* Both host and device objects become stale after invalidation or eviction. Device capture additionally overwrites the previous slot for that sequence.
 * In device mode, `cache_size` does not include `llama_context`-owned device tensor storage.
 * `clear()` removes Python-side checkpoint metadata but does not explicitly free llama.cpp-owned device buffers.
 * `close()` detaches internal references; the object should not be reused afterward.
@@ -1459,9 +1466,9 @@ Only one active checkpoint per `seq_id` is safe.
 
 ---
 
-# Module Variables and Constants
+## Module Variables and Constants
 
-## `LlamaCache`
+### `LlamaCache`
 
 ```python
 LlamaCache = LlamaTrieCache
@@ -1485,7 +1492,7 @@ Both refer to the trie-based cache implementation in the current source.
 
 ---
 
-# How the Cache Implementations Compare
+## How the Cache Implementations Compare
 
 | Class                   | Storage |                   Prefix Lookup | Eviction                 | Persistence | Best For                                     |
 | ----------------------- | ------- | ------------------------------: | ------------------------ | ----------: | -------------------------------------------- |
@@ -1496,7 +1503,7 @@ Both refer to the trie-based cache implementation in the current source.
 
 ---
 
-# Recommended Entry Points
+## Recommended Entry Points
 
 For most users:
 
@@ -1522,7 +1529,7 @@ from llama_cpp.llama_cache import HybridCheckpointCache
 
 ---
 
-# Related Links
+## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
+* [Wiki index](../index.md)
+* [Llama](../core/Llama.md)

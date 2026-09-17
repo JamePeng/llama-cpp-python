@@ -5,7 +5,7 @@ source_files:
   - llama_cpp/llama.py
   - llama_cpp/llama_embedding.py
   - llama_cpp/_internals.py
-last_updated: 2026-07-26
+last_updated: 2026-09-17
 version_target: "latest"
 ---
 
@@ -330,6 +330,21 @@ Normalization defaults differ between the two classes:
 
 L2-normalized vectors are convenient for cosine similarity because their dot
 product is their cosine similarity.
+
+### Request lifecycle
+
+Both embedding entry points use `Llama.embed()` for execution. After initial
+configuration and argument validation, starting execution invalidates prior
+generation memory, output mappings, hybrid checkpoints, and
+draft state. A final cleanup resets the context and batch even if decoding or
+output extraction raises. Returned vectors are copied before native memory is
+cleared and remain valid after reuse or closure of the model.
+Errors rejected before execution starts do not trigger this reset.
+
+Use a separate instance when generation state must remain available while
+computing embeddings. Do not call embedding methods during an active generation
+stream on the same instance. The subclass retains its L2 default; sharing the
+implementation does not change the base class's raw-output default.
 
 ### Batch and Context Capacity
 

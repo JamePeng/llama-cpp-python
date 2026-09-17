@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-07-26
+last_updated: 2026-09-17
 version_target: "latest"
 ---
 
@@ -11,7 +11,9 @@ version_target: "latest"
 
 ## Overview
 
-`LlamaEmbedding` is a specialized class for high-performance Text Embedding and Reranking. It inherits from the base `Llama` class but is optimized for vector operations.
+`LlamaEmbedding` provides embedding-oriented defaults and reranking helpers on
+top of `Llama`. Its `embed()` method uses the base implementation while retaining
+L2 normalization as the default.
 
 ### Support Embeddings & Rerank Model:
 
@@ -110,12 +112,14 @@ larger values may require more context resources.
 - `return_count=False`: List of embedding vectors.
 - `return_count=True`: Tuple `(embeddings, token_count)`.
 
-**Internal Logic:**
-1. Determines mode based on `pooling_type`: `LLAMA_POOLING_TYPE_NONE` (token-level), `LLAMA_POOLING_TYPE_RANK` (rerank), or other (sequence-level).
-2. Uses streaming batch decoding to process embeddings in chunks.
-3. For token-level mode, extracts and normalizes per-token vectors.
-4. For sequence-level mode, extracts sequence vectors and normalizes.
-5. Supports `separator` for splitting input into multiple documents.
+**Implementation and lifecycle:**
+
+`LlamaEmbedding.embed()` delegates to [Llama.embed()](../core/Llama.md#embedinput-normalizefalse-truncatetrue-separatornone-return_countfalse).
+It retains the L2 default and treats an empty separator as no splitting. The
+shared implementation packs whole inputs into batches, copies borrowed output
+vectors, and resets generation state before execution and during final cleanup.
+Decode or output-extraction failures cannot leave a reusable partial request.
+Rank output remains unnormalized; returned vectors are independent Python data.
 
 ### `rank(query, documents)`
 

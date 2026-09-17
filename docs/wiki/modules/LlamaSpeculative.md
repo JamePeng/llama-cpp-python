@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-09-05
+last_updated: 2026-09-17
 version_target: "latest"
 ---
 
@@ -19,9 +19,11 @@ New code should pass a `SpecConfig` to `Llama(speculative=...)`. The old
 `Llama(draft_model=...)` callback path and `LlamaDraftModel` are deprecated
 compatibility APIs.
 
-The current engines support one sequence (`seq_id=0`). MTP and n-gram engines
-are text-only. The DFlash family can consume target token or embedding batches
-after the target context has extracted the configured layer inputs.
+The current engines support one sequence (`seq_id=0`). MTP is text-only.
+N-gram engines can use an MTMD-prefilled prompt. Their history retains media IDs,
+but proposed continuations stop before the first negative media ID.
+DFlash-family engines can consume target token or
+embedding batches at the lower level; see the [MTMD boundaries](#native-draft-positions-and-image-batches).
 
 ## Implementation Status
 
@@ -650,6 +652,27 @@ mismatch before drafting: target verification and rollback still use token-based
 positions. The low-level position interface does not by itself enable end-to-end
 multimodal speculative generation.
 
+The MTMD chat handler accepts prefilled prompts for `NGRAM_MAP_K` and
+`NGRAM_MAP_K4V`. Media is evaluated by MTMD first; n-gram history and lookup keys
+retain negative media IDs, while proposals are truncated before the first such
+ID so only vocabulary tokens are drafted. MTP and DFlash-family
+engines are rejected by this handler before prefill starts. Lower-level DFlash
+embedding processing does not override this high-level restriction.
+
+### Draft checkpoint lifetime
+
+MTP and DFlash checkpoints belong to one engine and its current capture.
+Capturing a new checkpoint makes an older capture stale. `clear()`, `close()`,
+and a failure during restoration also invalidate the capture identity. Restoring an old
+checkpoint or one from another engine raises `RuntimeError` before native restore.
+This preliminary rejection does not invalidate the current valid capture.
+The same valid draft-time checkpoint can still be reused during verification.
+
+These transient checkpoints are separate from `HybridCheckpointCache` prompt
+history and from `LlamaState`. A complete target snapshot does not include draft
+hidden states, pending features, or sampler progression. See
+[state restoration](../core/Llama.md#save_state-and-load_statestate).
+
 ### Prefix-cache reuse and `reset`
 
 `HybridCheckpointCache` currently saves and restores only the target context.
@@ -663,8 +686,10 @@ enabled, the current implementation instead clears the target and engine state
 together before prompt evaluation. Restoring only the target cache without a
 matching draft checkpoint could leave the two contexts misaligned. Consequently,
 cross-request longest-prefix reuse is not currently available while speculative
-decoding is enabled; this safety behavior is separate from the checkpoint and
-rollback operations used successfully inside one speculative generation.
+decoding is enabled through ordinary text generation. An explicit MTMD prefill
+handoff follows its own path and preserves the already evaluated prompt for
+supported n-gram engines. These behaviors are separate from checkpoints and
+rollback inside one speculative generation.
 
 Do not use `reset=False` as a cache-reuse workaround. It blindly appends the
 provided tokens to the existing context instead of performing prefix matching.
@@ -673,8 +698,7 @@ strictly new suffix tokens. Supporting general prefix reuse requires a coupled
 checkpoint containing both the target state and the corresponding speculative
 state.
 
-* MTP and n-gram engines are text-only. DFlash-family engines accept target
-  embedding batches, but end-to-end multimodal model coverage is still limited.
+* MTP is text-only; MTMD-prefilled generation supports n-gram engines. DFlash-family embedding support remains a lower-level capability.
 * Current engines support only `seq_id=0`; parallel sequence decoding is not yet
   supported.
 * Speculation still runs target verification. Low acceptance or expensive
