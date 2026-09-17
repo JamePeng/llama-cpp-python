@@ -2208,6 +2208,10 @@ class Llama:
                                     f"remaining {len(tokens)} prompt tokens to eval",
                                     file=sys.stderr,
                                 )
+                    else:
+                        # The live context already ends at the matched prefix.
+                        # Appending the full prompt would evaluate that prefix twice.
+                        tokens = original_tokens[longest_prefix:]
         if reset:
             # No prefix matched at all. Completely clear the KV cache to prevent context poisoning.
             self.reset()
