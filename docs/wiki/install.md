@@ -5,7 +5,7 @@ source_files:
   - README.md
   - vendor/llama.cpp/docs/build.md
   - vendor/llama.cpp/docs/backend/
-last_updated: 2026-09-17
+last_updated: 2026-09-19
 author: JamePeng
 version_target: "latest"
 ---
@@ -182,8 +182,8 @@ build. These options are useful across many backends.
 | `CMAKE_BUILD_TYPE` | `Release`, `Debug` | Selects build type for single-config generators such as Ninja or Unix Makefiles. Release is the normal install choice. |
 | `GGML_NATIVE` | `ON`, `OFF` | Controls whether ggml builds for the current host CPU/GPU. Use `OFF` for more portable wheels; use `ON` for local machine-specific optimization. |
 | `BUILD_SHARED_LIBS` | `ON`, `OFF` | Controls shared versus static native libraries. The Python package normally installs shared runtime libraries. |
-| `GGML_BACKEND_DL` | `ON`, `OFF` | Builds backend libraries so they can be loaded dynamically at runtime when supported by the build. |
-| `GGML_CPU_ALL_VARIANTS` | `ON`, `OFF` | Builds multiple CPU backend variants for x86 feature sets when supported. Useful for portable x64 wheels. |
+| `GGML_BACKEND_DL` | `ON`, `OFF` | Builds backend libraries so they can be loaded dynamically at runtime. Requires `BUILD_SHARED_LIBS=ON`. |
+| `GGML_CPU_ALL_VARIANTS` | `ON`, `OFF` | Builds multiple CPU backend variants for x86 feature sets. Requires `GGML_BACKEND_DL=ON` and is useful for portable x64 wheels. |
 | `GGML_OPENMP` | `ON`, `OFF` | Enables OpenMP CPU parallelism. On Windows, OpenMP runtime DLLs may need to be packaged beside backend DLLs. |
 | `CMAKE_PREFIX_PATH` | path list | Helps CMake find SDKs or libraries installed outside default locations. |
 | `CMAKE_C_COMPILER` / `CMAKE_CXX_COMPILER` | compiler paths or names | Selects compilers, often needed for SYCL, HIP, or custom toolchains. |
@@ -199,7 +199,7 @@ CMAKE_ARGS="-DGGML_CUDA=ON -DGGML_NATIVE=OFF" \
 Example dynamic CPU backend build:
 
 ```bash
-CMAKE_ARGS="-DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF" \
+CMAKE_ARGS="-DBUILD_SHARED_LIBS=ON -DGGML_BACKEND_DL=ON -DGGML_CPU_ALL_VARIANTS=ON -DGGML_NATIVE=OFF" \
   python -m pip install --force-reinstall --no-cache-dir \
   "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
@@ -212,7 +212,7 @@ Choose one backend path that matches your hardware and installed SDKs.
 
 | Backend | Typical CMake option | Notes |
 |---|---|---|
-| CPU only | none | Default portable path. Performance depends on CPU features and build options. |
+| CPU build | No accelerator option; add `-DGGML_METAL=OFF` on macOS | Performance depends on CPU features and build options. Metal is enabled by default on supported macOS builds. |
 | OpenBLAS | `-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=OpenBLAS` | CPU BLAS acceleration for prompt processing and larger batches. |
 | BLIS | `-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=FLAME` | CPU BLAS route using BLIS. |
 | Intel oneMKL | `-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Intel10_64lp` | Intel CPU BLAS route. This is not the Intel GPU path. |
@@ -226,9 +226,15 @@ Choose one backend path that matches your hardware and installed SDKs.
 | CANN | `-DGGML_CANN=ON` | Ascend NPU backend. Requires Ascend drivers and CANN toolkit. |
 | ZenDNN | `-DGGML_ZENDNN=ON` | AMD Zen CPU acceleration, mainly matrix multiplication paths. |
 | zDNN | `-DGGML_ZDNN=ON -DZDNN_ROOT=/path/to/zdnn` | IBM Z / LinuxONE acceleration path. |
+| MUSA | `-DGGML_MUSA=ON` | Moore Threads GPUs; requires the MUSA SDK. |
+| KleidiAI | `-DGGML_CPU_KLEIDIAI=ON` | Arm CPU kernels; valid only for AArch64/arm64 targets. |
+| WebGPU | `-DGGML_WEBGPU=ON` | Requires a compatible Dawn installation. |
+| Hexagon | `-DGGML_HEXAGON=ON` | Qualcomm Hexagon backend with target-specific setup. |
 
-For the full list of backend options, check the upstream llama.cpp build
-documentation and the current `vendor/llama.cpp` source.
+These advanced backends are build options present in the bundled vendor source;
+they are not all exercised by this project's wheel or test matrix. For the full
+list, check the current `vendor/llama.cpp` source first. Upstream `master`
+documents newer work that may not exist in the revision bundled by a release.
 
 ---
 
@@ -251,19 +257,10 @@ $env:CMAKE_ARGS = "-DGGML_CUDA=on"
 python -m pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
-For newer NVIDIA GPUs with compute capability 90 or higher, the README notes
-that Programmatic Dependent Launch can be enabled with:
-
-```bash
--DGGML_CUDA_PDL=ON
-```
-
-Example:
-
-```bash
-CMAKE_ARGS="-DGGML_CUDA=on -DGGML_CUDA_PDL=ON" \
-  python -m pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
-```
+For compatible CUDA toolchains, the backend compiles Programmatic Dependent
+Launch support automatically. On Hopper-class or newer GPUs, leave
+`GGML_CUDA_PDL` unset to allow it, or set `GGML_CUDA_PDL=0` at runtime to
+disable it. It is not a CMake option.
 
 If `nvcc` produces large volumes of non-blocking template warnings, the README
 documents optional CUDA warning suppression:
@@ -305,10 +302,16 @@ Runtime variables that may matter after installation:
 | Variable | Use |
 |---|---|
 | `CUDA_VISIBLE_DEVICES` | Selects or hides CUDA devices for the current process. |
+| `CUDA_SCALE_LAUNCH_QUEUES` | Controls CUDA command-buffer capacity. Upstream suggests testing `4x` for multi-GPU pipeline workloads. |
 | `GGML_CUDA_ENABLE_UNIFIED_MEMORY` | Enables unified-memory fallback on Linux when VRAM is exhausted. On Windows, similar behavior may be controlled by NVIDIA driver settings. |
 | `GGML_CUDA_P2P` | Enables peer-to-peer access between GPUs when driver and hardware support it. |
-| `GGML_CUDA_FORCE_CUBLAS_COMPUTE_32F` | Forces FP32 compute in selected cuBLAS paths, trading speed for numerical headroom. |
-| `GGML_CUDA_FORCE_CUBLAS_COMPUTE_16F` | Forces FP16 compute in selected cuBLAS paths when supported. |
+| `GGML_CUDA_CUBLAS_COMPUTE_TYPE` | Overrides the cuBLAS compute type. Supported values are `auto`, `f16`, `fp16`, `bf16`, `f32`, and `fp32`. |
+| `GGML_CUDA_PDL` | Runtime PDL switch when support was compiled automatically. Unset enables supported launches; `0` disables them. |
+
+CUDA build-time tuning also includes `GGML_CUDA_FORCE_MMQ`,
+`GGML_CUDA_FORCE_CUBLAS`, and `GGML_CUDA_FA_QUANTS`. The last option controls
+which K/V type combinations compile Flash Attention kernels; combinations not
+included fall back to the compiled `f16-f16` path with a warning.
 
 ---
 
@@ -371,8 +374,10 @@ CMAKE_ARGS="-DGGML_METAL=OFF" \
   python -m pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
-At runtime, use `n_gpu_layers=0` when you want CPU inference even though the
-package was built with Metal support.
+At runtime, `n_gpu_layers=0` disables model-layer offload, but llama.cpp may
+still use an available GPU backend for other operations. The Python API does
+not currently expose the CLI's `--device none` selector. Build with
+`GGML_METAL=OFF` when all GPU use must be excluded.
 
 ---
 
@@ -468,14 +473,6 @@ documents a TheRock ROCm workflow that sets `HIP_PATH`, `ROCM_PATH`,
 `HIP_DEVICE_LIB_PATH`, compiler paths, `CMAKE_GENERATOR`, and `CMAKE_ARGS`
 before running `pip install`.
 
-For RDNA3 or CDNA hardware, upstream docs mention optional Flash Attention
-acceleration through rocWMMA:
-
-```bash
-CMAKE_ARGS="-DGGML_HIP=ON -DGPU_TARGETS=gfx1100 -DGGML_HIP_ROCWMMA_FATTN=ON" \
-  python -m pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
-```
-
 Runtime variables that may matter:
 
 | Variable | Use |
@@ -513,7 +510,7 @@ Useful SYCL build options from the upstream backend docs:
 | `GGML_SYCL_GRAPH` | Enables the experimental SYCL graph extension. |
 | `GGML_SYCL_DNN` | Enables oneDNN integration. |
 | `GGML_SYCL_HOST_MEM_FALLBACK` | Allows host-memory fallback when device memory is full, at reduced speed. |
-| `GGML_SYCL_SUPPORT_LEVEL_ZERO` | Enables Level Zero support for Intel GPU memory allocation. |
+| `GGML_SYCL_SUPPORT_LEVEL_ZERO_API` | Builds Level Zero API support for Intel GPU memory allocation. |
 
 Useful SYCL runtime variables:
 
@@ -521,8 +518,9 @@ Useful SYCL runtime variables:
 |---|---|
 | `ONEAPI_DEVICE_SELECTOR` | Selects a SYCL device, such as a specific Level Zero GPU. |
 | `GGML_SYCL_ENABLE_FLASH_ATTN` | Enables or disables Flash Attention in the SYCL backend. |
-| `GGML_SYCL_ENABLE_LEVEL_ZERO` | Uses Level Zero allocation when support was built in. |
-| `GGML_SYCL_DISABLE_DNN` | Disables oneDNN path and uses oneMKL path. |
+| `GGML_SYCL_USE_LEVEL_ZERO_API` | Uses the Level Zero allocation path when build-time support is available. Set to `0` to disable it. |
+| `GGML_SYCL_ENABLE_DNN` | Enables oneDNN at runtime; set to `0` to disable it. |
+| `GGML_SYCL_GET_MEM_API` | Selects Level Zero (`0`) or the legacy SYCL API (`1`) for device-memory information. |
 | `ZES_ENABLE_SYSMAN` | Helps query free GPU memory in some Intel GPU setups. |
 
 ---
@@ -609,6 +607,9 @@ The README notes that newer preview wheels may be built with:
 GGML_BACKEND_DL=ON
 GGML_CPU_ALL_VARIANTS=ON
 ```
+
+This mode also requires `BUILD_SHARED_LIBS=ON`. `GGML_NATIVE=ON` is incompatible
+with the dynamic CPU backend path; use `GGML_NATIVE=OFF` for portable wheels.
 
 In that build mode, CPU backend variants are installed as separate runtime
 libraries under:

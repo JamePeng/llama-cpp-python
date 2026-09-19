@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-09-17
+last_updated: 2026-09-19
 version_target: "latest"
 ---
 
@@ -42,7 +42,7 @@ L2 normalization as the default.
 | `n_ubatch` | int | 512 | Physical batch size. |
 | `n_seq_max` | int | 1 (inherited) | Maximum number of independent sequence IDs available in a decode batch. Increase this for parallel embedding batches. |
 | `pooling_type` | int | `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) | Pooling strategy used by the model: `LLAMA_POOLING_TYPE_RANK` (4) for rerankers, `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) for embeddings. |
-| `n_gpu_layers` | int | 0 | Number of layers offloaded to GPU (0 = CPU only, -1 = all layers). |
+| `n_gpu_layers` | int | 0 | Number of model layers offloaded to GPU. `0` disables layer offload but does not guarantee that every operation avoids an available GPU backend; `-1` uses automatic offload. |
 | `verbose` | bool | True | Whether to print debug information. |
 | `**kwargs` | Any | — | Extra arguments passed to the `Llama` base class (e.g., `n_batch`, `n_ctx`, `verbose`). |
 
