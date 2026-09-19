@@ -7,6 +7,144 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0-Milestone] MTMD Text-to-Speech, Grammar Improvements, and Runtime State Reliability
+
+- feat(tts): add MTMD audio generation for `Qwen3-TTS` and `Pocket TTS`
+    - add `MTMDAudioGenerator` with owned WAV and float32 PCM results
+    - support speaker reference audio and model-specific language and sampling options
+    - expose mmproj Flash Attention configuration independently of the language model
+    - validate generated audio and release resources after failures or cancellation
+    - add a command-line TTS example, a Streamlit playground, and usage guides
+
+- feat(grammar): support custom roots and lazy grammar triggers
+    - expose custom start rules through `LlamaGrammar.from_string()` and `from_file()`
+    - retain immutable regex and token-ID trigger settings on reusable grammar definitions
+    - forward lazy configuration to native sampling and reject lazy mode without triggers
+    - validate grammar inputs and reject sampler operations after closure
+    - keep native grammar state owned by each sampling context
+
+- fix(grammar): align JSON Schema conversion and chat object constraints
+    - preserve caller-owned schemas while resolving references and escaped JSON Pointers
+    - improve empty-schema handling, string and array constraints, integer bounds,
+      regex escapes, and additional-property name exclusions
+    - reject invalid counts and empty unions or enums before generating GBNF
+    - normalize empty `json_object` response schemas to an explicit object schema
+    - treat missing, null, and empty tool parameters as objects with no declared properties
+
+- perf(grammar): reuse optional suffixes and character fragments
+    - build optional property suffixes in reverse order without repeated recursion
+    - cache character ranges and hexadecimal fragments within each schema conversion
+    - reduce duplicate rule lookups while preserving grammar output and property ordering
+    - optimize schema conversion without changing per-token sampling
+    - Local benchmark medians (before -> after):
+        - 20 optional properties: 0.297 ms -> 0.146 ms (2.0x)
+        - 100 optional properties: 4.889 ms -> 0.646 ms (7.6x)
+        - 200 optional properties: 21.689 ms -> 1.339 ms (16.2x)
+        - Unicode properties: 2.429 ms -> 1.387 ms (1.8x)
+        - Repeated regex patterns: 1.548 ms -> 0.731 ms (2.1x)
+        * For 100 optional properties, recursive suffix calls drop from 5,050
+        to zero and rule registration calls drop from 5,152 to 301.
+
+- fix(state): preserve owned snapshots and valid sampling outputs
+    - save committed token data, score arrays, and last logits alongside native state
+    - validate snapshot structure and model/context compatibility before native restoration
+    - restore valid sampling output without relying on borrowed native logits buffers
+    - reject immediate sampling when a restored snapshot has no valid last output
+    - include owned arrays in RAM and trie cache payload accounting
+    - clarify that snapshots do not preserve sampler progression or draft-engine state
+
+- fix(cache): align hybrid checkpoint lifetime with native context changes
+    - register caches with their owning context through weak references
+    - invalidate affected checkpoints after wrapped native memory and state mutations
+    - reject stale checkpoint objects before native restore in both host and device modes
+    - treat partial-state restoration and attention suffix removal as one operation
+    - prune future checkpoints after successful restoration and invalidate affected
+      history when native restoration or suffix removal fails
+    - invalidate overwritten device slots across registered caches on the same context
+    - close registered caches before releasing their native context
+
+- fix(runtime): preserve prompt reuse and coordinate state cleanup
+    - evaluate only the new suffix when an extended prompt matches the entire live context
+    - require a decode suffix when reusing memory-only hybrid checkpoints
+    - update Python token cursors only after successful native rollback
+    - reset uncertain state after fatal decode or generation errors
+    - avoid saving empty hybrid checkpoints after reset or cancellation
+
+- feat(context): add threadpool management and safe native cancellation
+    - expose attachment and detachment of externally owned generation and batch threadpools
+    - retain borrowed threadpool and abort callback references for their required lifetime
+    - connect `Llama.abort()` to the native abort callback
+    - distinguish native decode aborts from fatal errors and reset partially processed state
+    - report `finish_reason="abort"` for cancelled completion and chat responses
+    - handle `KeyboardInterrupt` inside the generation loop as cancellation, with a
+      diagnostic when verbose logging is enabled
+    - prevent aborted requests from being stored in the prompt cache
+
+- fix(speculative): align DFlash execution and draft checkpoint ownership
+    - pass target-layer features directly through the fused DFlash injection path
+    - honor sidecar causal-attention metadata and validate DSpark confidence-head requirements
+    - clamp draft lengths to trained block capacity and replay features on device restore
+    - add explicit draft-position handling and skip repeated-position image embedding batches
+    - reject high-level draft positions inconsistent with target verification
+    - reject MTP and DFlash checkpoints from another engine or an obsolete capture
+    - preserve valid temporary checkpoints during verification and reset fresh speculative
+      text requests with their target context
+
+- fix(multimodal): preserve prefill outputs and recover from partial failures
+    - hand completed MTMD prefill to generation without decoding media ledger IDs as text
+    - support this handoff for n-gram speculation while rejecting unsupported engines
+    - check native sequence removal before changing the Python token ledger
+    - validate media capacity and native output positions before committing prefill progress
+    - reset uncertain state after partial text or media prefill fails
+    - release media resources after preprocessing, submission, tokenization, or logging failures
+    - extract shared initialization and resource ownership into `MTMDBaseHandler`
+    - bind `mtmd_input_part` and `mtmd_tokenize_from_parts` for pre-split media inputs
+
+- refactor(embedding): share execution and generation-state cleanup
+    - delegate `LlamaEmbedding.embed()` to `Llama.embed()` while preserving subclass defaults
+    - reset generation state when embedding execution starts and during final cleanup
+    - reject unsuccessful decode results and copy outputs before native memory is cleared
+    - document normalization modes, pooling, output selection, and batch packing
+
+- refactor(examples): rebuild low-level API examples
+    - use the current model, context, vocabulary, batch, and sampler APIs
+    - share backend discovery, decoding, sampling, and resource lifecycle helpers
+    - refresh generation, chat, reason/action, and quantization command-line examples
+    - expose context, batching, GPU offload, token limits, and native logging options
+    - remove obsolete helper scripts and update the low-level usage guide
+
+- test: consolidate coverage and share pinned models across CI environments
+    - organize coverage into runtime, state, speculation, media, and format modules
+    - retain Qwen2.5 for ordinary Transformer execution and use Qwen3.5-0.8B for
+      hybrid state, MTP, recovery, and image tests with its matching Q8_0 projector
+    - replace test-owned downloads with shared model-path environment variables
+    - skip unconfigured model tests locally and fail when required models are missing in Actions
+    - prepare pinned models once and share one artifact across all six test environments
+
+- docs(wiki): align runtime guides with implemented behavior
+    - document state ownership, restore limits, cache matching, and checkpoint invalidation
+    - clarify speculative and multimodal support boundaries and cancellation cleanup
+    - add caching, Qwen3.5 image chat, grammar, TTS, and runtime troubleshooting guides
+    - refresh wiki navigation, contribution guidance, and development setup
+
+- chore(vendor): update the bundled llama.cpp revision
+    - advance `vendor/llama.cpp` from `9723942` to `60081bb`
+    - include upstream model, backend, allocation-failure, and speculative execution updates
+
+- compatibility: clarify state reuse and multimodal speculation limits
+    - `LlamaState` is not a portable serialization format or an exact stochastic continuation
+    - loading target state with a speculative engine requires a fresh full-prompt request
+      with `reset=True`; target-only snapshots cannot resume draft state
+    - MTMD chat prefill supports `NGRAM_MAP_K` and `NGRAM_MAP_K4V`, but still rejects
+      MTP and DFlash-family engines; lower-level embedding support does not enable them
+    - hybrid cache notifications cover wrapped operations on the owning context, not
+      arbitrary raw C calls, automatic SWA eviction, or cross-context shared-KV changes
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260911
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/34c1bfbce3ad485d31e67039fa9200e6ab49882e...15f95d1d268b8d48e88676af6ef7bfceb5f8e3ab
+
+
 ## [0.3.49] DFlash2 / DFlash / DSpark Speculative Decoding Support, and MTMD Video Support
 
 - feat(speculative): `0-day` Support `DFlash2` selector and M-RoPE execution
