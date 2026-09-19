@@ -8,7 +8,7 @@
 ![GitHub Tag](https://img.shields.io/github/v/tag/JamePeng/llama-cpp-python)
 [![PyPI - License](https://img.shields.io/pypi/l/llama-cpp-python)](https://pypi.org/project/llama-cpp-python/)
 [![PyPI - Downloads](https://static.pepy.tech/badge/llama-cpp-python/month)](https://pepy.tech/projects/llama-cpp-python)
-[![Github All Releases](https://img.shields.io/github/downloads/abetlen/llama-cpp-python/total.svg?label=Github%20Downloads)]()
+[![GitHub Downloads](https://img.shields.io/github/downloads/JamePeng/llama-cpp-python/total.svg?label=GitHub%20Downloads)](https://github.com/JamePeng/llama-cpp-python/releases)
 
 Efficient Python bindings for **ggml-org's** [`llama.cpp`](https://github.com/ggml-org/llama.cpp) library.
 This package provides:
@@ -132,7 +132,7 @@ pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python
 
 **Sanity Checking**  
 Use this line to check if installation was successful before moving further.  
-```python.exe -c "from llama_cpp import Llama; print('llama-cpp import OK')"```
+`python.exe -c "from llama_cpp import Llama; print('llama-cpp import OK')"`
 
 <details>
 <summary>CLI / requirements.txt</summary>
@@ -181,8 +181,11 @@ $env:CMAKE_ARGS = "-DGGML_CUDA=on"
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
-Note: **Programmatic Dependent Launch (PDL)** is a CUDA optimization for newer NVIDIA GPUs (CC >= 90; does not include Ada).
-It enables stream-level dependency-driven concurrent execution of CUDA kernels within the same stream, achieving similar kernel launch overhead reduction as CUDA Graphs. If you have a newer NVIDIA GPU (e.g. `Hoppper`, `Blackwell` and above), you can achieve significant speedups and latency reduction in token generation across nearly all models when compiling with ` -DGGML_CUDA_PDL=ON`.
+**Programmatic Dependent Launch (PDL)** is available on compatible CUDA
+toolkits and Hopper-class or newer GPUs (compute capability 9.0 or later; Ada
+is not included). The bundled backend compiles PDL support automatically when
+the CUDA toolchain supports it. `GGML_CUDA_PDL=0` disables it at runtime;
+leaving the variable unset enables it when the selected kernel supports PDL.
 
 **Pre-built Wheel (New)**
 
@@ -196,7 +199,7 @@ This means CPU backends are shipped as dynamically loaded runtime libraries unde
 
 ```text
 site-packages/llama_cpp/lib
-````
+```
 
 Supported CPU backend variants may include:
 
@@ -293,7 +296,9 @@ On MacOS, Metal is enabled by default(`GGML_METAL=ON`). Using Metal makes the co
 
 To disable the Metal build at compile time use the `CMAKE_ARGS="-DGGML_METAL=OFF"` cmake option.
 
-When built with Metal support, you can explicitly disable GPU inference with the `n-gpu-layers=0` parameter.
+In Python, `n_gpu_layers=0` disables model-layer offload. It does not guarantee
+that every operation avoids the GPU. Build with `GGML_METAL=OFF` when a CPU-only
+Metal-free package is required.
 
 ```bash
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
@@ -414,7 +419,7 @@ SYCL backend supports Intel GPU Family:
 - Intel Built-in Arc GPU
 - Intel iGPU in Core CPU (11th Generation Core CPU and newer, refer to [oneAPI supported GPU](https://www.intel.com/content/www/us/en/developer/articles/system-requirements/intel-oneapi-base-toolkit-system-requirements.html#inpage-nav-1-1)).
 
-On older Intel GPUs, you may try [OpenCL](/docs/backend/OPENCL.md) although the performance is not optimal, and some GPUs may not support OpenCL nor have any GPGPU capabilities.
+For OpenCL backend requirements and configuration, see the bundled [OpenCL guide](vendor/llama.cpp/docs/backend/OPENCL.md).
 
 More Information see here: https://github.com/ggml-org/llama.cpp/blob/master/docs/backend/SYCL.md
 
@@ -480,6 +485,10 @@ For cleaner CI/local logs, you can pass:
 When building wheels with `GGML_BACKEND_DL=ON` and `GGML_CPU_ALL_VARIANTS=ON`,
 GGML CPU backends are built as separate dynamic libraries, such as:
 
+`GGML_BACKEND_DL` requires `BUILD_SHARED_LIBS=ON`, and
+`GGML_CPU_ALL_VARIANTS` requires `GGML_BACKEND_DL=ON`. Use
+`GGML_NATIVE=OFF` for this portable dynamic CPU backend layout.
+
 ```text
 ggml-cpu-x64.dll
 ggml-cpu-haswell.dll
@@ -514,6 +523,7 @@ Without this file, `ggml-cpu-*.dll` may fail to load dynamically at runtime.
 
 * Enable `GGML_BACKEND_DL=ON`
 * Enable `GGML_CPU_ALL_VARIANTS=ON`
+* Enable `BUILD_SHARED_LIBS=ON`
 * Use `GGML_NATIVE=OFF` for portable wheels
 * Install all `ggml-cpu-*` backend libraries into `llama_cpp/lib`
 * Package required runtime dependencies such as `libomp140.x86_64.dll`
@@ -680,7 +690,9 @@ examples, or continue below for advanced features.
 
 `llama-cpp-python` supports native **Assistant Prefill** for seamless message continuation. You can now simply use the `assistant_prefill=True` parameter in the `create_chat_completion` function.
 
-This safely renders the `N-1` conversation history using standard Jinja templates (preserving exact control tokens) and flawlessly appends your partial text directly to the prompt.
+With a compatible chat handler, this appends the final partial assistant message
+to the rendered conversation prompt. The continuation depends on the model and
+chat template.
 
 ```python
 from llama_cpp import Llama
@@ -701,7 +713,7 @@ response = llm.create_chat_completion(
 )
 
 prefilled_text = messages[-1]["content"]
-# The model will flawlessly continue from " Venus\n3. Earth..."
+# Append the generated continuation to the supplied assistant prefix.
 generated_text = response["choices"][0]["message"]["content"]
 
 print(prefilled_text + generated_text)
@@ -715,10 +727,10 @@ Historically, `llama-cpp-python` only supported "static loading" where a LoRA wa
 
 `llama-cpp-python` now supports **Just-In-Time (JIT)** dynamic adapter routing. Instead of statically binding a single LoRA to a model during initialization (which locks the instance to a single task), you can now preload multiple adapters into VRAM and seamlessly apply them on-the-fly per request.
 
-This architecture unlocks true **Multi-Tenant Serving**:
-* **Zero-Latency Switching:** Compute graph weights are atomically modified in C++ memory instantly before evaluation.
-* **VRAM Efficiency:** You only load the heavy base model once. Multiple LoRAs share the same base model memory.
-* **Thread-Safe & Contamination-Free:** Strict internal state debouncing ensures that weights are perfectly cleaned between requests, guaranteeing zero persona contamination.
+Loaded adapters share the base model and can be selected for sequential requests.
+Adapter changes are not guaranteed to be zero-cost, and a `Llama` instance does
+not provide concurrent request isolation. Serialize requests on each instance
+and finish or close a stream before switching adapters.
 
 ### Dynamic LoRA Example
 
@@ -732,13 +744,13 @@ llm = Llama(model_path="path/to/llama-3-8b.gguf")
 llm.load_lora("python_coder", "path/to/python-coder-lora.gguf")
 llm.load_lora("translator", "path/to/spanish-translator-lora.gguf")
 
-# 3. User A: Coding Task (Instantly applies the coder LoRA)
+# 3. User A: Coding task with the coder LoRA
 response_a = llm.create_chat_completion(
     messages=[{"role": "user", "content": "Write a fast inverse square root in C."}],
     active_loras=[{"name": "python_coder", "scale": 1.0}]
 )
 
-# 4. User B: Translation Task (Zero-latency switch to the translator LoRA)
+# 4. User B: Translation task with the translator LoRA
 response_b = llm.create_chat_completion(
     messages=[{"role": "user", "content": "Explain quantum physics in Spanish."}],
     active_loras=[{"name": "translator", "scale": 0.85}] # Apply at 85% strength
@@ -960,9 +972,10 @@ deprecated and is kept only for compatibility with stateless draft callbacks.
 > starting with `0.3.49`.
 
 The current implementation supports one sequence (`seq_id=0`) and provides
-five usable modes. MTP and n-gram engines are text-only; the DFlash family can
-process target token or embedding batches after extracting its configured
-target-layer inputs.
+five usable modes. MTP is text-only. N-gram engines can consume a completed
+MTMD prefill; proposals stop before negative media ledger IDs. The DFlash family
+can process token or embedding batches at the lower level, but MTMD chat still
+rejects MTP and DFlash-family engines.
 
 | Mode | `SpeculativeType` | Draft source |
 |---|---|---|
@@ -977,8 +990,8 @@ Eagle3, draft-simple, and the other n-gram variants appear in
 engines.
 
 DFlash, DFlash2, and DSpark share `LlamaDFlashDecoding`: target-layer features
-are fused and injected into the draft KV cache before one non-causal mask-block
-decode. All three require `draft_model_path`. DFlash2 uses the same
+are passed through the fused draft decode path, with attention configuration
+selected from the sidecar metadata. All three require `draft_model_path`. DFlash2 uses the same
 `DRAFT_DFLASH` type and is selected automatically when the sidecar reports a
 non-zero `dflash.selector_top_k`. The requested `draft_n_max` is clamped to the
 draft GGUF's trained block size; benchmark several values on the deployment
@@ -1197,10 +1210,14 @@ python -m examples.benchmark.benchmark_speculative -h
 * Greedy speculative and ordinary runs can diverge because verification uses a
   different batch shape and may change floating-point tie-breaking. The
   DFlash/DFlash2/DSpark benchmark reports the first divergent generated token.
-* The current stateful engines are text-only and single-sequence. Do not enable
-  them for MTMD/multimodal embedding batches or parallel sequence decoding.
-* A speculative reset clears target and draft state together; public prompt
-  cache restoration does not currently persist the speculative engine state.
+* Stateful engines currently support one sequence. MTMD prefill supports
+  `NGRAM_MAP_K` and `NGRAM_MAP_K4V`; MTP and DFlash-family engines remain
+  unsupported by the MTMD chat handler. High-level verification also requires
+  native positions consistent with the token cursor.
+* A speculative reset clears target and draft state together. Fresh speculative
+  text requests do not reuse the ordinary cross-request prefix cache. Loading a
+  `LlamaState` does not restore draft state; start a full-prompt request with
+  `reset=True`. See the [state reuse guide](docs/wiki/features/caching.md).
 * `draft_model=` and `LlamaDraftModel` are legacy compatibility APIs. New code
   should use `speculative=SpecConfig(...)`.
 * Close `Llama` explicitly in long-running applications to release an external
@@ -1784,7 +1801,7 @@ with closing(Llama(
     embeddings=True,
     pooling_type=LLAMA_POOLING_TYPE_NONE,
     n_ctx=4096,
-    n_gpu_layers=-1,  # Use 0 for CPU inference.
+    n_gpu_layers=-1,  # Use 0 to disable model-layer offload.
 )) as llama:
     with MTMDAudioGenerator(
         mmproj_path="/path/to/model/mmproj-qwen3-TTS-12Hz-1.7B-Base-BF16.gguf",
@@ -2016,10 +2033,13 @@ run_inference(
 
 ## Embeddings & Reranking (GGUF)
 
-`llama-cpp-python` provides a high-performance, memory-efficient specialized class `LlamaEmbedding` for generating text embeddings and calculating reranking scores.
+`LlamaEmbedding` provides embedding defaults and a reranking helper on top of
+the shared `Llama.embed()` implementation.
 
 ### Key Features:
-* **Streaming Batch Processing:** Process massive datasets (e.g., Hundreds of documents) without running out of memory (OOM).
+* **Batch Processing:** Pack inputs into decode batches within token and sequence
+  limits. Results accumulate in Python memory; large datasets should be split
+  into application-level batches.
 * **Native Reranking:** Built-in support for Cross-Encoder models (outputting relevance scores instead of vectors).
 * **Optimized Performance:** Utilizes Unified KV Cache for parallel encoding of multiple documents.
 * **Chat Template Support:** Support for rerank templates has been introduced (via `llama_model_chat_template(model, b"rerank")`), which can automatically populate the query and document into a specific format.
@@ -2042,13 +2062,13 @@ run_inference(
 To generate embeddings, use the `LlamaEmbedding` class. It automatically configures the model for vector generation.
 
 ```python
-from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_embedding import LlamaEmbedding
 
 # Initialize the model (automatically sets embeddings=True)
 llm = LlamaEmbedding(
     model_path="path/to/bge-m3.gguf",
     n_gpu_layers=-1,
-    pooling_type=LLAMA_POOLING_TYPE_NONE,
+    # Use the embedding model's default pooling for one vector per input.
     n_seq_max=128,  # Maximum independent sequences in one decode batch
 )
 
@@ -2057,7 +2077,7 @@ response = llm.create_embedding("Hello, world!")
 print(response['data'][0]['embedding'])
 
 # 2. Batch processing (High Performance)
-# You can pass a large list of strings; the streaming batcher handles memory automatically.
+# Inputs are packed into native batches; returned vectors remain in Python memory.
 documents = ["Hello, world!", "Goodbye, world!", "Llama is cute."] * 100
 embeddings = llm.embed(documents) # Returns a list of lists (vectors)
 
@@ -2067,21 +2087,22 @@ print(f"Generated {len(embeddings)} vectors.")
 > **Parallel batch capacity:** `n_seq_max` controls how many independent
 > sequence IDs may coexist in one decode batch; it is not the total number of
 > documents accepted by `embed()`. For batch embedding, set it high enough for
-> the number of short documents that can fit within `n_batch`. If an error says
-> `seq_id=1` exceeds `n_seq_max=1`, initialize the model with at least
-> `n_seq_max=2`. For example, use `n_seq_max=8` for up to eight parallel
-> sequences. Larger values can use more context resources.
+> the desired number of short documents per batch. The batcher flushes when
+> token or sequence capacity is reached; `n_seq_max=1` processes inputs
+> sequentially. Larger values can use more context resources.
+> `LLAMA_POOLING_TYPE_NONE` returns one vector per token, adding a token
+> dimension to each input's output; it does not return one pooled document vector.
 
 **Advanced Output Formats:**
 You can request raw arrays or cosine similarity matrices directly:
 
 ```python
-from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_embedding import LlamaEmbedding
 
 # Initialize the model (automatically sets embeddings=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1)
 
-# Returns raw List[float] instead of a dictionary wrapper
+# Returns a list of vectors without the dictionary wrapper
 vector = llm.create_embedding("Text", output_format="array")
 
 # Returns a similarity matrix (A @ A.T) in the response
@@ -2139,18 +2160,23 @@ The `embed` method supports various mathematical normalization strategies via th
 | NORM_MODE_EUCLIDEAN | $2$       | euclidean (default) | $\Large{x_i \over\sqrt{\sum x_i^2}}$
 | NORM_MODE_PNORM | $>2$      | p-norm              | $\Large{x_i \over\sqrt[p]{\sum \lvert x_i\rvert^p}}$
 
-This is useful for optimizing storage or preparing vectors for cosine similarity search (which requires L2 normalization).
+Mode `0` rescales floating-point values; it does not cast to int16 or compress
+storage. `NORM_MODE_PNORM` equals `6`; any integer greater than `2` selects that
+p-norm. L2 normalization makes dot products equivalent to cosine similarity.
+`LlamaEmbedding` defaults to L2, while `Llama.embed()` defaults to raw output.
+Rank outputs are not normalized.
 
 ```python
 from llama_cpp.llama_embedding import (
-  LLAMA_POOLING_TYPE_NONE,
+  LlamaEmbedding,
+  NORM_MODE_NONE,
   NORM_MODE_MAX_INT16,
   NORM_MODE_TAXICAB,
   NORM_MODE_EUCLIDEAN
 )
 
 # Initialize the model (automatically sets embeddings=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1)
 
 # Taxicab (L1)
 vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB)
@@ -2158,8 +2184,8 @@ vec_l1 = llm.embed("text", normalize=NORM_MODE_TAXICAB)
 # Default is Euclidean (L2) - Standard for vector databases
 vec_l2 = llm.embed("text", normalize=NORM_MODE_EUCLIDEAN)
 
-# Max Absolute Int16 - Useful for quantization/compression
-vec_int16 = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
+# Scale to a maximum absolute value of 32760; output remains floating point.
+vec_scaled = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
 
 # Raw Output (No Normalization) - Get the raw floating point values from the model
 embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE)
@@ -2167,11 +2193,13 @@ embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MOD
 
 ### Using the standard `Llama` class
 
-The standard `Llama` class also supports the maintained streaming embedding
-implementation. Initialize it with `embeddings=True`, then call `embed()` for
+The standard `Llama` class owns the shared embedding implementation.
+Initialize it with `embeddings=True`, then call `embed()` for
 raw results or `create_embedding()` for an OpenAI-compatible response.
 `LlamaEmbedding` remains a convenient specialized interface because it enables
-embedding-oriented defaults and provides the `rank()` helper.
+embedding-oriented defaults and provides the `rank()` helper. Once embedding
+execution begins, it resets existing generation state and cleans up again on
+exit. Use separate instances if a live generation context must be preserved.
 
 ```python
 llm = llama_cpp.Llama(
@@ -2203,14 +2231,14 @@ This allows you to use llama.cpp compatible models with any OpenAI compatible cl
 To install the server package and get started:
 
 ```bash
-pip install 'llama-cpp-python[server]'
+pip install 'llama-cpp-python[server] @ git+https://github.com/JamePeng/llama-cpp-python.git'
 python3 -m llama_cpp.server --model models/7B/llama-model.gguf
 ```
 
-Similar to Hardware Acceleration section above, you can also install with GPU (cuBLAS) support like this:
+For a source build with the CUDA backend on a POSIX shell:
 
 ```bash
-CMAKE_ARGS="-DGGML_CUDA=on" FORCE_CMAKE=1 pip install 'llama-cpp-python[server]'
+CMAKE_ARGS="-DGGML_CUDA=on" pip install 'llama-cpp-python[server] @ git+https://github.com/JamePeng/llama-cpp-python.git'
 python3 -m llama_cpp.server --model models/7B/llama-model.gguf --n_gpu_layers 35
 ```
 
@@ -2236,6 +2264,9 @@ python3 -m llama_cpp.server --hf_model_repo_id Qwen/Qwen2-0.5B-Instruct-GGUF --m
 
 ### Web Server Features
 
+The following links describe the upstream Python server. This fork retains the
+server as a deprecated component; newer Python features may not be exposed there.
+
 - [Local Copilot replacement](https://llama-cpp-python.readthedocs.io/en/latest/server/#code-completion)
 - [Function Calling support](https://llama-cpp-python.readthedocs.io/en/latest/server/#function-calling)
 - [Vision API support](https://llama-cpp-python.readthedocs.io/en/latest/server/#multimodal-models)
@@ -2260,8 +2291,8 @@ cd llama-cpp-python
 # Upgrade pip (required for editable mode)
 pip install --upgrade pip
 
-# Install with pip
-pip install -e .
+# Install with test dependencies
+pip install -e ".[test]"
 
 # if you want to use the fastapi / openapi server
 pip install -e '.[server]'
@@ -2273,7 +2304,9 @@ pip install -e '.[all]'
 make clean
 ```
 
-Now try running the tests
+Run the tests; model-backed checks use the paths described in
+[tests/README.md](tests/README.md). Unconfigured model tests are skipped locally;
+Actions requires its configured models.
 
 ```bash
 pytest
