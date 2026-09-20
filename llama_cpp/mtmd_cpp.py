@@ -787,18 +787,21 @@ def mtmd_image_tokens_get_ny(image_tokens: mtmd_image_tokens_p) -> c_size_t:
 #     uint32_t t;
 #     uint32_t x;
 #     uint32_t y;
+#     uint32_t z;
 # };
 class mtmd_decoder_pos(Structure):
     _fields_ = [
         ("t", c_uint32),
         ("x", c_uint32),
         ("y", c_uint32),
+        ("z", c_uint32),
     ]
 
     if TYPE_CHECKING:
         t: c_uint32
         x: c_uint32
         y: c_uint32
+        z: c_uint32
 
 mtmd_decoder_pos_p_ctypes = POINTER(mtmd_decoder_pos)
 

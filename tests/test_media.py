@@ -132,6 +132,33 @@ def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
         llm._hybrid_cache_mgr.save_checkpoint.assert_called_once()
 
 
+def test_mtmd_decoder_pos_abi():
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    position = module.mtmd_decoder_pos
+    assert ctypes.sizeof(position) == 16
+    assert ctypes.alignment(position) == ctypes.alignment(ctypes.c_uint32)
+    assert [getattr(position, field).offset for field in ("t", "x", "y", "z")] == [0, 4, 8, 12]
+
+    # Exercise native struct returns and array writes without loading a model.
+    chunks = module.mtmd_test_create_input_chunks()
+    assert chunks
+    try:
+        chunk = module.mtmd_input_chunks_get(chunks, 1)
+        image = module.mtmd_input_chunk_get_tokens_image(chunk)
+        assert image
+        count = module.mtmd_image_tokens_get_n_tokens(image)
+        assert count > 1
+        positions = (position * count)()
+        module.mtmd_helper_image_get_decoder_pos(image, 7, positions)
+        for index, actual in enumerate(positions):
+            returned = module.mtmd_image_tokens_get_decoder_pos(image, 7, index)
+            expected = (7 + index,) * 4
+            assert (actual.t, actual.x, actual.y, actual.z) == expected
+            assert (returned.t, returned.x, returned.y, returned.z) == expected
+    finally:
+        module.mtmd_input_chunks_free(chunks)
+
+
 def test_mtmd_helper_init_opt_abi():
     module = importlib.import_module("llama_cpp.mtmd_cpp")
 
