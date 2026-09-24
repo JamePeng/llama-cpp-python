@@ -7,6 +7,7 @@ import threading
 import struct
 
 import pytest
+from jinja2.exceptions import TemplateError
 
 
 @pytest.fixture
@@ -332,6 +333,39 @@ def test_mtmd_chat_constructor_preserves_template_options(tmp_path):
         assert handler.chat_template.render(**handler.extra_template_arguments) == "custom: hello"
         arguments["value"] = "changed"
         assert handler.extra_template_arguments == {"value": "hello"}
+    finally:
+        handler.close()
+
+
+def test_mtmd_chat_template_raise_exception_preserves_message(tmp_path):
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    handler = multimodal.MTMDChatHandler(
+        mmproj_path=str(tmp_path),
+        verbose=False,
+        chat_template_override=(
+            "{% if video %}{{ raise_exception('Video not supported') }}"
+            "{% else %}text supported{% endif %}"
+        ),
+    )
+    try:
+        assert handler.chat_template.render(video=False) == "text supported"
+        with pytest.raises(TemplateError, match="Video not supported"):
+            handler.chat_template.render(video=True)
+    finally:
+        handler.close()
+
+
+def test_mtmd_chat_template_strftime_now(tmp_path):
+    import datetime
+
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    handler = multimodal.MTMDChatHandler(
+        mmproj_path=str(tmp_path),
+        verbose=False,
+        chat_template_override="{{ strftime_now('%Y') }}",
+    )
+    try:
+        assert handler.chat_template.render() == datetime.datetime.now().strftime("%Y")
     finally:
         handler.close()
 

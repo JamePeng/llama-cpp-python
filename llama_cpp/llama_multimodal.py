@@ -44,7 +44,8 @@ from llama_cpp.llama_chat_format import (
     _convert_completion_to_chat,
     _convert_completion_to_chat_function,
     _grammar_for_response_format,
-    ImmutableSandboxedEnvironment
+    ImmutableSandboxedEnvironment,
+    Jinja2ChatFormatter,
 )
 
 class MTMDBaseHandler:
@@ -1017,10 +1018,13 @@ class MTMDChatHandler(MTMDBaseHandler):
         self._change_chat_template(self.chat_format)
 
     def _change_chat_template(self, new_template: str):
-        self.chat_template = ImmutableSandboxedEnvironment(
+        environment = ImmutableSandboxedEnvironment(
             trim_blocks=True,
             lstrip_blocks=True
-        ).from_string(new_template)
+        )
+        environment.globals["raise_exception"] = Jinja2ChatFormatter.raise_exception
+        environment.globals["strftime_now"] = Jinja2ChatFormatter.strftime_now
+        self.chat_template = environment.from_string(new_template)
 
     def _init_mtmd_context(self, llama_model: llama_core.Llama):
         if self.mtmd_ctx is not None:
