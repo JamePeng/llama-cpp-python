@@ -125,22 +125,25 @@ llama_seq_id = ctypes.c_int32
 #     LLAMA_VOCAB_TYPE_UGM    = 4, // T5 tokenizer based on Unigram
 #     LLAMA_VOCAB_TYPE_RWKV   = 5, // RWKV tokenizer based on greedy tokenization
 #     LLAMA_VOCAB_TYPE_PLAMO2 = 6, // PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming
+#     LLAMA_VOCAB_TYPE_TEST   = 7, // Dummy tokenizer for testing: rolling hash of fixed-size chunks -> tokens, tokens -> hex
 # };
 class llama_vocab_type(enum.IntEnum):
-    LLAMA_VOCAB_TYPE_NONE = 0
+    LLAMA_VOCAB_TYPE_NONE   = 0
     """For models without vocab"""
-    LLAMA_VOCAB_TYPE_SPM = 1
+    LLAMA_VOCAB_TYPE_SPM    = 1
     """LLaMA tokenizer based on byte-level BPE with byte fallback"""
-    LLAMA_VOCAB_TYPE_BPE = 2
+    LLAMA_VOCAB_TYPE_BPE    = 2
     """GPT-2 tokenizer based on byte-level BPE"""
-    LLAMA_VOCAB_TYPE_WPM = 3
+    LLAMA_VOCAB_TYPE_WPM    = 3
     """BERT tokenizer based on WordPiece"""
-    LLAMA_VOCAB_TYPE_UGM = 4
+    LLAMA_VOCAB_TYPE_UGM    = 4
     """T5 tokenizer based on Unigram"""
-    LLAMA_VOCAB_TYPE_RWKV = 5
+    LLAMA_VOCAB_TYPE_RWKV   = 5
     """RWKV tokenizer based on greedy tokenization"""
     LLAMA_VOCAB_TYPE_PLAMO2 = 6
     """PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming"""
+    LLAMA_VOCAB_TYPE_TEST   = 7
+    """Dummy tokenizer for testing: rolling hash of fixed-size chunks -> tokens, tokens -> hex"""
 
 
 # NOTE: Deprecated and will be removed in the future. (already gone in llama.cpp)
@@ -1539,6 +1542,8 @@ def llama_model_load_from_file(
 
 
 # // Load a model from an open FILE pointer
+# // The GGUF is read from the current position, so it can be embedded in a larger file
+# // mmap needs the GGUF data section at a file offset to be aligned to the CPU tensor alignment (32 bytes)
 # LLAMA_API struct llama_model * llama_model_load_from_file_ptr(
 #                                 FILE * file,
 #             struct llama_model_params   params);
@@ -1597,6 +1602,10 @@ def llama_model_save_to_file(model: llama_model_p, path_model: bytes, /):
     None,
 )
 def llama_free_model(model: llama_model_p, /):
+    """
+    DEPRECATED(LLAMA_API void llama_free_model(struct llama_model * model),
+         "use llama_model_free instead")
+    """
     ...
 
 
@@ -2150,6 +2159,21 @@ def llama_model_quantize(
 )
 def llama_adapter_lora_init(
     model: llama_model_p, path_lora: bytes, /
+) -> Optional[llama_adapter_lora_p]:
+    ...
+
+
+# // Load a LoRA adapter from an open FILE pointer, reading from its current position
+# LLAMA_API struct llama_adapter_lora * llama_adapter_lora_init_from_file_ptr(
+#         struct llama_model * model,
+#         FILE * file);
+@ctypes_function(
+    "llama_adapter_lora_init_from_file_ptr",
+    [llama_model_p_ctypes, ctypes.c_void_p],
+    llama_adapter_lora_p_ctypes,
+)
+def llama_adapter_lora_init_from_file_ptr(
+    model: llama_model_p, file: ctypes.c_void_p, /
 ) -> Optional[llama_adapter_lora_p]:
     ...
 
