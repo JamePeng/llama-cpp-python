@@ -1096,8 +1096,8 @@ def ggml_backend_buffer_free(buffer: ggml_backend_buffer_t):
 
 
 # GGML_API void *                         ggml_backend_buffer_get_base      (ggml_backend_buffer_t buffer);
-@ggml_base_function("ggml_backend_buffer_get_base", [ctypes.c_void_p], None)
-def ggml_backend_buffer_get_base(buffer: ggml_backend_buffer_t):
+@ggml_base_function("ggml_backend_buffer_get_base", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_buffer_get_base(buffer: ggml_backend_buffer_t) -> ctypes.c_void_p:
     """
     Get ggml_backend_buffer base address
     """
@@ -1199,7 +1199,7 @@ def ggml_backend_buffer_get_usage(buffer: ggml_backend_buffer_t) -> ctypes.c_int
 
 # GGML_API ggml_backend_buffer_type_t     ggml_backend_buffer_get_type      (ggml_backend_buffer_t buffer);
 @ggml_base_function("ggml_backend_buffer_get_type", [ctypes.c_void_p], ctypes.c_void_p)
-def ggml_backend_buffer_get_type(buffer: ggml_backend_buffer_t) -> ggml_backend_buffer_t:
+def ggml_backend_buffer_get_type(buffer: ggml_backend_buffer_t) -> ggml_backend_buffer_type_t:
     """
     Get ggml_backend_buffer_type
     """
@@ -1212,6 +1212,257 @@ def ggml_backend_buffer_reset(buffer: ggml_backend_buffer_t):
     """
     Reset ggml_backend_buffer
     """
+    ...
+
+
+# // Backend (stream)
+
+# GGML_API ggml_guid_t ggml_backend_guid(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_guid", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_guid(backend: ggml_backend_t) -> Optional[int]:
+    """Get the backend implementation GUID."""
+    ...
+
+
+# GGML_API const char * ggml_backend_name(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_name", [ctypes.c_void_p], ctypes.c_char_p)
+def ggml_backend_name(backend: ggml_backend_t) -> bytes:
+    """Get the backend name."""
+    ...
+
+
+# GGML_API void ggml_backend_free(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_free", [ctypes.c_void_p], None)
+def ggml_backend_free(backend: ggml_backend_t) -> None:
+    """Free a backend created by a device or registry initializer."""
+    ...
+
+
+# GGML_API ggml_backend_buffer_type_t ggml_backend_get_default_buffer_type(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_get_default_buffer_type", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_get_default_buffer_type(backend: ggml_backend_t) -> ggml_backend_buffer_type_t:
+    """Get the backend's default buffer type."""
+    ...
+
+
+# GGML_API ggml_backend_buffer_t ggml_backend_alloc_buffer(ggml_backend_t backend, size_t size);
+@ggml_base_function("ggml_backend_alloc_buffer", [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_void_p)
+def ggml_backend_alloc_buffer(backend: ggml_backend_t, size: int) -> ggml_backend_buffer_t:
+    """Allocate a backend buffer; release it with ggml_backend_buffer_free."""
+    ...
+
+
+# GGML_API size_t ggml_backend_get_alignment(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_get_alignment", [ctypes.c_void_p], ctypes.c_size_t)
+def ggml_backend_get_alignment(backend: ggml_backend_t) -> int:
+    """Get the backend's tensor alignment."""
+    ...
+
+
+# GGML_API size_t ggml_backend_get_max_size(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_get_max_size", [ctypes.c_void_p], ctypes.c_size_t)
+def ggml_backend_get_max_size(backend: ggml_backend_t) -> int:
+    """Get the maximum buffer size supported by the backend."""
+    ...
+
+
+# GGML_API void ggml_backend_synchronize(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_synchronize", [ctypes.c_void_p], None)
+def ggml_backend_synchronize(backend: ggml_backend_t) -> None:
+    """Wait for queued backend operations to complete."""
+    ...
+
+
+# GGML_API ggml_backend_dev_t ggml_backend_get_device(ggml_backend_t backend);
+@ggml_base_function("ggml_backend_get_device", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_get_device(backend: ggml_backend_t) -> ggml_backend_dev_t:
+    """Get the device associated with a backend."""
+    ...
+
+
+# The caller keeps data buffers alive until an asynchronous operation completes.
+# GGML_API void ggml_backend_tensor_set_async (ggml_backend_t backend, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
+@ggml_base_function("ggml_backend_tensor_set_async", [ctypes.c_void_p, ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_set_async(backend, tensor, data, offset, size):
+    """Queue a host-to-tensor copy; keep data alive until the backend is synchronized."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_get_async (ggml_backend_t backend, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
+@ggml_base_function("ggml_backend_tensor_get_async", [ctypes.c_void_p, ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_get_async(backend, tensor, data, offset, size):
+    """Queue a tensor-to-host copy; keep data alive until the backend is synchronized."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_set_2d_async(ggml_backend_t backend, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
+@ggml_base_function("ggml_backend_tensor_set_2d_async", [ctypes.c_void_p, ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_set_2d_async(backend, tensor, data, offset, size, n_copies, stride_tensor, stride_data):
+    """Queue strided host-to-tensor copies; keep data alive until synchronization."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_get_2d_async(ggml_backend_t backend, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
+@ggml_base_function("ggml_backend_tensor_get_2d_async", [ctypes.c_void_p, ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_get_2d_async(backend, tensor, data, offset, size, n_copies, stride_tensor, stride_data):
+    """Queue strided tensor-to-host copies; keep data alive until synchronization."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_set ( struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
+@ggml_base_function("ggml_backend_tensor_set", [ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_set(tensor, data, offset, size):
+    """Copy host data into a tensor starting at the given byte offset."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_get (const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
+@ggml_base_function("ggml_backend_tensor_get", [ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_get(tensor, data, offset, size):
+    """Copy tensor data into host memory starting at the given byte offset."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_set_2d( struct ggml_tensor * tensor, const void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
+@ggml_base_function("ggml_backend_tensor_set_2d", [ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_set_2d(tensor, data, offset, size, n_copies, stride_tensor, stride_data):
+    """Copy strided host data into tensor storage."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_get_2d(const struct ggml_tensor * tensor, void * data, size_t offset, size_t size, size_t n_copies, size_t stride_tensor, size_t stride_data);
+@ggml_base_function("ggml_backend_tensor_get_2d", [ggml_tensor_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_get_2d(tensor, data, offset, size, n_copies, stride_tensor, stride_data):
+    """Copy strided tensor data into host memory."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_memset( struct ggml_tensor * tensor, uint8_t value, size_t offset, size_t size);
+@ggml_base_function("ggml_backend_tensor_memset", [ggml_tensor_p, ctypes.c_uint8, ctypes.c_size_t, ctypes.c_size_t], None)
+def ggml_backend_tensor_memset(tensor, value, offset, size):
+    """Fill a byte range of tensor storage with a value."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_copy(const struct ggml_tensor * src, struct ggml_tensor * dst);
+@ggml_base_function("ggml_backend_tensor_copy", [ggml_tensor_p, ggml_tensor_p], None)
+def ggml_backend_tensor_copy(src, dst):
+    """Copy tensor data between backend buffers."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_tensor_alloc(ggml_backend_buffer_t buffer, struct ggml_tensor * tensor, void * addr);
+@ggml_base_function("ggml_backend_tensor_alloc", [ctypes.c_void_p, ggml_tensor_p, ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_tensor_alloc(buffer, tensor, addr):
+    """Attach tensor storage at an address within a backend buffer."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_view_init(struct ggml_tensor * tensor);
+@ggml_base_function("ggml_backend_view_init", [ggml_tensor_p], ctypes.c_int)
+def ggml_backend_view_init(tensor):
+    """Initialize the buffer view for a tensor."""
+    ...
+
+
+# GGML_API ggml_backend_graph_plan_t ggml_backend_graph_plan_create(ggml_backend_t backend, struct ggml_cgraph * cgraph);
+@ggml_base_function("ggml_backend_graph_plan_create", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_graph_plan_create(backend, graph):
+    """Create a reusable compute plan; free it with the same backend."""
+    ...
+
+
+# GGML_API void ggml_backend_graph_plan_free (ggml_backend_t backend, ggml_backend_graph_plan_t plan);
+@ggml_base_function("ggml_backend_graph_plan_free", [ctypes.c_void_p, ctypes.c_void_p], None)
+def ggml_backend_graph_plan_free(backend, plan):
+    """Release a compute plan created for this backend."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_graph_plan_compute (ggml_backend_t backend, ggml_backend_graph_plan_t plan);
+@ggml_base_function("ggml_backend_graph_plan_compute", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_graph_plan_compute(backend, plan):
+    """Execute a graph plan and return a ggml_status value."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_graph_compute (ggml_backend_t backend, struct ggml_cgraph * cgraph);
+@ggml_base_function("ggml_backend_graph_compute", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_graph_compute(backend, graph):
+    """Execute a graph on this backend and return a ggml_status value."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_graph_compute_async(ggml_backend_t backend, struct ggml_cgraph * cgraph);
+@ggml_base_function("ggml_backend_graph_compute_async", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_graph_compute_async(backend, graph):
+    """Queue graph execution; synchronize before consuming its results."""
+    ...
+
+
+# Deprecated in ggml-backend.h; use the device versions for new code.
+# GGML_API bool ggml_backend_supports_op(ggml_backend_t backend, const struct ggml_tensor * op);
+@ggml_base_function("ggml_backend_supports_op", [ctypes.c_void_p, ggml_tensor_p], ctypes.c_bool)
+def ggml_backend_supports_op(backend, op):
+    """Deprecated backend-level operation check; prefer ggml_backend_dev_supports_op."""
+    ...
+
+
+# GGML_API bool ggml_backend_supports_buft(ggml_backend_t backend, ggml_backend_buffer_type_t buft);
+@ggml_base_function("ggml_backend_supports_buft", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_bool)
+def ggml_backend_supports_buft(backend, buft):
+    """Deprecated backend-level buffer check; prefer ggml_backend_dev_supports_buft."""
+    ...
+
+
+# GGML_API bool ggml_backend_offload_op(ggml_backend_t backend, const struct ggml_tensor * op);
+@ggml_base_function("ggml_backend_offload_op", [ctypes.c_void_p, ggml_tensor_p], ctypes.c_bool)
+def ggml_backend_offload_op(backend, op):
+    """Deprecated backend-level offload check; prefer ggml_backend_dev_offload_op."""
+    ...
+
+
+# GGML_API void ggml_backend_tensor_copy_async(ggml_backend_t backend_src, ggml_backend_t backend_dst, const struct ggml_tensor * src, struct ggml_tensor * dst);
+@ggml_base_function("ggml_backend_tensor_copy_async", [ctypes.c_void_p, ctypes.c_void_p, ggml_tensor_p, ggml_tensor_p], None)
+def ggml_backend_tensor_copy_async(backend_src, backend_dst, src, dst):
+    """Queue a tensor copy between backends, with synchronous fallback when needed."""
+    ...
+
+
+# // Backend events
+
+# GGML_API ggml_backend_event_t ggml_backend_event_new(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_event_new", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_event_new(device: ggml_backend_dev_t) -> ggml_backend_event_t:
+    """Create an event on a device that supports events."""
+    ...
+
+
+# GGML_API void ggml_backend_event_free(ggml_backend_event_t event);
+@ggml_base_function("ggml_backend_event_free", [ctypes.c_void_p], None)
+def ggml_backend_event_free(event: ggml_backend_event_t) -> None:
+    """Free an event."""
+    ...
+
+
+# GGML_API void ggml_backend_event_record(ggml_backend_event_t event, ggml_backend_t backend);
+@ggml_base_function("ggml_backend_event_record", [ctypes.c_void_p, ctypes.c_void_p], None)
+def ggml_backend_event_record(event: ggml_backend_event_t, backend: ggml_backend_t) -> None:
+    """Record an event after queued backend operations."""
+    ...
+
+
+# GGML_API void ggml_backend_event_synchronize(ggml_backend_event_t event);
+@ggml_base_function("ggml_backend_event_synchronize", [ctypes.c_void_p], None)
+def ggml_backend_event_synchronize(event: ggml_backend_event_t) -> None:
+    """Wait for an event to complete."""
+    ...
+
+
+# GGML_API void ggml_backend_event_wait(ggml_backend_t backend, ggml_backend_event_t event);
+@ggml_base_function("ggml_backend_event_wait", [ctypes.c_void_p, ctypes.c_void_p], None)
+def ggml_backend_event_wait(backend: ggml_backend_t, event: ggml_backend_event_t) -> None:
+    """Make a backend wait for an event."""
     ...
 
 
@@ -1232,16 +1483,190 @@ def ggml_backend_buffer_reset(buffer: ggml_backend_buffer_t):
 #     GGML_BACKEND_DEVICE_TYPE_META,
 # };
 class GGMLBackendDevType(enum.IntEnum):
-    GGML_BACKEND_DEVICE_TYPE_CPU  = 0  # CPU device using system memory
-    GGML_BACKEND_DEVICE_TYPE_GPU  = 1  # GPU device using dedicated memory
-    GGML_BACKEND_DEVICE_TYPE_IGPU = 2  # integrated GPU device using host memory
+    GGML_BACKEND_DEVICE_TYPE_CPU   = 0  # CPU device using system memory
+    GGML_BACKEND_DEVICE_TYPE_GPU   = 1  # GPU device using dedicated memory
+    GGML_BACKEND_DEVICE_TYPE_IGPU  = 2  # integrated GPU device using host memory
     GGML_BACKEND_DEVICE_TYPE_ACCEL = 3  # accelerator devices intended to be used together with the CPU backend (e.g. BLAS or AMX)
     GGML_BACKEND_DEVICE_TYPE_META  = 4  # "meta" device wrapping multiple other devices for tensor parallelism
+
+# // functionality supported by the device
+# struct ggml_backend_dev_caps {
+#     // asynchronous operations
+#     bool async;
+#     // pinned host buffer
+#     bool host_buffer;
+#     // creating buffers from host ptr
+#     bool buffer_from_host_ptr;
+#     // event synchronization
+#     bool events;
+#     // mmap is supported for loading
+#     bool mmap_support;
+# };
+class GGMLBackendDevCaps(ctypes.Structure):
+    _fields_ = [
+        ("async_", ctypes.c_bool),
+        ("host_buffer", ctypes.c_bool),
+        ("buffer_from_host_ptr", ctypes.c_bool),
+        ("events", ctypes.c_bool),
+        ("mmap_support", ctypes.c_bool),
+    ]
+
+# // all the device properties
+# struct ggml_backend_dev_props {
+#     // device name
+#     const char * name;
+#     // device description
+#     const char * description;
+#     // device free memory in bytes
+#     size_t memory_free;
+#     // device total memory in bytes
+#     size_t memory_total;
+#     // device type
+#     enum ggml_backend_dev_type type;
+#     // device id
+#     //   for PCI devices, this should be the lower-case PCI bus id formatted as "domain:bus:device.function" (e.g. "0000:c1:00.0")
+#     //   if the id is unknown, this should be NULL
+#     const char * device_id;
+#     // device capabilities
+#     struct ggml_backend_dev_caps caps;
+# };
+class GGMLBackendDevProps(ctypes.Structure):
+    _fields_ = [
+        ("name", ctypes.c_char_p),
+        ("description", ctypes.c_char_p),
+        ("memory_free", ctypes.c_size_t),
+        ("memory_total", ctypes.c_size_t),
+        ("type", ctypes.c_int),
+        ("device_id", ctypes.c_char_p),
+        ("caps", GGMLBackendDevCaps),
+    ]
+
 
 ggml_backend_dev_type_t = NewType(
     "ggml_backend_dev_type_t",
     ctypes.c_void_p,
 )
+
+
+# GGML_API const char * ggml_backend_dev_name(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_dev_name", [ctypes.c_void_p], ctypes.c_char_p)
+def ggml_backend_dev_name(device: ggml_backend_dev_t) -> bytes:
+    """Get the device name (for example, CUDA0 or RPC0)."""
+    ...
+
+
+# GGML_API const char * ggml_backend_dev_description(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_dev_description", [ctypes.c_void_p], ctypes.c_char_p)
+def ggml_backend_dev_description(device: ggml_backend_dev_t) -> bytes:
+    """Get the device description."""
+    ...
+
+
+# GGML_API void ggml_backend_dev_memory(ggml_backend_dev_t device, size_t * free, size_t * total);
+@ggml_base_function("ggml_backend_dev_memory", [ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)], None)
+def ggml_backend_dev_memory(device: ggml_backend_dev_t, free: ctypes.POINTER(ctypes.c_size_t), total: ctypes.POINTER(ctypes.c_size_t)) -> None:
+    """Read free and total device memory."""
+    ...
+
+
+# GGML_API enum ggml_backend_dev_type ggml_backend_dev_type(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_dev_type", [ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_dev_type(device: ggml_backend_dev_t) -> int:
+    """Get the device type from GGMLBackendDevType."""
+    ...
+
+
+# GGML_API ggml_backend_reg_t ggml_backend_dev_backend_reg(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_dev_backend_reg", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_dev_backend_reg(device: ggml_backend_dev_t) -> ggml_backend_reg_t:
+    """Get the backend registration that owns a device."""
+    ...
+
+
+# GGML_API void ggml_backend_dev_get_props(ggml_backend_dev_t device, struct ggml_backend_dev_props * props);
+@ggml_base_function("ggml_backend_dev_get_props", [ctypes.c_void_p, ctypes.POINTER(GGMLBackendDevProps)], None)
+def ggml_backend_dev_get_props(device: ggml_backend_dev_t, props: ctypes.POINTER(GGMLBackendDevProps)) -> None:
+    """Read device properties, including its physical device ID when available."""
+    ...
+
+
+# GGML_API ggml_backend_t ggml_backend_dev_init(ggml_backend_dev_t device, const char * params);
+@ggml_base_function("ggml_backend_dev_init", [ctypes.c_void_p, ctypes.c_char_p], ctypes.c_void_p)
+def ggml_backend_dev_init(device: ggml_backend_dev_t, params: Optional[bytes]) -> ggml_backend_t:
+    """Create a backend on the selected device; release it with ggml_backend_free."""
+    ...
+
+
+# GGML_API ggml_backend_buffer_type_t ggml_backend_dev_buffer_type(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_dev_buffer_type", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_dev_buffer_type(device: ggml_backend_dev_t) -> ggml_backend_buffer_type_t:
+    """Get the device's default buffer type."""
+    ...
+
+
+# GGML_API ggml_backend_buffer_type_t ggml_backend_dev_host_buffer_type(ggml_backend_dev_t device);
+@ggml_base_function("ggml_backend_dev_host_buffer_type", [ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_dev_host_buffer_type(device: ggml_backend_dev_t) -> ggml_backend_buffer_type_t:
+    """Get the device's host buffer type, if supported."""
+    ...
+
+
+# GGML_API ggml_backend_buffer_t ggml_backend_dev_buffer_from_host_ptr(ggml_backend_dev_t device, void * ptr, size_t size, size_t max_tensor_size);
+@ggml_base_function("ggml_backend_dev_buffer_from_host_ptr", [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_size_t], ctypes.c_void_p)
+def ggml_backend_dev_buffer_from_host_ptr(device: ggml_backend_dev_t, ptr: ctypes.c_void_p, size: int, max_tensor_size: int) -> ggml_backend_buffer_t:
+    """Wrap host memory on a capable device; the caller retains the host allocation."""
+    ...
+
+
+# GGML_API bool ggml_backend_dev_supports_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
+@ggml_base_function("ggml_backend_dev_supports_op", [ctypes.c_void_p, ggml_tensor_p], ctypes.c_bool)
+def ggml_backend_dev_supports_op(device: ggml_backend_dev_t, op: ggml_tensor_p) -> bool:
+    """Check whether a device supports a tensor operation."""
+    ...
+
+
+# GGML_API bool ggml_backend_dev_supports_buft(ggml_backend_dev_t device, ggml_backend_buffer_type_t buft);
+@ggml_base_function("ggml_backend_dev_supports_buft", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_bool)
+def ggml_backend_dev_supports_buft(device: ggml_backend_dev_t, buft: ggml_backend_buffer_type_t) -> bool:
+    """Check whether a device supports a buffer type."""
+    ...
+
+
+# GGML_API bool ggml_backend_dev_offload_op(ggml_backend_dev_t device, const struct ggml_tensor * op);
+@ggml_base_function("ggml_backend_dev_offload_op", [ctypes.c_void_p, ggml_tensor_p], ctypes.c_bool)
+def ggml_backend_dev_offload_op(device: ggml_backend_dev_t, op: ggml_tensor_p) -> bool:
+    """Check whether an operation should be offloaded to the device."""
+    ...
+
+# // Backend (reg)
+
+# GGML_API const char * ggml_backend_reg_name(ggml_backend_reg_t reg);
+@ggml_base_function("ggml_backend_reg_name", [ctypes.c_void_p], ctypes.c_char_p)
+def ggml_backend_reg_name(reg: ggml_backend_reg_t) -> bytes:
+    """Get the backend registration name."""
+    ...
+
+
+# GGML_API size_t ggml_backend_reg_dev_count(ggml_backend_reg_t reg);
+@ggml_base_function("ggml_backend_reg_dev_count", [ctypes.c_void_p], ctypes.c_size_t)
+def ggml_backend_reg_dev_count(reg: ggml_backend_reg_t) -> int:
+    """Get the number of devices exposed by a backend registration."""
+    ...
+
+
+# GGML_API ggml_backend_dev_t ggml_backend_reg_dev_get(ggml_backend_reg_t reg, size_t index);
+@ggml_base_function("ggml_backend_reg_dev_get", [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_void_p)
+def ggml_backend_reg_dev_get(reg: ggml_backend_reg_t, index: int) -> ggml_backend_dev_t:
+    """Get a device exposed by a backend registration."""
+    ...
+
+
+# GGML_API void * ggml_backend_reg_get_proc_address(ggml_backend_reg_t reg, const char * name);
+@ggml_base_function("ggml_backend_reg_get_proc_address", [ctypes.c_void_p, ctypes.c_char_p], ctypes.c_void_p)
+def ggml_backend_reg_get_proc_address(reg: ggml_backend_reg_t, name: bytes) -> Optional[int]:
+    """Get a backend-specific function pointer, or None if unavailable."""
+    ...
+
 
 # //
 # // Backend registry
@@ -1337,8 +1762,8 @@ def ggml_backend_init_by_name(name: ctypes.c_char_p, params: ctypes.c_char_p) ->
 
 # // = ggml_backend_dev_init(ggml_backend_dev_by_type(type), params)
 # GGML_API ggml_backend_t ggml_backend_init_by_type(enum ggml_backend_dev_type type, const char * params);
-@ggml_base_function("ggml_backend_dev_init", [ctypes.c_int32, ctypes.c_char_p], ctypes.c_void_p)
-def ggml_backend_dev_init(type: ctypes.c_int32, params: ctypes.c_char_p) -> ggml_backend_t:
+@ggml_function("ggml_backend_init_by_type", [ctypes.c_int32, ctypes.c_char_p], ctypes.c_void_p)
+def ggml_backend_init_by_type(type: ctypes.c_int32, params: ctypes.c_char_p) -> ggml_backend_t:
     """
     = ggml_backend_dev_init(ggml_backend_dev_by_type(type), params)
     """
@@ -1395,6 +1820,169 @@ def ggml_backend_load_all_from_path(dir_path: ctypes.c_char_p):
     ...
 
 
+# // Meta backend
+# Meta split axis is an enum (C int); the returned string is owned by ggml.
+# GGML_API const char * ggml_backend_meta_split_axis_name(enum ggml_backend_meta_split_axis split_axis);
+@ggml_base_function("ggml_backend_meta_split_axis_name", [ctypes.c_int], ctypes.c_char_p)
+def ggml_backend_meta_split_axis_name(split_axis):
+    """Get the ggml-owned name of a meta split axis."""
+    ...
+
+
+# // Backend scheduler
+# typedef struct ggml_backend_sched * ggml_backend_sched_t;
+ggml_backend_sched_t = NewType(
+    "ggml_backend_sched_t",
+    ctypes.c_void_p,
+)
+
+
+# Keep the backend and buffer-type arrays alive for ggml_backend_sched_new.
+# The backend instances must outlive the scheduler.
+# // Evaluation callback for each node in the graph (set with ggml_backend_sched_set_eval_callback)
+# // when ask == true, the scheduler wants to know if the user wants to observe this node
+# // this allows the scheduler to batch nodes together in order to evaluate them in a single call
+# // when ask == false, the scheduler passes the node to the user; false cancels computation
+# typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
+ggml_backend_sched_eval_callback = ctypes.CFUNCTYPE(
+    ctypes.c_bool, ggml_tensor_p, ctypes.c_bool, ctypes.c_void_p
+)
+
+
+# GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
+@ggml_base_function("ggml_backend_sched_new", [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.c_size_t, ctypes.c_bool, ctypes.c_bool], ctypes.c_void_p)
+def ggml_backend_sched_new(backends, bufts, n_backends, graph_size, parallel, op_offload):
+    """Create a scheduler; its backends must remain alive until the scheduler is freed."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_free(ggml_backend_sched_t sched);
+@ggml_base_function("ggml_backend_sched_free", [ctypes.c_void_p], None)
+def ggml_backend_sched_free(sched):
+    """Release the scheduler before freeing its backends."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_reserve_size(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph, size_t * sizes);
+@ggml_base_function("ggml_backend_sched_reserve_size", [ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(ctypes.c_size_t)], None)
+def ggml_backend_sched_reserve_size(sched, measure_graph, sizes):
+    """Reserve scheduler buffers for a measure graph and report their sizes."""
+    ...
+
+
+# GGML_API bool ggml_backend_sched_reserve(ggml_backend_sched_t sched, struct ggml_cgraph * measure_graph);
+@ggml_base_function("ggml_backend_sched_reserve", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_bool)
+def ggml_backend_sched_reserve(sched, measure_graph):
+    """Reserve scheduler buffers for a measure graph; return whether it succeeded."""
+    ...
+
+
+# GGML_API int ggml_backend_sched_get_n_backends(ggml_backend_sched_t sched);
+@ggml_base_function("ggml_backend_sched_get_n_backends", [ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_sched_get_n_backends(sched):
+    """Get the number of backends managed by the scheduler."""
+    ...
+
+
+# GGML_API ggml_backend_t ggml_backend_sched_get_backend(ggml_backend_sched_t sched, int i);
+@ggml_base_function("ggml_backend_sched_get_backend", [ctypes.c_void_p, ctypes.c_int], ctypes.c_void_p)
+def ggml_backend_sched_get_backend(sched, i):
+    """Get the backend at the given scheduler index."""
+    ...
+
+
+# GGML_API int ggml_backend_sched_get_n_splits(ggml_backend_sched_t sched);
+@ggml_base_function("ggml_backend_sched_get_n_splits", [ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_sched_get_n_splits(sched):
+    """Get the split count for the last scheduled graph."""
+    ...
+
+
+# GGML_API int ggml_backend_sched_get_n_copies(ggml_backend_sched_t sched);
+@ggml_base_function("ggml_backend_sched_get_n_copies", [ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_sched_get_n_copies(sched):
+    """Get the copy count used for the last scheduled graph."""
+    ...
+
+
+# GGML_API ggml_backend_buffer_type_t ggml_backend_sched_get_buffer_type(ggml_backend_sched_t sched, ggml_backend_t backend);
+@ggml_base_function("ggml_backend_sched_get_buffer_type", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_void_p)
+def ggml_backend_sched_get_buffer_type(sched, backend):
+    """Get the buffer type selected for a backend in the scheduler."""
+    ...
+
+
+# GGML_API size_t ggml_backend_sched_get_buffer_size(ggml_backend_sched_t sched, ggml_backend_t backend);
+@ggml_base_function("ggml_backend_sched_get_buffer_size", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_size_t)
+def ggml_backend_sched_get_buffer_size(sched, backend):
+    """Get the allocated scheduler buffer size for a backend."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_set_tensor_backend(ggml_backend_sched_t sched, struct ggml_tensor * node, ggml_backend_t backend);
+@ggml_base_function("ggml_backend_sched_set_tensor_backend", [ctypes.c_void_p, ggml_tensor_p, ctypes.c_void_p], None)
+def ggml_backend_sched_set_tensor_backend(sched, node, backend):
+    """Assign a graph node to a backend before graph allocation."""
+    ...
+
+
+# GGML_API ggml_backend_t ggml_backend_sched_get_tensor_backend(ggml_backend_sched_t sched, struct ggml_tensor * node);
+@ggml_base_function("ggml_backend_sched_get_tensor_backend", [ctypes.c_void_p, ggml_tensor_p], ctypes.c_void_p)
+def ggml_backend_sched_get_tensor_backend(sched, node):
+    """Get the backend assigned to a graph node."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_split_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph);
+@ggml_base_function("ggml_backend_sched_split_graph", [ctypes.c_void_p, ctypes.c_void_p], None)
+def ggml_backend_sched_split_graph(sched, graph):
+    """Split a graph across backends without allocating its tensors."""
+    ...
+
+
+# GGML_API bool ggml_backend_sched_alloc_graph(ggml_backend_sched_t sched, struct ggml_cgraph * graph);
+@ggml_base_function("ggml_backend_sched_alloc_graph", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_bool)
+def ggml_backend_sched_alloc_graph(sched, graph):
+    """Allocate tensors for a scheduled graph; return whether it succeeded."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_sched_graph_compute(ggml_backend_sched_t sched, struct ggml_cgraph * graph);
+@ggml_base_function("ggml_backend_sched_graph_compute", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_sched_graph_compute(sched, graph):
+    """Allocate if needed and compute the graph; return a ggml_status value."""
+    ...
+
+
+# GGML_API enum ggml_status ggml_backend_sched_graph_compute_async(ggml_backend_sched_t sched, struct ggml_cgraph * graph);
+@ggml_base_function("ggml_backend_sched_graph_compute_async", [ctypes.c_void_p, ctypes.c_void_p], ctypes.c_int)
+def ggml_backend_sched_graph_compute_async(sched, graph):
+    """Queue scheduler graph computation; synchronize before reading results."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_synchronize(ggml_backend_sched_t sched);
+@ggml_base_function("ggml_backend_sched_synchronize", [ctypes.c_void_p], None)
+def ggml_backend_sched_synchronize(sched):
+    """Wait for all queued scheduler work to finish."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_reset(ggml_backend_sched_t sched);
+@ggml_base_function("ggml_backend_sched_reset", [ctypes.c_void_p], None)
+def ggml_backend_sched_reset(sched):
+    """Reset assignments and allocations; previously allocated tensor data pointers become invalid."""
+    ...
+
+
+# Keep callback alive until the scheduler is freed or the callback is replaced.
+# GGML_API void ggml_backend_sched_set_eval_callback(ggml_backend_sched_t sched, ggml_backend_sched_eval_callback callback, void * user_data);
+@ggml_base_function("ggml_backend_sched_set_eval_callback", [ctypes.c_void_p, ggml_backend_sched_eval_callback, ctypes.c_void_p], None)
+def ggml_backend_sched_set_eval_callback(sched, callback, user_data):
+    """Set a node callback; keep the CFUNCTYPE object alive until replaced or freed."""
+    ...
+
+
 # // CPU buffer types are always available
 
 # GGML_API ggml_backend_buffer_t      ggml_backend_cpu_buffer_from_ptr(void * ptr, size_t size);
@@ -1408,7 +1996,8 @@ def ggml_backend_cpu_buffer_from_ptr(
     size: ctypes.c_size_t
 ) -> ggml_backend_buffer_t:
     """
-    Return the CPU backend buffer type from ptr.
+    Wrap caller-owned host memory in a CPU backend buffer.
+    The host allocation must remain valid until the buffer is freed.
     """
     ...
 
@@ -1424,30 +2013,6 @@ def ggml_backend_cpu_buffer_type() -> ggml_backend_buffer_type_t:
     Return the CPU backend buffer type.
     """
     ...
-
-
-# //
-# // Backend scheduler
-# //
-
-# typedef struct ggml_backend_sched * ggml_backend_sched_t;
-ggml_backend_sched_t = NewType(
-    "ggml_backend_sched_t",
-    ctypes.c_void_p,
-)
-
-
-# // Evaluation callback for each node in the graph (set with ggml_backend_sched_set_eval_callback)
-# // when ask == true, the scheduler wants to know if the user wants to observe this node
-# // this allows the scheduler to batch nodes together in order to evaluate them in a single call
-# //
-# // when ask == false, the scheduler is passing the node tensor to the user for observation
-# // if the user returns false, the scheduler will cancel the graph compute
-# //
-# typedef bool (*ggml_backend_sched_eval_callback)(struct ggml_tensor * t, bool ask, void * user_data);
-ggml_backend_sched_eval_callback = ctypes.CFUNCTYPE(
-    ctypes.c_bool, ctypes.c_void_p, ctypes.c_bool, ctypes.c_void_p
-)
 
 
 # //
