@@ -102,6 +102,23 @@ def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, fail
     assert handler._free_mtmd_resources.call_count == 2
 
 
+@pytest.mark.parametrize("video", [False, True])
+def test_mtmd_media_eval_error_explains_video_context_usage(chat_prefill, video):
+    handler, llm, backend = chat_prefill
+    backend.mtmd_helper_eval_chunk_single.side_effect = lambda *args: 1
+    messages = [{"role": "user", "content": [{"type": "video", "video": "clip.mp4"}]}] if video else []
+
+    with pytest.raises(ValueError, match="Media evaluation failed") as exc_info:
+        handler(llama=llm, messages=messages)
+
+    error = str(exc_info.value)
+    assert "error code 1" in error
+    assert "media_tokens=2" in error
+    assert "n_ctx=6" in error
+    assert ("video_fps_target" in error) is video
+    assert ("chat_handler_kwargs" in error) is video
+
+
 @pytest.mark.parametrize("mode", ["plain", "hybrid", "shift"])
 def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
     handler, llm, backend = chat_prefill

@@ -1235,6 +1235,21 @@ class MTMDChatHandler(MTMDBaseHandler):
 
         return media_items
 
+    @staticmethod
+    def _has_video_input(messages: List[llama_types.ChatCompletionRequestMessage]) -> bool:
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for item in content:
+                if isinstance(item, dict) and (
+                    item.get("type") in ("video", "video_url")
+                    or "video" in item
+                    or "video_url" in item
+                ):
+                    return True
+        return False
+
     def _render_mtmd_prompt(
         self,
         messages: List[llama_types.ChatCompletionRequestMessage],
@@ -1904,7 +1919,23 @@ class MTMDChatHandler(MTMDBaseHandler):
                     )
 
                     if result != 0:
-                        raise ValueError(f"{self.log_prefix}(mtmd_helper_eval_chunk_single): Media evaluation failed with error code {result}.")
+                        message = (
+                            f"{self.log_prefix}(mtmd_helper_eval_chunk_single): "
+                            f"Media evaluation failed with error code {result} "
+                            f"(start_pos={n_past}, media_tokens={chunk_n_tokens}, "
+                            f"n_ctx={llama.n_ctx()}, n_batch={llama.n_batch})."
+                        )
+                        if self._has_video_input(messages):
+                            message += (
+                                " Video expands into image batches that can fill the "
+                                "model's context. If the native log reports 'failed to "
+                                "find a memory slot', lower video_fps_target and "
+                                "image_min_tokens/image_max_tokens, or increase n_ctx. "
+                                "When supplying an explicit chat_handler to Llama, "
+                                "set the video and image options on that handler, "
+                                "not in chat_handler_kwargs."
+                            )
+                        raise ValueError(message)
 
                     if not n_past <= new_n_past.value <= llama.n_ctx():
                         raise ValueError(f"{self.log_prefix}(mtmd_helper_eval_chunk_single): Invalid output position {new_n_past.value}.")
