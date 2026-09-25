@@ -370,6 +370,72 @@ def test_mtmd_chat_template_strftime_now(tmp_path):
         handler.close()
 
 
+@pytest.mark.parametrize(
+    "video_item",
+    [
+        {"type": "video", "video": "/path/to/clip.mp4"},
+        {"type": "video", "video": {"url": "/path/to/clip.mp4"}},
+        {"type": "video_url", "video_url": "/path/to/clip.mp4"},
+        {"type": "video_url", "video_url": {"url": "/path/to/clip.mp4"}},
+    ],
+)
+def test_qwen35_video_template_uses_mtmd_marker(tmp_path, video_item):
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    handler = multimodal.Qwen35ChatHandler(mmproj_path=str(tmp_path), verbose=False)
+    handler.mtmd_bos_token = ""
+    handler.mtmd_eos_token = ""
+    handler.media_marker = "<__media__>"
+    handler.is_support_video = True
+    messages = [{"role": "user", "content": [video_item]}]
+    try:
+        media_items = handler._get_media_items(messages)
+        prompt = handler._render_and_replace_media(
+            messages=messages,
+            media_items=media_items,
+            add_generation_prompt=False,
+        )
+        assert media_items == [{"url": "/path/to/clip.mp4", "type": "video"}]
+        assert "Video 1: <|vision_start|><__media__><|vision_end|>" in prompt
+        assert "<|video_pad|>" not in prompt
+        with pytest.raises(TemplateError, match="System message cannot contain videos"):
+            handler._render_mtmd_prompt(
+                messages=[{"role": "system", "content": [video_item]}],
+                add_generation_prompt=False,
+            )
+    finally:
+        handler.close()
+
+
+@pytest.mark.parametrize(
+    "image_item",
+    [
+        {"image": "/path/to/image.png"},
+        {"image_url": {"url": "/path/to/image.png"}},
+        {"type": "image", "image": {"url": "/path/to/image.png"}},
+        {"type": "image_url", "image_url": "/path/to/image.png"},
+    ],
+)
+def test_qwen3vl_image_template_injects_media_without_type(tmp_path, image_item):
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    handler = multimodal.Qwen3VLChatHandler(mmproj_path=str(tmp_path), verbose=False)
+    handler.mtmd_bos_token = ""
+    handler.mtmd_eos_token = ""
+    handler.media_marker = "<__media__>"
+    handler.is_support_vision = True
+    messages = [{"role": "user", "content": [image_item]}]
+    try:
+        media_items = handler._get_media_items(messages)
+        prompt = handler._render_and_replace_media(
+            messages=messages,
+            media_items=media_items,
+            add_generation_prompt=False,
+        )
+        assert media_items == [{"url": "/path/to/image.png", "type": "image"}]
+        assert "Picture 1: <|vision_start|><__media__><|vision_end|>" in prompt
+    finally:
+        handler.close()
+
+
 def test_mtmd_base_image_loader_uses_subclass_byte_loader():
     import io
     from PIL import Image
