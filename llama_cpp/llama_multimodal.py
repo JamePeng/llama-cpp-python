@@ -2144,6 +2144,13 @@ class GenericMTMDChatHandler(MTMDChatHandler):
 
         super().__init__(mmproj_path = mmproj_path, verbose = verbose, **kwargs)
 
+        # The parent precompiles a fallback when no template is supplied. Keep
+        # the unresolved selection so the first request can use the model's
+        # template instead of mistaking that fallback for an explicit choice.
+        self.chat_format = (
+            chat_format if chat_format is not None else self.chat_format_override
+        )
+
     def _resolve_chat_format(self, llama: llama_core.Llama) -> str:
         # Highest priority: use the template explicitly provided by the caller.
         if self.chat_format is not None:
@@ -2223,6 +2230,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
                 "a model that provides tokenizer.chat_template metadata."
             )
 
+        self._change_chat_template(self.chat_format)
         self._chat_format_parser_tags = [
             tag
             for tag in self.KNOWN_MEDIA_TAGS
