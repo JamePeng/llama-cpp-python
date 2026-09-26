@@ -908,12 +908,20 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         finally:
             self._request_lock.release()
 
+@dataclass
+class _MTMDPrefillInternal:
+    """Internal mutable state produced by a multimodal prefill."""
+    prompt: List[int]
+    logits: np.ndarray
+    n_tokens: int
 
 @dataclass(frozen=True)
 class MTMDPrefillResult:
-    """Prompt, owned final logits, and token count from a multimodal prefill."""
-
-    prompt: List[int]
+    """Immutable multimodal prefill result.
+    
+    `logits` is a read-only NumPy view. Call `.copy()` to obtain a mutable array.
+    """
+    prompt: tuple[int, ...]
     logits: np.ndarray
     n_tokens: int
 
@@ -1716,7 +1724,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
-    ) -> MTMDPrefillResult:
+    ) -> _MTMDPrefillInternal:
         """Evaluate a multimodal chat prompt without sampling or generating tokens.
 
         The returned logits are an owned copy, and the Llama KV state remains
@@ -1951,9 +1959,9 @@ class MTMDChatHandler(MTMDBaseHandler):
             logits = llama._restored_logits
             if logits is None:
                 raise RuntimeError("MTMD prefill did not produce final logits")
-            return MTMDPrefillResult(
+            return _MTMDPrefillInternal(
                 prompt=prompt,
-                logits=logits.copy(),
+                logits=logits,
                 n_tokens=llama.n_tokens,
             )
         except BaseException:
@@ -2076,8 +2084,16 @@ class MTMDChatHandler(MTMDBaseHandler):
             add_generation_prompt=add_generation_prompt,
         )
         if prefill_only:
-            return prefill
+            logits = prefill.logits.view()
+            logits.flags.writeable = False
+            return MTMDPrefillResult(
+                prompt=tuple(prefill.prompt),
+                logits=logits,
+                n_tokens=prefill.n_tokens,
+            )
+
         prompt = prefill.prompt
+        del prefill
 
         # Handle response format and tools (same as before)
         if response_format is not None and response_format["type"] == "json_object":

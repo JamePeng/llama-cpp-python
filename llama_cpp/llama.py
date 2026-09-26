@@ -4361,6 +4361,15 @@ prompt: The prompt to generate text from.
             presence_penalty=presence_penalty,
         )
 
+    def _get_chat_completion_handler(
+        self,
+    ) -> llama_chat_format.LlamaChatCompletionHandler:
+        return (
+            self.chat_handler
+            or self._chat_handlers.get(self.chat_format)
+            or llama_chat_format.get_chat_completion_handler(self.chat_format)
+        )
+
     def create_chat_completion(
         self,
         messages: List[ChatCompletionRequestMessage],
@@ -4489,11 +4498,7 @@ prompt: The prompt to generate text from.
         if presence_penalty is not None and present_penalty == 0.0:
             present_penalty = presence_penalty
 
-        handler = (
-            self.chat_handler
-            or self._chat_handlers.get(self.chat_format)
-            or llama_chat_format.get_chat_completion_handler(self.chat_format)
-        )
+        handler = self._get_chat_completion_handler()
         return handler(
             llama=self,
             messages=messages,
@@ -4550,6 +4555,43 @@ prompt: The prompt to generate text from.
             reasoning_start_in_prompt=reasoning_start_in_prompt,
             reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
+
+    def create_chat_prefill(
+        self,
+        messages: List[ChatCompletionRequestMessage],
+        functions: Optional[List[ChatCompletionFunction]] = None,
+        function_call: Optional[ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[ChatCompletionTool]] = None,
+        tool_choice: Optional[ChatCompletionToolChoiceOption] = None,
+        add_generation_prompt: bool = True,
+    ) -> llama_multimodal.MTMDPrefillResult:
+        """Prefill a chat prompt with the selected MTMD handler, without generation.
+
+        Raises:
+            TypeError: If the selected chat handler is not an MTMDChatHandler.
+        """
+        handler = self._get_chat_completion_handler()
+        if not isinstance(handler, llama_multimodal.MTMDChatHandler):
+            raise TypeError(
+                "create_chat_prefill requires an MTMDChatHandler; "
+                f"the selected handler is {type(handler).__name__}."
+            )
+
+        result = handler(
+            llama=self,
+            messages=messages,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+            add_generation_prompt=add_generation_prompt,
+            prefill_only=True,
+        )
+        if not isinstance(result, llama_multimodal.MTMDPrefillResult):
+            raise TypeError(
+                "The selected MTMDChatHandler did not return an MTMDPrefillResult."
+            )
+        return result
 
     def create_chat_completion_openai_v1(
         self,

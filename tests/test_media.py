@@ -1,7 +1,7 @@
 import ctypes
 import importlib
 import os
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 import threading
 import struct
@@ -148,6 +148,86 @@ def test_generic_chat_prefill_resolves_model_template(chat_prefill_builder):
     llm._model.model_chat_template.assert_called_once_with(None)
     assert handler._template_initialized
     assert handler._chat_format_parser_tags == ["<|image|>"]
+
+
+@pytest.mark.parametrize(
+    "resolution", ["chat_handler", "chat_format", "global_registry"]
+)
+def test_llama_create_chat_prefill_uses_selected_mtmd_handler(
+    chat_prefill_builder, resolution, monkeypatch
+):
+    import numpy as np
+    from llama_cpp import Llama
+    from llama_cpp import llama_multimodal as multimodal
+
+    handler, llm, backend = chat_prefill_builder(
+        multimodal.GenericMTMDChatHandler, chat_format=None
+    )
+    template = "{% for message in messages %}{{ message.content }}{% endfor %}<|image|>"
+    llm._model = SimpleNamespace(model_chat_template=Mock(return_value=template))
+    llm.create_chat_prefill = MethodType(Llama.create_chat_prefill, llm)
+    llm.chat_handler = handler if resolution == "chat_handler" else None
+    llm.chat_format = "test-prefill"
+    llm._chat_handlers = (
+        {"test-prefill": handler} if resolution == "chat_format" else {}
+    )
+    registry_lookup = Mock(return_value=handler)
+    monkeypatch.setattr(
+        "llama_cpp.llama.llama_chat_format.get_chat_completion_handler",
+        registry_lookup,
+    )
+
+    messages = [{"role": "user", "content": "inspect this"}]
+    functions = [{
+        "name": "lookup",
+        "parameters": {"type": "object", "properties": {}},
+    }]
+    result = llm.create_chat_prefill(
+        messages=messages,
+        functions=functions,
+        function_call="auto",
+        tools=[],
+        tool_choice="none",
+        add_generation_prompt=False,
+    )
+
+    assert isinstance(result, multimodal.MTMDPrefillResult)
+    assert result.n_tokens == llm.n_tokens
+    assert llm._restored_logits is not None
+    assert not llm.reset.called
+    llm._ctx.memory_clear.assert_not_called()
+    backend.mtmd_helper_eval_chunk_single.assert_called_once()
+    assert not np.shares_memory(result.logits, llm._restored_logits)
+    llm.create_completion.assert_not_called()
+    llm._model.model_chat_template.assert_called_once_with(None)
+    processed = handler._process_mtmd_prompt.call_args.kwargs
+    assert processed["messages"] is messages
+    assert processed["functions"] is functions
+    assert processed["function_call"] == "auto"
+    assert processed["tools"] == []
+    assert processed["tool_choice"] == "none"
+    assert processed["add_generation_prompt"] is False
+    if resolution == "global_registry":
+        registry_lookup.assert_called_once_with("test-prefill")
+    else:
+        registry_lookup.assert_not_called()
+
+
+def test_llama_create_chat_prefill_rejects_non_mtmd_handler():
+    from llama_cpp import Llama
+
+    handler = Mock()
+    llm = SimpleNamespace(
+        chat_handler=handler,
+        _chat_handlers={},
+        chat_format="unused",
+    )
+    llm.create_chat_prefill = MethodType(Llama.create_chat_prefill, llm)
+
+    with pytest.raises(TypeError, match="requires an MTMDChatHandler"):
+        llm.create_chat_prefill(messages=[])
+
+    handler.assert_not_called()
 
 
 def test_minicpmv45_prefill_prepares_prompt_and_keeps_generation_stops(
