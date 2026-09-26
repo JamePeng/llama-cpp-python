@@ -46,6 +46,7 @@ from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
 import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_chat_format as llama_chat_format
 import llama_cpp.llama_multimodal as llama_multimodal
+from .llama_chat_format import PrefillResult
 
 from llama_cpp.llama_speculative import (
     LlamaDraftModel,
@@ -1812,6 +1813,41 @@ class Llama:
             logits_ptr = self._ctx.get_logits_ith(-1)
             logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
             self.scores[0, :] = logits_view
+
+    def prefill(
+        self,
+        prompt: Union[str, Sequence[int]],
+        *,
+        reset: bool = True,
+        add_bos: bool = True,
+        special: bool = True,
+        active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
+        control_vector: Optional[Dict[str, Any]] = None,
+    ) -> PrefillResult:
+        """Evaluate a text prompt and return its final next-token logits."""
+        tokens = (
+            self.tokenize(prompt.encode("utf-8"), add_bos=add_bos, special=special)
+            if isinstance(prompt, str)
+            else list(prompt)
+        )
+        if not tokens:
+            raise ValueError("Prefill requires at least one token")
+        if reset:
+            self.reset()
+
+        self.eval(
+            tokens,
+            active_loras=active_loras,
+            control_vector=control_vector,
+            copy_logits=True,
+        )
+
+        logits = (
+            self.scores[self.n_tokens - 1]
+            if self._logits_all
+            else self.scores[0]
+        )
+        return PrefillResult(logits=logits)
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
     def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp_lib.llama_logit_bias]:
@@ -4361,6 +4397,15 @@ prompt: The prompt to generate text from.
             presence_penalty=presence_penalty,
         )
 
+    def _get_chat_completion_handler(
+        self,
+    ) -> llama_chat_format.LlamaChatCompletionHandler:
+        return (
+            self.chat_handler
+            or self._chat_handlers.get(self.chat_format)
+            or llama_chat_format.get_chat_completion_handler(self.chat_format)
+        )
+
     def create_chat_completion(
         self,
         messages: List[ChatCompletionRequestMessage],
@@ -4411,6 +4456,7 @@ prompt: The prompt to generate text from.
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
         # Reasoning Budget Params
         reasoning_budget: int = -1,
         reasoning_start: str = "<think>",
@@ -4457,7 +4503,7 @@ prompt: The prompt to generate text from.
             dry_base`: Set the DRY repetition penalty base value. Default: `1.75`
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
             dry_penalty_last_n: How many tokens to scan for repetitions. Default: `64`; `0` disables scanning and `-1` uses the context size.
-            dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
+            dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\\n', ':', '"', '*']`
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
             use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
@@ -4466,6 +4512,7 @@ prompt: The prompt to generate text from.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use.
             grammar_lazy: If True, enables lazy evaluation.
+            chat_template_kwargs: Optional keyword arguments passed to the Jinja chat template at render time. These values override matching handler-level template defaults for the current request only.
             reasoning_budget: Token budget for the first visible reasoning block.
                 -1 disables the sampler, 0 forces an immediate end after reasoning starts,
                 and N > 0 allows at most N generated tokens inside the block.
@@ -4489,11 +4536,7 @@ prompt: The prompt to generate text from.
         if presence_penalty is not None and present_penalty == 0.0:
             present_penalty = presence_penalty
 
-        handler = (
-            self.chat_handler
-            or self._chat_handlers.get(self.chat_format)
-            or llama_chat_format.get_chat_completion_handler(self.chat_format)
-        )
+        handler = self._get_chat_completion_handler()
         return handler(
             llama=self,
             messages=messages,
@@ -4543,6 +4586,7 @@ prompt: The prompt to generate text from.
             control_vector=control_vector,
             assistant_prefill=assistant_prefill,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
             reasoning_budget=reasoning_budget,
             reasoning_start=reasoning_start,
             reasoning_end=reasoning_end,
@@ -4550,6 +4594,41 @@ prompt: The prompt to generate text from.
             reasoning_start_in_prompt=reasoning_start_in_prompt,
             reasoning_start_max_tokens=reasoning_start_max_tokens,
         )
+
+    def create_chat_prefill(
+        self,
+        messages: List[ChatCompletionRequestMessage],
+        functions: Optional[List[ChatCompletionFunction]] = None,
+        function_call: Optional[ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[ChatCompletionTool]] = None,
+        tool_choice: Optional[ChatCompletionToolChoiceOption] = None,
+        add_generation_prompt: bool = True,
+        assistant_prefill: bool = False,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> PrefillResult:
+        """Prefill a chat prompt through its handler without generating a token."""
+        handler = self._get_chat_completion_handler()
+        prefill = getattr(handler, "prefill", None)
+        if not callable(prefill):
+            raise NotImplementedError(
+                "The selected chat handler does not support prefill"
+            )
+
+        prefill_kwargs: Dict[str, Any] = {
+            "llama": self,
+            "messages": messages,
+            "functions": functions,
+            "function_call": function_call,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "add_generation_prompt": add_generation_prompt,
+            "assistant_prefill": assistant_prefill,
+        }
+        # For compatibility
+        if chat_template_kwargs is not None:
+            prefill_kwargs["chat_template_kwargs"] = chat_template_kwargs
+
+        return prefill(**prefill_kwargs)
 
     def create_chat_completion_openai_v1(
         self,

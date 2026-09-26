@@ -19,6 +19,7 @@ from typing import (
     Union,
     Protocol,
     cast,
+    overload,
 )
 
 import jinja2
@@ -72,8 +73,12 @@ class LlamaChatCompletionHandler(Protocol):
 
     Very generic protocol that can be used to implement any chat format.
     The only hard requirement is that it must return a ChatCompletion when
-    stream=False and an iterator of ChatCompletionChunks when stream=True."""
+    stream=False and an iterator of ChatCompletionChunks when stream=True.
+    ``prefill_only`` is MTMD-specific; other handlers may ignore it, so this
+    Protocol leaves its result type unspecified.
+    """
 
+    @overload
     def __call__(
         self,
         *,
@@ -133,11 +138,22 @@ class LlamaChatCompletionHandler(Protocol):
         reasoning_budget_message: Optional[str] = None,
         reasoning_start_in_prompt: bool = False,
         reasoning_start_max_tokens: Optional[int] = 32,
+        prefill_only: Literal[False] = False,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
     ]: ...
+
+    @overload
+    def __call__(
+        self,
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        prefill_only: bool,
+        **kwargs: Any,
+    ) -> Any: ...
 
 
 class LlamaChatCompletionHandlerNotFoundException(Exception):
@@ -206,6 +222,27 @@ class ChatFormatterResponse:
     stop: Optional[Union[str, List[str]]] = None
     stopping_criteria: Optional[llama_core.StoppingCriteriaList] = None
     added_special: bool = False
+
+
+@dataclasses.dataclass(frozen=True)
+class PrefillResult:
+    """owned, read-only final next-token logits."""
+
+    logits: npt.NDArray[np.single]
+
+    def __post_init__(self) -> None:
+        logits = np.array(self.logits, copy=True)
+        if logits.ndim != 1:
+            raise ValueError("Prefill logits must be a one-dimensional vocabulary vector")
+        logits.flags.writeable = False
+        object.__setattr__(self, "logits", logits)
+
+
+@dataclasses.dataclass
+class _PreparedChatPrompt:
+    prompt: List[int]
+    stop: Optional[Union[str, List[str]]]
+    stopping_criteria: Optional[llama_core.StoppingCriteriaList]
 
 
 class ChatFormatter(Protocol):
@@ -787,6 +824,89 @@ def _convert_completion_to_chat_function(
 def chat_formatter_to_chat_completion_handler(
     chat_formatter: ChatFormatter,
 ) -> LlamaChatCompletionHandler:
+    def prepare_chat_prompt(
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        functions: Optional[List[llama_types.ChatCompletionFunction]],
+        function_call: Optional[llama_types.ChatCompletionRequestFunctionCall],
+        tools: Optional[List[llama_types.ChatCompletionTool]],
+        tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption],
+        stop: Optional[Union[str, List[str]]],
+        assistant_prefill: bool,
+        add_generation_prompt: Optional[bool],
+        chat_template_kwargs: Optional[Dict[str, Any]],
+    ) -> _PreparedChatPrompt:
+        partial_assistant_text = ""
+        if assistant_prefill:
+            if not messages:
+                if llama.verbose:
+                    print("Llama.create_chat_completion: Warning! 'assistant_prefill=True' but messages list is empty. Ignoring prefill.", file=sys.stderr)
+            elif messages[-1].get("role") != "assistant":
+                if llama.verbose:
+                    print(f"Llama.create_chat_completion: Warning! 'assistant_prefill=True' but last message role is '{messages[-1].get('role')}'. Expected 'assistant'. Ignoring prefill.", file=sys.stderr)
+            else:
+                messages = messages.copy()
+                partial_message = messages.pop()
+                partial_assistant_text = partial_message.get("content", "") or ""
+                if not partial_assistant_text and llama.verbose:
+                    print("Llama.create_chat_completion: Warning! 'assistant_prefill=True' but the assistant message has no content.", file=sys.stderr)
+
+        format_kwargs = {
+            "messages": messages,
+            "functions": functions,
+            "function_call": function_call,
+            "tools": tools,
+            "tool_choice": tool_choice,
+        }
+        # Write `format_kwargs` keys from upon
+        _RESERVED_CHAT_TEMPLATE_KWARGS = {
+            "messages",
+            "functions",
+            "function_call",
+            "tools",
+            "tool_choice",
+            "add_generation_prompt",
+        }
+
+        if add_generation_prompt is not None:
+            format_kwargs["add_generation_prompt"] = add_generation_prompt
+
+        if chat_template_kwargs is not None:
+            reserved = (
+                _RESERVED_CHAT_TEMPLATE_KWARGS
+                & chat_template_kwargs.keys()
+            )
+            if reserved:
+                raise ValueError(
+                    "chat_template_kwargs contains reserved keys: "
+                    f"{sorted(reserved)}"
+                )
+
+            format_kwargs.update(chat_template_kwargs)
+
+        result = chat_formatter(
+            **format_kwargs,
+        )
+        if partial_assistant_text:
+            result.prompt += partial_assistant_text
+
+        prompt = llama.tokenize(
+            result.prompt.encode("utf-8"),
+            add_bos=not result.added_special,
+            special=True,
+        )
+        if result.stop is not None:
+            stop = [] if stop is None else [stop] if isinstance(stop, str) else stop
+            rstop = result.stop if isinstance(result.stop, list) else [result.stop]
+            stop = stop + rstop
+
+        return _PreparedChatPrompt(
+            prompt=prompt,
+            stop=stop,
+            stopping_criteria=result.stopping_criteria,
+        )
+
     def chat_completion_handler(
         *,
         llama: llama_core.Llama,
@@ -831,6 +951,7 @@ def chat_formatter_to_chat_completion_handler(
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
         # Reasoning Budget Params
         #
         # Generic first-reasoning-block budget control. These parameters are
@@ -842,54 +963,28 @@ def chat_formatter_to_chat_completion_handler(
         reasoning_budget_message: Optional[str] = None,
         reasoning_start_in_prompt: bool = False,
         reasoning_start_max_tokens: Optional[int] = 32,
+        add_generation_prompt: Optional[bool] = None,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
     ]:
 
-        # JIT Interception for Assistant Prefill (Continue Generation)
-        partial_assistant_text = ""
-        if assistant_prefill:
-            if not messages:
-                if llama.verbose:
-                    print("Llama.create_chat_completion: Warning! 'assistant_prefill=True' but messages list is empty. Ignoring prefill.", file=sys.stderr)
-            elif messages[-1].get("role") != "assistant":
-                if llama.verbose:
-                    print(f"Llama.create_chat_completion: Warning! 'assistant_prefill=True' but last message role is '{messages[-1].get('role')}'. Expected 'assistant'. Ignoring prefill.", file=sys.stderr)
-            else:
-                # Safe to prefill: pop the last message without mutating the user's original list
-                messages = messages.copy()
-                partial_message = messages.pop()
-                partial_assistant_text = partial_message.get("content", "") or ""
-                if not partial_assistant_text and llama.verbose:
-                    print("Llama.create_chat_completion: Warning! 'assistant_prefill=True' but the assistant message has no content.", file=sys.stderr)
-
-        result = chat_formatter(
+        prepared = prepare_chat_prompt(
+            llama=llama,
             messages=messages,
             functions=functions,
             function_call=function_call,
             tools=tools,
             tool_choice=tool_choice,
+            stop=stop,
+            assistant_prefill=assistant_prefill,
+            add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
-
-        # Seamlessly append the partial assistant text to the standard generated Jinja template
-        if partial_assistant_text:
-            result.prompt += partial_assistant_text
-
-        prompt = llama.tokenize(
-            result.prompt.encode("utf-8"),
-            add_bos=not result.added_special,
-            special=True,
-        )
-        if result.stop is not None:
-            stop = [] if stop is None else [stop] if isinstance(stop, str) else stop
-            rstop = result.stop if isinstance(result.stop, list) else [result.stop]
-            stop = stop + rstop
-
-        stopping_criteria = None
-        if result.stopping_criteria is not None:
-            stopping_criteria = result.stopping_criteria
+        prompt = prepared.prompt
+        stop = prepared.stop
+        stopping_criteria = prepared.stopping_criteria
 
         if response_format is not None and response_format["type"] == "json_object":
             grammar = _grammar_for_response_format(
@@ -991,6 +1086,33 @@ def chat_formatter_to_chat_completion_handler(
             )
         return _convert_completion_to_chat(completion_or_chunks, stream=stream)
 
+    def prefill_handler(
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        functions: Optional[List[llama_types.ChatCompletionFunction]] = None,
+        function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[llama_types.ChatCompletionTool]] = None,
+        tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+        assistant_prefill: bool = False,
+        add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
+    ) -> PrefillResult:
+        prepared = prepare_chat_prompt(
+            llama=llama,
+            messages=messages,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+            stop=[],
+            assistant_prefill=assistant_prefill,
+            add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
+        )
+        return llama.prefill(prepared.prompt, reset=True)
+
+    chat_completion_handler.prefill = prefill_handler  # type: ignore[attr-defined]
     return chat_completion_handler
 
 
