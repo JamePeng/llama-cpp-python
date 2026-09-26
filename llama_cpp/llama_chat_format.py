@@ -859,12 +859,24 @@ def chat_formatter_to_chat_completion_handler(
             "tools": tools,
             "tool_choice": tool_choice,
         }
+        # Write `format_kwargs` keys from upon
+        _RESERVED_CHAT_TEMPLATE_KWARGS = {
+            "messages",
+            "functions",
+            "function_call",
+            "tools",
+            "tool_choice",
+            "add_generation_prompt",
+        }
 
         if add_generation_prompt is not None:
             format_kwargs["add_generation_prompt"] = add_generation_prompt
 
         if chat_template_kwargs is not None:
-            reserved = format_kwargs.keys() & chat_template_kwargs.keys()
+            reserved = (
+                _RESERVED_CHAT_TEMPLATE_KWARGS
+                & chat_template_kwargs.keys()
+            )
             if reserved:
                 raise ValueError(
                     "chat_template_kwargs contains reserved keys: "

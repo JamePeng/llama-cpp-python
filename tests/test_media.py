@@ -7,6 +7,7 @@ import threading
 import struct
 
 import pytest
+from jinja2 import Template
 from jinja2.exceptions import TemplateError
 
 
@@ -569,6 +570,28 @@ def test_mtmd_chat_constructor_preserves_template_options(tmp_path):
         assert handler.extra_template_arguments == {"value": "hello"}
     finally:
         handler.close()
+
+
+def test_mtmd_render_prompt_applies_request_template_kwargs_without_mutating_defaults():
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    template_arguments = {"enable_thinking": False}
+    handler = SimpleNamespace(
+        chat_template=Template("{{ 'enabled' if enable_thinking else 'disabled' }}"),
+        extra_template_arguments=template_arguments,
+        verbose=False,
+        log_prefix="test",
+        mtmd_eos_token="",
+        mtmd_bos_token="",
+    )
+
+    prompt = multimodal.MTMDChatHandler._render_mtmd_prompt(
+        handler,
+        messages=[],
+        chat_template_kwargs={"enable_thinking": True},
+    )
+
+    assert prompt == "enabled"
+    assert template_arguments == {"enable_thinking": False}
 
 
 def test_mtmd_chat_template_raise_exception_preserves_message(tmp_path):
