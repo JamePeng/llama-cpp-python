@@ -918,8 +918,9 @@ class _MTMDPrefillInternal:
 @dataclass(frozen=True)
 class MTMDPrefillResult:
     """Immutable multimodal prefill result.
-    
-    `logits` is a read-only NumPy view. Call `.copy()` to obtain a mutable array.
+
+    `logits` is an owned, read-only NumPy array. Call `.copy()` to obtain a
+    mutable array.
     """
     prompt: tuple[int, ...]
     logits: np.ndarray
@@ -2084,7 +2085,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             add_generation_prompt=add_generation_prompt,
         )
         if prefill_only:
-            logits = prefill.logits.view()
+            logits = prefill.logits.copy()
             logits.flags.writeable = False
             return MTMDPrefillResult(
                 prompt=tuple(prefill.prompt),

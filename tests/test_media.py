@@ -78,10 +78,12 @@ def test_chat_prefill_returns_owned_logits_without_generation(chat_prefill):
     handler, llm, _ = chat_prefill
     result = handler(llama=llm, messages=[], prefill_only=True)
 
-    assert result.prompt == [1, 2, -9, -9]
+    assert result.prompt == (1, 2, -9, -9)
     assert result.n_tokens == llm.n_tokens == 4
     assert result.logits.shape == (llm.n_vocab(),)
     assert result.logits.dtype == np.float32
+    assert result.logits.flags.owndata
+    assert not result.logits.flags.writeable
     assert not np.shares_memory(result.logits, llm._restored_logits)
     np.testing.assert_array_equal(result.logits, [0.25, -0.5, 1.0])
     llm.create_completion.assert_not_called()
@@ -165,6 +167,9 @@ def test_llama_create_chat_prefill_uses_selected_mtmd_handler(
     )
     template = "{% for message in messages %}{{ message.content }}{% endfor %}<|image|>"
     llm._model = SimpleNamespace(model_chat_template=Mock(return_value=template))
+    llm._get_chat_completion_handler = MethodType(
+        Llama._get_chat_completion_handler, llm
+    )
     llm.create_chat_prefill = MethodType(Llama.create_chat_prefill, llm)
     llm.chat_handler = handler if resolution == "chat_handler" else None
     llm.chat_format = "test-prefill"
@@ -221,6 +226,9 @@ def test_llama_create_chat_prefill_rejects_non_mtmd_handler():
         chat_handler=handler,
         _chat_handlers={},
         chat_format="unused",
+    )
+    llm._get_chat_completion_handler = MethodType(
+        Llama._get_chat_completion_handler, llm
     )
     llm.create_chat_prefill = MethodType(Llama.create_chat_prefill, llm)
 
