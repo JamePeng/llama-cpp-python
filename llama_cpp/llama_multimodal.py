@@ -44,6 +44,7 @@ if TYPE_CHECKING:
 from ._logger import ggml_log_callback
 
 from llama_cpp.llama_chat_format import (
+    PrefillResult,
     _convert_completion_to_chat,
     _convert_completion_to_chat_function,
     _grammar_for_response_format,
@@ -909,22 +910,11 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             self._request_lock.release()
 
 @dataclass
-class _MTMDPrefillInternal:
+class _MTMDPrefillResult:
     """Internal mutable state produced by a multimodal prefill."""
     prompt: List[int]
     logits: np.ndarray
-    n_tokens: int
 
-@dataclass(frozen=True)
-class MTMDPrefillResult:
-    """Immutable multimodal prefill result.
-
-    `logits` is an owned, read-only NumPy array. Call `.copy()` to obtain a
-    mutable array.
-    """
-    prompt: tuple[int, ...]
-    logits: np.ndarray
-    n_tokens: int
 
 
 class MTMDChatHandler(MTMDBaseHandler):
@@ -1725,7 +1715,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
-    ) -> _MTMDPrefillInternal:
+    ) -> _MTMDPrefillResult:
         """Evaluate a multimodal chat prompt without sampling or generating tokens.
 
         The returned logits are an owned copy, and the Llama KV state remains
@@ -1960,10 +1950,9 @@ class MTMDChatHandler(MTMDBaseHandler):
             logits = llama._restored_logits
             if logits is None:
                 raise RuntimeError("MTMD prefill did not produce final logits")
-            return _MTMDPrefillInternal(
+            return _MTMDPrefillResult(
                 prompt=prompt,
                 logits=logits,
-                n_tokens=llama.n_tokens,
             )
         except BaseException:
             # A helper can commit earlier ubatches before reporting failure.
@@ -1974,6 +1963,26 @@ class MTMDChatHandler(MTMDBaseHandler):
             # Generation no longer needs these resources once prompt evaluation ends.
             self._free_mtmd_resources(chunks, bitmap_cleanup)
 
+    def prefill(
+        self,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        assistant_prefill: bool = False,
+        **kwargs: Any,
+    ) -> PrefillResult:
+        """Evaluate a multimodal chat prompt and retain its native KV state.
+
+        Public calls go through ``__call__`` so model-specific subclasses can
+        prepare template arguments and input state. The base handler uses the
+        private prepared path after that setup and before generation.
+        """
+        if assistant_prefill:
+            raise NotImplementedError(
+                "assistant_prefill is not supported by MTMD chat handlers"
+            )
+
+        return self(llama=llama, messages=messages, prefill_only=True, **kwargs)
+
     @overload
     def __call__(
         self,
@@ -1982,7 +1991,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         messages: List[llama_types.ChatCompletionRequestMessage],
         prefill_only: Literal[True],
         **kwargs: Any,
-    ) -> MTMDPrefillResult: ...
+    ) -> PrefillResult: ...
 
     @overload
     def __call__(
@@ -2008,7 +2017,7 @@ class MTMDChatHandler(MTMDBaseHandler):
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
-        MTMDPrefillResult,
+        PrefillResult,
     ]: ...
 
     def __call__(
@@ -2067,15 +2076,15 @@ class MTMDChatHandler(MTMDBaseHandler):
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
-        MTMDPrefillResult,
+        PrefillResult,
     ]:
-        """Call the handler, or return the MTMD prompt state when requested.
+        """Call the handler, or return final next-token logits when requested.
 
         ``prefill_only=True`` is supported by direct MTMD handler calls. It still
-        runs subclass ``__call__`` preprocessing, then returns before sampling.
+        runs subclass ``__call__`` preprocessing, then returns a ``PrefillResult``
+        before sampling.
         """
-        prefill = MTMDChatHandler._prefill_mtmd(
-            self,
+        prefill = self._prefill_mtmd(
             llama=llama,
             messages=messages,
             functions=functions,
@@ -2085,12 +2094,8 @@ class MTMDChatHandler(MTMDBaseHandler):
             add_generation_prompt=add_generation_prompt,
         )
         if prefill_only:
-            logits = prefill.logits.copy()
-            logits.flags.writeable = False
-            return MTMDPrefillResult(
-                prompt=tuple(prefill.prompt),
-                logits=logits,
-                n_tokens=prefill.n_tokens,
+            return PrefillResult(
+                logits=prefill.logits,
             )
 
         prompt = prefill.prompt

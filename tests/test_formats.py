@@ -528,6 +528,181 @@ def test_formatter_stop_token_boundary():
     assert criterion(np.array([1, 2], dtype=np.intc), logits) is False
 
 
+@pytest.mark.parametrize(
+    "logits_all, logits_index", [(False, 0), (True, 1)]
+)
+def test_text_prefill_uses_eval_and_owns_final_logits(logits_all, logits_index):
+    from llama_cpp import Llama, PrefillResult
+
+    llama = Llama.__new__(Llama)
+    llama.tokenize = Mock(return_value=[11, 12])
+    llama.reset = Mock()
+    llama.eval = Mock()
+    llama.n_tokens = 2
+    llama._logits_all = logits_all
+    llama.scores = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
+    llama.create_completion = Mock()
+
+    result = llama.prefill("hello")
+
+    assert isinstance(result, PrefillResult)
+    assert not hasattr(result, "prompt")
+    assert not hasattr(result, "n_tokens")
+    assert result.logits.shape == (3,)
+    assert result.logits.flags.owndata and not result.logits.flags.writeable
+    np.testing.assert_array_equal(result.logits, [1.0, 2.0, 3.0] if not logits_all else [4.0, 5.0, 6.0])
+    llama.tokenize.assert_called_once_with(b"hello", add_bos=True, special=True)
+    llama.reset.assert_called_once_with()
+    llama.eval.assert_called_once_with(
+        [11, 12], active_loras=None, control_vector=None, copy_logits=True
+    )
+    llama.create_completion.assert_not_called()
+
+    saved = result.logits.copy()
+    llama.scores[logits_index, 0] = 99.0
+    np.testing.assert_array_equal(result.logits, saved)
+
+
+@pytest.mark.parametrize(
+    "prompt, kwargs",
+    [([], {}), ("", {"add_bos": False})],
+)
+def test_text_prefill_rejects_empty_tokens_without_reset(prompt, kwargs):
+    from llama_cpp import Llama
+
+    llama = Llama.__new__(Llama)
+    llama.tokenize = Mock(return_value=[])
+    llama.reset = Mock()
+    llama.eval = Mock()
+
+    with pytest.raises(ValueError, match="at least one token"):
+        llama.prefill(prompt, **kwargs)
+
+    llama.reset.assert_not_called()
+    llama.eval.assert_not_called()
+
+
+def test_standard_chat_prefill_shares_completion_preparation(monkeypatch):
+    from llama_cpp import PrefillResult
+    from llama_cpp.llama_chat_format import (
+        ChatFormatterResponse,
+        chat_formatter_to_chat_completion_handler,
+    )
+
+    messages = [
+        {"role": "user", "content": "question"},
+        {"role": "assistant", "content": "partial"},
+    ]
+    original = copy.deepcopy(messages)
+    formatter_calls = []
+    stopping_criteria = object()
+
+    def format_chat(**kwargs):
+        formatter_calls.append(kwargs)
+        return ChatFormatterResponse(
+            prompt="rendered:",
+            stop=["<eos>"],
+            stopping_criteria=stopping_criteria,
+            added_special=True,
+        )
+
+    tokenized = Mock(return_value=[21, 22])
+    prefill_result = PrefillResult(np.array([1.0, 2.0]))
+    prefill = Mock(return_value=prefill_result)
+    create_completion = Mock(return_value=object())
+    llama = SimpleNamespace(
+        verbose=False,
+        tokenize=tokenized,
+        prefill=prefill,
+        create_completion=create_completion,
+    )
+    handler = chat_formatter_to_chat_completion_handler(format_chat)
+    monkeypatch.setattr(
+        "llama_cpp.llama_chat_format._convert_completion_to_chat",
+        lambda completion, stream=False: completion,
+    )
+
+    assert handler.prefill(
+        llama=llama, messages=messages, assistant_prefill=True
+    ) is prefill_result
+    assert handler(
+        llama=llama,
+        messages=messages,
+        assistant_prefill=True,
+        add_generation_prompt=True,
+    ) is create_completion.return_value
+
+    assert messages == original
+    assert len(formatter_calls) == 2
+    for call in formatter_calls:
+        assert call["messages"] == [original[0]]
+        assert call["add_generation_prompt"] is True
+    assert tokenized.call_args_list == [
+        ((b"rendered:partial",), {"add_bos": False, "special": True}),
+        ((b"rendered:partial",), {"add_bos": False, "special": True}),
+    ]
+    prefill.assert_called_once_with([21, 22], reset=True)
+    completion_args = create_completion.call_args.kwargs
+    assert completion_args["prompt"] == [21, 22]
+    assert completion_args["stop"] == ["<eos>"]
+    assert completion_args["stopping_criteria"] is stopping_criteria
+
+
+def test_standard_completion_preserves_formatter_generation_prompt_default(monkeypatch):
+    from llama_cpp.llama_chat_format import Jinja2ChatFormatter
+
+    formatter = Jinja2ChatFormatter(
+        template="{% if add_generation_prompt %}generation{% else %}configured-default{% endif %}",
+        eos_token="<eos>",
+        bos_token="<bos>",
+        add_generation_prompt=False,
+    )
+    tokenized = Mock(return_value=[31])
+    llama = SimpleNamespace(
+        verbose=False,
+        tokenize=tokenized,
+        create_completion=Mock(return_value=object()),
+    )
+    handler = formatter.to_chat_handler()
+    monkeypatch.setattr(
+        "llama_cpp.llama_chat_format._convert_completion_to_chat",
+        lambda completion, stream=False: completion,
+    )
+
+    handler(llama=llama, messages=[{"role": "user", "content": "question"}])
+
+    assert tokenized.call_args.args[0] == b"configured-default"
+
+
+def test_create_chat_prefill_dispatches_by_capability():
+    from types import MethodType
+    from llama_cpp import Llama, PrefillResult
+
+    result = PrefillResult(np.array([0.0, 1.0]))
+    handler = SimpleNamespace(prefill=Mock(return_value=result))
+    llama = SimpleNamespace(
+        chat_handler=handler,
+        _chat_handlers={},
+        chat_format="unused",
+    )
+    llama._get_chat_completion_handler = MethodType(
+        Llama._get_chat_completion_handler, llama
+    )
+    llama.create_chat_prefill = MethodType(Llama.create_chat_prefill, llama)
+
+    assert llama.create_chat_prefill(messages=[]) is result
+    handler.prefill.assert_called_once_with(
+        llama=llama,
+        messages=[],
+        functions=None,
+        function_call=None,
+        tools=None,
+        tool_choice=None,
+        add_generation_prompt=True,
+        assistant_prefill=False,
+    )
+
+
 def test_formatter_preserves_inputs_and_exposes_hf_template_context():
     messages = [{"role": "user", "content": [{"type": "text", "text": "<&中文"}]}]
     tools = [{"type": "function", "function": {"name": "lookup"}}]

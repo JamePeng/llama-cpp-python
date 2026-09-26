@@ -46,6 +46,7 @@ from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
 import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_chat_format as llama_chat_format
 import llama_cpp.llama_multimodal as llama_multimodal
+from .llama_chat_format import PrefillResult
 
 from llama_cpp.llama_speculative import (
     LlamaDraftModel,
@@ -1812,6 +1813,41 @@ class Llama:
             logits_ptr = self._ctx.get_logits_ith(-1)
             logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
             self.scores[0, :] = logits_view
+
+    def prefill(
+        self,
+        prompt: Union[str, Sequence[int]],
+        *,
+        reset: bool = True,
+        add_bos: bool = True,
+        special: bool = True,
+        active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
+        control_vector: Optional[Dict[str, Any]] = None,
+    ) -> PrefillResult:
+        """Evaluate a text prompt and return its final next-token logits."""
+        tokens = (
+            self.tokenize(prompt.encode("utf-8"), add_bos=add_bos, special=special)
+            if isinstance(prompt, str)
+            else list(prompt)
+        )
+        if not tokens:
+            raise ValueError("Prefill requires at least one token")
+        if reset:
+            self.reset()
+
+        self.eval(
+            tokens,
+            active_loras=active_loras,
+            control_vector=control_vector,
+            copy_logits=True,
+        )
+
+        logits = (
+            self.scores[self.n_tokens - 1]
+            if self._logits_all
+            else self.scores[0]
+        )
+        return PrefillResult(logits=logits)
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
     def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp_lib.llama_logit_bias]:
@@ -4564,20 +4600,17 @@ prompt: The prompt to generate text from.
         tools: Optional[List[ChatCompletionTool]] = None,
         tool_choice: Optional[ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
-    ) -> llama_multimodal.MTMDPrefillResult:
-        """Prefill a chat prompt with the selected MTMD handler, without generation.
-
-        Raises:
-            TypeError: If the selected chat handler is not an MTMDChatHandler.
-        """
+        assistant_prefill: bool = False,
+    ) -> PrefillResult:
+        """Prefill a chat prompt through its handler without generating a token."""
         handler = self._get_chat_completion_handler()
-        if not isinstance(handler, llama_multimodal.MTMDChatHandler):
-            raise TypeError(
-                "create_chat_prefill requires an MTMDChatHandler; "
-                f"the selected handler is {type(handler).__name__}."
+        prefill = getattr(handler, "prefill", None)
+        if not callable(prefill):
+            raise NotImplementedError(
+                "The selected chat handler does not support prefill"
             )
 
-        result = handler(
+        return prefill(
             llama=self,
             messages=messages,
             functions=functions,
@@ -4585,13 +4618,8 @@ prompt: The prompt to generate text from.
             tools=tools,
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
-            prefill_only=True,
+            assistant_prefill=assistant_prefill,
         )
-        if not isinstance(result, llama_multimodal.MTMDPrefillResult):
-            raise TypeError(
-                "The selected MTMDChatHandler did not return an MTMDPrefillResult."
-            )
-        return result
 
     def create_chat_completion_openai_v1(
         self,

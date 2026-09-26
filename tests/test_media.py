@@ -74,12 +74,15 @@ def chat_prefill(chat_prefill_builder):
 
 def test_chat_prefill_returns_owned_logits_without_generation(chat_prefill):
     import numpy as np
+    from llama_cpp import PrefillResult
 
     handler, llm, _ = chat_prefill
     result = handler(llama=llm, messages=[], prefill_only=True)
 
-    assert result.prompt == (1, 2, -9, -9)
-    assert result.n_tokens == llm.n_tokens == 4
+    assert isinstance(result, PrefillResult)
+    assert not hasattr(result, "prompt")
+    assert not hasattr(result, "n_tokens")
+    assert llm.n_tokens == 4
     assert result.logits.shape == (llm.n_vocab(),)
     assert result.logits.dtype == np.float32
     assert result.logits.flags.owndata
@@ -121,6 +124,7 @@ def test_chat_completion_ignores_legacy_subclass_prefill_name(chat_prefill_build
 
 def test_external_handler_forwards_prefill_only_through_call(chat_prefill_builder):
     from llama_cpp import llama_multimodal as multimodal
+    from llama_cpp import PrefillResult
 
     class WrappedChatHandler(multimodal.MTMDChatHandler):
         def __call__(self, **kwargs):
@@ -131,12 +135,13 @@ def test_external_handler_forwards_prefill_only_through_call(chat_prefill_builde
     result = handler(llama=llm, messages=[], prefill_only=True)
 
     assert handler.wrapper_ran
-    assert isinstance(result, multimodal.MTMDPrefillResult)
+    assert isinstance(result, PrefillResult)
     llm.create_completion.assert_not_called()
 
 
 def test_generic_chat_prefill_resolves_model_template(chat_prefill_builder):
     from llama_cpp import llama_multimodal as multimodal
+    from llama_cpp import PrefillResult
 
     handler, llm, _ = chat_prefill_builder(
         multimodal.GenericMTMDChatHandler, chat_format=None
@@ -146,7 +151,7 @@ def test_generic_chat_prefill_resolves_model_template(chat_prefill_builder):
 
     result = handler(llama=llm, messages=[], prefill_only=True)
 
-    assert isinstance(result, multimodal.MTMDPrefillResult)
+    assert isinstance(result, PrefillResult)
     llm._model.model_chat_template.assert_called_once_with(None)
     assert handler._template_initialized
     assert handler._chat_format_parser_tags == ["<|image|>"]
@@ -161,6 +166,7 @@ def test_llama_create_chat_prefill_uses_selected_mtmd_handler(
     import numpy as np
     from llama_cpp import Llama
     from llama_cpp import llama_multimodal as multimodal
+    from llama_cpp import PrefillResult
 
     handler, llm, backend = chat_prefill_builder(
         multimodal.GenericMTMDChatHandler, chat_format=None
@@ -196,8 +202,8 @@ def test_llama_create_chat_prefill_uses_selected_mtmd_handler(
         add_generation_prompt=False,
     )
 
-    assert isinstance(result, multimodal.MTMDPrefillResult)
-    assert result.n_tokens == llm.n_tokens
+    assert isinstance(result, PrefillResult)
+    assert llm.n_tokens == 4
     assert llm._restored_logits is not None
     assert not llm.reset.called
     llm._ctx.memory_clear.assert_not_called()
@@ -221,7 +227,7 @@ def test_llama_create_chat_prefill_uses_selected_mtmd_handler(
 def test_llama_create_chat_prefill_rejects_non_mtmd_handler():
     from llama_cpp import Llama
 
-    handler = Mock()
+    handler = lambda **kwargs: None
     llm = SimpleNamespace(
         chat_handler=handler,
         _chat_handlers={},
@@ -232,16 +238,15 @@ def test_llama_create_chat_prefill_rejects_non_mtmd_handler():
     )
     llm.create_chat_prefill = MethodType(Llama.create_chat_prefill, llm)
 
-    with pytest.raises(TypeError, match="requires an MTMDChatHandler"):
+    with pytest.raises(NotImplementedError, match="handler does not support prefill"):
         llm.create_chat_prefill(messages=[])
-
-    handler.assert_not_called()
 
 
 def test_minicpmv45_prefill_prepares_prompt_and_keeps_generation_stops(
     chat_prefill_builder,
 ):
     from llama_cpp import llama_multimodal as multimodal
+    from llama_cpp import PrefillResult
 
     handler, llm, _ = chat_prefill_builder(
         multimodal.MiniCPMv45ChatHandler, enable_thinking=False
@@ -254,9 +259,9 @@ def test_minicpmv45_prefill_prepares_prompt_and_keeps_generation_stops(
         return [1, 2, -9, -9], [(2, 4, object(), 1, -9)], object(), []
 
     handler._process_mtmd_prompt.side_effect = process_prompt
-    result = handler(llama=llm, messages=[], prefill_only=True)
+    result = handler.prefill(llama=llm, messages=[])
 
-    assert isinstance(result, multimodal.MTMDPrefillResult)
+    assert isinstance(result, PrefillResult)
     llm.create_completion.assert_not_called()
     assert observed[0][0].tolist() == [0, 0, 0, 0, 0, 0]
     assert observed[0][1]["enable_thinking"] is False
