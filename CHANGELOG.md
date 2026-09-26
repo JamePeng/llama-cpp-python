@@ -7,6 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] MTMD Template Compatibility, Vision/Video Input Improvements, and Expanded GGML Backend Bindings
+
+- feat(mtmd): expand vision chat template media support
+    - Recognize **Muse Glimmer**'s <|patch|> marker for image detection in the **generic MTMD handler**
+    - Update **Qwen3VLChatHandler** rendering to inject image and video URLs for MTMD processing.
+    - Enable **Qwen35ChatHandler** video inputs and handle string or {"url": ...} values.
+    - Add regression tests for the supported media input formats.
+
+- feat(ggml): expand backend API bindings
+    - Bind device, buffer, tensor, graph, event, and scheduler APIs from ggml-backend.h.
+    - Correct the device initializer and buffer base pointer signatures, and document each binding with its C declaration and usage notes.
+
+- fix(mtmd): load and compile the model template for generic chat handlers
+    - Preserve unresolved template selection until the first request instead of
+    treating the precompiled fallback as an explicit template.
+    - Recompile the resolved template before extracting media tags so rendering, placeholder
+    normalization, and extra template arguments use the same template.
+
+- fix(mtmd): provide actionable guidance for media evaluation failures
+    - Include the native error code, start position, media token count, context size, and batch size.
+    - For video requests, suggest reducing frame sampling and image token limits or increasing the context size.
+    - Clarify that video options belong on an explicitly constructed chat handler.
+    - Add regression tests for video and non-video error messages.
+
+- fix(mtmd): register standard Jinja chat template helpers
+    - Expose raise_exception so unsupported inputs return the template's intended error message instead of an undefined-function error.
+    - Expose strftime_now for model chat templates that use date formatting.
+    - Reuse the existing formatter implementations and add regression tests for both helpers.
+
+- fix(mtmd): align decoder position struct with native ABI
+    - Add the missing uint32 z field to restore the 16-byte layout
+    - Update type annotations and struct documentation
+    - Test field offsets, native struct returns, and array writes
+
+- docs(readme): align feature and build guidance with current behavior
+    - Correct CUDA PDL, Metal offload, dynamic backend, and OpenCL build
+    guidance against the bundled llama.cpp implementation.
+    - Clarify assistant prefill behavior, LoRA request isolation, speculative
+    decoding boundaries, and the limits of cross-request state reuse.
+    - Update embedding examples to use model-defined pooling and accurately
+    describe batching, normalization, output ownership, and generation-state
+    cleanup.
+    - Use repository-specific server installation commands, document the
+    current development test setup, and fix malformed Markdown fences and
+    project links.
+
+- docs(wiki): align backend options with bundled llama.cpp
+    - Update CUDA documentation to describe PDL as a runtime switch and replace
+    obsolete cuBLAS compute variables with GGML_CUDA_CUBLAS_COMPUTE_TYPE.
+    - Remove the retired HIP rocWMMA option and correct the current SYCL
+    Level Zero and oneDNN variable names.
+    - Document dynamic backend dependencies and list the MUSA, KleidiAI,
+    WebGPU, and Hexagon build options with their validation boundaries.
+    - Clarify that n_gpu_layers=0 disables model-layer offload but does not
+    guarantee that all operations avoid an available GPU backend.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20260925
+
+- Thanks to (**@KLL535**) for the bug report and testing feedback: https://github.com/JamePeng/llama-cpp-python/issues/180
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/5c83af7dcfed4ffdd6bda791835d92698c90a398...3e99f13c8c3cc236bafbedf3448ec2ef0d7df797
+
 ## [0.4.0-Milestone] MTMD Text-to-Speech, Grammar Improvements, and Runtime State Reliability
 
 - feat(tts): add MTMD audio generation for `Qwen3-TTS` and `Pocket TTS`
