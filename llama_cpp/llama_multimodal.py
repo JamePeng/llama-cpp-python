@@ -1268,6 +1268,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Render the chat template into plain prompt text.
@@ -1275,6 +1276,37 @@ class MTMDChatHandler(MTMDBaseHandler):
         This stage only renders the Jinja template. It does not normalize media
         placeholders or replace media URLs with the MTMD runtime marker.
         """
+
+        template_kwargs = dict(getattr(self, "extra_template_arguments", {}))
+        if chat_template_kwargs:
+            # `_render_mtmd_prompt` arguments
+            reserved = {
+                "messages",
+                "add_generation_prompt",
+                "eos_token",
+                "bos_token",
+                "functions",
+                "function_call",
+                "tools",
+                "tool_choice",
+            }
+            invalid = reserved.intersection(chat_template_kwargs)
+            if invalid:
+                raise ValueError(
+                    f"{self.log_prefix}(_render_mtmd_prompt): chat_template_kwargs contains reserved keys - {sorted(invalid)}"
+                )
+
+            if self.verbose:
+                overrides = {
+                    key: value
+                    for key, value in chat_template_kwargs.items()
+                    if key in template_kwargs and template_kwargs[key] != value
+                }
+                if overrides:
+                    print(f"{self.log_prefix}(_render_mtmd_prompt): Template kwargs override - {overrides}")
+
+            template_kwargs.update(chat_template_kwargs)
+
         return self.chat_template.render(
             messages=messages,
             add_generation_prompt=add_generation_prompt,
@@ -1284,7 +1316,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             function_call=function_call,
             tools=tools,
             tool_choice=tool_choice,
-            **getattr(self, "extra_template_arguments", {}),
+            **template_kwargs,
         )
 
     def _replace_media_placeholders(
@@ -1351,6 +1383,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> str:
         """
         Render chat messages and normalize rendered media placeholders into MTMD markers.
@@ -1362,6 +1395,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             tools=tools,
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
         return self._replace_media_placeholders(
@@ -1520,6 +1554,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> Tuple[List[int], List[tuple], Any, List[Any]]:
         """
         Core multimodal preprocessing pipeline.
@@ -1552,6 +1587,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             tools=tools,
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
         if self.verbose:
@@ -1715,6 +1751,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> _MTMDPrefillResult:
         """Evaluate a multimodal chat prompt without sampling or generating tokens.
 
@@ -1734,6 +1771,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             tools=tools,
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
         prefill_started = False
@@ -2065,6 +2103,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
         prefill_only: bool = False,
         reasoning_budget: int = -1,
         reasoning_start: str = "<think>",
@@ -2092,6 +2131,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             tools=tools,
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
         if prefill_only:
             return PrefillResult(

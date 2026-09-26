@@ -4456,6 +4456,7 @@ prompt: The prompt to generate text from.
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
         # Reasoning Budget Params
         reasoning_budget: int = -1,
         reasoning_start: str = "<think>",
@@ -4502,7 +4503,7 @@ prompt: The prompt to generate text from.
             dry_base`: Set the DRY repetition penalty base value. Default: `1.75`
             dry_allowed_length: Tokens that extend repetition beyond this receive exponentially increasing penalty: multiplier * base ^ (length of repeating sequence before token - allowed length). Default: `2`
             dry_penalty_last_n: How many tokens to scan for repetitions. Default: `64`; `0` disables scanning and `-1` uses the context size.
-            dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\n', ':', '"', '*']`
+            dry_seq_breakers: Specify an array of sequence breakers for DRY sampling. Only a JSON array of strings is accepted. Default: `['\\n', ':', '"', '*']`
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
             use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
@@ -4511,6 +4512,7 @@ prompt: The prompt to generate text from.
             logits_processor: A list of logits processors to use.
             grammar: A grammar to use.
             grammar_lazy: If True, enables lazy evaluation.
+            chat_template_kwargs: Optional keyword arguments passed to the Jinja chat template at render time. These values override matching handler-level template defaults for the current request only.
             reasoning_budget: Token budget for the first visible reasoning block.
                 -1 disables the sampler, 0 forces an immediate end after reasoning starts,
                 and N > 0 allows at most N generated tokens inside the block.
@@ -4584,6 +4586,7 @@ prompt: The prompt to generate text from.
             control_vector=control_vector,
             assistant_prefill=assistant_prefill,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
             reasoning_budget=reasoning_budget,
             reasoning_start=reasoning_start,
             reasoning_end=reasoning_end,
@@ -4601,6 +4604,7 @@ prompt: The prompt to generate text from.
         tool_choice: Optional[ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
         assistant_prefill: bool = False,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> PrefillResult:
         """Prefill a chat prompt through its handler without generating a token."""
         handler = self._get_chat_completion_handler()
@@ -4619,6 +4623,7 @@ prompt: The prompt to generate text from.
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
             assistant_prefill=assistant_prefill,
+            chat_template_kwargs=chat_template_kwargs,
         )
 
     def create_chat_completion_openai_v1(
