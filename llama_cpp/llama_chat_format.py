@@ -19,6 +19,7 @@ from typing import (
     Union,
     Protocol,
     cast,
+    overload,
 )
 
 import jinja2
@@ -72,8 +73,12 @@ class LlamaChatCompletionHandler(Protocol):
 
     Very generic protocol that can be used to implement any chat format.
     The only hard requirement is that it must return a ChatCompletion when
-    stream=False and an iterator of ChatCompletionChunks when stream=True."""
+    stream=False and an iterator of ChatCompletionChunks when stream=True.
+    ``prefill_only`` is MTMD-specific; other handlers may ignore it, so this
+    Protocol leaves its result type unspecified.
+    """
 
+    @overload
     def __call__(
         self,
         *,
@@ -133,11 +138,22 @@ class LlamaChatCompletionHandler(Protocol):
         reasoning_budget_message: Optional[str] = None,
         reasoning_start_in_prompt: bool = False,
         reasoning_start_max_tokens: Optional[int] = 32,
+        prefill_only: Literal[False] = False,
         **kwargs,  # type: ignore
     ) -> Union[
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
     ]: ...
+
+    @overload
+    def __call__(
+        self,
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        prefill_only: bool,
+        **kwargs: Any,
+    ) -> Any: ...
 
 
 class LlamaChatCompletionHandlerNotFoundException(Exception):

@@ -11,51 +11,175 @@ from jinja2.exceptions import TemplateError
 
 
 @pytest.fixture
-def chat_prefill(tmp_path, monkeypatch):
+def chat_prefill_builder(tmp_path, monkeypatch):
     import numpy as np
     from llama_cpp import Llama
     from llama_cpp import llama_multimodal as multimodal
 
-    handler = multimodal.MTMDChatHandler(mmproj_path=str(tmp_path), verbose=False)
-    monkeypatch.setattr(handler, "mtmd_ctx", object())
-    monkeypatch.setattr(handler, "_init_mtmd_context", Mock())
-    monkeypatch.setattr(handler, "_free_mtmd_resources", Mock())
-    monkeypatch.setattr(handler, "_is_text_chunk", lambda kind: False)
-    monkeypatch.setattr(handler, "_is_image_chunk", lambda kind: True)
-    monkeypatch.setattr(multimodal, "_convert_completion_to_chat", lambda result, **kw: result)
-    handler._process_mtmd_prompt = Mock(return_value=(
-        [1, 2, -9, -9], [(2, 4, object(), 1, -9)], object(), []
-    ))
-    ctx = SimpleNamespace(
-        ctx=object(), memory_seq_rm=Mock(return_value=True),
-        memory_seq_add=Mock(), memory_can_shift=lambda: True,
-        memory_clear=Mock(),
-    )
-    llm = SimpleNamespace(
-        n_tokens=3, input_ids=np.array([1, 2, 3, 0, 0, 0]),
-        _n_ctx=6, n_ctx=lambda: 6, n_batch=1, n_keep=0,
-        _ctx=ctx, is_hybrid=False, _hybrid_cache_mgr=None,
-        speculative=None, verbose=False,
-        context_params=SimpleNamespace(no_perf=True),
-        _prefilled_prompt=(1, 2, 3), _restored_logits=object(),
-        _last_eval_output_start=2, _last_eval_output_count=1,
-        longest_token_prefix=Llama.longest_token_prefix,
-        create_completion=Mock(return_value="completed"),
-    )
-    llm.reset = Mock(side_effect=lambda: Llama.reset(llm))
-    llm._memory_seq_rm_or_raise = lambda *args: Llama._memory_seq_rm_or_raise(llm, *args)
-    llm._mark_prefilled_prompt = Mock()
+    def build(handler_class=multimodal.MTMDChatHandler, **handler_kwargs):
+        handler_kwargs.setdefault("mmproj_path", str(tmp_path))
+        handler_kwargs.setdefault("verbose", False)
+        handler = handler_class(**handler_kwargs)
+        monkeypatch.setattr(handler, "mtmd_ctx", object())
+        monkeypatch.setattr(handler, "_init_mtmd_context", Mock())
+        monkeypatch.setattr(handler, "_free_mtmd_resources", Mock())
+        monkeypatch.setattr(handler, "_is_text_chunk", lambda kind: False)
+        monkeypatch.setattr(handler, "_is_image_chunk", lambda kind: True)
+        monkeypatch.setattr(multimodal, "_convert_completion_to_chat", lambda result, **kw: result)
+        handler._process_mtmd_prompt = Mock(return_value=(
+            [1, 2, -9, -9], [(2, 4, object(), 1, -9)], object(), []
+        ))
+        ctx = SimpleNamespace(
+            ctx=object(), memory_seq_rm=Mock(return_value=True),
+            memory_seq_add=Mock(), memory_can_shift=lambda: True,
+            memory_clear=Mock(),
+        )
+        llm = SimpleNamespace(
+            n_tokens=3, input_ids=np.array([1, 2, 3, 0, 0, 0]),
+            _n_ctx=6, n_ctx=lambda: 6, n_vocab=lambda: 3, n_batch=1, n_keep=0,
+            _ctx=ctx, is_hybrid=False, _hybrid_cache_mgr=None,
+            speculative=None, verbose=False,
+            context_params=SimpleNamespace(no_perf=True),
+            _prefilled_prompt=(1, 2, 3), _restored_logits=object(),
+            _last_eval_output_start=2, _last_eval_output_count=1,
+            longest_token_prefix=Llama.longest_token_prefix,
+            create_completion=Mock(return_value="completed"),
+        )
+        llm.reset = Mock(side_effect=lambda: Llama.reset(llm))
+        llm._memory_seq_rm_or_raise = lambda *args: Llama._memory_seq_rm_or_raise(llm, *args)
+        llm._mark_prefilled_prompt = Mock(
+            side_effect=lambda: setattr(
+                llm, "_restored_logits", np.array([0.25, -0.5, 1.0], dtype=np.float32)
+            )
+        )
 
-    def evaluate(mtmd, ctx, chunk, pos, seq, batch, logits, output):
-        output._obj.value = pos.value + 2
-        return 0
+        def evaluate(mtmd, ctx, chunk, pos, seq, batch, logits, output):
+            output._obj.value = pos.value + 2
+            return 0
 
-    backend = SimpleNamespace(
-        mtmd_input_chunk_get_n_tokens=lambda chunk: 2,
-        mtmd_helper_eval_chunk_single=Mock(side_effect=evaluate),
+        backend = SimpleNamespace(
+            mtmd_input_chunk_get_n_tokens=lambda chunk: 2,
+            mtmd_helper_eval_chunk_single=Mock(side_effect=evaluate),
+        )
+        monkeypatch.setattr(handler, "_mtmd_cpp", backend)
+        return handler, llm, backend
+
+    return build
+
+
+@pytest.fixture
+def chat_prefill(chat_prefill_builder):
+    return chat_prefill_builder()
+
+
+def test_chat_prefill_returns_owned_logits_without_generation(chat_prefill):
+    import numpy as np
+
+    handler, llm, _ = chat_prefill
+    result = handler(llama=llm, messages=[], prefill_only=True)
+
+    assert result.prompt == [1, 2, -9, -9]
+    assert result.n_tokens == llm.n_tokens == 4
+    assert result.logits.shape == (llm.n_vocab(),)
+    assert result.logits.dtype == np.float32
+    assert not np.shares_memory(result.logits, llm._restored_logits)
+    np.testing.assert_array_equal(result.logits, [0.25, -0.5, 1.0])
+    llm.create_completion.assert_not_called()
+
+    saved_logits = result.logits.copy()
+    llm.reset()
+    np.testing.assert_array_equal(result.logits, saved_logits)
+
+
+def test_chat_completion_uses_prefill_and_preserves_generation_args(chat_prefill):
+    handler, llm, _ = chat_prefill
+
+    assert handler(
+        llama=llm, messages=[], add_generation_prompt=False, temperature=0.7, top_p=0.8
+    ) == "completed"
+
+    completion_args = llm.create_completion.call_args.kwargs
+    assert completion_args["prompt"] == [1, 2, -9, -9]
+    assert completion_args["temperature"] == 0.7
+    assert completion_args["top_p"] == 0.8
+
+
+def test_chat_completion_ignores_legacy_subclass_prefill_name(chat_prefill_builder):
+    from llama_cpp import llama_multimodal as multimodal
+
+    class LegacyChatHandler(multimodal.MTMDChatHandler):
+        def prefill(self, *args, **kwargs):
+            raise AssertionError("legacy prefill override must not intercept generation")
+
+    handler, llm, _ = chat_prefill_builder(LegacyChatHandler)
+
+    assert handler(llama=llm, messages=[]) == "completed"
+    assert llm.create_completion.call_args.kwargs["prompt"] == [1, 2, -9, -9]
+
+
+def test_external_handler_forwards_prefill_only_through_call(chat_prefill_builder):
+    from llama_cpp import llama_multimodal as multimodal
+
+    class WrappedChatHandler(multimodal.MTMDChatHandler):
+        def __call__(self, **kwargs):
+            self.wrapper_ran = True
+            return super().__call__(**kwargs)
+
+    handler, llm, _ = chat_prefill_builder(WrappedChatHandler)
+    result = handler(llama=llm, messages=[], prefill_only=True)
+
+    assert handler.wrapper_ran
+    assert isinstance(result, multimodal.MTMDPrefillResult)
+    llm.create_completion.assert_not_called()
+
+
+def test_generic_chat_prefill_resolves_model_template(chat_prefill_builder):
+    from llama_cpp import llama_multimodal as multimodal
+
+    handler, llm, _ = chat_prefill_builder(
+        multimodal.GenericMTMDChatHandler, chat_format=None
     )
-    monkeypatch.setattr(handler, "_mtmd_cpp", backend)
-    yield handler, llm, backend
+    template = "{% for message in messages %}{{ message.content }}{% endfor %}<|image|>"
+    llm._model = SimpleNamespace(model_chat_template=Mock(return_value=template))
+
+    result = handler(llama=llm, messages=[], prefill_only=True)
+
+    assert isinstance(result, multimodal.MTMDPrefillResult)
+    llm._model.model_chat_template.assert_called_once_with(None)
+    assert handler._template_initialized
+    assert handler._chat_format_parser_tags == ["<|image|>"]
+
+
+def test_minicpmv45_prefill_prepares_prompt_and_keeps_generation_stops(
+    chat_prefill_builder,
+):
+    from llama_cpp import llama_multimodal as multimodal
+
+    handler, llm, _ = chat_prefill_builder(
+        multimodal.MiniCPMv45ChatHandler, enable_thinking=False
+    )
+    llm.input_ids[:] = [1, 2, 3, 4, 5, 6]
+    observed = []
+
+    def process_prompt(**kwargs):
+        observed.append((llm.input_ids.copy(), handler.extra_template_arguments.copy()))
+        return [1, 2, -9, -9], [(2, 4, object(), 1, -9)], object(), []
+
+    handler._process_mtmd_prompt.side_effect = process_prompt
+    result = handler(llama=llm, messages=[], prefill_only=True)
+
+    assert isinstance(result, multimodal.MTMDPrefillResult)
+    llm.create_completion.assert_not_called()
+    assert observed[0][0].tolist() == [0, 0, 0, 0, 0, 0]
+    assert observed[0][1]["enable_thinking"] is False
+
+    llm.reset()
+    handler(llama=llm, messages=[], stop=["caller-stop"])
+    assert llm.create_completion.call_args.kwargs["stop"] == [
+        handler.MINICPMV_EOS_TOKEN,
+        handler.MINICPMV_PAD_TOKEN,
+    ]
+    llm.create_completion.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "interrupt"])

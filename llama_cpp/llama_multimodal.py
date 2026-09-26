@@ -26,10 +26,13 @@ from typing import (
     Protocol,
     TYPE_CHECKING,
     cast,
+    overload,
 )
 
 import urllib.request
 from urllib.error import URLError, HTTPError
+
+import numpy as np
 
 import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_types as llama_types
@@ -698,7 +701,6 @@ class MTMDAudioGenerator(MTMDBaseHandler):
     @staticmethod
     def _validate_audio(data: bytes, response_format: str, rate: int, samples: int) -> None:
         """Reject malformed buffers and clearly invalid signals, not low volume speech."""
-        import numpy as np
 
         if samples <= 0:
             raise RuntimeError("TTS returned empty audio")
@@ -905,6 +907,15 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 return self._get_audio_output(llama, response_format, finish_reason)
         finally:
             self._request_lock.release()
+
+
+@dataclass(frozen=True)
+class MTMDPrefillResult:
+    """Prompt, owned final logits, and token count from a multimodal prefill."""
+
+    prompt: List[int]
+    logits: np.ndarray
+    n_tokens: int
 
 
 class MTMDChatHandler(MTMDBaseHandler):
@@ -1695,7 +1706,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             self._free_mtmd_resources(chunks, bitmap_cleanup, video_cleanup)
             raise
 
-    def __call__(
+    def _prefill_mtmd(
         self,
         *,
         llama: llama_core.Llama,
@@ -1704,53 +1715,13 @@ class MTMDChatHandler(MTMDBaseHandler):
         function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
-        temperature: float = 0.2,
-        top_p: float = 0.95,
-        top_k: int = 40,
-        min_p: float = 0.05,
-        typical_p: float = 1.0,
-        stream: bool = False,
-        stop: Optional[Union[str, List[str]]] = [],
-        seed: Optional[int] = None,
-        response_format: Optional[
-            llama_types.ChatCompletionRequestResponseFormat
-        ] = None,
-        max_tokens: Optional[int] = None,
-        present_penalty: float = 0.0,
-        frequency_penalty: float = 0.0,
-        repeat_penalty: float = 1.1,
-        top_n_sigma: float = -1.00,
-        mirostat_mode: int = 0,
-        mirostat_tau: float = 5.0,
-        mirostat_eta: float = 0.1,
-        xtc_threshold: float = 0.1,
-        xtc_probability: float = 0.0,
-        dry_multiplier: float = 0.0,
-        dry_base: float = 1.75,
-        dry_allowed_length: int = 2,
-        dry_penalty_last_n:int = 64,
-        dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
-        adaptive_target : float = -1.0,
-        adaptive_decay : float = 0.9,
-        use_infill: bool = False,
-        model: Optional[str] = None,
-        logits_processor: Optional[llama_core.LogitsProcessorList] = None,
-        grammar: Optional[llama_grammar.LlamaGrammar] = None,
-        logit_bias: Optional[Dict[str, float]] = None,
-        logprobs: Optional[bool] = None,
-        top_logprobs: Optional[int] = None,
         add_generation_prompt: bool = True,
-        reasoning_budget: int = -1,
-        reasoning_start: str = "<think>",
-        reasoning_end: str = "</think>",
-        reasoning_budget_message: Optional[str] = None,
-        reasoning_start_in_prompt: bool = False,
-        reasoning_start_max_tokens: Optional[int] = 32,
-        **kwargs,  # type: ignore
-    ) -> Union[
-        llama_types.CreateChatCompletionResponse,
-        Iterator[llama_types.CreateChatCompletionStreamResponse],
-    ]:
+    ) -> MTMDPrefillResult:
+        """Evaluate a multimodal chat prompt without sampling or generating tokens.
+
+        The returned logits are an owned copy, and the Llama KV state remains
+        available for a subsequent generation call.
+        """
         # 1. Initialize mtmd context
         self._init_mtmd_context(llama)
         assert self.mtmd_ctx is not None
@@ -1977,6 +1948,14 @@ class MTMDChatHandler(MTMDBaseHandler):
                     tokens=prompt,
                     seq_id=0
                 )
+            logits = llama._restored_logits
+            if logits is None:
+                raise RuntimeError("MTMD prefill did not produce final logits")
+            return MTMDPrefillResult(
+                prompt=prompt,
+                logits=logits.copy(),
+                n_tokens=llama.n_tokens,
+            )
         except BaseException:
             # A helper can commit earlier ubatches before reporting failure.
             if prefill_started:
@@ -1985,6 +1964,120 @@ class MTMDChatHandler(MTMDBaseHandler):
         finally:
             # Generation no longer needs these resources once prompt evaluation ends.
             self._free_mtmd_resources(chunks, bitmap_cleanup)
+
+    @overload
+    def __call__(
+        self,
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        prefill_only: Literal[True],
+        **kwargs: Any,
+    ) -> MTMDPrefillResult: ...
+
+    @overload
+    def __call__(
+        self,
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        prefill_only: Literal[False] = False,
+        **kwargs: Any,
+    ) -> Union[
+        llama_types.CreateChatCompletionResponse,
+        Iterator[llama_types.CreateChatCompletionStreamResponse],
+    ]: ...
+
+    @overload
+    def __call__(
+        self,
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        prefill_only: bool,
+        **kwargs: Any,
+    ) -> Union[
+        llama_types.CreateChatCompletionResponse,
+        Iterator[llama_types.CreateChatCompletionStreamResponse],
+        MTMDPrefillResult,
+    ]: ...
+
+    def __call__(
+        self,
+        *,
+        llama: llama_core.Llama,
+        messages: List[llama_types.ChatCompletionRequestMessage],
+        functions: Optional[List[llama_types.ChatCompletionFunction]] = None,
+        function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[llama_types.ChatCompletionTool]] = None,
+        tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
+        temperature: float = 0.2,
+        top_p: float = 0.95,
+        top_k: int = 40,
+        min_p: float = 0.05,
+        typical_p: float = 1.0,
+        stream: bool = False,
+        stop: Optional[Union[str, List[str]]] = [],
+        seed: Optional[int] = None,
+        response_format: Optional[
+            llama_types.ChatCompletionRequestResponseFormat
+        ] = None,
+        max_tokens: Optional[int] = None,
+        present_penalty: float = 0.0,
+        frequency_penalty: float = 0.0,
+        repeat_penalty: float = 1.1,
+        top_n_sigma: float = -1.00,
+        mirostat_mode: int = 0,
+        mirostat_tau: float = 5.0,
+        mirostat_eta: float = 0.1,
+        xtc_threshold: float = 0.1,
+        xtc_probability: float = 0.0,
+        dry_multiplier: float = 0.0,
+        dry_base: float = 1.75,
+        dry_allowed_length: int = 2,
+        dry_penalty_last_n:int = 64,
+        dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"],
+        adaptive_target : float = -1.0,
+        adaptive_decay : float = 0.9,
+        use_infill: bool = False,
+        model: Optional[str] = None,
+        logits_processor: Optional[llama_core.LogitsProcessorList] = None,
+        grammar: Optional[llama_grammar.LlamaGrammar] = None,
+        logit_bias: Optional[Dict[str, float]] = None,
+        logprobs: Optional[bool] = None,
+        top_logprobs: Optional[int] = None,
+        add_generation_prompt: bool = True,
+        prefill_only: bool = False,
+        reasoning_budget: int = -1,
+        reasoning_start: str = "<think>",
+        reasoning_end: str = "</think>",
+        reasoning_budget_message: Optional[str] = None,
+        reasoning_start_in_prompt: bool = False,
+        reasoning_start_max_tokens: Optional[int] = 32,
+        **kwargs,  # type: ignore
+    ) -> Union[
+        llama_types.CreateChatCompletionResponse,
+        Iterator[llama_types.CreateChatCompletionStreamResponse],
+        MTMDPrefillResult,
+    ]:
+        """Call the handler, or return the MTMD prompt state when requested.
+
+        ``prefill_only=True`` is supported by direct MTMD handler calls. It still
+        runs subclass ``__call__`` preprocessing, then returns before sampling.
+        """
+        prefill = MTMDChatHandler._prefill_mtmd(
+            self,
+            llama=llama,
+            messages=messages,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+            add_generation_prompt=add_generation_prompt,
+        )
+        if prefill_only:
+            return prefill
+        prompt = prefill.prompt
 
         # Handle response format and tools (same as before)
         if response_format is not None and response_format["type"] == "json_object":
