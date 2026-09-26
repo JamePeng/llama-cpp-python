@@ -1096,6 +1096,7 @@ def chat_formatter_to_chat_completion_handler(
         tool_choice: Optional[llama_types.ChatCompletionToolChoiceOption] = None,
         assistant_prefill: bool = False,
         add_generation_prompt: bool = True,
+        chat_template_kwargs: Optional[Dict[str, Any]] = None,
     ) -> PrefillResult:
         prepared = prepare_chat_prompt(
             llama=llama,
@@ -1107,6 +1108,7 @@ def chat_formatter_to_chat_completion_handler(
             stop=[],
             assistant_prefill=assistant_prefill,
             add_generation_prompt=add_generation_prompt,
+            chat_template_kwargs=chat_template_kwargs,
         )
         return llama.prefill(prepared.prompt, reset=True)
 

@@ -4614,17 +4614,21 @@ prompt: The prompt to generate text from.
                 "The selected chat handler does not support prefill"
             )
 
-        return prefill(
-            llama=self,
-            messages=messages,
-            functions=functions,
-            function_call=function_call,
-            tools=tools,
-            tool_choice=tool_choice,
-            add_generation_prompt=add_generation_prompt,
-            assistant_prefill=assistant_prefill,
-            chat_template_kwargs=chat_template_kwargs,
-        )
+        prefill_kwargs: Dict[str, Any] = {
+            "llama": self,
+            "messages": messages,
+            "functions": functions,
+            "function_call": function_call,
+            "tools": tools,
+            "tool_choice": tool_choice,
+            "add_generation_prompt": add_generation_prompt,
+            "assistant_prefill": assistant_prefill,
+        }
+        # For compatibility
+        if chat_template_kwargs is not None:
+            prefill_kwargs["chat_template_kwargs"] = chat_template_kwargs
+
+        return prefill(**prefill_kwargs)
 
     def create_chat_completion_openai_v1(
         self,
