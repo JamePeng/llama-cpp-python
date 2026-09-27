@@ -2135,6 +2135,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         )
         if prefill_only:
             return PrefillResult(
+                n_tokens=len(prefill.prompt),
                 logits=prefill.logits,
             )
 

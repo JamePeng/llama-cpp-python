@@ -546,8 +546,6 @@ def test_text_prefill_uses_eval_and_owns_final_logits(logits_all, logits_index):
     result = llama.prefill("hello")
 
     assert isinstance(result, PrefillResult)
-    assert not hasattr(result, "prompt")
-    assert not hasattr(result, "n_tokens")
     assert result.logits.shape == (3,)
     assert result.logits.flags.owndata and not result.logits.flags.writeable
     np.testing.assert_array_equal(result.logits, [1.0, 2.0, 3.0] if not logits_all else [4.0, 5.0, 6.0])
@@ -607,7 +605,10 @@ def test_standard_chat_prefill_shares_completion_preparation(monkeypatch):
         )
 
     tokenized = Mock(return_value=[21, 22])
-    prefill_result = PrefillResult(np.array([1.0, 2.0]))
+    prefill_result = PrefillResult(
+        n_tokens=2,
+        logits=np.array([1.0, 2.0])
+    )
     prefill = Mock(return_value=prefill_result)
     create_completion = Mock(return_value=object())
     llama = SimpleNamespace(
@@ -678,7 +679,10 @@ def test_create_chat_prefill_dispatches_by_capability():
     from types import MethodType
     from llama_cpp import Llama, PrefillResult
 
-    result = PrefillResult(np.array([0.0, 1.0]))
+    result = PrefillResult(
+        n_tokens=2,
+        logits=np.array([0.0, 1.0])
+    )
     handler = SimpleNamespace(prefill=Mock(return_value=result))
     llama = SimpleNamespace(
         chat_handler=handler,

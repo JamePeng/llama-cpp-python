@@ -226,8 +226,11 @@ class ChatFormatterResponse:
 
 @dataclasses.dataclass(frozen=True)
 class PrefillResult:
-    """owned, read-only final next-token logits."""
+    """owned, read-only final next-token logits.
+    
+    n_tokens is the number of token IDs in the final prompt passed to the prefill/completion path."""
 
+    n_tokens: int
     logits: npt.NDArray[np.single]
 
     def __post_init__(self) -> None:

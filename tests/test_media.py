@@ -81,8 +81,6 @@ def test_chat_prefill_returns_owned_logits_without_generation(chat_prefill):
     result = handler(llama=llm, messages=[], prefill_only=True)
 
     assert isinstance(result, PrefillResult)
-    assert not hasattr(result, "prompt")
-    assert not hasattr(result, "n_tokens")
     assert llm.n_tokens == 4
     assert result.logits.shape == (llm.n_vocab(),)
     assert result.logits.dtype == np.float32

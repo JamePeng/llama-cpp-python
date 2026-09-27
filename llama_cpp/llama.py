@@ -1847,7 +1847,10 @@ class Llama:
             if self._logits_all
             else self.scores[0]
         )
-        return PrefillResult(logits=logits)
+        return PrefillResult(
+            n_tokens=len(tokens),
+            logits=logits
+        )
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
     def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp_lib.llama_logit_bias]:
