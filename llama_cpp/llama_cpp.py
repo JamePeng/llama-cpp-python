@@ -1376,9 +1376,7 @@ def llama_model_quantize_default_params() -> llama_model_quantize_params:
 
 
 # // Initialize the llama + ggml backend
-# // If numa is true, use NUMA optimizations
 # // Call once at the start of the program
-# LLAMA_API void llama_backend_init(bool numa);
 # LLAMA_API void llama_backend_init(void);
 @ctypes_function(
     "llama_backend_init",
@@ -1421,7 +1419,7 @@ def llama_backend_free():
     ...
 
 
-# //optional:
+# // Optional: enable numa optimizations
 # LLAMA_API void llama_numa_init(enum ggml_numa_strategy numa);
 @ctypes_function(
     "llama_numa_init",
@@ -3230,6 +3228,15 @@ def llama_set_causal_attn(ctx: llama_context_p, causal_attn: bool, /):
     """Set whether to use causal attention or not
     If set to true, the model will only attend to the past tokens"""
     ...
+
+
+# // Returns whether the context is currently using causal attention
+# LLAMA_API bool llama_get_causal_attn(const struct llama_context * ctx);
+@ctypes_function("llama_get_causal_attn", [llama_context_p_ctypes], ctypes.c_bool)
+def llama_get_causal_attn(ctx: llama_context_p, /) -> bool:
+    """Returns whether the context is currently using causal attention"""
+    ...
+
 
 # // Set whether the model is in warmup mode or not
 # // If true, all model tensors are activated during llama_decode() to load and cache their weights.

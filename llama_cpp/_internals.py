@@ -1098,6 +1098,12 @@ class LlamaContext:
         """
         llama_cpp.llama_set_causal_attn(self.ctx, causal_attn)
 
+    def get_causal_attn(self) -> bool:
+        """
+        Returns whether the context is currently using causal attention
+        """
+        return llama_cpp.llama_get_causal_attn(self.ctx)
+
     def synchronize(self):
         """Wait for all pending backend computation to finish.
 
