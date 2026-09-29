@@ -317,6 +317,7 @@ class LlamaProxy:
             no_host=settings.no_host,
             kv_overrides=kv_overrides,
             rpc_servers=settings.rpc_servers,
+            rpc_local_devices=settings.rpc_local_devices,
             # Context Params
             seed=settings.seed,
             n_ctx=settings.n_ctx,
