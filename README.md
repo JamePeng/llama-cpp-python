@@ -47,7 +47,9 @@ This package provides:
         - [3. Normalization](https://github.com/JamePeng/llama-cpp-python#3-normalization)
 - [FAQ](https://github.com/JamePeng/llama-cpp-python#faq)
 
-The new documentation will be maintained in the [docs/wiki](https://github.com/JamePeng/llama-cpp-python/tree/main/docs/wiki) directory based on the LLM Wiki approach. Interested volunteers are welcome to participate in its maintenance and updates :)
+The project's maintained documentation is available in [docs/wiki](docs/wiki/index.md)
+and published to the [project wiki](https://github.com/JamePeng/llama-cpp-python/wiki).
+It follows the LLM Wiki approach, and contributions to its maintenance are welcome :)
 
 
 ## Discussions
@@ -57,10 +59,10 @@ Starting March 2026, I am excited to announce that we have officially enabled th
 You can access it right here: [GitHub Discussions](https://github.com/JamePeng/llama-cpp-python/discussions).
 
 **Why Discussions? & Updates on Documentation**
-As the project has evolved, our existing documentation (`docs`) has unfortunately become a bit bloated and outdated. To provide you with more timely and clear information:
+As the project has evolved, some older documentation pages have become bloated or outdated. For timely updates alongside the maintained wiki:
 
 * **New Feature Releases:** Moving forward, whenever a new feature is rolled out, I will publish a dedicated standalone article in the Discussions section. These posts will include detailed explanations, usage guides, and important caveats.
-* This approach will serve as a more agile and interactive "live documentation" while we figure out the best way to refactor the old docs.
+* Discussions provide interactive release notes and usage articles alongside the maintained [`docs/wiki`](docs/wiki/index.md) reference.
 
 **Join the Community**
 I warmly welcome all of you to use this new space. Let's build together:
