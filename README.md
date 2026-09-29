@@ -438,12 +438,63 @@ CMAKE_ARGS="-DGGML_SYCL=on -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DGG
 <details>
 <summary>RPC</summary>
 
-To install with RPC support, set the `GGML_RPC=on` environment variable before installing:
+To install with RPC support, enable `GGML_RPC` in the CMake build:
 
 ```bash
-source /opt/intel/oneapi/setvars.sh   
-CMAKE_ARGS="-DGGML_RPC=on" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+CMAKE_ARGS="-DGGML_RPC=ON" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
+
+On Windows PowerShell:
+
+```powershell
+$env:CMAKE_ARGS = "-DGGML_RPC=ON"
+pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
+
+Start a `ggml-rpc-server` built from a compatible llama.cpp revision. For
+example, from the directory containing the server and its ggml backend
+libraries on Windows:
+
+```powershell
+.\ggml-rpc-server.exe --host 127.0.0.1 --port 50052 --device CUDA0
+```
+
+Use the server's reachable IP address in place of `127.0.0.1` when Python runs
+on a different host. The server prints its exposed device names at startup;
+omit `--device` to let it select available accelerators. Then select its
+devices when loading the model:
+
+```python
+from llama_cpp import Llama
+
+llm = Llama(
+    model_path="model.gguf",
+    rpc_servers=["192.168.1.50:50052"],
+    rpc_local_devices=[],  # do not offload model layers to local GPUs
+    n_gpu_layers=-1,
+)
+```
+
+`rpc_servers` also accepts a comma-separated string. RPC devices are listed
+before local GPUs when interpreting `tensor_split` and `main_gpu`; each remote
+server may expose more than one device. When supplied, `tensor_split` must have
+one value per selected RPC or local GPU device. The model file remains on the
+Python host. Keep the RPC server on a trusted network; llama.cpp's RPC protocol
+does not provide authentication or encryption.
+
+Set `rpc_local_devices=[]` to use only the remote devices, or pass local GPU
+names such as `["CUDA0"]` to select and order the local devices added after the
+remote ones. `LLAMA_SPLIT_MODE_ROW` is not supported with RPC. Each server is
+probed before registration, and repeated use of an endpoint reuses its
+process-wide vendor registration. Registrations remain available until the
+Python process exits because ggml does not expose a safe way to destroy them
+while models may hold device pointers. The Python adapter caps distinct
+endpoints used in one process at `GGML_RPC_MAX_SERVERS` (16); restart Python
+to switch beyond that limit. A server that disconnects between the probe and
+the native call can still cause ggml to terminate the process. For images and
+other multimodal inputs, see [Multimodal Models with RPC](#multimodal-models-with-rpc).
+If a configured server is unavailable at startup, model loading fails instead
+of silently switching to local GPUs.
 </details>
 
 
@@ -1327,6 +1378,58 @@ response = llm.create_chat_completion(
 
 print(response["choices"][0]["message"]["content"])
 ```
+
+### Multimodal Models with RPC
+
+Use `rpc_servers` for the language model and `mmproj_path` for its matching
+multimodal projector. This example uses Qwen3.5 and sends a local PNG image as
+a data URI:
+
+```python
+import base64
+from pathlib import Path
+
+from llama_cpp import Llama
+
+image_data = base64.b64encode(Path("image.png").read_bytes()).decode("ascii")
+image_url = f"data:image/png;base64,{image_data}"
+
+llm = Llama(
+    model_path="Qwen3.5-9B-MTP-Q8_0.gguf",
+    mmproj_path="mmproj-Qwen3.5-9B-MTP-BF16.gguf",
+    rpc_servers=["127.0.0.1:50052"],
+    rpc_local_devices=[],
+    n_gpu_layers=-1,
+    n_ctx=2048,
+    n_batch=256,
+    chat_handler_kwargs={
+        "extra_template_arguments": {"enable_thinking": False},
+    },
+)
+try:
+    response = llm.create_chat_completion(
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "What is in this image?"},
+            ],
+        }],
+        max_tokens=64,
+    )
+    print(response["choices"][0]["message"]["content"])
+finally:
+    llm.close()
+```
+
+The projector is initialized on the first multimodal request. A successful
+`Llama(...)` call alone does not verify that the `mmproj` loaded. Also,
+`rpc_local_devices=[]` selects devices for the language model only. The MTMD
+projector chooses its own backend; with `use_gpu=True` (the default), it uses
+the first GPU in the process-wide ggml registry, which can be a local GPU.
+Set `chat_handler_kwargs={"use_gpu": False}` to run the projector on the local
+CPU. The current high-level handler does not expose an explicit RPC device
+selection for the projector.
 
 #### Chat Template Resolution Order
 
