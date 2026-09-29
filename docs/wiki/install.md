@@ -5,7 +5,7 @@ source_files:
   - README.md
   - vendor/llama.cpp/docs/build.md
   - vendor/llama.cpp/docs/backend/
-last_updated: 2026-09-19
+last_updated: 2026-09-30
 author: JamePeng
 version_target: "latest"
 ---
@@ -183,6 +183,7 @@ build. These options are useful across many backends.
 | `GGML_NATIVE` | `ON`, `OFF` | Controls whether ggml builds for the current host CPU/GPU. Use `OFF` for more portable wheels; use `ON` for local machine-specific optimization. |
 | `BUILD_SHARED_LIBS` | `ON`, `OFF` | Controls shared versus static native libraries. The Python package normally installs shared runtime libraries. |
 | `GGML_BACKEND_DL` | `ON`, `OFF` | Builds backend libraries so they can be loaded dynamically at runtime. Requires `BUILD_SHARED_LIBS=ON`. |
+| `GGML_RPC` | `ON`, `OFF` | Builds the RPC backend so Python can register remote ggml devices. A compatible `ggml-rpc-server` is required separately. |
 | `GGML_CPU_ALL_VARIANTS` | `ON`, `OFF` | Builds multiple CPU backend variants for x86 feature sets. Requires `GGML_BACKEND_DL=ON` and is useful for portable x64 wheels. |
 | `GGML_OPENMP` | `ON`, `OFF` | Enables OpenMP CPU parallelism. On Windows, OpenMP runtime DLLs may need to be packaged beside backend DLLs. |
 | `CMAKE_PREFIX_PATH` | path list | Helps CMake find SDKs or libraries installed outside default locations. |
@@ -217,6 +218,7 @@ Choose one backend path that matches your hardware and installed SDKs.
 | BLIS | `-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=FLAME` | CPU BLAS route using BLIS. |
 | Intel oneMKL | `-DGGML_BLAS=ON -DGGML_BLAS_VENDOR=Intel10_64lp` | Intel CPU BLAS route. This is not the Intel GPU path. |
 | CUDA | `-DGGML_CUDA=on` | Requires NVIDIA CUDA Toolkit matching your driver and GPU. |
+| RPC | `-DGGML_RPC=ON` | Offloads model layers to devices exposed by a compatible `ggml-rpc-server`; see the [RPC guide](features/rpc.md). |
 | Metal | `-DGGML_METAL=on` | Enabled by default on supported macOS builds. Use `-DGGML_METAL=OFF` to disable. |
 | Vulkan | `-DGGML_VULKAN=on` | Requires Vulkan SDK and platform-specific setup. |
 | OpenVINO | `-DGGML_OPENVINO=ON` | Useful for Intel CPU, GPU, and NPU workflows after OpenVINO environment setup. |
@@ -235,6 +237,29 @@ These advanced backends are build options present in the bundled vendor source;
 they are not all exercised by this project's wheel or test matrix. For the full
 list, check the current `vendor/llama.cpp` source first. Upstream `master`
 documents newer work that may not exist in the revision bundled by a release.
+
+---
+
+## RPC Build Option
+
+Enable the RPC backend in the Python package build. On Linux or macOS:
+
+```bash
+CMAKE_ARGS="-DGGML_RPC=ON" \
+  python -m pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
+
+On Windows PowerShell:
+
+```powershell
+$env:CMAKE_ARGS = "-DGGML_RPC=ON"
+python -m pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
+```
+
+This builds the Python-side RPC backend. Run a compatible
+`ggml-rpc-server` separately on the device host. For server startup, device
+selection, failure behavior, and multimodal input, follow the
+[RPC model offloading guide](features/rpc.md).
 
 ---
 

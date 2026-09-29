@@ -1,5 +1,20 @@
 # Runtime state troubleshooting
 
+## RPC model loading fails
+
+If construction reports that the RPC backend is unavailable, verify that the
+Python package was built with `GGML_RPC=ON` and that its dynamic backend
+libraries are present. `Llama` loads those backends before RPC registration;
+calling the internal `_rpc.register_rpc_devices()` directly requires that
+initialization to have happened first.
+
+For connection or protocol errors, check that the compatible
+`ggml-rpc-server` is running, its address and port match `rpc_servers`, and it
+exposes at least one device. A failed RPC configuration stops model loading;
+it does not silently use local GPUs. A disconnect after Python's preflight
+probe can still make native ggml terminate the process. See
+[RPC model offloading](features/rpc.md#registration-and-failures).
+
 ## A saved checkpoint does not produce a cache hit
 
 Check whether the request still matches the saved token prefix, whether the

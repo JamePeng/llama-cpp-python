@@ -451,9 +451,13 @@ $env:CMAKE_ARGS = "-DGGML_RPC=ON"
 pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
 
-Start a `ggml-rpc-server` built from a compatible llama.cpp revision. For
-example, from the directory containing the server and its ggml backend
-libraries on Windows:
+You can download a prebuilt `ggml-rpc-server` from the official
+[llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases). Choose an
+archive for the server host's operating system, architecture, and backend
+(for example, CUDA or Vulkan), and keep the executable with its matching ggml
+backend libraries and required runtime libraries. Use a release compatible
+with the llama.cpp revision in this Python package. For example, from the
+directory containing the server and its libraries on Windows:
 
 ```powershell
 .\ggml-rpc-server.exe --host 127.0.0.1 --port 50052 --device CUDA0

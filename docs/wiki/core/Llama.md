@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-09-17
+last_updated: 2026-09-30
 version_target: "latest"
 ---
 
@@ -44,8 +44,10 @@ model allocation for inspection and planning rather than inference.
 | `split_mode` | `int` | `LLAMA_SPLIT_MODE_LAYER` | Model GPU split mode:<br>• `LLAMA_SPLIT_MODE_NONE`: single GPU<br>• `LLAMA_SPLIT_MODE_ROW`: row-level split<br>• `LLAMA_SPLIT_MODE_LAYER`: layer-level split |
 | `load_mode` | `int` (`llama_load_mode`) | `LLAMA_LOAD_MODE_AUTO` | How model data is loaded. `AUTO` lets llama.cpp choose from device capabilities; the explicit `LLAMA_LOAD_MODE_*` values are described below. |
 | `lazy_mode` | `int` (`llama_lazy_mode`) | `LLAMA_LAZY_MODE_AUTO` | Controls on-demand reads for architecture-marked tensors when mmap is active. |
-| `main_gpu` | `int` | `0` | With `LLAMA_SPLIT_MODE_NONE`, selects the GPU for the whole model. With `ROW`, selects the GPU for small tensors and intermediate results. It is ignored with `LAYER`. |
-| `tensor_split` | `Optional[List[float]]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). |
+| `main_gpu` | `int` | `0` | With `LLAMA_SPLIT_MODE_NONE`, selects the GPU for the whole model. With `ROW`, selects the GPU for small tensors and intermediate results. It is ignored with `LAYER`. RPC devices precede selected local GPUs in the device order. |
+| `tensor_split` | `Optional[List[float]]` | `None` | Proportional split of tensors across GPUs (max `LLAMA_MAX_DEVICES`). With RPC, supply one value per selected remote and local GPU device, in device order. |
+| `rpc_servers` | `Optional[Union[str, Sequence[str]]]` | `None` | RPC endpoints as `host:port` strings or one comma-separated string. Each endpoint may expose multiple devices. Requires an available RPC backend and compatible server. |
+| `rpc_local_devices` | `Optional[Sequence[str]]` | `None` | Local GPU device names to include after RPC devices. `None` selects default local GPUs; `[]` selects only remote devices. Requires `rpc_servers`. |
 | `kv_overrides` | `Optional[Dict[str, Union[bool, int, float, str]]]` | `None` | Key-value overrides for the model metadata. |
 | `use_mmap`, `use_direct_io`, `use_mlock` | `bool` | `False` | Deprecated compatibility arguments. They no longer configure native loading; use `load_mode`. |
 | `vocab_only` | `bool` | `False` | Load model metadata and vocabulary without weight tensors. |
@@ -55,6 +57,12 @@ model allocation for inspection and planning rather than inference.
 | `no_alloc` | `bool` | `False` | Load metadata and simulate model allocation without allocating tensor data. Intended for inspection and planning rather than inference. |
 | `load_mtp` | `bool` | `False` | Load the target model's NextN/MTP tensors. This is enabled automatically for built-in MTP through `speculative`; normally it should not be set manually. |
 | `numa` | `Union[bool, int]` | `False` | NUMA strategy (e.g., `GGML_NUMA_STRATEGY_DISTRIBUTE`). |
+
+RPC registration is process-wide, but each `Llama` instance passes its own
+explicit device list. RPC model construction rejects row split mode and fails
+if a configured server is unavailable; it does not fall back to local GPUs.
+See [RPC model offloading](../features/rpc.md) for setup, lifecycle, and
+multimodal device selection.
 
 #### Model Load Modes
 

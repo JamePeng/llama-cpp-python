@@ -43,6 +43,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | [Caching and State Reuse](features/caching.md) | Live prefixes, full snapshots, partial checkpoints, ownership, and cache misses. |
 | [Embeddings and Reranking](features/embeddings-rerank.md) | End-to-end sentence embeddings, token-level vectors, normalization, streaming batches, similarity output, and cross-encoder reranking. |
 | [Grammar and Constrained Generation](features/grammar.md) | GBNF and JSON Schema usage, reusable definitions, lazy sampling, conversion optimizations, and supported behavior and limitations. |
+| [RPC Model Offloading](features/rpc.md) | Build and start an RPC backend, select remote and local devices, handle registration failures, and use multimodal models. |
 
 ### Examples
 
@@ -94,6 +95,12 @@ For speculative decoding:
 2. [Llama Speculative Decoding](modules/LlamaSpeculative.md)
 3. [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md)
 
+For RPC model offloading:
+
+1. [Installation](install.md#rpc-build-option)
+2. [RPC Model Offloading](features/rpc.md)
+3. [Llama](core/Llama.md)
+
 For text-to-speech:
 
 1. [MTMD Speech Synthesis](examples/audio/audio-tts.md) — Qwen3-TTS Base and Pocket TTS, reference audio, Flash Attention, output formats, and current cloning limitations.
@@ -123,6 +130,7 @@ Completed pages currently linked from this index:
 - `modules/MTMDCppBindings.md`
 - `features/embeddings-rerank.md`
 - `features/grammar.md`
+- `features/rpc.md`
 - `features/caching.md`
 - `examples/vision/vision-qwen.md`
 - `troubleshooting.md`
