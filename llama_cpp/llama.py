@@ -4,6 +4,7 @@ import contextlib
 import ctypes
 import fnmatch
 import json
+import math
 import multiprocessing
 import os
 import sys
@@ -59,6 +60,7 @@ from llama_cpp.llama_speculative import (
 )
 
 import llama_cpp._internals as internals
+from ._rpc import normalize_rpc_servers, register_rpc_devices
 from ._internals import (
     LlamaSamplingContext,
     LlamaSamplingParams,
@@ -115,6 +117,7 @@ class Llama:
     """High-level Python wrapper for a llama.cpp model."""
 
     __backend_initialized = False
+    __backend_lock = threading.Lock()
 
     LLM_FFN_EXPS_REGEX = rb"\.ffn_(up|down|gate|gate_up)_(ch|)exps"
 
@@ -132,6 +135,8 @@ class Llama:
         lazy_mode: int = llama_cpp_lib.llama_lazy_mode.LLAMA_LAZY_MODE_AUTO,
         main_gpu: int = 0,
         tensor_split: Optional[List[float]] = None,
+        rpc_servers: Optional[Union[str, Sequence[str]]] = None,
+        rpc_local_devices: Optional[Sequence[str]] = None,
         kv_overrides: Optional[Dict[str, Union[bool, int, float, str]]] = None,
         use_mmap: bool = False,
         use_direct_io: bool = False,
@@ -246,6 +251,10 @@ class Llama:
             load_mode: How to load the model. See llama_cpp.LLAMA_LOAD_MODE_* for options.
             main_gpu: main_gpu interpretation depends on split_mode: LLAMA_SPLIT_MODE_NONE: the GPU that is used for the entire model. LLAMA_SPLIT_MODE_ROW: the GPU that is used for small tensors and intermediate results. LLAMA_SPLIT_MODE_LAYER: ignored
             tensor_split: How split tensors should be distributed across GPUs. If None, the model is not split.
+            rpc_servers: RPC endpoints as host:port strings, or a comma-separated string.
+                RPC devices precede local GPUs in tensor_split and main_gpu indices.
+            rpc_local_devices: Local GPU names to include alongside RPC devices, in order.
+                None selects the default local GPUs; an empty list selects only RPC devices.
             kv_overrides: Key-value overrides for the model.
             vocab_only: Only load the vocabulary no weights.
             check_tensors: validate model tensor data
@@ -332,6 +341,15 @@ class Llama:
         self.verbose = verbose
         self.verbosity = verbosity
         self._stack = contextlib.ExitStack()
+        self.rpc_servers = normalize_rpc_servers(rpc_servers)
+        if isinstance(rpc_local_devices, (str, bytes)):
+            raise TypeError("rpc_local_devices must be a sequence of device names")
+        self.rpc_local_devices = list(rpc_local_devices) if rpc_local_devices is not None else None
+        self._c_rpc_devices = None
+        if self.rpc_local_devices is not None and not self.rpc_servers:
+            raise ValueError("rpc_local_devices requires rpc_servers")
+        if self.rpc_servers and split_mode == llama_cpp_lib.llama_split_mode.LLAMA_SPLIT_MODE_ROW:
+            raise ValueError("RPC devices do not support LLAMA_SPLIT_MODE_ROW")
 
         configure_logging(
             verbose=verbose,
@@ -342,39 +360,43 @@ class Llama:
 
         # llama.cpp / ggml backend initialization is process-global.
         # Run it once before loading any model.
-        if not Llama.__backend_initialized:
-            with suppress_stdout_stderr(disable=verbose):
-                llama_cpp_lib.llama_backend_init()
+        with Llama.__backend_lock:
+            if not Llama.__backend_initialized:
+                with suppress_stdout_stderr(disable=verbose):
+                    llama_cpp_lib.llama_backend_init()
 
-                # Wheels built with `GGML_BACKEND_DL` ship ggml backends as separate
-                # dynamic libraries under llama_cpp/lib, for example:
-                #
-                #   ggml-cpu-x64.dll
-                #   ggml-cpu-haswell.dll
-                #   ggml-cpu-alderlake.dll
-                #   ggml-cuda.dll
-                #
-                # With the dynamic backend layout, llama_backend_init() initializes
-                # the global backend system but does not necessarily register every
-                # packaged backend. Loading the package lib directory ensures ggml can
-                # discover CPU variants and optional accelerator backends before model
-                # loading.
-                lib_dir = Path(llama_cpp_lib.__file__).resolve().parent / "lib"
+                    # Dynamic ggml backends must be loaded before model selection.
+                    lib_dir = Path(llama_cpp_lib.__file__).resolve().parent / "lib"
 
-                if not lib_dir.exists():
-                    raise FileNotFoundError(f"Llama.__init__: llama_cpp lib directory not found: {lib_dir}")
+                    if not lib_dir.exists():
+                        raise FileNotFoundError(f"Llama.__init__: llama_cpp lib directory not found: {lib_dir}")
 
-                # Load all dynamic ggml backend plugins from the packaged lib directory.
-                ggml_backend_load_all_from_path(
-                    ctypes.c_char_p(str(lib_dir).encode("utf-8"))
+                    ggml_backend_load_all_from_path(
+                        ctypes.c_char_p(str(lib_dir).encode("utf-8"))
+                    )
+
+                    if self.verbose:
+                        count = ggml_backend_reg_count()
+                        print(f"Llama.__init__: Loaded ggml backend registry count: {count}", file=sys.stderr)
+
+                Llama.__backend_initialized = True
+
+            if self.rpc_servers:
+                if tensor_split is not None:
+                    if not all(math.isfinite(value) and value >= 0 for value in tensor_split):
+                        raise ValueError("tensor_split values must be finite and non-negative")
+                    if not any(tensor_split):
+                        raise ValueError("tensor_split must include a positive value")
+                rpc_devices = register_rpc_devices(
+                    self.rpc_servers,
+                    self.rpc_local_devices,
+                    tensor_parallel=(split_mode == llama_cpp_lib.llama_split_mode.LLAMA_SPLIT_MODE_TENSOR),
+                    max_devices=llama_cpp_lib.LLAMA_MAX_DEVICES,
+                    expected_devices=len(tensor_split) if tensor_split is not None else None,
                 )
-
-                # Print the number of backend registrations to confirm whether the DLL is loaded.
-                if self.verbose:
-                    count = ggml_backend_reg_count()
-                    print(f"Llama.__init__: Loaded ggml backend registry count: {count}", file=sys.stderr)
-
-            Llama.__backend_initialized = True
+                self._c_rpc_devices = (ctypes.c_void_p * (len(rpc_devices) + 1))(
+                    *rpc_devices, None
+                )
 
         if isinstance(numa, bool):
             self.numa = (
@@ -412,6 +434,8 @@ class Llama:
 
         # Model Params
         self.model_params = llama_cpp_lib.llama_model_default_params()
+        if self._c_rpc_devices is not None:
+            self.model_params.devices = self._c_rpc_devices
         self.model_params.n_gpu_layers = self._parse_n_gpu_layers(n_gpu_layers)
         self.model_params.split_mode = split_mode
         self.model_params.load_mode = load_mode
@@ -1049,21 +1073,24 @@ class Llama:
         self._last_eval_output_start = 0
         self._last_eval_output_count = 0
         self._state_needs_speculative_reset = False
-        self.model_params =None
-        self.context_params = None
         self.chat_handler = None
         self.input_ids = None
         self.metadata = None
         self.scores = None
         self.tokenizer_ = None
 
-        self._c_tensor_split = None
-        self._kv_overrides_array = None
-
         # Preserve dependency order and attempt every close on failure.
-        with contextlib.ExitStack() as cleanup:
-            for resource in reversed(resources):
-                cleanup.callback(resource.close)
+        try:
+            with contextlib.ExitStack() as cleanup:
+                for resource in reversed(resources):
+                    cleanup.callback(resource.close)
+        finally:
+            # Native destructors may still need the model parameter storage.
+            self.model_params = None
+            self.context_params = None
+            self._c_tensor_split = None
+            self._c_rpc_devices = None
+            self._kv_overrides_array = None
 
     def __del__(self) -> None:
         # __del__ can run after Python has started clearing module globals and
@@ -4596,6 +4623,8 @@ prompt: The prompt to generate text from.
             lazy_mode=self.model_params.lazy_mode,
             main_gpu=self.model_params.main_gpu,
             tensor_split=self.tensor_split,
+            rpc_servers=self.rpc_servers,
+            rpc_local_devices=self.rpc_local_devices,
             kv_overrides=self.kv_overrides,
             vocab_only=self.model_params.vocab_only,
             check_tensors=self.model_params.check_tensors,
