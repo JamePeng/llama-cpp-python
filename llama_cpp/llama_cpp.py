@@ -1420,6 +1420,7 @@ def llama_backend_free():
 
 
 # // Optional: enable numa optimizations
+# // TODO: deprecate and make part of llama_backend_init()
 # LLAMA_API void llama_numa_init(enum ggml_numa_strategy numa);
 @ctypes_function(
     "llama_numa_init",
