@@ -943,7 +943,7 @@ class ggml_opt_optimizer_params(ctypes.Structure):
 # // userdata can be used to pass arbitrary data
 # typedef struct ggml_opt_optimizer_params (*ggml_opt_get_optimizer_params)(void * userdata);
 ggml_opt_get_optimizer_params = ctypes.CFUNCTYPE(
-    ctypes.POINTER(ggml_opt_optimizer_params), ctypes.c_void_p
+    ggml_opt_optimizer_params, ctypes.c_void_p
 )
 
 
