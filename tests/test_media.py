@@ -177,6 +177,37 @@ def test_mtmd_decoder_pos_abi():
         module.mtmd_input_chunks_free(chunks)
 
 
+@pytest.mark.parametrize("n_pos", [1, 4])
+def test_mtmd_helper_post_decode_callback(n_pos):
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    embeddings = (ctypes.c_float * 6)(1, 2, 3, 4, 5, 6)
+    positions = (ctypes.c_int32 * (2 * n_pos))(*range(2 * n_pos))
+    batch = module.mtmd_helper_embd_batch(2, embeddings, 3, positions, n_pos, 7)
+    user_data = ctypes.c_int32(11)
+    received = []
+
+    @module.mtmd_helper_post_decode_callback
+    def callback(batch_ptr, user_data_ptr):
+        received.append((
+            ctypes.addressof(batch_ptr.contents),
+            batch_ptr.contents.n_tokens,
+            batch_ptr.contents.n_embd,
+            batch_ptr.contents.n_pos,
+            batch_ptr.contents.seq_id,
+            list(batch_ptr.contents.embd[:6]),
+            list(batch_ptr.contents.pos[:2 * n_pos]),
+            ctypes.cast(user_data_ptr, ctypes.POINTER(ctypes.c_int32)).contents.value,
+        ))
+        return -3
+
+    assert callback(ctypes.byref(batch), ctypes.byref(user_data)) == -3
+    assert received == [(
+        ctypes.addressof(batch), 2, 3, n_pos, 7,
+        [1, 2, 3, 4, 5, 6], list(range(2 * n_pos)), 11,
+    )]
+    assert module.mtmd_helper_decode_image_chunk.argtypes[8] is module.mtmd_helper_post_decode_callback
+
+
 def test_mtmd_helper_init_opt_abi():
     module = importlib.import_module("llama_cpp.mtmd_cpp")
 

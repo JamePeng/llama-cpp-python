@@ -1635,10 +1635,27 @@ def mtmd_helper_eval_chunk_single(
     ...
 
 
-# typedef int32_t (*mtmd_helper_post_decode_callback)(struct llama_batch batch, void * user_data);
+class mtmd_helper_embd_batch(Structure):
+    """Borrowed embedding sub-batch, valid only during the decode callback.
+
+    ``embd`` has shape [n_tokens, n_embd]; ``pos`` has shape
+    [n_pos, n_tokens] in section-major order.
+    """
+
+    _fields_ = [
+        ("n_tokens", c_int32),
+        ("embd", POINTER(c_float)),
+        ("n_embd", c_int32),
+        ("pos", POINTER(c_int32)),
+        ("n_pos", c_int32),
+        ("seq_id", c_int32),
+    ]
+
+
+# typedef int32_t (*mtmd_helper_post_decode_callback)(const struct mtmd_helper_embd_batch * batch, void * user_data);
 mtmd_helper_post_decode_callback = CFUNCTYPE(
     c_int32,
-    llama_cpp_lib.llama_batch,
+    POINTER(mtmd_helper_embd_batch),
     c_void_p,
 )
 
