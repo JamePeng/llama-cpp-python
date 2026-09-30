@@ -1152,6 +1152,7 @@ llama_model_imatrix_data_p = ctypes.POINTER(llama_model_imatrix_data)
 #     const struct llama_model_kv_override * kv_overrides;        // pointer to kv overrides
 #     const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
 #     const int32_t * prune_layers;                               // pointer to layer indices to prune
+#     size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
 # } llama_model_quantize_params;
 class llama_model_quantize_params(ctypes.Structure):
     """Parameters for llama_model_quantize
@@ -1171,6 +1172,7 @@ class llama_model_quantize_params(ctypes.Structure):
         kv_overrides (POINTER(llama_model_kv_override)): Pointer to KV overrides.
         tt_overrides (POINTER(llama_model_tensor_override)): Pointer to tensor overrides.
         prune_layers (POINTER(c_int32)): Pointer to layer indices to prune.
+        max_buf_size (size_t): max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
     """
 
     if TYPE_CHECKING:
@@ -1188,6 +1190,7 @@ class llama_model_quantize_params(ctypes.Structure):
         kv_overrides: ctypes.POINTER(llama_model_kv_override) # type: ignore
         tensor_types: ctypes.POINTER(llama_model_tensor_override) # type: ignore
         prune_layers: ctypes.POINTER(ctypes.c_int32) # type: ignore
+        max_buf_size: ctypes.c_size_t
 
     _fields_ = [
         ("nthread", ctypes.c_int32),
@@ -1204,6 +1207,7 @@ class llama_model_quantize_params(ctypes.Structure):
         ("kv_overrides", ctypes.POINTER(llama_model_kv_override)),
         ("tt_overrides", ctypes.POINTER(llama_model_tensor_override)),
         ("prune_layers", ctypes.POINTER(ctypes.c_int32)),
+        ("max_buf_size", ctypes.c_size_t),
     ]
 
 
@@ -5201,12 +5205,11 @@ def llama_opt_param_filter_all(
 
 # struct llama_opt_params {
 #     uint32_t n_ctx_train; // assumed context size post training, use context size specified in llama_context if 0
-
 #     llama_opt_param_filter param_filter; // callback for determining which tensors contain trainable parameters
 #     void * param_filter_ud;              // userdata for determining which tensors contain trainable parameters
-
 #     ggml_opt_get_optimizer_params get_opt_pars; // callback for calculating optimizer parameters
 #     void * get_opt_pars_ud;                     // userdata for calculating optimizer parameters
+#     enum ggml_opt_optimizer_type optimizer_type;
 # };
 class llama_opt_params(ctypes.Structure):
     _fields_ = [
@@ -5215,19 +5218,20 @@ class llama_opt_params(ctypes.Structure):
         ("param_filter_ud", ctypes.c_void_p),
         ("get_opt_pars", ggml_opt_get_optimizer_params),
         ("get_opt_pars_ud", ctypes.c_void_p),
+        ("optimizer_type", ctypes.c_int),
     ]
 
 
 # LLAMA_API void llama_opt_init(struct llama_context * lctx, struct llama_model * model, struct llama_opt_params lopt_params);
 @ctypes_function(
     "llama_opt_init",
-    [llama_context_p_ctypes, llama_model_p_ctypes, llama_opt_params_p_ctypes],
+    [llama_context_p_ctypes, llama_model_p_ctypes, llama_opt_params],
     None,
 )
 def llama_opt_init(
     lctx: llama_context_p,
     model: llama_model_p,
-    lopt_params: llama_opt_params_p, /
+    lopt_params: llama_opt_params, /
 ):
     ...
 
