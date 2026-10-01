@@ -861,6 +861,7 @@ def chat_formatter_to_chat_completion_handler(
             "tools": tools,
             "tool_choice": tool_choice,
         }
+        
         if add_generation_prompt is not None:
             format_kwargs["add_generation_prompt"] = add_generation_prompt
 
