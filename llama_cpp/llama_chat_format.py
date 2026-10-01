@@ -838,7 +838,6 @@ def chat_formatter_to_chat_completion_handler(
         stop: Optional[Union[str, List[str]]],
         assistant_prefill: bool,
         add_generation_prompt: Optional[bool],
-        chat_template_kwargs: Optional[Dict[str, Any]],
     ) -> _PreparedChatPrompt:
         partial_assistant_text = ""
         if assistant_prefill:
@@ -862,31 +861,8 @@ def chat_formatter_to_chat_completion_handler(
             "tools": tools,
             "tool_choice": tool_choice,
         }
-        # Write `format_kwargs` keys from upon
-        _RESERVED_CHAT_TEMPLATE_KWARGS = {
-            "messages",
-            "functions",
-            "function_call",
-            "tools",
-            "tool_choice",
-            "add_generation_prompt",
-        }
-
         if add_generation_prompt is not None:
             format_kwargs["add_generation_prompt"] = add_generation_prompt
-
-        if chat_template_kwargs is not None:
-            reserved = (
-                _RESERVED_CHAT_TEMPLATE_KWARGS
-                & chat_template_kwargs.keys()
-            )
-            if reserved:
-                raise ValueError(
-                    "chat_template_kwargs contains reserved keys: "
-                    f"{sorted(reserved)}"
-                )
-
-            format_kwargs.update(chat_template_kwargs)
 
         result = chat_formatter(
             **format_kwargs,
@@ -954,7 +930,6 @@ def chat_formatter_to_chat_completion_handler(
         logprobs: Optional[bool] = None,
         top_logprobs: Optional[int] = None,
         assistant_prefill: bool = False,
-        chat_template_kwargs: Optional[Dict[str, Any]] = None,
         # Reasoning Budget Params
         #
         # Generic first-reasoning-block budget control. These parameters are
@@ -983,7 +958,6 @@ def chat_formatter_to_chat_completion_handler(
             stop=stop,
             assistant_prefill=assistant_prefill,
             add_generation_prompt=add_generation_prompt,
-            chat_template_kwargs=chat_template_kwargs,
         )
         prompt = prepared.prompt
         stop = prepared.stop
