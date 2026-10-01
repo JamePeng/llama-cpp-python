@@ -48,10 +48,11 @@ jobs:
           CIBW_ARCHS: "arm64"
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
           CIBW_ENVIRONMENT: >
+            CMAKE_BUILD_PARALLEL_LEVEL=12
             CMAKE_ARGS="-DCMAKE_OSX_ARCHITECTURES=arm64
             -DCMAKE_APPLE_SILICON_PROCESSOR=arm64
-            -DCMAKE_CROSSCOMPILING=on
             -DGGML_METAL=on
+            -DGGML_RPC=ON
             -DGGML_METAL_USE_BF16=on
             -DGGML_METAL_EMBED_LIBRARY=on"
         with:
@@ -61,7 +62,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-metal_${{ matrix.os }}
+          name: wheels-metal-arm64
           path: ./wheelhouse2/*.whl
 
   release:

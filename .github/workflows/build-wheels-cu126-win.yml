@@ -26,7 +26,7 @@ jobs:
     env:
       CUDAVER: ${{ matrix.cuda }}
       CUDAARCHVER: ${{ matrix.cudaarch }}
-      MAX_JOBS: 12
+      CMAKE_BUILD_PARALLEL_LEVEL: 12
 
     steps:
       - name: Add MSBuild to PATH
@@ -124,6 +124,7 @@ jobs:
             # GGML dynamic backend layout
             '-DGGML_CPU=ON'
             '-DGGML_CUDA=ON'
+            '-DGGML_RPC=ON'
             '-DGGML_NATIVE=OFF'
             '-DGGML_BACKEND_DL=ON'
             '-DGGML_CPU_ALL_VARIANTS=ON'
@@ -132,12 +133,8 @@ jobs:
             # CUDA backend
             "-DCMAKE_CUDA_ARCHITECTURES=$env:CUDAARCHVER"
             '-DGGML_CUDA_FORCE_MMQ=ON'
-            '-DCUDA_SEPARABLE_COMPILATION=ON'
             "-DCMAKE_CUDA_FLAGS=$cudaDiagSuppress"
 
-            # Build behavior
-            "-DCMAKE_BUILD_PARALLEL_LEVEL=$env:MAX_JOBS"
-            '-DENABLE_CCACHE=ON'
           )
 
           $env:CMAKE_ARGS = $cmakeArgs -join ' '
