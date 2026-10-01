@@ -56,6 +56,17 @@ The example uses CPU execution. For an appropriate GPU build, configure target
 layer offload and the handler's `use_gpu` separately. Output depends on the image
 and model; generation is not a validation of image recognition accuracy.
 
+## Use an RPC-backed language model
+
+Start a compatible RPC server as shown in the
+[RPC model offloading guide](../../features/rpc.md), then add
+`rpc_servers=["127.0.0.1:50052"]`, `rpc_local_devices=[]`, and
+`n_gpu_layers=-1` to the `Llama(...)` call above. Keep `use_gpu=False` on this
+handler if the projector should run on the local CPU. The RPC device list
+selects model-layer placement only; it does not select the projector backend.
+The [RPC guide's multimodal example](../../features/rpc.md#multimodal-input)
+also shows a matching Qwen3.5 model and projector with the generic MTMD handler.
+
 ## N-gram speculation
 
 To enable n-gram proposals, add these imports and pass the configuration to the

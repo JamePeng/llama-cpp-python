@@ -14,6 +14,99 @@ from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
 
+def test_extended_batch_matches_legacy_decode(completion_model, tmp_path):
+    model = completion_model
+    tokens = model.tokenize(b"Hello", add_bos=True)
+    model.eval(tokens)
+    expected = np.ctypeslib.as_array(
+        model._ctx.get_logits_ith(-1), shape=(model.n_vocab(),)
+    ).copy()
+    model.reset()
+    batch = llama_cpp.llama_batch_ext_init(model._ctx.ctx)
+    assert batch
+    try:
+        assert llama_cpp.llama_batch_ext_add_token(batch, -1, tokens[0]) == -3
+        assert llama_cpp.llama_batch_ext_add_token(batch, 0, llama_cpp.LLAMA_TOKEN_NULL) == -2
+        # Invalid token input leaves an empty entry in the native batch.
+        llama_cpp.llama_batch_ext_clear(batch)
+        for pos, token in enumerate(tokens):
+            idx = llama_cpp.llama_batch_ext_add_token(batch, 0, token)
+            assert idx == pos
+            if pos == 0:
+                assert llama_cpp.llama_batch_ext_add_seq(batch, idx, 0)
+                assert not llama_cpp.llama_batch_ext_add_seq(batch, idx, model.context_params.n_seq_max)
+            assert llama_cpp.llama_batch_ext_set_pos(batch, idx, ctypes.byref(llama_cpp.llama_pos(pos)))
+            assert llama_cpp.llama_batch_ext_set_output_logits(batch, idx, pos == len(tokens) - 1)
+        assert llama_cpp.llama_process(model._ctx.ctx, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, batch) == 0
+        actual = np.ctypeslib.as_array(model._ctx.get_logits_ith(-1), shape=(model.n_vocab(),))
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+        assert llama_cpp.llama_state_seq_get_size(model._ctx.ctx, 0) == llama_cpp.llama_state_seq_get_size_ext(
+            model._ctx.ctx, 0, llama_cpp.LLAMA_STATE_SEQ_FLAGS_NONE
+        )
+
+        session_path = os.fsencode(tmp_path / "session.bin")
+        token_array = (llama_cpp.llama_token * len(tokens))(*tokens)
+        assert llama_cpp.llama_state_save_file(model._ctx.ctx, session_path, token_array, len(tokens)) is True
+        model.reset()
+        restored = (llama_cpp.llama_token * len(tokens))()
+        count = ctypes.c_size_t()
+        assert llama_cpp.llama_state_load_file(
+            model._ctx.ctx, session_path, restored, len(tokens), ctypes.byref(count)
+        ) is True
+        assert count.value == len(tokens)
+        assert list(restored) == tokens
+        assert llama_cpp.llama_state_load_file(
+            model._ctx.ctx, os.fsencode(tmp_path / "missing.bin"), restored, len(tokens), ctypes.byref(count)
+        ) is False
+
+        # Compare embedding input and the by-value llama_embd setters.
+        model.reset()
+        width = model.n_embd_inp()
+        zeros = (ctypes.c_float * width)()
+        embd = llama_cpp.llama_embd(zeros, 1, width)
+        use_mrope = model._model.rope_type() in (
+            llama_cpp.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+            llama_cpp.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
+        )
+        legacy = internals.LlamaBatch(n_tokens=2, embd=width, n_seq_max=1)
+        try:
+            embedding_data = np.zeros(2 * width, dtype=np.float32)
+            if use_mrope:
+                legacy.add_embeddings_mrope(
+                    embedding_data, pos_array=[[0, 1]] * 3 + [[0, 0]],
+                    seq_ids=[0], logits_array=[False, True],
+                )
+            else:
+                legacy.add_embeddings(
+                    embedding_data, pos_array=[0, 1],
+                    seq_ids=[0], logits_array=[False, True],
+                )
+            assert model._ctx.decode(legacy) == 0
+            expected = np.ctypeslib.as_array(
+                model._ctx.get_logits_ith(-1), shape=(model.n_vocab(),)
+            ).copy()
+        finally:
+            legacy.close()
+        model.reset()
+        llama_cpp.llama_batch_ext_clear(batch)
+        assert llama_cpp.llama_batch_ext_add_embd(batch, 0, embd) == 0
+        assert llama_cpp.llama_batch_ext_add(batch, 0) == 1
+        assert llama_cpp.llama_batch_ext_set_embd_token(batch, 1, embd)
+        assert not llama_cpp.llama_batch_ext_set_embd_state(batch, 1, embd)
+        for pos in range(2):
+            positions = (llama_cpp.llama_pos * 4)(pos, pos, pos, 0)
+            assert llama_cpp.llama_batch_ext_set_pos(batch, pos, positions)
+            assert llama_cpp.llama_batch_ext_set_output_embd(batch, pos, pos == 1)
+        assert llama_cpp.llama_process(model._ctx.ctx, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, batch) == 0
+        actual = np.ctypeslib.as_array(model._ctx.get_logits_ith(-1), shape=(model.n_vocab(),))
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
+        llama_cpp.llama_batch_ext_clear(batch)
+        for idx in range(model.n_batch):
+            assert llama_cpp.llama_batch_ext_add_token(batch, 0, tokens[0]) == idx
+        assert llama_cpp.llama_batch_ext_add(batch, 0) == -1
+    finally:
+        llama_cpp.llama_batch_ext_free(batch)
+
 
 @pytest.mark.parametrize("entry", ["create_completion", "__call__", "create_chat_completion"])
 @pytest.mark.parametrize("present,expected", [(0.0, 1.5), (0.7, 0.7)])

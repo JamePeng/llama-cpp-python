@@ -70,6 +70,10 @@ class ModelSettings(BaseSettings):
         default=None,
         description="comma seperated list of rpc servers for offloading",
     )
+    rpc_local_devices: Optional[List[str]] = Field(
+        default=None,
+        description="Local GPU device names to include with RPC; an empty list uses only RPC devices.",
+    )
     # Context Params
     seed: int = Field(
         default=llama_cpp.LLAMA_DEFAULT_SEED, description="Random seed. -1 for random."

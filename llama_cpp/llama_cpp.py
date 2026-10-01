@@ -96,6 +96,10 @@ llama_model_p_ctypes = ctypes.c_void_p
 llama_context_p = NewType("llama_context_p", int)
 llama_context_p_ctypes = ctypes.c_void_p
 
+# struct llama_batch_ext;
+llama_batch_ext_p = NewType("llama_batch_ext_p", int)
+llama_batch_ext_p_ctypes = ctypes.c_void_p
+
 # # struct llama_sampler;
 # llama_sampler_p = NewType("llama_sampler_p", int)
 # llama_sampler_p_ctypes = ctypes.c_void_p
@@ -557,6 +561,14 @@ class llama_lazy_mode(enum.IntEnum):
 class llama_context_type(enum.IntEnum):
     LLAMA_CONTEXT_TYPE_DEFAULT = 0
     LLAMA_CONTEXT_TYPE_MTP     = 1
+
+# enum llama_process_type {
+#     LLAMA_PROCESS_TYPE_ENCODE,
+#     LLAMA_PROCESS_TYPE_DECODE,
+# };
+class llama_process_type(enum.IntEnum):
+    LLAMA_PROCESS_TYPE_ENCODE = 0
+    LLAMA_PROCESS_TYPE_DECODE = 1
 
 # typedef struct llama_token_data {
 #     llama_token id; // token id
@@ -1152,6 +1164,7 @@ llama_model_imatrix_data_p = ctypes.POINTER(llama_model_imatrix_data)
 #     const struct llama_model_kv_override * kv_overrides;        // pointer to kv overrides
 #     const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
 #     const int32_t * prune_layers;                               // pointer to layer indices to prune
+#     size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
 # } llama_model_quantize_params;
 class llama_model_quantize_params(ctypes.Structure):
     """Parameters for llama_model_quantize
@@ -1171,6 +1184,7 @@ class llama_model_quantize_params(ctypes.Structure):
         kv_overrides (POINTER(llama_model_kv_override)): Pointer to KV overrides.
         tt_overrides (POINTER(llama_model_tensor_override)): Pointer to tensor overrides.
         prune_layers (POINTER(c_int32)): Pointer to layer indices to prune.
+        max_buf_size (size_t): max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
     """
 
     if TYPE_CHECKING:
@@ -1188,6 +1202,7 @@ class llama_model_quantize_params(ctypes.Structure):
         kv_overrides: ctypes.POINTER(llama_model_kv_override) # type: ignore
         tensor_types: ctypes.POINTER(llama_model_tensor_override) # type: ignore
         prune_layers: ctypes.POINTER(ctypes.c_int32) # type: ignore
+        max_buf_size: ctypes.c_size_t
 
     _fields_ = [
         ("nthread", ctypes.c_int32),
@@ -1204,6 +1219,7 @@ class llama_model_quantize_params(ctypes.Structure):
         ("kv_overrides", ctypes.POINTER(llama_model_kv_override)),
         ("tt_overrides", ctypes.POINTER(llama_model_tensor_override)),
         ("prune_layers", ctypes.POINTER(ctypes.c_int32)),
+        ("max_buf_size", ctypes.c_size_t),
     ]
 
 
@@ -1376,9 +1392,7 @@ def llama_model_quantize_default_params() -> llama_model_quantize_params:
 
 
 # // Initialize the llama + ggml backend
-# // If numa is true, use NUMA optimizations
 # // Call once at the start of the program
-# LLAMA_API void llama_backend_init(bool numa);
 # LLAMA_API void llama_backend_init(void);
 @ctypes_function(
     "llama_backend_init",
@@ -1421,7 +1435,8 @@ def llama_backend_free():
     ...
 
 
-# //optional:
+# // Optional: enable numa optimizations
+# // TODO: deprecate and make part of llama_backend_init()
 # LLAMA_API void llama_numa_init(enum ggml_numa_strategy numa);
 @ctypes_function(
     "llama_numa_init",
@@ -2763,7 +2778,7 @@ def llama_state_load_file(
         ctypes.c_size_t,
         ctypes.POINTER(ctypes.c_size_t),
     ],
-    ctypes.c_size_t,
+    ctypes.c_bool,
 )
 def llama_load_session_file(
     ctx: llama_context_p,
@@ -2772,7 +2787,7 @@ def llama_load_session_file(
     n_token_capacity: Union[ctypes.c_size_t, int],
     n_token_count_out: CtypesPointerOrRef[ctypes.c_size_t],
     /,
-) -> int:
+) -> bool:
     ...
 
 
@@ -2815,7 +2830,7 @@ def llama_state_save_file(
         llama_token_p,
         ctypes.c_size_t,
     ],
-    ctypes.c_size_t,
+    ctypes.c_bool,
 )
 def llama_save_session_file(
     ctx: llama_context_p,
@@ -2823,7 +2838,7 @@ def llama_save_session_file(
     tokens: CtypesArray[llama_token],
     n_token_count: Union[ctypes.c_size_t, int],
     /,
-) -> int:
+) -> bool:
     ...
 
 
@@ -2834,7 +2849,7 @@ def llama_save_session_file(
 @ctypes_function(
     "llama_state_seq_get_size",
     [llama_context_p_ctypes, llama_seq_id],
-    llama_seq_id,
+    ctypes.c_size_t,
 )
 def llama_state_seq_get_size(ctx: llama_context_p, seq_id: llama_seq_id, /) -> int:
     """Get the exact size needed to copy the state of a single sequence"""
@@ -3169,6 +3184,209 @@ def llama_decode(ctx: llama_context_p, batch: llama_batch, /) -> int:
     ...
 
 
+# // Extended batch API
+
+# struct llama_embd {
+#     const float * data;
+#     size_t n_rows; // number of embedding rows in data
+#     size_t n_embd; // size of one row
+# };
+class llama_embd(ctypes.Structure):
+    """Embedding view containing n_rows rows of n_embd floats."""
+
+    if TYPE_CHECKING:
+        data: ctypes.POINTER(ctypes.c_float) # type: ignore
+        n_rows: int
+        n_embd: int
+
+    _fields_ = [
+        ("data", ctypes.POINTER(ctypes.c_float)),
+        ("n_rows", ctypes.c_size_t),
+        ("n_embd", ctypes.c_size_t),
+    ]
+
+# LLAMA_API struct llama_batch_ext * llama_batch_ext_init (struct llama_context * ctx);
+@ctypes_function("llama_batch_ext_init", [llama_context_p_ctypes], llama_batch_ext_p_ctypes)
+def llama_batch_ext_init(ctx: llama_context_p, /) -> llama_batch_ext_p:
+    """Create a batch for this context; release it with llama_batch_ext_free()."""
+    ...
+
+
+# LLAMA_API void llama_batch_ext_free (struct llama_batch_ext * batch);
+@ctypes_function("llama_batch_ext_free", [llama_batch_ext_p_ctypes], None)
+def llama_batch_ext_free(batch: llama_batch_ext_p, /):
+    ...
+
+
+# LLAMA_API void llama_batch_ext_clear(struct llama_batch_ext * batch);
+@ctypes_function("llama_batch_ext_clear", [llama_batch_ext_p_ctypes], None)
+def llama_batch_ext_clear(batch: llama_batch_ext_p, /):
+    """Remove all entries so the batch can be reused."""
+    ...
+
+
+# // Add an input token to the batch, with default values:
+# //     id = LLAMA_TOKEN_NULL
+# //     embd = nullptr
+# //     pos = not set, the caller must set it with llama_batch_ext_set_pos()
+# // Returns the batch index (>= 0)
+# // On error:
+# //     -1: batch is full
+# //     -2: token is invalid (id == LLAMA_TOKEN_NULL or invalid embd)
+# //     -3: invalid sequence id
+# LLAMA_API int32_t llama_batch_ext_add      (struct llama_batch_ext * batch, llama_seq_id seq_id);
+@ctypes_function("llama_batch_ext_add", [llama_batch_ext_p_ctypes, llama_seq_id], ctypes.c_int32)
+def llama_batch_ext_add(batch: llama_batch_ext_p, seq_id: int, /) -> int:
+    """Add an entry without a token or embedding. Returns its index or an error."""
+    ...
+
+
+# // Add an input token to the batch, with a specified token ID or token embedding
+# LLAMA_API int32_t llama_batch_ext_add_token(struct llama_batch_ext * batch, llama_seq_id seq_id, llama_token id);
+@ctypes_function(
+    "llama_batch_ext_add_token",
+    [llama_batch_ext_p_ctypes, llama_seq_id, llama_token],
+    ctypes.c_int32,
+)
+def llama_batch_ext_add_token(batch: llama_batch_ext_p, seq_id: int, id: int, /) -> int:
+    """Add a token. Returns its index, or -1 full, -2 invalid input, -3 invalid sequence.
+
+    On -2, an empty entry remains in the batch; clear it before reuse.
+    """
+    ...
+
+
+# LLAMA_API int32_t llama_batch_ext_add_embd (struct llama_batch_ext * batch, llama_seq_id seq_id, struct llama_embd embd);
+@ctypes_function(
+    "llama_batch_ext_add_embd",
+    [llama_batch_ext_p_ctypes, llama_seq_id, llama_embd],
+    ctypes.c_int32,
+)
+def llama_batch_ext_add_embd(batch: llama_batch_ext_p, seq_id: int, embd: llama_embd, /) -> int:
+    """Copy an embedding into the batch. Returns its index or a negative error.
+
+    On -2, an empty entry remains in the batch; clear it before reuse.
+    """
+    ...
+
+
+# // Add the token at index idx in the batch to another sequence id. The position will stays the same.
+# // Note: this should be called before other _set() functions
+# LLAMA_API bool llama_batch_ext_add_seq(
+#                             struct llama_batch_ext * batch,
+#                                             int32_t   idx,
+#                                         llama_seq_id   seq_id);
+@ctypes_function(
+    "llama_batch_ext_add_seq",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, llama_seq_id],
+    ctypes.c_bool,
+)
+def llama_batch_ext_add_seq(batch: llama_batch_ext_p, idx: int, seq_id: int, /) -> bool:
+    """Add an entry to another sequence before calling the other setters."""
+    ...
+
+
+# // Set the token embedding for the token at index idx in the batch
+# // use it after llama_batch_ext_add_token() to have an entry with both a token id and an embedding
+# LLAMA_API bool llama_batch_ext_set_embd_token(
+#                             struct llama_batch_ext * batch,
+#                                             int32_t   idx,
+#                                     struct llama_embd   embd);
+@ctypes_function(
+    "llama_batch_ext_set_embd_token",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, llama_embd],
+    ctypes.c_bool,
+)
+def llama_batch_ext_set_embd_token(batch: llama_batch_ext_p, idx: int, embd: llama_embd, /) -> bool:
+    """Copy a token embedding into an existing entry."""
+    ...
+
+
+# // Set the "state" embedding for the token at index idx in the batch
+# // "state" here means extra hidden state carried over from a previous stage, e.g.:
+# //   - MTP: state from N layers of the target model
+# //   - Qwen3 VL (deepstack): state from N layers of the vision encoder
+# LLAMA_API bool llama_batch_ext_set_embd_state(
+#                             struct llama_batch_ext * batch,
+#                                             int32_t   idx,
+#                                     struct llama_embd   embd);
+@ctypes_function(
+    "llama_batch_ext_set_embd_state",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, llama_embd],
+    ctypes.c_bool,
+)
+def llama_batch_ext_set_embd_state(batch: llama_batch_ext_p, idx: int, embd: llama_embd, /) -> bool:
+    """Set state embeddings. The current native implementation returns False."""
+    ...
+
+
+# // Set if output embeddings should be available for the token at index idx in the batch
+# // Note: for now, this is equivalent to setting the output logits
+# LLAMA_API bool llama_batch_ext_set_output_embd(
+#                             struct llama_batch_ext * batch,
+#                                             int32_t  idx,
+#                                                 bool  value);
+@ctypes_function(
+    "llama_batch_ext_set_output_embd",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_bool],
+    ctypes.c_bool,
+)
+def llama_batch_ext_set_output_embd(batch: llama_batch_ext_p, idx: int, value: bool, /) -> bool:
+    """Select embedding output for an entry; currently also selects logits."""
+    ...
+
+
+# // Set output logits for the token at index idx in the batch
+# // Note: for now, this is equivalent to setting the output embd
+# LLAMA_API bool llama_batch_ext_set_output_logits(
+#                             struct llama_batch_ext * batch,
+#                                             int32_t  idx,
+#                                                 bool  value);
+@ctypes_function(
+    "llama_batch_ext_set_output_logits",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_bool],
+    ctypes.c_bool,
+)
+def llama_batch_ext_set_output_logits(batch: llama_batch_ext_p, idx: int, value: bool, /) -> bool:
+    """Select logits for an entry; currently also selects embedding output."""
+    ...
+
+
+# // Set custom position for the token at index idx in the batch
+# // For M-RoPE models:
+# //     - Embedding tokens must have multiple positions per token
+# //     - Text token only requires one single position per token
+# LLAMA_API bool llama_batch_ext_set_pos(
+#                             struct llama_batch_ext * batch,
+#                                             int32_t   idx,
+#                                     const llama_pos * pos);
+@ctypes_function(
+    "llama_batch_ext_set_pos",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.POINTER(llama_pos)],
+    ctypes.c_bool,
+)
+def llama_batch_ext_set_pos(
+    batch: llama_batch_ext_p, idx: int, pos: CtypesPointerOrRef[llama_pos], /
+) -> bool:
+    """Set one position for text, or all M-RoPE positions for an embedding."""
+    ...
+
+
+# // Return values are the same as llama_decode()
+# LLAMA_API int32_t llama_process(
+#                             struct llama_context * ctx,
+#                             enum llama_process_type   type,
+#                             struct llama_batch_ext * batch);
+@ctypes_function(
+    "llama_process",
+    [llama_context_p_ctypes, ctypes.c_int, llama_batch_ext_p_ctypes],
+    ctypes.c_int32,
+)
+def llama_process(ctx: llama_context_p, type: int, batch: llama_batch_ext_p, /) -> int:
+    """Encode or decode an extended batch. Return codes match llama_decode()."""
+    ...
+
+
 # // Set the number of threads used for decoding
 # // n_threads is the number of threads used for generation (single token)
 # // n_threads_batch is the number of threads used for prompt and batch processing (multiple tokens)
@@ -3230,6 +3448,15 @@ def llama_set_causal_attn(ctx: llama_context_p, causal_attn: bool, /):
     """Set whether to use causal attention or not
     If set to true, the model will only attend to the past tokens"""
     ...
+
+
+# // Returns whether the context is currently using causal attention
+# LLAMA_API bool llama_get_causal_attn(const struct llama_context * ctx);
+@ctypes_function("llama_get_causal_attn", [llama_context_p_ctypes], ctypes.c_bool)
+def llama_get_causal_attn(ctx: llama_context_p, /) -> bool:
+    """Returns whether the context is currently using causal attention"""
+    ...
+
 
 # // Set whether the model is in warmup mode or not
 # // If true, all model tensors are activated during llama_decode() to load and cache their weights.
@@ -5193,12 +5420,11 @@ def llama_opt_param_filter_all(
 
 # struct llama_opt_params {
 #     uint32_t n_ctx_train; // assumed context size post training, use context size specified in llama_context if 0
-
 #     llama_opt_param_filter param_filter; // callback for determining which tensors contain trainable parameters
 #     void * param_filter_ud;              // userdata for determining which tensors contain trainable parameters
-
 #     ggml_opt_get_optimizer_params get_opt_pars; // callback for calculating optimizer parameters
 #     void * get_opt_pars_ud;                     // userdata for calculating optimizer parameters
+#     enum ggml_opt_optimizer_type optimizer_type;
 # };
 class llama_opt_params(ctypes.Structure):
     _fields_ = [
@@ -5207,19 +5433,20 @@ class llama_opt_params(ctypes.Structure):
         ("param_filter_ud", ctypes.c_void_p),
         ("get_opt_pars", ggml_opt_get_optimizer_params),
         ("get_opt_pars_ud", ctypes.c_void_p),
+        ("optimizer_type", ctypes.c_int),
     ]
 
 
 # LLAMA_API void llama_opt_init(struct llama_context * lctx, struct llama_model * model, struct llama_opt_params lopt_params);
 @ctypes_function(
     "llama_opt_init",
-    [llama_context_p_ctypes, llama_model_p_ctypes, llama_opt_params_p_ctypes],
+    [llama_context_p_ctypes, llama_model_p_ctypes, llama_opt_params],
     None,
 )
 def llama_opt_init(
     lctx: llama_context_p,
     model: llama_model_p,
-    lopt_params: llama_opt_params_p, /
+    lopt_params: llama_opt_params, /
 ):
     ...
 
