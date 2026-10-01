@@ -65,6 +65,7 @@ jobs:
   build-and-test:
     needs: prepare-models
     env:
+      LLAMA_TEST_REQUIRE_RPC: "1"
       LLAMA_TEST_TRANSFORMER_MODEL: ${{ github.workspace }}/test-models/qwen2.5-0.5b-instruct-q4_k_m.gguf
       LLAMA_TEST_HYBRID_MODEL: ${{ github.workspace }}/test-models/Qwen3.5-0.8B-Q4_K_M.gguf
       LLAMA_TEST_MMPROJ: ${{ github.workspace }}/test-models/mmproj-Qwen3.5-0.8b-Q8_0.gguf
@@ -79,11 +80,11 @@ jobs:
           # Apple Silicon macOS with Metal
           - os: macos-26
             python-version: "3.9"
-            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=off -DGGML_RPC=on"
+            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=off"
             metal_status: "(Metal)"
           - os: macos-26
             python-version: "3.14"
-            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=off -DGGML_RPC=on"
+            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=off"
             metal_status: "(Metal)"
 
     steps:
@@ -110,7 +111,7 @@ jobs:
 
       - name: Install dependencies and Build
         env:
-          CMAKE_ARGS: ${{ matrix.cmake_args }}
+          CMAKE_ARGS: -DGGML_RPC=ON ${{ matrix.cmake_args }}
         run: |
           echo "Building with CMAKE_ARGS: $CMAKE_ARGS"
           uv pip install --system -e .[all] --verbose

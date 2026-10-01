@@ -1,9 +1,27 @@
+import os
 import socket
 import struct
+from pathlib import Path
 
 import pytest
 
 from llama_cpp import _ggml, _rpc
+
+
+def test_native_rpc_backend_loads():
+    from llama_cpp import llama_cpp
+
+    llama_cpp.llama_backend_init()
+    lib_dir = Path(llama_cpp.__file__).resolve().parent / "lib"
+    _ggml.ggml_backend_load_all_from_path(os.fsencode(lib_dir))
+    backend = _ggml.ggml_backend_reg_by_name(b"RPC")
+    if not backend:
+        if os.environ.get("LLAMA_TEST_REQUIRE_RPC") == "1":
+            pytest.fail(f"Required RPC backend failed to load from {lib_dir}")
+        pytest.skip("RPC backend is not enabled in this local build")
+    assert _ggml.ggml_backend_reg_name(backend) == b"RPC"
+    assert _ggml.ggml_backend_reg_get_proc_address(backend, b"ggml_backend_rpc_add_server")
+    assert llama_cpp.llama_supports_rpc()
 
 
 @pytest.mark.parametrize(
