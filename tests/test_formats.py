@@ -695,6 +695,7 @@ def test_create_chat_prefill_dispatches_by_capability():
     llama.create_chat_prefill = MethodType(Llama.create_chat_prefill, llama)
 
     assert llama.create_chat_prefill(messages=[]) is result
+    assert result.probabilities is None
     handler.prefill.assert_called_once_with(
         llama=llama,
         messages=[],
@@ -705,6 +706,58 @@ def test_create_chat_prefill_dispatches_by_capability():
         add_generation_prompt=True,
         assistant_prefill=False,
     )
+
+
+@pytest.mark.parametrize("masked, error", [
+    ([1000.0, float("-inf"), 999.0], False),
+    ([float("-inf")] * 3, True),
+    ([float("nan"), 0.0, 0.0], True),
+    ([float("inf"), 0.0, 0.0], True),
+])
+def test_create_chat_prefill_grammar_probabilities(monkeypatch, masked, error):
+    from llama_cpp import Llama, LlamaGrammar, PrefillResult
+
+    raw = PrefillResult(n_tokens=4, logits=np.array([1000, 2000, 999], dtype=np.float32))
+    handler = SimpleNamespace(prefill=Mock(return_value=raw))
+    llama = SimpleNamespace(
+        _get_chat_completion_handler=lambda: handler, _model=object()
+    )
+    grammar = LlamaGrammar.from_string('answer ::= "A" | "B"', root="answer")
+    native = object()
+    freed = Mock()
+    init = Mock(return_value=native)
+    # Exercise the real GrammarSampler lifetime and candidate buffer, without a model.
+    llama._model = SimpleNamespace(vocab=object())
+    monkeypatch.setattr(llama_cpp.llama_cpp, "llama_sampler_init_grammar", init)
+    monkeypatch.setattr(llama_cpp.llama_cpp, "llama_sampler_free", freed)
+
+    def apply(sampler, pointer):
+        assert sampler is native
+        data = pointer._obj
+        assert data.size == 3
+        for i, logit in enumerate(masked):
+            data.data[i].logit = logit
+
+    monkeypatch.setattr(llama_cpp.llama_cpp, "llama_sampler_apply", apply)
+    if error:
+        with pytest.raises(ValueError):
+            Llama.create_chat_prefill(llama, messages=[], grammar=grammar)
+    else:
+        result = Llama.create_chat_prefill(llama, messages=[], grammar=grammar)
+        np.testing.assert_array_equal(result.logits, raw.logits)
+        assert not result.logits.flags.writeable
+        assert result.n_tokens == 4
+        assert raw.probabilities is None
+        assert set(result.probabilities) == {0, 2}
+        assert sum(result.probabilities.values()) == pytest.approx(1.0)
+        assert result.probabilities[0] == pytest.approx(1 / (1 + np.exp(-1)))
+    init.assert_called_once_with(llama._model.vocab, grammar.grammar.encode(), b"answer")
+    freed.assert_called_once_with(native)
+
+    handler.prefill.reset_mock()
+    with pytest.raises(TypeError, match="LlamaGrammar"):
+        Llama.create_chat_prefill(llama, messages=[], grammar='root ::= "A"')
+    handler.prefill.assert_not_called()
 
 
 def test_formatter_preserves_inputs_and_exposes_hf_template_context():

@@ -4631,8 +4631,15 @@ prompt: The prompt to generate text from.
         tool_choice: Optional[ChatCompletionToolChoiceOption] = None,
         add_generation_prompt: bool = True,
         assistant_prefill: bool = False,
+        grammar: Optional[LlamaGrammar] = None,
     ) -> PrefillResult:
-        """Prefill a chat prompt through its handler without generating a token."""
+        """Prefill a chat prompt through its handler without generating a token.
+
+        With ``grammar``, also return probabilities for allowed next tokens.
+        (these are not whole-answer probabilities)
+        """
+        if grammar is not None and not isinstance(grammar, LlamaGrammar):
+            raise TypeError("grammar must be a LlamaGrammar")
         handler = self._get_chat_completion_handler()
         prefill = getattr(handler, "prefill", None)
         if not callable(prefill):
@@ -4640,7 +4647,7 @@ prompt: The prompt to generate text from.
                 "The selected chat handler does not support prefill"
             )
 
-        return prefill(
+        result = prefill(
             llama=self,
             messages=messages,
             functions=functions,
@@ -4649,6 +4656,33 @@ prompt: The prompt to generate text from.
             tool_choice=tool_choice,
             add_generation_prompt=add_generation_prompt,
             assistant_prefill=assistant_prefill,
+        )
+        if grammar is None:
+            return result
+
+        candidates = internals.LlamaTokenDataArray(n_vocab=len(result.logits))
+        candidates.copy_logits(result.logits)
+        with internals.GrammarSampler(
+            self._model, grammar.grammar, root=grammar.root
+        ) as sampler:
+            sampler.apply(ctypes.byref(candidates.candidates))
+
+        masked_logits = candidates.candidates_data["logit"]
+        if np.isnan(masked_logits).any() or np.isposinf(masked_logits).any():
+            raise ValueError("Grammar-constrained logits must not contain NaN or +inf")
+        allowed = np.isfinite(masked_logits)
+        if not allowed.any():
+            raise ValueError("Grammar allows no next token with a finite logit")
+        logits = masked_logits[allowed].astype(np.float64)
+        probabilities = np.exp(logits - logits.max())
+        probabilities /= probabilities.sum()
+        return PrefillResult(
+            n_tokens=result.n_tokens,
+            logits=result.logits,
+            probabilities=dict(zip(
+                map(int, candidates.candidates_data["id"][allowed]),
+                map(float, probabilities),
+            )),
         )
 
     def create_chat_completion_openai_v1(
