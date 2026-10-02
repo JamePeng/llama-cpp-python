@@ -1012,6 +1012,21 @@ def ggml_backend_buft_alloc_buffer(
     ...
 
 
+# GGML_API ggml_backend_buffer_t ggml_backend_buft_alloc_buffer_n(ggml_backend_buffer_type_t buft, struct ggml_tensor ** tensors, int n_tensors);
+@ggml_base_function("ggml_backend_buft_alloc_buffer_n", [
+    ctypes.c_void_p,
+    ctypes.POINTER(ggml_tensor_p),
+    ctypes.c_int,
+], ctypes.c_void_p)
+def ggml_backend_buft_alloc_buffer_n(
+    buft: ggml_backend_buffer_type_t,
+    tensors: ctypes.POINTER(ggml_tensor_p),  # type: ignore
+    n_tensors: ctypes.c_int,
+) -> ggml_backend_buffer_t:
+    """Allocate a backend buffer for an array of tensor pointers."""
+    ...
+
+
 # GGML_API size_t                ggml_backend_buft_get_alignment (ggml_backend_buffer_type_t buft);
 @ggml_base_function("ggml_backend_buft_get_alignment", [ctypes.c_void_p], ctypes.c_size_t)
 def ggml_backend_buft_get_alignment(buft: ggml_backend_buffer_type_t) -> ctypes.c_size_t:
@@ -1042,6 +1057,21 @@ def ggml_backend_buft_get_alloc_size(
     """
     Get alloc data size needed to allocate the tensor, including padding (defaults to ggml_nbytes)
     """
+    ...
+
+
+# GGML_API size_t ggml_backend_buft_get_alloc_size_n(ggml_backend_buffer_type_t buft, struct ggml_tensor ** tensors, int n_tensors);
+@ggml_base_function("ggml_backend_buft_get_alloc_size_n", [
+    ctypes.c_void_p,
+    ctypes.POINTER(ggml_tensor_p),
+    ctypes.c_int,
+], ctypes.c_size_t)
+def ggml_backend_buft_get_alloc_size_n(
+    buft: ggml_backend_buffer_type_t,
+    tensors: ctypes.POINTER(ggml_tensor_p),  # type: ignore
+    n_tensors: ctypes.c_int,
+) -> ctypes.c_size_t:
+    """Get the allocation size for an array of tensor pointers."""
     ...
 
 
