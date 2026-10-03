@@ -121,7 +121,12 @@ def package(seed_dir: Path, backend: str, version: str) -> None:
     recorded = json.loads((seed_dir / "native-build.json").read_text())
     actual = native_manifest(seed_dir, backend, version)
     if recorded != actual:
-        raise RuntimeError("Native build backend, version, platform, architecture, or hash mismatch")
+        differences = [
+            f"{key}: native={recorded.get(key)!r}, requested={actual.get(key)!r}"
+            for key in sorted(recorded.keys() | actual.keys())
+            if recorded.get(key) != actual.get(key)
+        ]
+        raise RuntimeError("Native build manifest mismatch: " + "; ".join(differences))
     suffix = version_suffix(backend, version)
     seeds = list(seed_dir.glob("*.whl"))
     if len(seeds) != 1:

@@ -13,6 +13,7 @@ jobs:
 
     outputs:
       version: ${{ steps.version.outputs.version }}
+      backend_version: ${{ steps.version.outputs.backend_version }}
 
     strategy:
       fail-fast: false
@@ -143,7 +144,9 @@ jobs:
 
       - name: Read package version
         id: version
-        run: python .github/scripts/package_backend_wheel.py --version >> $env:GITHUB_OUTPUT
+        run: |
+          python .github/scripts/package_backend_wheel.py --version >> $env:GITHUB_OUTPUT
+          echo "backend_version=${{ matrix.cuda }}" >> $env:GITHUB_OUTPUT
 
       - name: Record native build configuration
         run: python .github/scripts/package_backend_wheel.py --write-manifest --seed-dir dist --backend cuda --backend-version ${{ matrix.cuda }}
@@ -190,7 +193,7 @@ jobs:
       - name: Package wheel without native compilation
         run: |
           uv pip install build
-          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version 12.6.3
+          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version ${{ needs.build_native.outputs.backend_version }}
 
       - name: Install wheel and print version information
         run: python .github/scripts/package_backend_wheel.py --verify
