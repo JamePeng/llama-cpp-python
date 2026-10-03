@@ -1,4 +1,4 @@
-name: Build Wheels (CU126) for Linux
+name: Build Wheels (CU130) for Linux
 
 on:
   workflow_dispatch:
@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   build_native:
-    name: Build native libraries cu126 linux
+    name: Build native libraries cu130 linux
     runs-on: ubuntu-22.04
-    container: nvidia/cuda:12.6.3-cudnn-devel-ubuntu22.04
+    container: nvidia/cuda:13.0.3-cudnn-devel-ubuntu22.04
 
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -19,8 +19,8 @@ jobs:
       fail-fast: false
       matrix:
         os: ["ubuntu-22.04"]
-        cuda: ["12.6.3"]
-        cudaarch: ["70-real;75-real;80-real;86-real;87-real;89-real"]
+        cuda: ["13.0.2"]
+        cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real;121-real"]
 
     defaults:
       run:
@@ -125,7 +125,7 @@ jobs:
       - name: Share native build
         uses: actions/upload-artifact@v6
         with:
-          name: native-cu126-linux
+          name: native-cu130-linux
           path: |
             dist/*.whl
             dist/native-build.json
@@ -134,7 +134,7 @@ jobs:
           retention-days: 7
 
   package_wheels:
-    name: Package cu126 linux Python ${{ matrix.pyver }}
+    name: Package cu130 linux Python ${{ matrix.pyver }}
     needs: build_native
     runs-on: ubuntu-22.04
     strategy:
@@ -158,13 +158,13 @@ jobs:
       - name: Download native build
         uses: actions/download-artifact@v7
         with:
-          name: native-cu126-linux
+          name: native-cu130-linux
           path: native-wheel
 
       - name: Package wheel without native compilation
         run: |
           uv pip install build
-          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version 12.6.3
+          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version 13.0.2
 
       - name: Install wheel and print version information
         run: python .github/scripts/package_backend_wheel.py --verify
@@ -172,20 +172,20 @@ jobs:
       - name: Upload wheel
         uses: actions/upload-artifact@v6
         with:
-          name: wheels-cu126-linux-py${{ matrix.pyver }}
+          name: wheels-cu130-linux-py${{ matrix.pyver }}
           path: dist/*.whl
           if-no-files-found: error
           compression-level: 0
 
   release:
-    name: Publish cu126 linux wheels
+    name: Publish cu130 linux wheels
     needs: [build_native, package_wheels]
     runs-on: ubuntu-22.04
     steps:
       - name: Download packaged wheels
         uses: actions/download-artifact@v7
         with:
-          pattern: wheels-cu126-linux-py*
+          pattern: wheels-cu130-linux-py*
           merge-multiple: true
           path: dist
 
@@ -198,6 +198,6 @@ jobs:
         with:
           files: dist/*.whl
           fail_on_unmatched_files: true
-          tag_name: v${{ needs.build_native.outputs.version }}-cu126-linux-${{ steps.date.outputs.date }}
+          tag_name: v${{ needs.build_native.outputs.version }}-cu130-linux-${{ steps.date.outputs.date }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -7,15 +7,17 @@ permissions:
   contents: write
 
 jobs:
-  build_wheels:
-    name: Build Wheel ${{ matrix.os }} py${{ matrix.pyver }} cu126
+  build_native:
+    name: Build native libraries cu126 win
     runs-on: ${{ matrix.os }}
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     strategy:
       fail-fast: false
       matrix:
         os: ["windows-2022"]
-        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
         cuda: ["12.6.3"]
         cudaarch: ["70-real;75-real;80-real;86-real;87-real;89-real;90-real"]
 
@@ -40,16 +42,16 @@ jobs:
           submodules: recursive
 
       - name: Install CUDA ${{ matrix.cuda }}
-        uses: Jimver/cuda-toolkit@v0.2.35
+        uses: Jimver/cuda-toolkit@v0.2.36
         id: cuda-toolkit
         with:
           cuda: ${{ matrix.cuda }}
           use-github-cache: false
 
-      - name: Install uv and Python ${{ matrix.pyver }}
+      - name: Install uv and Python 3.10
         uses: astral-sh/setup-uv@v7
         with:
-          python-version: ${{ matrix.pyver }}
+          python-version: "3.10"
           activate-environment: true
           enable-cache: true
 
@@ -67,10 +69,8 @@ jobs:
           echo LIB=%LIB%>>%GITHUB_ENV%
           echo LIBPATH=%LIBPATH%>>%GITHUB_ENV%
 
-      - name: Build wheel
+      - name: Build native libraries and carrier wheel
         run: |
-          $cudaVersion = $env:CUDAVER.Remove($env:CUDAVER.LastIndexOf('.')).Replace('.', '')
-
           $env:CUDA_HOME = $env:CUDA_PATH
           $env:CUDA_TOOLKIT_ROOT_DIR = $env:CUDA_PATH
           $env:VERBOSE = '1'
@@ -132,7 +132,6 @@ jobs:
 
             # CUDA backend
             "-DCMAKE_CUDA_ARCHITECTURES=$env:CUDAARCHVER"
-            '-DGGML_CUDA_FORCE_MMQ=ON'
             "-DCMAKE_CUDA_FLAGS=$cudaDiagSuppress"
 
           )
@@ -142,47 +141,89 @@ jobs:
 
           python -m build --wheel
 
-          # Check if wheel was built
-          if (!(Test-Path '.\dist\*.whl')) {
-            Write-Error "No wheel built in dist/ directory"
-            exit 1
-          }
+      - name: Read package version
+        id: version
+        run: python .github/scripts/package_backend_wheel.py --version >> $env:GITHUB_OUTPUT
 
-          $wheelFile = Get-Item '.\dist\*.whl' | Select-Object -First 1
+      - name: Record native build configuration
+        run: python .github/scripts/package_backend_wheel.py --write-manifest --seed-dir dist --backend cuda --backend-version ${{ matrix.cuda }}
 
-          # Wheel filename format:
-          #   name-version-python_tag-abi_tag-platform_tag.whl
-          $parts = $wheelFile.Name.Split('-')
-          $distName = $parts[0]
-          $version  = $parts[1]
-          $pyTag    = $parts[2]
-          $abiTag   = $parts[3]
-          $platTag  = $parts[4]
+      - name: Share native build
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-cu126-win
+          path: |
+            dist/*.whl
+            dist/native-build.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
-          # CPU all-variants is now an internal runtime layout detail.
-          $newVersion = "$version+cu$cudaVersion"
-          $newName = "$distName-$newVersion-$pyTag-$abiTag-$platTag"
+  package_wheels:
+    name: Package cu126 win Python ${{ matrix.pyver }}
+    needs: build_native
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
 
-          # Rename wheel file
-          Rename-Item -Path $wheelFile.FullName -NewName $newName
-          Write-Output "Renamed wheel to: $newName"
+      - name: Install uv and Python ${{ matrix.pyver }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
 
-          # Write the build tag to the output
-          Write-Output "CUDA_VERSION=$cudaVersion" >> $env:GITHUB_ENV
-          Write-Output "TAG_VERSION=$version" >> $env:GITHUB_ENV
+      - name: Download native build
+        uses: actions/download-artifact@v7
+        with:
+          name: native-cu126-win
+          path: native-wheel
+
+      - name: Package wheel without native compilation
+        run: |
+          uv pip install build
+          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version 12.6.3
+
+      - name: Install wheel and print version information
+        run: python .github/scripts/package_backend_wheel.py --verify
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-cu126-win-py${{ matrix.pyver }}
+          path: dist/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish cu126 win wheels
+    needs: [build_native, package_wheels]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download packaged wheels
+        uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-cu126-win-py*
+          merge-multiple: true
+          path: dist
 
       - name: Get current date
-        id: get-date
-        run: |
-          $currentDate = Get-Date -UFormat "%Y%m%d"
-          Write-Output "BUILD_DATE=$currentDate" >> $env:GITHUB_ENV
+        id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
 
       - name: Create release
-        if: always() && env.TAG_VERSION != ''
         uses: softprops/action-gh-release@v3
         with:
-          files: dist/*
-          # Set tag_name to v<tag>-cu<cuda_version>-win-<date>
-          tag_name: v${{ env.TAG_VERSION }}-cu${{ env.CUDA_VERSION }}-win-${{ env.BUILD_DATE }}
+          files: dist/*.whl
+          fail_on_unmatched_files: true
+          tag_name: v${{ needs.build_native.outputs.version }}-cu126-win-${{ steps.date.outputs.date }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
