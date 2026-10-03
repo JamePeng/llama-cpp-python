@@ -7,6 +7,95 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.2] RPC Device Selection and Extended Batch / Runtime Bindings
+
+- feat(rpc): support remote device selection in Llama
+    - Probe RPC endpoints before native registration and verify protocol and device
+    counts. Reuse process-wide registrations to avoid repeatedly allocating
+    vendor-owned backend resources.
+    - Allow each Llama instance to select remote and local devices explicitly.
+    Validate device ordering and tensor splits, reject unsupported row splitting,
+    and retain the device pointer array until native model cleanup completes.
+    - Cover endpoint validation, registration reuse, device isolation, handshake
+    checks, and resource lifetime with RPC tests.
+
+- feat(server): expose local device selection for RPC models
+    - Add rpc_local_devices to model settings and pass it to Llama during model
+    creation. An empty list allows server users to place model layers only on
+    the selected RPC devices.
+
+- feat(bindings): add extended batch API and fix state return types
+    - Add llama_batch_ext bindings, llama_embd, llama_process_type, and
+    llama_process for token and embedding inputs.
+    - Correct session save/load return types to bool and sequence state
+    size to size_t. Document batch reuse after invalid input errors.
+    - Add regression coverage for token and embedding decode equivalence,
+    batch limits.
+
+- feat(ggml): bind multi-tensor buffer allocation APIs
+    - Add ctypes bindings for ggml_backend_buft_alloc_buffer_n and
+    ggml_backend_buft_get_alloc_size_n, matching the vendor signatures.
+
+- build: enable RPC and clean up wheel build configuration
+    - Enable RPC in all CUDA and Metal wheel builds.
+    - Limit build parallelism through CMAKE_BUILD_PARALLEL_LEVEL.
+    - Remove unused CMake options and the unnecessary Metal cross-compiling flag.
+    - Fix the Metal artifact name.
+
+- test(rpc): verify native backend loading across CI platforms
+    - Enable RPC in Linux, Windows, and macOS test builds.
+    - Verify backend registration, the RPC server entry point, and RPC support.
+    - Fail CI when the RPC backend is unavailable.
+    - Allow local builds without RPC to skip the native backend test.
+
+- fix(mtmd): align post-decode callback with embedding batch API
+    - Add the mtmd_helper_embd_batch structure and pass its pointer to
+    mtmd_helper_post_decode_callback instead of llama_batch by value.
+
+    - Document embedding and position layouts and the lifetime of
+    borrowed callback data.
+
+- fix(bindings): align quantization and training parameter ABI
+    - Add max_buf_size to llama_model_quantize_params and optimizer_type
+    to llama_opt_params.
+    - Pass llama_opt_params by value to llama_opt_init and update the
+    corresponding annotations and documentation.
+
+- fix(ggml): correct optimizer callback return type
+    - Return ggml_opt_optimizer_params by value instead of a pointer
+    to match the native callback ABI.
+
+- ci: update cache and artifact actions in test workflow
+    - Upgrade actions/cache from v5 to v6, actions/upload-artifact from
+    v4 to v6, and actions/download-artifact from v5 to v7.
+    - Used to eliminate Node.js 20 deprecation warnings.
+
+- docs: present the wiki as active project documentation
+    - Update the README to describe docs/wiki as the maintained documentation
+    source and link to the published project wiki. Clarify that Discussions
+    provide release notes and usage articles alongside the wiki.
+
+- docs(rpc): add setup and multimodal offloading guides
+    - Document how to obtain and start a compatible ggml-rpc-server, select
+    remote and local model devices, and handle connection failures.
+    - Add a wiki guide with text and Qwen3.5 image examples.
+    - Update the installation guide, Llama API reference, troubleshooting page, and
+    wiki navigation. Clarify that the MTMD projector selects its backend
+    independently of the RPC model device list.
+
+- docs(rpc): document remote and multimodal model setup
+    - Describe RPC build options, server startup, remote-only device selection,
+    and endpoint failure behavior.
+    - Add a Qwen3.5 image example using an RPC language model and a matching
+    mmproj. Clarify that the projector initializes on the first multimodal
+    request and selects its backend independently of rpc_local_devices.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20261003
+
+- Thanks to (**@alcoftTAO**) for testing feedback of RPC backend: https://github.com/JamePeng/llama-cpp-python/issues/181
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/6332d8d4fcd3d4ae0c92974161348d3e8eb1e2c0...6126add06f9c57678a6ce5951c4676d36dc52758
+
 ## [0.4.1] MTMD Template Compatibility, Vision/Video Input Improvements, and Expanded GGML Backend Bindings
 
 - feat(mtmd): expand vision chat template media support
