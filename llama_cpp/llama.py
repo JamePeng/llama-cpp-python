@@ -47,6 +47,7 @@ from .llama_tokenizer import BaseLlamaTokenizer, LlamaTokenizer
 import llama_cpp.llama_cpp as llama_cpp_lib
 import llama_cpp.llama_chat_format as llama_chat_format
 import llama_cpp.llama_multimodal as llama_multimodal
+from .llama_chat_format import PrefillResult
 
 from llama_cpp.llama_speculative import (
     LlamaDraftModel,
@@ -1839,6 +1840,44 @@ class Llama:
             logits_ptr = self._ctx.get_logits_ith(-1)
             logits_view = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
             self.scores[0, :] = logits_view
+
+    def prefill(
+        self,
+        prompt: Union[str, Sequence[int]],
+        *,
+        reset: bool = True,
+        add_bos: bool = True,
+        special: bool = True,
+        active_loras: Optional[List[Dict[str, Union[str, float]]]] = None,
+        control_vector: Optional[Dict[str, Any]] = None,
+    ) -> PrefillResult:
+        """Evaluate a text prompt and return its final next-token logits."""
+        tokens = (
+            self.tokenize(prompt.encode("utf-8"), add_bos=add_bos, special=special)
+            if isinstance(prompt, str)
+            else list(prompt)
+        )
+        if not tokens:
+            raise ValueError("Prefill requires at least one token")
+        if reset:
+            self.reset()
+
+        self.eval(
+            tokens,
+            active_loras=active_loras,
+            control_vector=control_vector,
+            copy_logits=True,
+        )
+
+        logits = (
+            self.scores[self.n_tokens - 1]
+            if self._logits_all
+            else self.scores[0]
+        )
+        return PrefillResult(
+            n_tokens=len(tokens),
+            logits=logits
+        )
 
     # Helper method: Convert dict logit_bias to List[llama_logit_bias]
     def _convert_logit_bias(self, logit_bias: Optional[Dict[int, float]]) -> List[llama_cpp_lib.llama_logit_bias]:
@@ -4388,6 +4427,15 @@ prompt: The prompt to generate text from.
             presence_penalty=presence_penalty,
         )
 
+    def _get_chat_completion_handler(
+        self,
+    ) -> llama_chat_format.LlamaChatCompletionHandler:
+        return (
+            self.chat_handler
+            or self._chat_handlers.get(self.chat_format)
+            or llama_chat_format.get_chat_completion_handler(self.chat_format)
+        )
+
     def create_chat_completion(
         self,
         messages: List[ChatCompletionRequestMessage],
@@ -4516,11 +4564,7 @@ prompt: The prompt to generate text from.
         if presence_penalty is not None and present_penalty == 0.0:
             present_penalty = presence_penalty
 
-        handler = (
-            self.chat_handler
-            or self._chat_handlers.get(self.chat_format)
-            or llama_chat_format.get_chat_completion_handler(self.chat_format)
-        )
+        handler = self._get_chat_completion_handler()
         return handler(
             llama=self,
             messages=messages,
@@ -4576,6 +4620,69 @@ prompt: The prompt to generate text from.
             reasoning_budget_message=reasoning_budget_message,
             reasoning_start_in_prompt=reasoning_start_in_prompt,
             reasoning_start_max_tokens=reasoning_start_max_tokens,
+        )
+
+    def create_chat_prefill(
+        self,
+        messages: List[ChatCompletionRequestMessage],
+        functions: Optional[List[ChatCompletionFunction]] = None,
+        function_call: Optional[ChatCompletionRequestFunctionCall] = None,
+        tools: Optional[List[ChatCompletionTool]] = None,
+        tool_choice: Optional[ChatCompletionToolChoiceOption] = None,
+        add_generation_prompt: bool = True,
+        assistant_prefill: bool = False,
+        grammar: Optional[LlamaGrammar] = None,
+    ) -> PrefillResult:
+        """Prefill a chat prompt through its handler without generating a token.
+
+        With ``grammar``, also return probabilities for allowed next tokens.
+        (these are not whole-answer probabilities)
+        """
+        if grammar is not None and not isinstance(grammar, LlamaGrammar):
+            raise TypeError("grammar must be a LlamaGrammar")
+        handler = self._get_chat_completion_handler()
+        prefill = getattr(handler, "prefill", None)
+        if not callable(prefill):
+            raise NotImplementedError(
+                "The selected chat handler does not support prefill"
+            )
+
+        result = prefill(
+            llama=self,
+            messages=messages,
+            functions=functions,
+            function_call=function_call,
+            tools=tools,
+            tool_choice=tool_choice,
+            add_generation_prompt=add_generation_prompt,
+            assistant_prefill=assistant_prefill,
+        )
+        if grammar is None:
+            return result
+
+        candidates = internals.LlamaTokenDataArray(n_vocab=len(result.logits))
+        candidates.copy_logits(result.logits)
+        with internals.GrammarSampler(
+            self._model, grammar.grammar, root=grammar.root
+        ) as sampler:
+            sampler.apply(ctypes.byref(candidates.candidates))
+
+        masked_logits = candidates.candidates_data["logit"]
+        if np.isnan(masked_logits).any() or np.isposinf(masked_logits).any():
+            raise ValueError("Grammar-constrained logits must not contain NaN or +inf")
+        allowed = np.isfinite(masked_logits)
+        if not allowed.any():
+            raise ValueError("Grammar allows no next token with a finite logit")
+        logits = masked_logits[allowed].astype(np.float64)
+        probabilities = np.exp(logits - logits.max())
+        probabilities /= probabilities.sum()
+        return PrefillResult(
+            n_tokens=result.n_tokens,
+            logits=result.logits,
+            probabilities=dict(zip(
+                map(int, candidates.candidates_data["id"][allowed]),
+                map(float, probabilities),
+            )),
         )
 
     def create_chat_completion_openai_v1(
