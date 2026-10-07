@@ -3,6 +3,7 @@ from __future__ import annotations
 import ctypes
 import enum
 import os
+import operator
 import sys
 import weakref
 
@@ -618,11 +619,17 @@ class LlamaContext:
         params: llama_cpp.llama_context_params,
         verbose: bool = True,
     ):
-        """Create a context for ``model`` using native context ``params``."""
+        """Create a context for ``model`` using native context ``params``.
+
+        Retaining params preserves its ctypes storage, but raw pointers cannot
+        retain their Python owners. The caller must keep ctx_other and initial
+        sampler owners alive until this context is closed, as required by C API.
+        """
         self.model = model
         self.params = params
         self.verbose = verbose
         self._exit_stack = ExitStack()
+        self.ctx = None
 
         ctx = llama_cpp.llama_init_from_model(self.model.model, self.params)
 
@@ -637,6 +644,7 @@ class LlamaContext:
         self.ctx = ctx
 
         self._loras_applied: bool = False
+        self._lora_refs = ()
         self._cvec_applied: bool = False
         self._threadpool_refs = None
         # llama.cpp borrows callbacks and their user data. Keep callbacks from
@@ -650,34 +658,50 @@ class LlamaContext:
         self._sampler_refs: Dict[int, "LlamaSampler"] = {}
 
     def close(self):
-        """Manually free LlamaContext resources."""
+        """Release all resources, reporting the first error after cleanup."""
+        errors = []
+
+        def release(action):
+            try:
+                action()
+            except Exception as exc:
+                errors.append(exc)
+
+        for batch in list(getattr(self, "_batch_ext_refs", ())):
+            release(batch.close)
         for cache in list(getattr(self, "_checkpoint_caches", ())):
-            cache.close()
+            release(cache.close)
         if hasattr(self, "_checkpoint_caches"):
             self._checkpoint_caches.clear()
         if getattr(self, "ctx", None) is not None:
-            try:
-                llama_cpp.llama_free(self.ctx)
-            except Exception:
-                pass
+            native = self.ctx
             self.ctx = None
+            release(lambda: llama_cpp.llama_free(native))
         self.params = None
 
         if getattr(self, "_exit_stack", None) is not None and hasattr(self._exit_stack, "close"):
-            self._exit_stack.close()
+            release(self._exit_stack.close)
             self._exit_stack = None
 
         # The context no longer needs to keep its parent model alive once the
         # native context and its callbacks have been released.
         self.model = None
+        self._lora_refs = ()
+        self._loras_applied = False
+        self._cvec_applied = False
         self._sampler_refs = {}
         self._threadpool_refs = None
         self._abort_callback_ref = None
         self._abort_callback_data_ref = None
+        if errors:
+            raise errors[0]
 
     def __del__(self):
         """Release native resources when the wrapper is garbage-collected."""
-        self.close()
+        try:
+            self.close()
+        except Exception:
+            pass
 
     def _assert_ctx(self):
         """Raise when an operation is attempted on a closed context."""
@@ -689,30 +713,37 @@ class LlamaContext:
 
     def n_ctx(self) -> int:
         """Return the total configured context capacity in tokens."""
+        self._assert_ctx()
         return llama_cpp.llama_n_ctx(self.ctx)
 
     def n_ctx_seq(self) -> int:
         """Return the effective context capacity available to each sequence."""
+        self._assert_ctx()
         return llama_cpp.llama_n_ctx_seq(self.ctx)
 
     def n_batch(self) -> int:
         """Return the maximum logical batch size accepted by the context."""
+        self._assert_ctx()
         return llama_cpp.llama_n_batch(self.ctx)
 
     def n_ubatch(self) -> int:
         """Return the maximum physical micro-batch size used for graph execution."""
+        self._assert_ctx()
         return llama_cpp.llama_n_ubatch(self.ctx)
 
     def n_seq_max(self) -> int:
         """Return the maximum number of sequences supported by one batch."""
+        self._assert_ctx()
         return llama_cpp.llama_n_seq_max(self.ctx)
 
     def n_rs_seq(self) -> int:
         """Return the configured recurrent-state snapshot capacity per sequence."""
+        self._assert_ctx()
         return llama_cpp.llama_n_rs_seq(self.ctx)
 
     def pooling_type(self) -> int:
         """Return the active ``llama_pooling_type`` value."""
+        self._assert_ctx()
         return llama_cpp.llama_pooling_type(self.ctx)
 
     # // Memory API
@@ -949,21 +980,25 @@ class LlamaContext:
 
     # // Decoding API
 
-    def encode(self, batch: LlamaBatch):
+    def encode(self, batch: Union[LlamaBatch, LlamaBatchExt], *, start: int = 0, count: Optional[int] = None):
         """Run an encoder batch without using the decoder KV cache.
 
         Raises ``RuntimeError`` for every nonzero native return code. On a
         native error, llama.cpp restores memory to its pre-call state.
+        Extended batches support explicit logical ranges via start/count.
         """
         self._assert_ctx()
-        return_code = llama_cpp.llama_encode(
-            self.ctx,
-            batch.batch,
-        )
+        if isinstance(batch, LlamaBatchExt):
+            native = batch.render(self, start=start, count=count)
+            return_code = llama_cpp.llama_process(self.ctx, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_ENCODE, native)
+        else:
+            if start != 0 or count is not None:
+                raise ValueError("Range submission requires LlamaBatchExt")
+            return_code = llama_cpp.llama_encode(self.ctx, batch.batch)
         if return_code != 0:
             raise RuntimeError(f"llama_encode returned {return_code}")
 
-    def decode(self, batch: 'LlamaBatch') -> int:
+    def decode(self, batch: Union[LlamaBatch, LlamaBatchExt], *, start: int = 0, count: Optional[int] = None) -> int:
         """
         Evaluate the batch of tokens using the transformer model.
 
@@ -978,6 +1013,8 @@ class LlamaContext:
             0: Success.
             1: No KV slot available (Recoverable). The caller should implement a
                fallback strategy, such as reducing the batch size and retrying.
+        For LlamaBatchExt, start/count select a logical input range; the builder
+        is preserved so the caller can retry without editing native counters.
 
         Raises:
             LlamaDecodeAbort: If the native abort callback interrupts decoding.
@@ -985,8 +1022,17 @@ class LlamaContext:
             RuntimeError: If a fatal, non-recoverable error occurs during decoding.
         """
         self._assert_ctx()
+        # Construction errors happen before processing and cannot mutate memory.
+        extended = isinstance(batch, LlamaBatchExt)
+        if extended:
+            native = batch.render(self, start=start, count=count)
+        elif start != 0 or count is not None:
+            raise ValueError("Range submission requires LlamaBatchExt")
         try:
-            return_code = llama_cpp.llama_decode(self.ctx, batch.batch)
+            if extended:
+                return_code = llama_cpp.llama_process(self.ctx, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, native)
+            else:
+                return_code = llama_cpp.llama_decode(self.ctx, batch.batch)
         except Exception as e:
             self._invalidate_checkpoints()
             raise RuntimeError(
@@ -1023,6 +1069,21 @@ class LlamaContext:
         msg = error_map.get(return_code, "Unknown fatal internal error")
         raise RuntimeError(f"llama_decode failed (code {return_code}): {msg}")
 
+    def process(self, batch: LlamaBatchExt, process_type: int, *, start: int = 0, count: Optional[int] = None) -> int:
+        """Submit an extended batch, preserving encode/decode error semantics.
+
+        This submits one logical range only. llama.cpp handles micro-batches;
+        the caller controls retries and any splitting across process calls.
+        """
+        if not isinstance(batch, LlamaBatchExt):
+            raise TypeError("process requires LlamaBatchExt")
+        if process_type == llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_ENCODE:
+            self.encode(batch, start=start, count=count)
+            return 0
+        if process_type == llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE:
+            return self.decode(batch, start=start, count=count)
+        raise ValueError(f"Invalid process type: {process_type}")
+
     def set_n_threads(self, n_threads: int, n_threads_batch: int):
         """
         Set the number of threads used for decoding
@@ -1031,6 +1092,7 @@ class LlamaContext:
             n_threads: the number of threads used for generation (single token)
             n_threads_batch: the number of threads used for prompt and batch processing (multiple tokens)
         """
+        self._assert_ctx()
         llama_cpp.llama_set_n_threads(self.ctx, n_threads, n_threads_batch)
 
     def attach_threadpool(self, threadpool, threadpool_batch=None) -> None:
@@ -1085,10 +1147,12 @@ class LlamaContext:
 
     def n_threads(self) -> int:
         """Get the number of threads used for generation of a single token."""
+        self._assert_ctx()
         return llama_cpp.llama_n_threads(self.ctx)
 
     def n_threads_batch(self) -> int:
         """Get the number of threads used for prompt and batch processing (multiple token)."""
+        self._assert_ctx()
         return llama_cpp.llama_n_threads_batch(self.ctx)
 
     def set_causal_attn(self, causal_attn: bool):
@@ -1096,12 +1160,14 @@ class LlamaContext:
         Set whether to use causal attention or not
         If set to true, the model will only attend to the past tokens
         """
+        self._assert_ctx()
         llama_cpp.llama_set_causal_attn(self.ctx, causal_attn)
 
     def get_causal_attn(self) -> bool:
         """
         Returns whether the context is currently using causal attention
         """
+        self._assert_ctx()
         return llama_cpp.llama_get_causal_attn(self.ctx)
 
     def synchronize(self):
@@ -1113,6 +1179,43 @@ class LlamaContext:
         """
         self._assert_ctx()
         llama_cpp.llama_synchronize(self.ctx)
+
+    def graph_reserve(self, n_tokens: int, n_seqs: int, n_outputs: int):
+        """Reserve backend compute buffers for a prospective microbatch.
+
+        llama.cpp rounds tokens up to a multiple of sequences. This resets
+        the scheduler, so pending computation is synchronized first. It does
+        not submit a batch or change sequence memory.
+
+        The returned graph is borrowed from this context. Do not free it or
+        keep using it after another reservation (including an internal one
+        during evaluation) or context closure. This staging API requires a
+        library exporting ``llama_graph_reserve``; missing symbols propagate
+        the low-level binding's RuntimeError.
+        """
+        self._assert_ctx()
+        dimensions = []
+        for name, value in (("n_tokens", n_tokens), ("n_seqs", n_seqs),
+                            ("n_outputs", n_outputs)):
+            if isinstance(value, (bool, np.bool_)):
+                raise TypeError(f"{name} must be an integer")
+            value = operator.index(value)
+            if not 1 <= value <= 0x7FFFFFFF:
+                raise ValueError(f"{name} must be between 1 and INT32_MAX")
+            dimensions.append(value)
+        n_tokens, n_seqs, n_outputs = dimensions
+        if n_seqs > self.n_seq_max():
+            raise ValueError("n_seqs exceeds the context sequence capacity")
+        rounded_tokens = ((n_tokens + n_seqs - 1) // n_seqs) * n_seqs
+        if rounded_tokens > 0x7FFFFFFF:
+            raise ValueError("rounded token count exceeds INT32_MAX")
+        if n_outputs > rounded_tokens:
+            raise ValueError("n_outputs exceeds the reserved token count")
+        self.synchronize()
+        graph = llama_cpp.llama_graph_reserve(self.ctx, n_tokens, n_seqs, n_outputs)
+        if not graph:
+            raise RuntimeError("LlamaContext.graph_reserve: failed to reserve graph")
+        return graph
 
     def get_logits(self):
         """
@@ -1391,10 +1494,13 @@ class LlamaContext:
         Clears all currently applied LoRA weights from the context.
         Restores the computational graph to the base model state.
         """
+        self._assert_ctx()
         if not self._loras_applied:
             return
-        llama_cpp.llama_set_adapters_lora(self.ctx, None, 0, None)
+        if llama_cpp.llama_set_adapters_lora(self.ctx, None, 0, None) != 0:
+            raise RuntimeError("LlamaContext.clear_loras: native detach failed")
         self._loras_applied = False
+        self._lora_refs = ()
 
     def apply_loras(self, active_loras: List[Tuple["LlamaLoraAdapter", float]]):
         """
@@ -1403,7 +1509,11 @@ class LlamaContext:
 
         Args:
             active_loras: A list of tuples containing (LlamaLoraAdapter instance, scale float).
+
+        Successfully attached adapter objects are retained until replacement,
+        detachment or context shutdown. Do not explicitly free attached adapters.
         """
+        self._assert_ctx()
         # If no LoRAs are requested, ensure the context is wiped clean to prevent contamination
         if not active_loras:
             self.clear_loras()
@@ -1421,6 +1531,8 @@ class LlamaContext:
 
         # 3. Populate the C-arrays with the underlying adapter pointers and float scales
         for i, (adapter_obj, scale) in enumerate(active_loras):
+            if not getattr(adapter_obj, "adapter", None):
+                raise RuntimeError("Cannot attach a closed or invalid LoRA adapter")
             c_adapters[i] = adapter_obj.adapter
             c_scales[i] = scale
 
@@ -1436,6 +1548,8 @@ class LlamaContext:
             raise RuntimeError("LlamaContext(apply_loras): Failed to set LoRA adapters dynamically.")
 
         self._loras_applied = True
+        # Native loras stores borrowed adapter pointers, not ownership.
+        self._lora_refs = tuple(adapter for adapter, _ in active_loras)
 
         if self.verbose:
             print(f"LlamaContext(apply_loras): Successfully applied {n_adapters} LoRA adapter(s) to the compute graph.")
@@ -1447,9 +1561,11 @@ class LlamaContext:
         Clears the currently loaded control vector from the context.
         Passing NULL (None) and zeros safely resets the graph.
         """
+        self._assert_ctx()
         if not self._cvec_applied:
             return
-        llama_cpp.llama_set_adapter_cvec(self.ctx, None, 0, 0, 0, 0)
+        if llama_cpp.llama_set_adapter_cvec(self.ctx, None, 0, 0, 0, 0) != 0:
+            raise RuntimeError("LlamaContext.clear_cvec: native detach failed")
         self._cvec_applied = False
 
     def apply_cvec(self, data: List[float], n_embd: int, il_start: int, il_end: int):
@@ -1466,6 +1582,7 @@ class LlamaContext:
             il_start: The starting layer to apply the vector (inclusive, 1-indexed).
             il_end: The ending layer to apply the vector (inclusive).
         """
+        self._assert_ctx()
         if not data:
             self.clear_cvec()
             return
@@ -1518,6 +1635,350 @@ class LlamaContext:
         """Get the default llama_context_params."""
         return llama_cpp.llama_context_default_params()
 
+
+@dataclass(frozen=True)
+class LlamaBatchEntry:
+    """One logical input. Position and row index are independent.
+
+    Embeddings are owned, contiguous float32 storage, shared by row views for
+    bulk additions. Treat the exposed arrays as read-only.
+    """
+
+    token: Optional[int]
+    embedding: Optional[npt.NDArray[np.float32]]
+    position: Tuple[int, ...]
+    seq_ids: Tuple[int, ...]
+    output: bool = False
+    decision_order: int = 0
+
+
+class LlamaBatchExt:
+    """Build per-entry inputs for multimodal prompts and MTP decoding.
+
+    Unlike the parallel arrays in ``LlamaBatch``, entries may carry different
+    inputs when the native model/context supports interleaving:
+
+    * ``add_token(s)``: vocabulary IDs resolved through the model's lookup table.
+    * ``add_embedding(s)``: external features; media encoding is done separately.
+    * ``add_token_embedding``: an ID and features for one MTP-style entry.
+      Paired entries cannot share a submitted range with unpaired entries.
+
+    Single-entry methods append one input; bulk methods append a validated span.
+    Text/paired positions are scalar; embedding positions have one or four axes
+    depending on RoPE. Bulk positions are entry-major. ``output=True`` explicitly
+    requests an output row; all entries default to False.
+
+    Append operations do not run the model. Submit with ``ctx.decode(batch)`` or
+    ``ctx.encode(batch)``. Logical size may exceed ``capacity()``; submit explicit
+    ``start``/``count`` ranges that fit. There is no automatic chunking.
+    ``submitted_indices`` and ``output_indices`` map the last rendered range.
+
+    Embeddings are copied into owned float32 storage, then copied during native
+    rendering. ``render()`` returns a borrowed pointer valid until render/reset/
+    close. Context outputs must be consumed before subsequent processing.
+    ``reset()`` clears inputs but retains native capacity; ``close()`` frees both.
+    Closing the context closes its batches. Prefer a context manager for cleanup;
+    the builder and context are not safe for concurrent use.
+    """
+
+    _decision_orders = frozenset(int(v) for v in llama_cpp.llama_decision_order)
+
+    def __init__(self, *, context: LlamaContext):
+        """Allocate a reusable native batch bound to an open context.
+
+        Args:
+            context (LlamaContext): Owning inference context, passed by keyword.
+                Supplies the model, batch/sequence limits, and position layout.
+                Kept alive until batch closure; submissions must use this context.
+        """
+        self._native = None
+        self._finalizer = None
+        self._entries: List[LlamaBatchEntry] = []
+        self._pos_buffer = (llama_cpp.llama_pos * 4)()
+        self.submitted_indices: Tuple[int, ...] = ()
+        self.output_indices: Tuple[int, ...] = ()
+        context._assert_ctx()
+        self._context = context  # keep the context/model alive
+        self._ctx = context.ctx
+        self._capacity = context.n_batch()
+        self._n_seq_max = context.n_seq_max()
+        self._n_vocab = context.model.n_vocab()
+        self._n_pos = 4 if context.model.rope_type() in (
+            llama_cpp.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+            llama_cpp.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
+        ) else 1
+        self._native = llama_cpp.llama_batch_ext_init(context.ctx)
+        if not self._native:
+            raise MemoryError("llama_batch_ext_init failed")
+        try:
+            # Capture the free function and pointer, never self. This also
+            # handles cycles and interpreter shutdown without module lookups.
+            self._finalizer = weakref.finalize(
+                self, llama_cpp.llama_batch_ext_free, self._native
+            )
+        except BaseException:
+            llama_cpp.llama_batch_ext_free(self._native)
+            self._native = None
+            raise
+        if not hasattr(context, "_batch_ext_refs"):
+            context._batch_ext_refs = weakref.WeakSet()
+        context._batch_ext_refs.add(self)
+
+    @staticmethod
+    def _integer(value, name: str) -> int:
+        """Convert an integer-like value to int; reject booleans and nonintegers."""
+        if isinstance(value, (bool, np.bool_)):
+            raise ValueError(f"{name} must be an integer")
+        try:
+            return operator.index(value)
+        except TypeError as exc:
+            raise ValueError(f"{name} must be an integer") from exc
+
+    def _require_open(self):
+        """Require a live native batch and its original open context."""
+        if not self._native:
+            raise RuntimeError("LlamaBatchExt has been closed")
+        self._context._assert_ctx()
+        if self._context.ctx != self._ctx:
+            raise RuntimeError("LlamaBatchExt context has changed")
+
+    def _seq_ids(self, seq_ids):
+        """Deduplicate sequence IDs and validate them against context capacity."""
+        ids = tuple(dict.fromkeys(self._integer(s, "seq_id") for s in seq_ids))
+        if not ids or any(s < 0 or s >= self._n_seq_max for s in ids):
+            raise ValueError("seq_ids must be nonempty and within context sequence capacity")
+        return ids
+
+    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, validated_seq_ids=None):
+        """Validate input metadata and construct a logical entry without copying features."""
+        if token is not None:
+            token = self._integer(token, "token")
+            if not 0 <= token < self._n_vocab:
+                raise ValueError("token is outside the context vocabulary")
+        if token is None and embedding is None:
+            raise ValueError("An entry requires a token or embedding")
+        ids = self._seq_ids(seq_ids) if validated_seq_ids is None else validated_seq_ids
+        n_pos = 1 if token is not None else self._n_pos
+        if isinstance(position, (int, np.integer)):
+            pos = (self._integer(position, "position"),)
+        else:
+            pos = tuple(self._integer(p, "position") for p in position)
+        if len(pos) != n_pos or any(p < 0 or p > 2**31 - 1 for p in pos):
+            raise ValueError(f"position requires {n_pos} nonnegative int32 values")
+        order = self._integer(decision_order, "decision_order")
+        if order not in self._decision_orders:
+            raise ValueError("Unknown decision_order")
+        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order)
+
+    @staticmethod
+    def _embedding(data):
+        """Copy a nonempty vector/matrix to owned, read-only contiguous float32 storage."""
+        array = np.array(data, dtype=np.float32, order="C", copy=True)
+        if array.ndim not in (1, 2) or array.size == 0:
+            raise ValueError("embedding must be a nonempty vector or matrix")
+        array.setflags(write=False)
+        return array
+
+    @property
+    def entries(self) -> Tuple[LlamaBatchEntry, ...]:
+        """Return a tuple snapshot of entries; their embedding arrays remain shared."""
+        return tuple(self._entries)
+
+    def __len__(self) -> int:
+        """Return the logical entry count, including embedding-only entries."""
+        return len(self._entries)
+
+    def n_tokens(self) -> int:
+        """Return the logical entry count, as in len(self)."""
+        return len(self)
+
+    def capacity(self) -> int:
+        """Return the maximum entries per native submission (context.n_batch())."""
+        return self._capacity
+
+    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0) -> int:
+        """Append one text entry and return its logical index (int).
+
+        token (int): Vocabulary ID; position (int): Scalar model position.
+        seq_ids (Sequence[int]): Context sequences sharing this entry, default (0,).
+        output (bool): Request an output row, default False.
+        decision_order (int): Decision-head metadata, default 0 for ordinary text."""
+        self._require_open()
+        entry = self._entry(token, None, position, seq_ids, output, decision_order)
+        self._entries.append(entry)
+        return len(self) - 1
+
+    def add_embedding(self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False) -> int:
+        """Copy one external feature entry and return its logical index (int).
+
+        embedding (array-like): Vector or matrix forming one entry's payload.
+        position (int or Sequence[int]): Scalar, or four axes for M-RoPE/IM-RoPE.
+        seq_ids (Sequence[int]): Sequences sharing the entry, default (0,).
+        output (bool): Request an output row, default False."""
+        self._require_open()
+        entry = self._entry(None, self._embedding(embedding), position, seq_ids, output, 0)
+        self._entries.append(entry)
+        return len(self) - 1
+
+    def add_token_embedding(self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False) -> int:
+        """Append one paired MTP-style entry and return its logical index (int).
+
+        token (int): Vocabulary ID; embedding (array-like): Copied feature payload.
+        position (int): Scalar model position.
+        seq_ids (Sequence[int]): Sequences sharing the entry, default (0,).
+        output (bool): Request an output row, default False.
+        All entries submitted with this entry must also be paired."""
+        self._require_open()
+        entry = self._entry(token, self._embedding(embedding), position, seq_ids, output, 0)
+        self._entries.append(entry)
+        return len(self) - 1
+
+    def add_tokens(self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None) -> Tuple[int, ...]:
+        """Append a validated text span; return logical indices (Tuple[int, ...]).
+
+        tokens (Sequence[int]): Vocabulary IDs; positions (Sequence[int]):
+            One scalar model position per token.
+        seq_ids (Sequence[int]): Common sequence IDs, default (0,).
+        outputs (Optional[Sequence[bool]]): One flag per token; None means all False.
+        Lengths must match; validation failure leaves existing entries unchanged."""
+        self._require_open()
+        flags = [False] * len(tokens) if outputs is None else outputs
+        if len(positions) != len(tokens) or len(flags) != len(tokens):
+            raise ValueError("tokens, positions and outputs must have equal lengths")
+        ids = self._seq_ids(seq_ids)
+        entries = [self._entry(t, None, p, ids, o, 0, validated_seq_ids=ids) for t, p, o in zip(tokens, positions, flags)]
+        start = len(self)
+        self._entries.extend(entries)
+        return tuple(range(start, len(self)))
+
+    def add_embeddings(self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None) -> Tuple[int, ...]:
+        """Copy a feature span once; return logical indices (Tuple[int, ...]).
+
+        embeddings (array-like): Matrix [entries, width], one entry per row.
+        positions (Sequence): Scalars, or [entries, 4] for M-RoPE/IM-RoPE.
+        seq_ids (Sequence[int]): Common sequence IDs, default (0,).
+        outputs (Optional[Sequence[bool]]): One flag per entry; None means all False.
+        Lengths must match; validation failure leaves existing entries unchanged."""
+        self._require_open()
+        data = self._embedding(embeddings)
+        if data.ndim != 2:
+            raise ValueError("Bulk embeddings require a 2-D matrix")
+        flags = [False] * len(data) if outputs is None else outputs
+        if len(positions) != len(data) or len(flags) != len(data):
+            raise ValueError("embeddings, positions and outputs must have equal lengths")
+        ids = self._seq_ids(seq_ids)
+        entries = [self._entry(None, row, p, ids, o, 0, validated_seq_ids=ids) for row, p, o in zip(data, positions, flags)]
+        start = len(self)
+        self._entries.extend(entries)
+        return tuple(range(start, len(self)))
+
+    def render(self, context: Optional[LlamaContext] = None, *, start: int = 0, count: Optional[int] = None):
+        """Prepare a native range without processing; return a borrowed batch pointer.
+
+        context (Optional[LlamaContext]): None or the original owning context.
+        start (int): First logical index, default 0.
+        count (Optional[int]): Entry count; None selects all remaining entries.
+        The range must be nonempty and fit capacity(). Construction failures clear
+        partial native rows; Python inputs survive. The pointer is valid until
+        render/reset/close. Native processing checks architecture support."""
+        self._require_open()
+        if context is not None and context is not self._context:
+            raise ValueError("Cannot submit LlamaBatchExt to a different context")
+        start = self._integer(start, "start")
+        count = len(self) - start if count is None else self._integer(count, "count")
+        if start < 0 or count <= 0 or start + count > len(self):
+            raise ValueError("Invalid or empty batch range")
+        if count > self._capacity:
+            raise ValueError("Batch range exceeds context.n_batch(); submit a smaller range")
+        entries = self._entries[start:start + count]
+        widths = {e.embedding.size for e in entries if e.embedding is not None}
+        if len(widths) > 1:
+            raise ValueError("All submitted embeddings must have the same flattened width")
+        paired = sum(e.token is not None and e.embedding is not None for e in entries)
+        if paired and paired != count:
+            raise ValueError("Paired token/embedding entries cannot mix with other entry types")
+        self.submitted_indices = self.output_indices = ()
+        llama_cpp.llama_batch_ext_clear(self._native)
+        try:
+            for i, e in enumerate(entries):
+                embd = None
+                if e.embedding is not None:
+                    data = e.embedding
+                    embd = llama_cpp.llama_embd(
+                        data.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                        1 if data.ndim == 1 else data.shape[0], data.shape[-1],
+                    )
+                if e.token is not None:
+                    idx = llama_cpp.llama_batch_ext_add_token(self._native, e.seq_ids[0], e.token)
+                else:
+                    idx = llama_cpp.llama_batch_ext_add_embd(self._native, e.seq_ids[0], embd)
+                if idx != i:
+                    raise RuntimeError(f"Native batch add failed at logical entry {start + i}: {idx}")
+                for sid in e.seq_ids[1:]:
+                    self._check(llama_cpp.llama_batch_ext_add_seq(self._native, idx, sid), "sequence", start + i)
+                if e.token is not None and embd is not None:
+                    self._check(llama_cpp.llama_batch_ext_set_embd_token(self._native, idx, embd), "embedding", start + i)
+                pos = self._pos_buffer
+                for j, value in enumerate(e.position):
+                    pos[j] = value
+                self._check(llama_cpp.llama_batch_ext_set_pos(self._native, idx, pos), "position", start + i)
+                # Fresh native entries default to output=False.
+                if e.output:
+                    self._check(llama_cpp.llama_batch_ext_set_output_logits(self._native, idx, True), "output", start + i)
+                if e.decision_order:
+                    self._check(llama_cpp.llama_batch_ext_set_decision_order(self._native, idx, e.decision_order), "decision order", start + i)
+        except BaseException:
+            llama_cpp.llama_batch_ext_clear(self._native)
+            raise
+        self.submitted_indices = tuple(range(start, start + count))
+        self.output_indices = tuple(start + i for i, e in enumerate(entries) if e.output)
+        return self._native
+
+    @staticmethod
+    def _check(ok, field: str, index: int):
+        """Raise RuntimeError with the logical index if a native setter rejects input."""
+        if not ok:
+            raise RuntimeError(f"Native batch rejected {field} at logical entry {index}")
+
+    def reset(self):
+        """Clear inputs and index mappings, retaining native capacity; also exposed as clear()."""
+        self._require_open()
+        llama_cpp.llama_batch_ext_clear(self._native)
+        self._entries.clear()
+        self.submitted_indices = self.output_indices = ()
+
+    clear = reset
+
+    def close(self):
+        """Release native storage, Python inputs, and the context reference.
+
+        Repeated calls are harmless. Python cleanup completes even if native free
+        raises, and native ownership is disarmed to prevent a second free."""
+        finalizer = self._finalizer
+        self._finalizer = None
+        self._native = None
+        try:
+            if finalizer is not None:
+                finalizer()
+        finally:
+            self._entries.clear()
+            self.submitted_indices = self.output_indices = ()
+            context = getattr(self, "_context", None)
+            if context is not None:
+                refs = getattr(context, "_batch_ext_refs", None)
+                if refs is not None:
+                    refs.discard(self)
+            self._context = None
+            self._ctx = None
+
+    def __enter__(self):
+        """Require an open batch and return self for use in a with statement."""
+        self._require_open()
+        return self
+
+    def __exit__(self, *_):
+        """Close the batch on leaving a with statement; do not suppress exceptions."""
+        self.close()
 
 class LlamaBatch:
     def __init__(
