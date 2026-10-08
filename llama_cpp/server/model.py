@@ -357,6 +357,7 @@ class LlamaProxy:
             # KV Cache Quantization
             type_k=settings.type_k,
             type_v=settings.type_v,
+            moe_cache_size=settings.moe_cache_size,
             # Tokenizer
             tokenizer=tokenizer,
             # Misc

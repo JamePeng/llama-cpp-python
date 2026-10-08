@@ -166,10 +166,11 @@ def test_speculative_output_limits_match_llama_cpp():
     assert speculative_output_limits(3, 4, 8) == (3, 3)
 
 
-def test_draft_context_does_not_inherit_target_embedding_mode():
+def test_draft_context_does_not_inherit_target_embedding_mode_or_moe_cache():
     target = llama_cpp_lib.llama_context_default_params()
     target.embeddings = True
     target.pooling_type = llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN
+    target.moe_cache_size = 64 * 1024 * 1024
 
     draft = LlamaMTPDecoding._copy_draft_context_params(
         target, llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
@@ -177,8 +178,10 @@ def test_draft_context_does_not_inherit_target_embedding_mode():
 
     assert target.embeddings is True
     assert target.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN
+    assert target.moe_cache_size == 64 * 1024 * 1024
     assert draft.embeddings is False
     assert draft.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
+    assert draft.moe_cache_size == 0
 
 
 def test_spec_config_validates_draft_runtime_arguments():

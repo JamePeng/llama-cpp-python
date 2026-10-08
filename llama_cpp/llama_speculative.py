@@ -1032,15 +1032,18 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
     def _copy_draft_context_params(
         context_params: Any, pooling_type_unspecified: int
     ) -> Any:
-        """Copy target parameters without inheriting embedding or pooling mode.
+        """Copy target parameters without embedding/pooling mode or MoE caching.
 
         This mirrors ``common_base_params_to_speculative`` in llama.cpp. Draft
         contexts configure hidden-state extraction themselves and must not
-        inherit a target embedding request or its pooling behavior.
+        inherit a target embedding request or its pooling behavior. MoE caching
+        is reserved for the target context.
         """
         params = type(context_params).from_buffer_copy(context_params)
         params.embeddings = False
         params.pooling_type = pooling_type_unspecified
+        # llama.cpp reserves the host-expert device cache for the target context.
+        params.moe_cache_size = 0
         return params
 
     def _init_model_draft_engine(

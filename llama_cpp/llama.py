@@ -157,6 +157,7 @@ class Llama:
         n_rs_seq: int = 0,
         n_outputs_max: int = 0,
         n_outputs_max_per_seq: int = 1,
+        moe_cache_size: int = 0,
         n_threads: Optional[int] = None,
         n_threads_batch: Optional[int] = None,
         ctx_type: int = llama_cpp_lib.llama_context_type.LLAMA_CONTEXT_TYPE_DEFAULT,
@@ -307,6 +308,9 @@ class Llama:
                 arguments, including draft length, probability threshold,
                 draft model, cache types and backend sampling.
             tokenizer: Optional tokenizer to override the default tokenizer from llama.cpp.
+            moe_cache_size: Device cache size in bytes for MoE experts kept in host memory,
+                split among devices like layers. Requires a GPU and MoE model;
+                tensor parallelism is unsupported. 0 disables caching. Experimental.
             type_k: KV cache data type for K (default: f16)
             type_v: KV cache data type for V (default: f16)
             spm_infill: Use Suffix/Prefix/Middle pattern for infill (instead of Prefix/Suffix/Middle) as some models prefer this.
@@ -341,6 +345,8 @@ class Llama:
         self.verbose = verbose
         self.verbosity = verbosity
         self._stack = contextlib.ExitStack()
+        if moe_cache_size < 0:
+            raise ValueError("moe_cache_size must be nonnegative")
         self.rpc_servers = normalize_rpc_servers(rpc_servers)
         if isinstance(rpc_local_devices, (str, bytes)):
             raise TypeError("rpc_local_devices must be a sequence of device names")
@@ -577,6 +583,7 @@ class Llama:
 
         # Context Params
         self.context_params = llama_cpp_lib.llama_context_default_params()
+        self.context_params.moe_cache_size = moe_cache_size
         self.context_params.n_ctx = n_ctx
         self.context_params.n_batch = self.n_batch
         self.context_params.n_ubatch = min(self.n_batch, n_ubatch)
@@ -4641,6 +4648,7 @@ prompt: The prompt to generate text from.
             n_rs_seq=self.context_params.n_rs_seq,
             n_outputs_max=self.context_params.n_outputs_max,
             n_outputs_max_per_seq=self.context_params.n_outputs_max_per_seq,
+            moe_cache_size=self.context_params.moe_cache_size,
             n_threads=self.context_params.n_threads,
             n_threads_batch=self.context_params.n_threads_batch,
             ctx_type=self.context_params.ctx_type,

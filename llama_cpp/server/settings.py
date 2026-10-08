@@ -199,6 +199,12 @@ class ModelSettings(BaseSettings):
         default=10,
         description="Number of tokens to predict using the draft model.",
     )
+    # MoE Expert Cache
+    moe_cache_size: int = Field(
+        default=0,
+        ge=0,
+        description="Device cache size in bytes for host-memory MoE experts; 0 disables it. Experimental.",
+    )
     # KV Cache Quantization
     type_k: Optional[int] = Field(
         default=None,
