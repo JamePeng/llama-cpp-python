@@ -82,7 +82,7 @@ from ._logger import (
     clear_log_filters,
     reset_log_filters,
 )
-from ._utils import suppress_stdout_stderr
+from ._utils import suppress_stdout_stderr, normalize_embedding
 
 
 def _format_speculative_duration(seconds: float) -> str:
@@ -3166,43 +3166,7 @@ class Llama:
             raise TypeError("normalize must be a bool or int")
 
         def normalize_vector(vector: Sequence[float]) -> List[float]:
-            values = list(vector)
-            # -1 (NONE): preserve the original vector. RANK always preserves
-            # raw classification scores regardless of the requested mode.
-            if normalize_mode == -1 or is_rank:
-                return values
-
-            array = np.asarray(values, dtype=np.float32)
-            # Compute y = scale * x / norm(x).
-            if normalize_mode == 0:
-                # 0 (MAX_INT16): y = 32760 * x / max(abs(x)). The result
-                # remains floating point; this is scaling, not int16 quantization.
-                norm = float(np.max(np.abs(array))) if array.size else 0.0
-                scale = 32760.0
-            elif normalize_mode == 1:
-                # 1 (TAXICAB / L1): y = x / sum(abs(x)).
-                norm = float(np.sum(np.abs(array)))
-                scale = 1.0
-            elif normalize_mode == 2:
-                # 2 (EUCLIDEAN / L2): y = x / sqrt(sum(x_i ** 2)).
-                norm = float(np.linalg.norm(array))
-                scale = 1.0
-            elif normalize_mode > 2:
-                # p > 2 (PNORM): y = x / (sum(abs(x_i) ** p)) ** (1/p).
-                # The mode itself is p; NORM_MODE_PNORM = 6 selects the L6 norm.
-                norm = float(
-                    np.sum(np.abs(array) ** normalize_mode)
-                    ** (1.0 / normalize_mode)
-                )
-                scale = 1.0
-            else:
-                # Other negative modes retain the existing passthrough behavior.
-                return values
-
-            # Zero vectors remain zero rather than producing NaNs on division.
-            if norm == 0.0:
-                return values
-            return ((array / norm) * scale).tolist()
+            return list(vector) if is_rank else normalize_embedding(vector, normalize_mode)
 
         if isinstance(input, str):
             inputs: List[Union[str, List[int]]] = (
