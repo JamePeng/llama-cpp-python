@@ -3138,6 +3138,9 @@ class Llama:
 
         ctx = self._ctx.ctx
         n_batch = self.n_batch
+        # Bidirectional attention must see the entire input in one microbatch.
+        if not self._ctx.get_causal_attn():
+            n_batch = min(n_batch, self._ctx.n_ubatch())
         n_ctx = self._n_ctx
         n_seq_max = self.context_params.n_seq_max
 
@@ -3149,7 +3152,7 @@ class Llama:
         out_dim = (
             llama_cpp_lib.llama_model_n_cls_out(self._model.model)
             if is_rank
-            else self.n_embd()
+            else self.n_embd_out()
         )
 
         # Preserve the historical bool API while accepting llama.cpp's integer

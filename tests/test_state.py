@@ -149,7 +149,8 @@ def test_embedding_request_cleans_generation_state_and_preserves_result_order(mo
     llm.context_params = SimpleNamespace(embeddings=True, n_seq_max=2, no_perf=True)
     llm.n_batch = 8
     llm.pooling_type = lambda: lib.LLAMA_POOLING_TYPE_MEAN
-    llm.n_embd = lambda: 2
+    llm.n_embd_out = lambda: 2
+    llm._ctx.get_causal_attn = lambda: True
     llm._model = SimpleNamespace(model=object())
     llm._batch = SimpleNamespace(reset=Mock(), n_tokens=lambda: 0, add_sequence=Mock())
     llm._ctx.decode = Mock(return_value=1 if failure == "decode" else 0)
