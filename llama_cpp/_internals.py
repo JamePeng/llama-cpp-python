@@ -1465,7 +1465,8 @@ class LlamaContext:
 
         This resets the prompt-evaluation, token-evaluation, and graph-reuse
         counters and updates the interval start time.  It does not reset the
-        model load time and does not synchronize queued backend work; callers
+        model load time or lifetime graph-reallocation counters, and does not
+        synchronize queued backend work; callers
         that cross an asynchronous decode boundary must synchronize first.
         """
         self._assert_ctx()
@@ -1483,7 +1484,7 @@ class LlamaContext:
         llama_cpp.llama_perf_context_print(self.ctx)
 
     def perf_context(self) -> llama_cpp.llama_perf_context_data:
-        """Return a non-synchronizing snapshot of the current perf interval."""
+        """Return interval stats and lifetime graph-reallocation totals without syncing."""
         self._assert_ctx()
         return llama_cpp.llama_perf_context(self.ctx)
 

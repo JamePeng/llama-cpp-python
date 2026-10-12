@@ -1879,6 +1879,14 @@ ggml_backend_sched_eval_callback = ctypes.CFUNCTYPE(
 )
 
 
+# typedef void (*ggml_backend_sched_realloc_callback)(ggml_backend_sched_t sched,
+#     struct ggml_cgraph * graph, bool backend_ids_changed, bool graph_size_changed, void * user_data);
+ggml_backend_sched_realloc_callback = ctypes.CFUNCTYPE(
+    None, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_bool, ctypes.c_bool,
+    ctypes.c_void_p,
+)
+
+
 # GGML_API ggml_backend_sched_t ggml_backend_sched_new(ggml_backend_t * backends, ggml_backend_buffer_type_t * bufts, int n_backends, size_t graph_size, bool parallel, bool op_offload);
 @ggml_base_function("ggml_backend_sched_new", [ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_void_p), ctypes.c_int, ctypes.c_size_t, ctypes.c_bool, ctypes.c_bool], ctypes.c_void_p)
 def ggml_backend_sched_new(backends, bufts, n_backends, graph_size, parallel, op_offload):
@@ -2010,6 +2018,25 @@ def ggml_backend_sched_reset(sched):
 @ggml_base_function("ggml_backend_sched_set_eval_callback", [ctypes.c_void_p, ggml_backend_sched_eval_callback, ctypes.c_void_p], None)
 def ggml_backend_sched_set_eval_callback(sched, callback, user_data):
     """Set a node callback; keep the CFUNCTYPE object alive until replaced or freed."""
+    ...
+
+
+# GGML_API void ggml_backend_sched_set_realloc_callback(ggml_backend_sched_t sched,
+#     ggml_backend_sched_realloc_callback callback, void * user_data);
+@ggml_base_function(
+    "ggml_backend_sched_set_realloc_callback",
+    [ctypes.c_void_p, ggml_backend_sched_realloc_callback, ctypes.c_void_p],
+    None,
+    required=False,
+)
+def ggml_backend_sched_set_realloc_callback(sched, callback, user_data):
+    """Observe compute-buffer reallocations on a caller-owned scheduler.
+
+    The callback receives borrowed scheduler/graph pointers, backend-assignment
+    and graph-size change flags, and user_data. Keep the callback and user_data
+    alive until replaced or the scheduler is freed. A null callback instance
+    unregisters it. Older libraries without this symbol raise RuntimeError.
+    """
     ...
 
 

@@ -5337,8 +5337,16 @@ def llama_log_set(
 #     int32_t n_p_eval;   // number of prompt tokens
 #     int32_t n_eval;     // number of generated tokens
 #     int32_t n_reused;   // number of times a ggml compute graph had been reused
+#     int32_t n_reallocs_same; // number of graph reallocations during inference with an unchanged graph size
+#     int32_t n_reallocs_diff; // number of graph reallocations during inference with a changed graph size
 # };
 class llama_perf_context_data(ctypes.Structure):
+    """Timing interval and graph statistics returned by llama.cpp.
+
+    n_reallocs_same/diff count compute-buffer reallocations with unchanged/
+    changed graph size, excluding changes in backend assignments. They are
+    context lifetime totals and survive llama_perf_context_reset().
+    """
     _fields_ = [
         ("t_start_ms", ctypes.c_double),
         ("t_load_ms", ctypes.c_double),
@@ -5347,6 +5355,8 @@ class llama_perf_context_data(ctypes.Structure):
         ("n_p_eval", ctypes.c_int32),
         ("n_eval", ctypes.c_int32),
         ("n_reused", ctypes.c_int32),
+        ("n_reallocs_same", ctypes.c_int32),
+        ("n_reallocs_diff", ctypes.c_int32),
     ]
 
 
@@ -5368,6 +5378,7 @@ class llama_perf_sampler_data(ctypes.Structure):
     llama_perf_context_data,
 )
 def llama_perf_context(ctx: llama_context_p, /) -> llama_perf_context_data:
+    """Read interval statistics and lifetime graph-reallocation counters."""
     ...
 
 
@@ -5388,6 +5399,7 @@ def llama_perf_context_print(ctx: llama_context_p, /):
     None,
 )
 def llama_perf_context_reset(ctx: llama_context_p, /):
+    """Reset the timing/reuse interval; preserve load time and reallocation totals."""
     ...
 
 
