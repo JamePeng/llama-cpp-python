@@ -6,7 +6,7 @@ source_files:
   - llama_cpp/llama_embedding.py
   - llama_cpp/llama_multimodal.py
   - llama_cpp/_internals.py
-last_updated: 2026-10-13
+last_updated: 2026-10-14
 version_target: "latest"
 ---
 
@@ -90,6 +90,8 @@ All examples assume that `MODEL_PATH` points to a compatible GGUF embedding or
 reranking model. Pooling requirements and output dimensions are model-specific.
 
 ### Multimodal Embeddings with EmbeddingGemma 2
+
+Multimodal embeddings are available starting with `0.4.3-preview`.
 
 Use a matching `embeddinggemma-2-BF16.gguf` and
 `mmproj-embeddinggemma-2-BF16.gguf`, and an installed build containing MTMD.

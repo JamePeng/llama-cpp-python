@@ -45,11 +45,15 @@ This package provides:
         - [1. Text Embeddings (Vector Search)](https://github.com/JamePeng/llama-cpp-python#1-text-embeddings-vector-search)
         - [2. Reranking (Cross-Encoder Scoring)](https://github.com/JamePeng/llama-cpp-python#2-reranking-cross-encoder-scoring)
         - [3. Normalization](https://github.com/JamePeng/llama-cpp-python#3-normalization)
+        - [4. Multimodal Embeddings](https://github.com/JamePeng/llama-cpp-python#4-multimodal-embeddings)
 - [FAQ](https://github.com/JamePeng/llama-cpp-python#faq)
 
 The project's maintained documentation is available in [docs/wiki](docs/wiki/index.md)
 and published to the [project wiki](https://github.com/JamePeng/llama-cpp-python/wiki).
 It follows the LLM Wiki approach, and contributions to its maintenance are welcome :)
+
+For manual inference, see [Llama Batch](docs/wiki/modules/LlamaBatch.md).
+For text/image/audio vectors, see [Embeddings and Reranking](docs/wiki/features/embeddings-rerank.md).
 
 
 ## Discussions
@@ -289,6 +293,11 @@ source /opt/intel/openvino/setupvars.sh
 # Build
 CMAKE_ARGS="-DGGML_OPENVINO=ON" pip install "llama-cpp-python @ git+https://github.com/JamePeng/llama-cpp-python.git"
 ```
+
+Embedding and reranking support is limited and depends on the model and device.
+Stateful execution is optional on CPU/GPU; context shifting requires stateless
+execution. See the [OpenVINO build and runtime guide](docs/wiki/install.md#openvino)
+for device selection, caching, and current limitations.
 </details>
 
 <details>
@@ -618,6 +627,15 @@ Run an example with `-h` for its complete options. The shared runtime
 demonstrates the current model/context lifecycle, vocabulary-based
 tokenization, `llama_batch` decoding, sampler chains, dynamic backend loading,
 and native logging configuration.
+
+Managed internal builders are available in `llama_cpp._internals`:
+`LlamaBatch` uses the legacy native arrays, while `LlamaBatchExt` builds
+context-bound entries with tokens, external features, positions, and output flags.
+The legacy native API converts inputs to `llama_batch_ext`; the extended builder
+submits through `llama_process()`. Both reach the same processing path.
+See [Llama Batch](docs/wiki/modules/LlamaBatch.md) for range submission,
+output indexing, ownership, and the distinction between token and MTP state
+embeddings. Extended batches do not encode media or guarantee faster inference.
 
 ## High-level API
 
@@ -2161,6 +2179,7 @@ the shared `Llama.embed()` implementation.
 |`bge-m3`| Embedding |[bge-m3-GGUF](https://huggingface.co/gpustack/bge-m3-GGUF) |  Useful ✅  |
 |`jina-embeddings-v2-base-zh`| Embedding |[jina-embeddings-v2-base-zh-GGUF](https://huggingface.co/gpustack/jina-embeddings-v2-base-zh-GGUF)  |  Useful ✅  |
 |`jina-embeddings-v3`| Embedding |[jina-embeddings-v3-GGUF](https://huggingface.co/second-state/jina-embeddings-v3-GGUF) |  Useful ✅  |
+|`embeddinggemma-2`| Multimodal Embedding |[embeddinggemma-2-GGUF](https://huggingface.co/unsloth/embeddinggemma-2-GGUF) | Useful ✅ (since `0.4.3-preview`) |
 |`bge-reranker-v2-m3`|   Rerank  |[bge-reranker-v2-m3-GGUF](https://huggingface.co/gpustack/bge-reranker-v2-m3-GGUF) |  Useful ✅  |
 |`qwen3-reranker`|   Rerank  |[Qwen3-Reranker-GGUF](https://huggingface.co/JamePeng2023/Qwen3-Reranker-GGUF) |  Useful ✅  |
 
@@ -2267,7 +2286,7 @@ The `embed` method supports various mathematical normalization strategies via th
 | NORM_MODE_MAX_INT16 | $0$       | max absolute int16  | $\Large{{32760 * x_i} \over\max \lvert x_i\rvert}$
 | NORM_MODE_TAXICAB | $1$       | taxicab             | $\Large{x_i \over\sum \lvert x_i\rvert}$
 | NORM_MODE_EUCLIDEAN | $2$       | euclidean (default) | $\Large{x_i \over\sqrt{\sum x_i^2}}$
-| NORM_MODE_PNORM | $>2$      | p-norm              | $\Large{x_i \over\sqrt[p]{\sum \lvert x_i\rvert^p}}$
+| NORM_MODE_PNORM | $6$ (or any integer $p>2$) | p-norm | $\Large{x_i \over\sqrt[p]{\sum \lvert x_i\rvert^p}}$
 
 Mode `0` rescales floating-point values; it does not cast to int16 or compress
 storage. `NORM_MODE_PNORM` equals `6`; any integer greater than `2` selects that
@@ -2299,6 +2318,46 @@ vec_scaled = llm.embed("text", normalize=NORM_MODE_MAX_INT16)
 # Raw Output (No Normalization) - Get the raw floating point values from the model
 embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MODE_NONE)
 ```
+
+### 4. Multimodal Embeddings
+
+Available starting with `0.4.3-preview`.
+
+`LlamaEmbedding.embed_multimodal()` returns one pooled vector from ordered text,
+image, and audio inputs using `MTMDEmbeddingHandler`. It requires a matching MTMD
+projector, non-causal attention, and MEAN, CLS, or LAST pooling. The projector
+loads lazily; the model owns and closes it.
+
+This example requires matching EmbeddingGemma 2 model/projector GGUFs and an
+encoded image file at `image.png`:
+
+```python
+from contextlib import closing
+from pathlib import Path
+
+from llama_cpp import LLAMA_POOLING_TYPE_MEAN
+from llama_cpp.llama_embedding import LlamaEmbedding
+
+with closing(LlamaEmbedding(
+    model_path="path/to/embeddinggemma-2-BF16.gguf",
+    mmproj_path="path/to/mmproj-embeddinggemma-2-BF16.gguf",
+    pooling_type=LLAMA_POOLING_TYPE_MEAN,
+    n_ctx=512, n_batch=512, n_ubatch=512,
+)) as model:
+    vector = model.embed_multimodal(
+        parts=["task: sentence similarity | query: ", Path("image.png").read_bytes()],
+    )
+    print(len(vector))  # 768 for EmbeddingGemma 2
+```
+
+Media is supplied as encoded file bytes; `parts` manages native markers.
+The full input, including media tokens, must fit `n_ctx`, `n_batch`, and
+`n_ubatch`. This API does not truncate or split oversized requests, and rejects
+video and NONE/RANK pooling. Each call resets generation state once execution
+starts. `create_embedding()` remains a text API.
+See [LlamaEmbedding](docs/wiki/modules/LlamaEmbedding.md) and the
+[multimodal embedding example](examples/multimodal_embedding.py) for audio,
+mixed inputs, projector settings, and token counts.
 
 ### Using the standard `Llama` class
 

@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-10-13
+last_updated: 2026-10-14
 version_target: "latest"
 ---
 
@@ -134,6 +134,8 @@ Decode or output-extraction failures cannot leave a reusable partial request.
 Rank output remains unnormalized; returned vectors are independent Python data.
 
 ### `embed_multimodal(prompt=None, media=(), *, parts=None, normalize=2, return_count=False)`
+
+Available starting with `0.4.3-preview`.
 
 Produce one pooled vector for a text/image/audio input. This requires an open
 model, a configured projector, non-causal attention, and active MEAN, CLS or LAST
