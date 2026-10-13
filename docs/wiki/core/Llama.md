@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-09-30
+last_updated: 2026-10-13
 version_target: "latest"
 ---
 
@@ -961,7 +961,9 @@ batch, and `n_seq_max` limits independent sequences.
 `LlamaEmbedding` remains available as the specialized convenience class. It
 automatically enables embedding-oriented context options, defaults to L2
 normalization, provides additional output formats, and adds the `rank()` helper
-for formatting query/document pairs.
+for formatting query/document pairs. Its
+[multimodal embedding API](../modules/LlamaEmbedding.md) accepts text/image/audio
+inputs with a matching MTMD projector and non-causal sequence pooling.
 
 > **OpenAI compatibility:** use sequence pooling when calling
 > `create_embedding()` through an OpenAI-compatible client. Token-level pooling

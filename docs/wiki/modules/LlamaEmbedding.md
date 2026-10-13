@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-09-19
+last_updated: 2026-10-13
 version_target: "latest"
 ---
 
@@ -14,6 +14,9 @@ version_target: "latest"
 `LlamaEmbedding` provides embedding-oriented defaults and reranking helpers on
 top of `Llama`. Its `embed()` method uses the base implementation while retaining
 L2 normalization as the default.
+With a compatible MTMD projector, `embed_multimodal()` also pools text, images
+and audio into one vector. It uses `MTMDEmbeddingHandler` without chat templates
+or a generation prompt.
 
 ### Support Embeddings & Rerank Model:
 
@@ -44,6 +47,8 @@ L2 normalization as the default.
 | `pooling_type` | int | `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) | Pooling strategy used by the model: `LLAMA_POOLING_TYPE_RANK` (4) for rerankers, `LLAMA_POOLING_TYPE_UNSPECIFIED` (-1) for embeddings. |
 | `n_gpu_layers` | int | 0 | Number of model layers offloaded to GPU. `0` disables layer offload but does not guarantee that every operation avoids an available GPU backend; `-1` uses automatic offload. |
 | `verbose` | bool | True | Whether to print debug information. |
+| `mmproj_path` | `Optional[str]` | `None` | Matching MTMD projector GGUF for multimodal embeddings. Loaded lazily on first use. |
+| `embedding_handler` | `Optional[MTMDEmbeddingHandler]` | `None` | Custom projector settings; use instead of `mmproj_path`. The model owns and closes this handler. |
 | `**kwargs` | Any | — | Extra arguments passed to the `Llama` base class (e.g., `n_batch`, `n_ctx`, `verbose`). |
 
 ### Initialization Logic
@@ -52,6 +57,8 @@ L2 normalization as the default.
 2. Sets `kv_unified=True` to enable unified KV Cache. Sequence IDs must still
    fit within the configured `n_seq_max`.
 3. Passes `pooling_type` to the parent class constructor.
+4. Configures an optional embedding projector. Passing both `mmproj_path` and
+   `embedding_handler` raises `ValueError`; a different handler type raises `TypeError`.
 
 ### Parallel Batch Capacity
 
@@ -86,6 +93,9 @@ Llama or LlamaEmbedding with n_seq_max>=2 ...
 `n_seq_max` is not the total number of documents passed to `embed()`; it is the
 number that can be active in one decode batch. Increase it carefully because
 larger values may require more context resources.
+For non-causal models, each text input must also fit `n_ubatch`: attention needs
+the whole sequence in one physical batch. `embed()` applies truncation against
+`min(n_batch, n_ubatch)` for these models; `truncate=False` rejects oversized inputs.
 
 ## Core Methods
 
@@ -120,6 +130,65 @@ shared implementation packs whole inputs into batches, copies borrowed output
 vectors, and resets generation state before execution and during final cleanup.
 Decode or output-extraction failures cannot leave a reusable partial request.
 Rank output remains unnormalized; returned vectors are independent Python data.
+
+### `embed_multimodal(prompt=None, media=(), *, parts=None, normalize=2, return_count=False)`
+
+Produce one pooled vector for a text/image/audio input. This requires an open
+model, a configured projector, non-causal attention, and active MEAN, CLS or LAST
+pooling. Use the pooling strategy required by the model; EmbeddingGemma 2 uses MEAN.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `prompt` | `Optional[str]` | `None` | Text containing one native media marker per payload in `media`. |
+| `media` | `Sequence[bytes]` | `()` | Encoded image/audio files, in marker order. Paths and URLs must be loaded into bytes first. |
+| `parts` | `Optional[Sequence[Union[str, bytes]]]` | `None` | Ordered text and media bytes, without manually inserting markers. Use instead of `prompt`/`media`. |
+| `normalize` | `Union[bool, int]` | `2` | Same normalization modes as `embed()`; `True` selects L2 and `False` preserves raw values. |
+| `return_count` | `bool` | `False` | Return `(vector, total_token_count)`, including both text and media tokens. |
+
+The result is an owned `List[float]` with the model's output embedding width,
+which may differ from its input feature width. EmbeddingGemma 2 projects
+512-dimensional input features to a 768-dimensional output vector.
+`create_embedding()` remains a text API; call `embed_multimodal()` directly for media.
+
+The projector initializes automatically on first use. Native library loading
+checks the required MTMD symbols; context initialization checks model binding.
+Closed or uninitialized objects, unsupported pooling/attention and unsupported
+media raise before encoding or decoding. Images and audio are detected from
+their encoded bytes. Video bytes are currently rejected by this embedding path.
+
+The complete input must fit `n_ctx`, `n_batch` and `n_ubatch`, including media
+feature tokens. There is no automatic truncation or splitting of a multimodal
+embedding request. MTMD may batch compatible media chunks separately during
+encoding; this does not relax the decoder microbatch limit.
+
+Requests reset inference state once validation/tokenization succeeds and during
+final cleanup. Embedding output is explicitly enabled before decoding. Native
+chunks, bitmaps and encoding batches are released on success or failure; returned
+vectors remain valid. Closing the model releases its projector before the model
+context. Do not share the model or handler with concurrent generation requests.
+
+See the [multimodal workflow](../features/embeddings-rerank.md#multimodal-embeddings-with-embeddinggemma-2)
+for a complete example and task-prefix conventions.
+
+### Shared MTMD encoding interfaces
+
+`MTMDBaseHandler` in `llama_cpp.llama_multimodal` exposes media preparation for
+custom consumers. With an open model and handler, use either
+`handler.tokenize(model, prompt, media)` or `handler.tokenize_parts(model, parts)`
+as a context manager. Both accept `add_special=True` and `parse_special=True`.
+Call `request.encode()` inside that scope; the request cannot be encoded after
+the scope exits.
+
+`request.n_tokens` counts input rows and `request.n_pos` counts decoder positions.
+The returned tuple of `MTMDEncodedChunk` objects preserves input order. Each chunk
+holds text `tokens` or a copied, read-only float32 `embeddings` matrix, absolute
+decoder `positions`, its position span `n_pos`, and `use_non_causal` metadata.
+Positions may be scalars or four-axis M-RoPE coordinates. These owned results
+remain usable after request cleanup and subsequent encoding.
+
+`MTMDEmbeddingHandler.embed(model, ...)` applies pooling and normalization on top
+of these interfaces. A standalone handler binds to its first model and must be
+closed before that model; it cannot be reused with a different model.
 
 ### `rank(query, documents)`
 
