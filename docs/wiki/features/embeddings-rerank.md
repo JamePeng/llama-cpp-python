@@ -80,8 +80,8 @@ the output shape and quality before deploying a new model or quantization.
 | `LlamaEmbedding.rank()` | Formats query/document pairs and returns reranking scores |
 | `Llama.tokenize()` | Converts text into token IDs for pre-tokenized embedding input |
 
-See [[core/Llama|Llama]] for the general model lifecycle and
-[[modules/LlamaEmbedding|Llama Embedding]] for the complete specialized class
+See [Llama](../core/Llama.md) for the general model lifecycle and
+[Llama Embedding](../modules/LlamaEmbedding.md) for the complete specialized class
 reference.
 
 ## Code Examples
@@ -147,8 +147,8 @@ vector = model.embed_multimodal(
 ```
 
 This snippet assumes the model remains open inside the preceding cleanup scope.
-`<__media__>` is the default native marker, not a Hugging Face `<|image|>` token.
-Use `parts` to avoid managing markers yourself. Each call returns one vector,
+`<__media__>` is the default native marker; a loaded projector may use a different
+marker. Use `parts` to let the handler use its context's marker. Each call returns one vector,
 not a batch of document vectors or an OpenAI response wrapper.
 
 The full text/media input must fit one decoder microbatch; increase `n_ubatch`,
@@ -502,9 +502,9 @@ For OpenAI-compatible vector-store clients, use sequence pooling so each
   architectures. Validate output quality and shape before production use.
 
 ## Related Features
-- [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-- [[core/Llama|Llama](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)] — General model lifecycle and built-in embedding APIs.
-- [[modules/LlamaEmbedding|Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] — Specialized API reference,
+- [Wiki index](../index.md)
+- [Llama](../core/Llama.md) — General model lifecycle and built-in embedding APIs.
+- [Llama Embedding](../modules/LlamaEmbedding.md) — Specialized API reference,
   normalization constants, and reranking methods.
-- [[install|Installation](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/install.md)] — Backend selection, GPU acceleration, and source
+- [Installation](../install.md) — Backend selection, GPU acceleration, and source
   installation.

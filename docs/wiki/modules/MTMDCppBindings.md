@@ -2,9 +2,11 @@
 title: MTMD ctypes Bindings
 module_name: llama_cpp.mtmd_cpp
 source_file: llama_cpp/mtmd_cpp.py
-last_updated: 2026-09-03
+last_updated: 2026-10-13
 version_target: "latest"
 ---
+
+# MTMD ctypes Bindings
 
 ## Overview
 
@@ -20,9 +22,14 @@ copy of the native API:
 - [`llama_cpp/mtmd_cpp.py`](../../../llama_cpp/mtmd_cpp.py) is the authoritative
   list of MTMD types, enums, callbacks, structures, and bound functions.
 - [`llama_cpp/llama_multimodal.py`](../../../llama_cpp/llama_multimodal.py)
-  provides the managed multimodal integration used by the high-level API.
+  provides `MTMDBaseHandler`, multimodal chat/TTS handlers, and
+  `MTMDEmbeddingHandler` for managed encoding and inference.
 - [`llama_cpp/llama_chat_format.py`](../../../llama_cpp/llama_chat_format.py)
-  contains the chat handlers that prepare multimodal messages and inputs.
+  provides chat-format registration and shared completion/message helpers.
+
+For text/image/audio embeddings with a matching projector, see
+[LlamaEmbedding](LlamaEmbedding.md). The loaded context's media marker is queried
+with `mtmd_get_marker()`; `mtmd_default_marker()` is only the default marker.
 
 ## Stability
 

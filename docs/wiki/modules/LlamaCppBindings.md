@@ -2,9 +2,11 @@
 title: llama.cpp ctypes Bindings
 module_name: llama_cpp.llama_cpp
 source_file: llama_cpp/llama_cpp.py
-last_updated: 2026-09-03
+last_updated: 2026-10-13
 version_target: "latest"
 ---
+
+# llama.cpp ctypes Bindings
 
 ## Overview
 
@@ -27,4 +29,6 @@ Refer to the following files according to the level of API you need:
 
 For the native declarations against which these bindings are maintained, refer
 to the headers under [`vendor/llama.cpp`](../../../vendor/llama.cpp). General
-application usage is documented in [[Llama]].
+application usage is documented in [Llama](../core/Llama.md).
+For managed internal batch builders and their native conversion paths, see
+[Llama Batch](LlamaBatch.md).

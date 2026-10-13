@@ -30,6 +30,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 |---|---|
 | [Llama Cache](modules/LlamaCache.md) | Cache interfaces and implementations for reusing model state across repeated prompts. |
 | [Llama Embedding](modules/LlamaEmbedding.md) | Text and multimodal embedding APIs, projector configuration, output formats, and batching behavior. |
+| [Llama Batch](modules/LlamaBatch.md) | Internal batch builders, per-entry inputs, range submission, output indices, and resource ownership. |
 | [Llama Grammar](modules/LlamaGrammar.md) | Grammar definitions, custom roots, lazy triggers, JSON Schema conversion, errors, and sampler ownership. |
 | [Llama Speculative Decoding](modules/LlamaSpeculative.md) | Stateful MTP, DFlash, DFlash2, DSpark, and n-gram engines; configuration, lifecycle, rollback, statistics, and benchmarks. |
 | [Logger](modules/Logger.md) | Python and native logging configuration, callbacks, levels, filtering, and output routing. |
@@ -123,6 +124,7 @@ Completed pages currently linked from this index:
 - `core/Llama.md`
 - `modules/LlamaCache.md`
 - `modules/LlamaEmbedding.md`
+- `modules/LlamaBatch.md`
 - `modules/LlamaGrammar.md`
 - `modules/LlamaSpeculative.md`
 - `modules/Logger.md`

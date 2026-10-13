@@ -25,6 +25,9 @@ For embedding-only applications, `LlamaEmbedding` provides embedding-oriented
 defaults and additional reranking helpers while inheriting the same model and
 context lifecycle.
 
+For manual context submission, see [Llama Batch](../modules/LlamaBatch.md) for
+the internal builders, range limits, output indices, and cleanup rules.
+
 ## Constructor (`__init__`)
 
 Initialize the model and context. Normal inference construction allocates model
@@ -120,8 +123,9 @@ mapping:
 | `n_ubatch` | `int` | `512` | Maximum number of tokens in a physical micro-batch processed by llama.cpp. |
 | `n_seq_max` | `int` | `1` | Maximum independent sequence states in one decode batch. Embedding calls split automatically at this limit; larger values enable more parallel sequences. |
 | `n_rs_seq` | `int` | `0` | Experimental recurrent-state snapshots retained per sequence for rollback. `0` disables rollback snapshots. |
-| `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` lets llama.cpp use the effective `n_batch`. |
-| `n_outputs_max_per_seq` | `int` | `1` | Maximum outputs per sequence. `0` lets llama.cpp use the effective `n_outputs_max`. |
+| `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` uses the effective `n_batch`; encoder models also use `n_batch` regardless of this override. |
+| `n_outputs_max_per_seq` | `int` | `1` | Maximum outputs per sequence with an attached backend sampler. `0` uses the effective `n_outputs_max`; larger values are capped at that limit. |
+| `moe_cache_size` | `int` | `0` | Experimental device cache budget in bytes for MoE experts kept in host memory, distributed among devices like layers. `0` disables it. Requires a GPU and MoE model; tensor parallelism is unsupported. |
 | `n_threads` | `Optional[int]` | `None` | Number of threads for generation (defaults to CPU count // 2). |
 | `n_threads_batch` | `Optional[int]` | `None` | Number of threads for batch processing (defaults to CPU count). |
 | `ctx_type` | `int` | `LLAMA_CONTEXT_TYPE_DEFAULT` | Context implementation selected by llama.cpp. Keep the default unless a model or backend requires another context type. |
@@ -839,8 +843,8 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     **Important:** native backend logging is process-global. Runtime changes affect all `Llama` instances in the same Python process.
 
     **verbose=False** vs. **verbosity=0**: These have distinct behaviors.
-    - `verbose=False` silences Python wrapper prints but not backend diagnostics; like `if self.verbose: print()`
-    - `verbosity=0` silences all backend non-error output.
+    - `verbose=False` suppresses wrapper prints and sets native logging to ERROR, unless `verbosity` overrides it.
+    - `verbosity=0` hides severity-based native messages, including errors. Output-level messages remain visible unless `show_output=False` is set through `configure_logging()`.
 
 ---
 
@@ -883,7 +887,7 @@ Generate raw embedding values for strings or pre-tokenized inputs.
 |---|---|---|---|
 | `input` | `Union[str, List[str], List[List[int]]]` | Required | A single string, a list of strings, or a list containing pre-tokenized token-ID lists. |
 | `normalize` | `Union[bool, int]` | `False` | `False` returns raw values, while `True` applies L2 normalization. Integer modes are listed below. Rank outputs are not normalized. |
-| `truncate` | `bool` | `True` | Truncate each input to the smaller of the context capacity and logical batch capacity. If disabled, an input longer than `n_batch` raises `ValueError`. |
+| `truncate` | `bool` | `True` | Truncate each input to the context/logical-batch limit, also bounded by `n_ubatch` for non-causal attention. If disabled, an input exceeding the effective batch limit raises `ValueError`. |
 | `separator` | `Optional[str]` | `None` | Split a single string into multiple independent inputs. When set, the result uses the batch return shape. |
 | `return_count` | `bool` | `False` | Return `(result, total_token_count)` instead of only the embedding result. |
 
@@ -974,10 +978,10 @@ inputs with a matching MTMD projector and non-causal sequence pooling.
 
 ## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Cache](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCache.md)] - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
-* [[Llama Embedding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaEmbedding.md)] - Dedicated class for text embeddings and reranking.
+* [Wiki index](../index.md)
+* [Llama Cache](../modules/LlamaCache.md) - Implementing disk or RAM-based prompt caching (LlamaRAMCache, **TrieCache**, **HybridCheckpointCache**).
+* [Llama Embedding](../modules/LlamaEmbedding.md) - Dedicated class for text embeddings and reranking.
 * [Llama Speculative Decoding](../modules/LlamaSpeculative.md) - Configuring stateful MTP, DFlash, DFlash2, DSpark, and n-gram speculative engines, rollback, statistics, and benchmarks.
-* [[llama.cpp ctypes Bindings](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/modules/LlamaCppBindings.md)] - Source pointers for the low-level llama.cpp and ggml bindings.
-* [[DFlash2 Speculative Decoding](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/examples/dflash2-speculative-decoding.md)] - Runnable Qwen3.8 DFlash2 configuration, validation, benchmark, and tuning workflow.
-* [[ChatHandlers]] - Customizing `LlamaChatCompletionHandler` for function calling and vision/omni models (e.g., `[[Gemma4ChatHandler]]`, `[[Qwen35ChatHandler]]`).
+* [llama.cpp ctypes Bindings](../modules/LlamaCppBindings.md) - Source pointers for the low-level llama.cpp and ggml bindings.
+* [DFlash2 Speculative Decoding](../examples/dflash2-speculative-decoding.md) - Runnable Qwen3.8 DFlash2 configuration, validation, benchmark, and tuning workflow.
+* [Qwen3.5 Image Chat](../examples/vision/vision-qwen.md) - Model/projector setup, chat handler configuration, and media recovery.

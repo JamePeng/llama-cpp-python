@@ -5,7 +5,7 @@ source_files:
   - README.md
   - vendor/llama.cpp/docs/build.md
   - vendor/llama.cpp/docs/backend/
-last_updated: 2026-09-30
+last_updated: 2026-10-13
 author: JamePeng
 version_target: "latest"
 ---
@@ -464,18 +464,21 @@ Runtime variables:
 
 | Variable | Use |
 |---|---|
-| `GGML_OPENVINO_DEVICE` | Selects `CPU`, `GPU`, `NPU`, or a specific GPU such as `GPU.0`. Defaults to CPU if unset or unavailable. |
-| `GGML_OPENVINO_CACHE_DIR` | Enables OpenVINO model caching when set. Not supported on NPU devices according to upstream docs. |
-| `GGML_OPENVINO_STATEFUL_EXECUTION` | Enables stateful KV-cache execution. Upstream docs recommend it for CPU/GPU performance and note it is not effective on NPU. |
+| `GGML_OPENVINO_DEVICE` | Selects `CPU`, `GPU`, `NPU`, or a specific GPU such as `GPU.0`. Defaults to CPU when unset; an unavailable requested device is an error, with no CPU fallback. |
+| `GGML_OPENVINO_CACHE_DIR` | Directory for OpenVINO's plugin cache; on NPU, sets `NPUW_CACHE_DIR`. |
+| `GGML_OPENVINO_STATEFUL_EXECUTION` | Optional stateful KV/recurrent-cache execution for single-slot CPU/GPU workloads, default `0`. NPU uses stateless execution. |
 | `GGML_OPENVINO_PREFILL_CHUNK_SIZE` | Controls NPU prefill chunk size. |
 | `GGML_OPENVINO_PROFILING` | Enables OpenVINO profiling. |
 
 Important limitations from the upstream OpenVINO backend docs:
 
-- GPU stateless execution has known issues; use `GGML_OPENVINO_STATEFUL_EXECUTION=1` for GPU workflows.
+- Stateful execution is optional on CPU/GPU. Context shifting requires stateless execution because stateful KV memory is owned by the OpenVINO model.
 - NPU runs may fail when context size is too large. Keep context size small for NPU workflows.
-- Encoder models such as embedding and reranking models are not supported by the current OpenVINO backend implementation.
+- Embedding and reranking support is limited and device/model-dependent; the current vendor lists `llama-embedding` among supported tools. Unsupported operations or shapes can still fail during translation.
 - Some benchmark workflows require Flash Attention enabled in the llama.cpp tool layer; in Python, verify behavior against your target model and backend.
+
+See the [vendored OpenVINO guide](../../vendor/llama.cpp/docs/backend/OPENVINO.md)
+for the full runtime options and current device-specific limits.
 
 ---
 
@@ -729,8 +732,9 @@ output = llm("Hello,", max_tokens=8)
 print(output["choices"][0]["text"])
 ```
 
-For GPU builds, set `n_gpu_layers=-1` or another positive value to offload
-layers:
+For GPU builds, `n_gpu_layers="auto"` (or `-1`) lets llama.cpp choose the offload
+count. Use `"all"` (or `-2`) to request all possible layers, or a positive integer
+for an explicit layer limit:
 
 ```python
 from llama_cpp import Llama
@@ -790,18 +794,18 @@ the ctypes declarations in `llama_cpp/llama_cpp.py` may also need to be updated.
 | CUDA build targets the wrong GPU generation | Native architecture detection picked the build machine GPU, or `nvcc` could not detect it. | Use `-DGGML_NATIVE=OFF` for portability or set `-DCMAKE_CUDA_ARCHITECTURES=...` explicitly. |
 | Native library fails to load on Windows | Required DLLs are missing from `PATH` or `llama_cpp/lib`. | Check `llama_cpp/lib` for `llama.dll`, `ggml*.dll`, backend DLLs, and runtime DLLs such as OpenMP or CUDA dependencies. |
 | GPU is not used at runtime | The package was built without that backend or `n_gpu_layers` is `0`. | Rebuild with the correct CMake backend flag and set `n_gpu_layers` to a positive value or `-1`. |
-| OpenVINO GPU or NPU behaves unexpectedly | Runtime device selection or context size is unsuitable. | Set `GGML_OPENVINO_DEVICE`, enable `GGML_OPENVINO_STATEFUL_EXECUTION=1` for GPU, and keep context size smaller for NPU workflows. |
+| OpenVINO GPU or NPU behaves unexpectedly | Runtime device selection, execution mode, or context size is unsuitable. | Check `GGML_OPENVINO_DEVICE`; use stateful CPU/GPU execution only when compatible with the workload, and reduce context size for NPU. |
 | SYCL device is not selected | oneAPI environment or device selector is missing. | Source oneAPI setup and set `ONEAPI_DEVICE_SELECTOR` for the intended device. |
 | Submodule files are missing | Repository was cloned without `--recursive`. | Run `git submodule update --init --recursive`. |
 
-For detailed diagnostics, see [[Troubleshooting]].
+For detailed diagnostics, see [Runtime Troubleshooting](troubleshooting.md).
 
 ---
 
 ## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
+* [Wiki index](index.md)
+* [Llama Core](core/Llama.md)
 * [README Installation](https://github.com/JamePeng/llama-cpp-python/blob/main/README.md#installation)
 * [llama.cpp build documentation](https://github.com/ggml-org/llama.cpp/blob/master/docs/build.md)
 * [llama.cpp backend documentation](https://github.com/ggml-org/llama.cpp/tree/master/docs/backend)

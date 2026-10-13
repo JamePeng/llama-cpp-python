@@ -3,9 +3,11 @@ title: Logger
 class_name: Logger (module)
 module_name: llama_cpp._logger
 source_file: llama_cpp/_logger.py
-last_updated: 2026-05-16
+last_updated: 2026-10-13
 version_target: latest
 ---
+
+# Logger
 
 ## Overview
 
@@ -24,9 +26,13 @@ The `Logger` module provides configuration for runtime logging in `llama-cpp-pyt
 
 The primary configuration function. Combines multiple parameters into a unified verbosity level.
 
+Precedence is `silent=True`, then `quiet=True`, then `verbosity`, then `verbose`.
+Without an override, the current threshold is retained. Native ggml INFO messages
+map to TRACE (`4`); continuation messages inherit the preceding message's level.
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `verbosity` | int \| bool \| None | None | Numeric level (0–5). `False` maps to `ERROR` (1), `True` to `DEBUG` (5). |
+| `verbosity` | int \| bool \| str \| None | None | Numeric threshold (0–5), clamped to that range, or an alias such as `"info"`, `"trace"`, or `"debug"`. `False` maps to `ERROR` (1), `True` to `DEBUG` (5). |
 | `verbose` | bool | None | Shorthand: `True` → `DEBUG`, `False` → `ERROR`. |
 | `quiet` | bool | None | Shorthand: `True` → `WARN` (2). |
 | `silent` | bool | None | Shorthand: `True` → `ERROR` (1). |
@@ -96,7 +102,7 @@ from llama_cpp import Llama
 from llama_cpp import reset_logging
 
 reset_logging()  # Default verbosity=3 (INFO), show warnings and errors
-llm = Llama(model_path="models/qwen3.gguf")
+llm = Llama(model_path="models/qwen3.gguf", verbosity=3)
 llm("Explain quantum physics.")
 ```
 
@@ -204,7 +210,7 @@ llm.clear_log_filters()
 - **Process-global**: Logging configuration affects all `Llama` instances in the same process. Use `add_log_filters` or `set_log_filters` carefully when multiple instances run concurrently.
 - **Flushed immediately**: Every log call flushes to `stdout`/`stderr`, so output appears immediately.
 - **Shorthand vs. precise**: Prefer `verbosity`/`set_verbosity` over `verbose`/`set_verbose`/`set_quiet`/`set_silent` for precision, though the shorthands remain for backward compatibility.
-- **verbose=False** vs. **verbosity=0**: These have distinct behaviors — `verbose=False` silences Python wrapper prints but not backend diagnostics; `verbosity=0` silences all backend non-error output.
+- **`verbose=False` vs. `verbosity=0`**: `verbose=False` suppresses wrapper prints and sets native logging to ERROR (`1`) unless `verbosity` overrides it. `verbosity=0` hides all severity-based native messages, including errors; output-level messages remain visible when `show_output=True`. Use `show_output=False` to hide those too.
 
 ## Deprecated / Changed APIs
 
@@ -212,5 +218,5 @@ None documented.
 
 ## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
+* [Wiki index](../index.md)
+* [Llama Core](../core/Llama.md)

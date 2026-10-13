@@ -2,7 +2,7 @@
 title: Git Commit Generation Agent
 page_type: development-helper
 source_file: docs/wiki/development/git-commit-generation-agent.md
-last_updated: 2026-05-23
+last_updated: 2026-10-13
 version_target: "latest"
 author: JamePeng
 audience: maintainers
@@ -211,4 +211,4 @@ When the user provides a code diff or a summary of changes, analyze the intent a
 
 ## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
+* [Wiki index](../index.md)

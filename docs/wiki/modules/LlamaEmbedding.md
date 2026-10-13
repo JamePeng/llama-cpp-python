@@ -31,7 +31,7 @@ or a generation prompt.
 
 **Core Features:**
 1. **Auto-configuration**: Automatically sets `embeddings=True`.
-2. **Streaming Batch**: Handles massive datasets without OOM (Out Of Memory).
+2. **Streaming Batch**: Limits inputs active in native inference; returned results still accumulate in Python memory.
 3. **Native Reranking Support**: Specifically handles `LLAMA_POOLING_TYPE_RANK` models (like BGE-Reranker, Qwen3-Reranker). It correctly identifies classification heads to output scalar relevance scores instead of high-dimensional vectors.
 4. **Advanced Normalization**: Implements MaxInt16, Taxicab (L1), and Euclidean (L2) normalization strategies using NumPy for optimal performance and compatibility with various vector databases.
 
@@ -116,11 +116,13 @@ the whole sequence in one physical batch. `embed()` applies truncation against
 - `NORM_MODE_MAX_INT16` (0): Max absolute value normalization (scaled to 32760).
 - `NORM_MODE_TAXICAB` (1): L1 Taxicab norm.
 - `NORM_MODE_EUCLIDEAN` (2): L2 Euclidean norm.
-- `NORM_MODE_PNORM` (>2): p-norm normalization.
+- `NORM_MODE_PNORM` (6): L6 normalization; any integer mode greater than 2 selects that p-norm.
 
 **Returns:**
-- `return_count=False`: List of embedding vectors.
-- `return_count=True`: Tuple `(embeddings, token_count)`.
+- Sequence pooling: one vector for a single string, or a list of vectors for a batch.
+- NONE pooling: one token-vector matrix per input.
+- RANK pooling: a scalar per input for one classifier output, otherwise a classifier vector.
+- `return_count=True`: Tuple `(result, token_count)`.
 
 **Implementation and lifecycle:**
 
@@ -206,7 +208,7 @@ closed before that model; it cannot be reused with a different model.
 2. Attempts to retrieve the built-in 'rerank' chat template.
 3. If template exists: dynamically replaces `{query}` and `{document}` and tokenizes; otherwise, manually constructs `[BOS] Query [SEP] Doc [EOS]` sequence.
 4. Executes embedding inference (`embed`), returning raw logits/scores.
-5. For generative rerankers (e.g., Qwen3-Reranker, output dim = 2), uses `yes_logit` as relevance score.
+5. For a two-output classifier head, uses the first output as the relevance score, without softmax. Its label meaning depends on the model.
 
 ### `create_embedding(input, model=None, normalize=NORM_MODE_EUCLIDEAN, output_format="json")`
 
@@ -220,9 +222,9 @@ closed before that model; it cannot be reused with a different model.
 | `output_format` | str | "json" | Output format: 'json', 'json+', or 'array'. |
 
 **Output Formats:**
-- `'json'`: OpenAI-style dictionary list.
-- `'json+'`: OpenAI dictionary list + cosine similarity matrix.
-- `'array'`: Raw Python list (`List[float]` or `List[List[float]]`).
+- `'json'`: OpenAI-style response dictionary containing a `data` list.
+- `'json+'`: The same response, with `cosineSimilarity` when at least two compatible vectors are available.
+- `'array'`: Raw list with one result per input, including a single string. Sequence pooling returns `List[List[float]]`; NONE pooling returns token matrices.
 
 **Returns**: Data structure according to `output_format`.
 
@@ -242,14 +244,14 @@ closed before that model; it cannot be reused with a different model.
      performance, and memory.
    - If `seq_id` exceeds the configured capacity, increase `n_seq_max` to at
      least `seq_id + 1`.
-   - Streaming processing avoids OOM for large datasets.
+   - Batching limits active native inputs; large returned collections can still exhaust host memory.
 
 3. **Normalization Selection**:
    - Vector databases typically prefer L2 normalization (Euclidean), but other norms may be needed in specific scenarios.
 
 4. **Reranker Models**:
    - Ensure `pooling_type` is set to `LLAMA_POOLING_TYPE_RANK`.
-   - Note that output is scalar scores, not vectors.
+   - `rank()` returns scalar scores; direct `embed()` can return classifier vectors for multi-output heads.
 
 5. **Performance Tuning**:
    - For GPU acceleration, set `n_gpu_layers` to -1 (recommended).
@@ -262,13 +264,13 @@ closed before that model; it cannot be reused with a different model.
 To generate embeddings, use the `LlamaEmbedding` class. It automatically configures the model for vector generation.
 
 ```python
-from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_UNSPECIFIED
 
 # Initialize the model (automatically sets embeddings=True)
 llm = LlamaEmbedding(
     model_path="path/to/bge-m3.gguf",
     n_gpu_layers=-1,
-    pooling_type=LLAMA_POOLING_TYPE_NONE,
+    pooling_type=LLAMA_POOLING_TYPE_UNSPECIFIED,
     n_seq_max=128,
 )
 
@@ -277,7 +279,7 @@ response = llm.create_embedding("Hello, world!")
 print(response['data'][0]['embedding'])
 
 # 2. Batch processing (High Performance)
-# You can pass a large list of strings; the streaming batcher handles memory automatically.
+# Native inference is batched; the returned vectors still occupy host memory.
 documents = ["Hello, world!", "Goodbye, world!", "Llama is cute."] * 100
 embeddings = llm.embed(documents) # Returns a list of lists (vectors)
 
@@ -288,12 +290,12 @@ print(f"Generated {len(embeddings)} vectors.")
 You can request raw arrays or cosine similarity matrices directly:
 
 ```python
-from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_UNSPECIFIED
 
 # Initialize the model (automatically sets embeddings=True)
-llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_NONE)
+llm = LlamaEmbedding(model_path="path/to/bge-m3.gguf", n_gpu_layers=-1, pooling_type=LLAMA_POOLING_TYPE_UNSPECIFIED)
 
-# Returns raw List[float] instead of a dictionary wrapper
+# Returns a list containing one sequence vector
 vector = llm.create_embedding("Text", output_format="array")
 
 # Returns a similarity matrix (A @ A.T) in the response
@@ -349,7 +351,7 @@ The `embed` method supports various mathematical normalization strategies via th
 | NORM_MODE_MAX_INT16 | $0$       | max absolute int16  | $\Large{{32760 * x_i} \over\max \lvert x_i\rvert}$
 | NORM_MODE_TAXICAB | $1$       | taxicab             | $\Large{x_i \over\sum \lvert x_i\rvert}$
 | NORM_MODE_EUCLIDEAN | $2$       | euclidean (default) | $\Large{x_i \over\sqrt{\sum x_i^2}}$
-| NORM_MODE_PNORM | $>2$      | p-norm              | $\Large{x_i \over\sqrt[p]{\sum \lvert x_i\rvert^p}}$
+| NORM_MODE_PNORM | $6$ (or any integer $p>2$) | p-norm | $\Large{x_i \over\sqrt[p]{\sum \lvert x_i\rvert^p}}$
 
 This is useful for optimizing storage or preparing vectors for cosine similarity search (which requires L2 normalization).
 
@@ -386,5 +388,5 @@ embeddings_raw = llm.embed(["search query", "document text"], normalize=NORM_MOD
 
 ## Related Links
 
-* [[Index-Home](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/index.md)]
-* [[Llama Core](https://github.com/JamePeng/llama-cpp-python/blob/main/docs/wiki/core/Llama.md)]
+* [Wiki index](../index.md)
+* [Llama Core](../core/Llama.md)
