@@ -308,7 +308,8 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         mtmd_context_params_default=native.mtmd_context_params_default,
         clip_flash_attn_type=native.clip_flash_attn_type,
         mtmd_helper_log_set=Mock(),
-        mtmd_default_marker=Mock(return_value=b"<media>"),
+        mtmd_default_marker=Mock(return_value=b"<default>"),
+        mtmd_get_marker=Mock(return_value=b"<media>"),
         mtmd_init_from_file=Mock(return_value=123),
         mtmd_support_vision=Mock(return_value=True),
         mtmd_support_audio=Mock(return_value=False),
@@ -325,6 +326,7 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         handler._init_mtmd_context(model)
         handler._init_mtmd_context(model)
         backend.mtmd_init_from_file.assert_called_once()
+        backend.mtmd_get_marker.assert_called_once_with(123)
         assert handler.media_marker == "<media>"
         assert handler.is_support_vision
         assert not handler.is_support_audio

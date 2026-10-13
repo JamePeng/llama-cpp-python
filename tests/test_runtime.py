@@ -18,6 +18,53 @@ from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
 
 
+def test_multimodal_embedding_requires_initialization():
+    model = LlamaEmbedding.__new__(LlamaEmbedding)
+    with pytest.raises(RuntimeError, match="not initialized"):
+        model.embed_multimodal("hello")
+    model._ctx = SimpleNamespace(ctx=123)
+    try:
+        with pytest.raises(ValueError, match="mmproj_path"):
+            model.embed_multimodal("hello")
+    finally:
+        model._ctx = None
+
+
+def test_real_multimodal_embedding_entrypoint_readiness():
+    import io
+    from contextlib import closing
+    from PIL import Image
+    from llama_cpp.llama_multimodal import MTMDEmbeddingHandler
+
+    model_path = os.environ.get("LLAMA_TEST_MULTIMODAL_EMBEDDING_MODEL")
+    mmproj_path = os.environ.get("LLAMA_TEST_MULTIMODAL_EMBEDDING_MMPROJ")
+    if not model_path or not mmproj_path:
+        pytest.skip("Set EmbeddingGemma 2 model/mmproj paths")
+    image = io.BytesIO()
+    Image.new("RGB", (224, 224), "red").save(image, format="PNG")
+    handler = MTMDEmbeddingHandler(mmproj_path, use_gpu=False, image_max_tokens=70, verbose=False)
+    try:
+        with closing(LlamaEmbedding(model_path, embedding_handler=handler, n_ctx=256,
+                            n_batch=256, n_ubatch=256, n_threads=4, verbose=False,
+                            pooling_type=llama_cpp.LLAMA_POOLING_TYPE_MEAN)) as model:
+            assert handler.mtmd_ctx is None
+            # Call directly after construction; no manual projector initialization.
+            vector = model.embed_multimodal(parts=["title: none | text: ", image.getvalue()])
+            assert len(vector) == 768 and np.isfinite(vector).all()
+            handler.is_support_vision = False
+            with pytest.raises(ValueError, match="does not support image"):
+                model.embed_multimodal(parts=["title: none | text: ", image.getvalue()])
+            handler.is_support_vision = True
+            model._ctx.set_embeddings(False)
+            vector = model.embed_multimodal("title: none | text: hello")
+            assert len(vector) == 768 and np.linalg.norm(vector) == pytest.approx(1, abs=1e-6)
+        assert handler.mtmd_ctx is None
+        with pytest.raises(RuntimeError, match="closed"):
+            model.embed_multimodal("hello")
+    finally:
+        handler.close()
+
+
 @pytest.fixture
 def runtime_context(monkeypatch):
     ctx = internals.LlamaContext.__new__(internals.LlamaContext)
@@ -940,6 +987,49 @@ def completion_model(shared_completion_model):
         yield shared_completion_model
     finally:
         shared_completion_model.reset()
+
+
+def test_backend_sampling_with_varying_extended_batch_outputs(completion_model):
+    model = completion_model
+    params = type(model.context_params).from_buffer_copy(model.context_params)
+    params.n_seq_max = 2
+    params.n_outputs_max = params.n_outputs_max_per_seq = 4
+    params.embeddings = False
+    context = internals.LlamaContext(model=model._model, params=params, verbose=False)
+    sampler = internals.LlamaSampler()
+    sampler.add_greedy()
+    try:
+        if not context.set_sampler(0, sampler):
+            pytest.skip("Backend greedy sampling is unsupported by this library")
+        # Attachment can succeed even when greedy falls back to CPU sampling.
+        sampler_name = llama_cpp.llama_sampler_name(sampler.samplers[0])
+        if sampler_name == b"-greedy":
+            pytest.skip("Greedy backend sampling is unsupported by the output device")
+        token = model.tokenize(b"Hello", add_bos=True)[0]
+        with internals.LlamaBatchExt(context=context) as batch:
+            # Keep four input entries while changing active sampling rows.
+            # Sequence 1 has no sampler: padding chains must not publish tokens.
+            for seq_id, outputs in ((0, 1), (0, 3), (0, 2), (0, 0), (1, 2), (0, 4)):
+                context.memory_clear(True)
+                sampler.reset()
+                batch.reset()
+                batch.add_tokens([token] * 4, positions=range(4), seq_ids=(seq_id,),
+                                 outputs=[i < outputs for i in range(4)])
+                assert context.decode(batch) == 0
+                context.synchronize()
+                assert batch.output_indices == tuple(range(outputs))
+                for i in range(outputs):
+                    sampled = context.get_sampled_token_ith(i)
+                    if seq_id == 0:
+                        assert 0 <= sampled < model.n_vocab(), (
+                            f"seq_id={seq_id}, outputs={outputs}, row={i}, "
+                            f"sampled={sampled}, sampler={sampler_name!r}"
+                        )
+                    else:
+                        assert sampled == llama_cpp.LLAMA_TOKEN_NULL
+    finally:
+        context.close()
+        sampler.close()
 
 
 def test_context_graph_reserve_preserves_decode_results(completion_model):

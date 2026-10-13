@@ -3,6 +3,7 @@ from typing import Union, List, Optional, Dict, Any, Tuple
 import llama_cpp.llama_cpp as llama_cpp_lib
 from .llama_types import Embedding
 from .llama import Llama
+from .llama_multimodal import MTMDEmbeddingHandler
 # Pooling types from .llama_cpp
 from .llama_cpp import (
     LLAMA_POOLING_TYPE_UNSPECIFIED,
@@ -45,6 +46,8 @@ class LlamaEmbedding(Llama):
             pooling_type: int = LLAMA_POOLING_TYPE_UNSPECIFIED,
             n_gpu_layers: int = 0,
             verbose: bool = True,
+            mmproj_path: Optional[str] = None,
+            embedding_handler: Optional[MTMDEmbeddingHandler] = None,
             **kwargs):
         """
         Initialize the embedding model with enforced configuration.
@@ -60,8 +63,15 @@ class LlamaEmbedding(Llama):
             n_gpu_layers: Number of model layers to offload to GPU.
                           - Set to 0 for CPU only.
                           - Set to -1 for all layers (recommended for best performance).
+            mmproj_path (str/None): Optional projector for image/audio embeddings.
+            embedding_handler (MTMDEmbeddingHandler/None): Custom projector settings;
+                owned and closed by this model. Use instead of mmproj_path.
             **kwargs: Additional arguments passed to the Llama base class (e.g., n_batch, n_ctx, verbose).
         """
+        if mmproj_path is not None and embedding_handler is not None:
+            raise ValueError("Use either mmproj_path or embedding_handler")
+        if embedding_handler is not None and not isinstance(embedding_handler, MTMDEmbeddingHandler):
+            raise TypeError("embedding_handler must be an MTMDEmbeddingHandler")
         kwargs["embeddings"] = True
         kwargs["n_gpu_layers"] = n_gpu_layers
         kwargs["n_ctx"] = n_ctx
@@ -78,6 +88,12 @@ class LlamaEmbedding(Llama):
         kwargs["pooling_type"] = pooling_type
 
         super().__init__(model_path=model_path, **kwargs)
+        self.embedding_handler = embedding_handler
+        if mmproj_path is not None:
+            self.embedding_handler = MTMDEmbeddingHandler(
+                mmproj_path=mmproj_path, use_gpu=n_gpu_layers != 0, verbose=verbose)
+        if self.embedding_handler is not None:
+            self._stack.callback(self.embedding_handler.close)
 
         if self.verbose:
             print(f"LlamaEmbedding initialized with pooling_type: {self.pooling_type()}")
@@ -95,6 +111,29 @@ class LlamaEmbedding(Llama):
             input, normalize=normalize, truncate=truncate,
             separator=separator or None, return_count=return_count,
         )
+
+    def embed_multimodal(self, prompt: Optional[str] = None, media=(), *, parts=None,
+                         normalize: Union[bool, int] = NORM_MODE_EUCLIDEAN,
+                         return_count: bool = False):
+        """Embed text/ordered media bytes or str/bytes parts using the owned projector.
+
+        prompt (str/None): Text with native markers matching media (sequence[bytes]).
+        parts (sequence[str/bytes]/None): Marker-free alternative to prompt/media.
+        normalize (bool/int): Normalization mode, default L2 (2).
+        return_count (bool): Include text and media token usage.
+        Requires an open model and a configured MTMDEmbeddingHandler; the
+        projector loads lazily on first use and validates backend/media support.
+        """
+        ctx = getattr(self, "_ctx", None)
+        if ctx is None or not getattr(ctx, "ctx", None):
+            raise RuntimeError("LlamaEmbedding is not initialized or has been closed")
+        handler = getattr(self, "embedding_handler", None)
+        if handler is None:
+            raise ValueError("Set mmproj_path or embedding_handler for multimodal embeddings")
+        if not isinstance(handler, MTMDEmbeddingHandler):
+            raise TypeError("embedding_handler must be an MTMDEmbeddingHandler")
+        return handler.embed(self, prompt, media, parts=parts,
+                             normalize=normalize, return_count=return_count)
 
     def rank(self, query: str, documents: List[str]) -> List[float]:
         """
