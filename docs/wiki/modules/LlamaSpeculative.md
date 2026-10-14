@@ -19,7 +19,8 @@ New code should pass a `SpecConfig` to `Llama(speculative=...)`. The old
 `Llama(draft_model=...)` callback path and `LlamaDraftModel` are deprecated
 compatibility APIs.
 
-The current engines support one sequence (`seq_id=0`). MTP is text-only.
+The current engines support one sequence (`seq_id=0`). High-level MTP generation
+is text-only; its lower-level `process()` also accepts embedding batches.
 N-gram engines can use an MTMD-prefilled prompt. Their history retains media IDs,
 but proposed continuations stop before the first negative media ID.
 DFlash-family engines can consume target token or
@@ -263,6 +264,8 @@ The engine reads target hidden-state rows, sizes them with the models'
 are used when the draft context provides enough slots; otherwise the engine
 uses a partial on-device checkpoint. The checkpoint captured and restored while
 drafting is reused for target verification instead of being captured twice.
+Partial hybrid checkpoints restore recurrent state without restoring attention
+KV, so the engine also removes the draft's KV suffix after device restoration.
 Backend sampling avoids copying a full vocabulary-sized logits row to Python
 when the backend exposes compact candidate buffers. This is especially
 important for large vocabularies.
@@ -287,6 +290,33 @@ important for large vocabularies.
 5. **Reset or close:** `clear()` removes request-local memory and sampler state;
    `close()` additionally releases the draft batch/context and an externally
    owned sidecar model.
+
+### Lower-level embedding processing
+
+`process()` accepts a decoded legacy `llama_batch` containing token IDs or
+external input embeddings. Embedding rows use the target's `n_embd_inp()`;
+the separate NextN states use `n_embd_out()`. The first row carries the pending
+state from the preceding batch, and subsequent rows carry the preceding target
+row's state. This handoff continues across text and embedding batches.
+
+Scalar positions are retained. For M-RoPE and IM-RoPE, all four position planes
+are converted from native section-major storage to entry-major coordinates for
+`LlamaBatchExt`. The temporal coordinate remains the cache position used by
+catch-up and rollback. Explicit positions and sequence `0` are required.
+Empty batches and batches with both or neither legacy input pointers are ignored.
+
+The embedding catch-up builder is created on first use and reused. Input
+features and hidden states are submitted separately through `add_embeddings(...,
+states=...)`. Dense NextN rows are fetched once per target batch, and verification
+records own the media features and coordinates needed for checkpoint replay.
+If accepted and rejected image rows share a cache position, rollback restores
+the checkpoint and replays the retained prefix instead of truncating by position.
+Temporary builder rows are released after catch-up; `clear()` and `close()`
+release retained media data.
+
+Call `process()` immediately after every successful target decode, before its
+outputs are replaced. This engine support does not connect the MTMD chat
+handler's native prefill callbacks or enable multimodal high-level generation.
 
 ### Built-in target MTP heads
 
@@ -439,6 +469,12 @@ also uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected
 top-token probability. For DFlash2, it filters the selected transition
 probability within the current predecessor row. For DSpark, it filters the
 model's predicted acceptance confidence.
+The noise block always uses the configured, trained-clamped draft length.
+A smaller per-call `n_max` caps the returned prefix after probability filtering
+and the resolved `draft_n_min` check; it does not reduce the decoded mask block.
+For example, a complete three-token proposal satisfying `draft_n_min=3` can
+return one token when the call specifies `n_max=1`. This preserves the full
+non-causal block's predictions and matches the native driver's filtering order.
 When a DSpark sidecar declares `dflash.has_confidence_head=false`, probability
 filtering requires `draft_p_min=0`.
 
@@ -656,8 +692,8 @@ The MTMD chat handler accepts prefilled prompts for `NGRAM_MAP_K` and
 `NGRAM_MAP_K4V`. Media is evaluated by MTMD first; n-gram history and lookup keys
 retain negative media IDs, while proposals are truncated before the first such
 ID so only vocabulary tokens are drafted. MTP and DFlash-family
-engines are rejected by this handler before prefill starts. Lower-level DFlash
-embedding processing does not override this high-level restriction.
+engines are rejected by this handler before prefill starts. Lower-level MTP and
+DFlash embedding processing does not override this high-level restriction.
 
 ### Draft checkpoint lifetime
 
@@ -698,7 +734,7 @@ strictly new suffix tokens. Supporting general prefix reuse requires a coupled
 checkpoint containing both the target state and the corresponding speculative
 state.
 
-* MTP is text-only; MTMD-prefilled generation supports n-gram engines. DFlash-family embedding support remains a lower-level capability.
+* High-level MTP generation is text-only; MTMD-prefilled generation supports n-gram engines. MTP and DFlash-family embedding processing remain lower-level capabilities.
 * Current engines support only `seq_id=0`; parallel sequence decoding is not yet
   supported.
 * Speculation still runs target verification. Low acceptance or expensive

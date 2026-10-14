@@ -1471,6 +1471,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                 mixed=True,
                 verbose=verbose,
             )
+            self.embedding_batch = None
 
             self._enable_backend_sampling(internals)
         except BaseException:
@@ -1485,6 +1486,8 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
         self.verify_tokens: List[int] = []
         self.verify_positions: List[int] = []
+        self.verify_embeddings: Optional[npt.NDArray[np.float32]] = None
+        self.verify_media_positions: Optional[Sequence[Any]] = None
         self._use_native_draft_rollback = (
             not (self.draft_model.is_recurrent() or self.draft_model.is_hybrid())
             or self.draft_context.n_rs_seq() >= config.draft_n_max
@@ -1666,6 +1669,12 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                     raise RuntimeError(
                         f"MTP draft checkpoint restore was incomplete: {read}/{size}"
                     )
+                # Partial hybrid snapshots restore recurrent state but retain attention KV.
+                # Trim the draft suffix before decoding the restored positions again.
+                if not self.is_mem_shared and not self.draft_context.memory_seq_rm(
+                    seq_id, int(checkpoint["position"]) + 1, -1
+                ):
+                    raise RuntimeError("MTP device draft-context rollback failed")
                 self._checkpoint_stats["device_restores"] += 1
             else:
                 if not self.draft_context.memory_seq_rm(
@@ -1678,6 +1687,8 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
             self.verify_tokens.clear()
             self.verify_positions.clear()
+            self.verify_embeddings = None
+            self.verify_media_positions = None
         except BaseException:
             self._checkpoint_owner = None
             raise
@@ -1729,6 +1740,10 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
         self.verify_tokens.clear()
         self.verify_positions.clear()
+        self.verify_embeddings = None
+        self.verify_media_positions = None
+        if self.embedding_batch is not None:
+            self.embedding_batch.reset()
         self._reset_backend_sampler()
 
     def close(self) -> None:
@@ -1741,21 +1756,56 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         errors: List[Exception] = []
 
         self._close_draft_resources(
-            errors, batch_names=("batch",), close_model=self._owns_model
+            errors, batch_names=("batch", "embedding_batch"), close_model=self._owns_model
         )
+        self.verify_embeddings = None
+        self.verify_media_positions = None
 
         if errors:
             raise errors[0]
 
     def process(self, batch: Any, seq_id: int = 0) -> None:
-        """Consume target token rows and their already-computed NextN states."""
+        """Consume target text or embedding rows and their dense NextN states.
+
+        Embedding batches use the target input width and section-major native
+        positions. Input features and hidden states are copied before returning.
+        Call immediately after each successful target decode.
+        """
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
         n_tokens = int(batch.n_tokens)
-        if n_tokens <= 0 or not bool(batch.token) or bool(batch.embd):
+        if n_tokens <= 0:
             return
-        positions = [int(batch.pos[i]) for i in range(n_tokens)]
-        tokens = [int(batch.token[i]) for i in range(n_tokens)]
+        has_tokens, has_embeddings = bool(batch.token), bool(batch.embd)
+        if has_tokens == has_embeddings:
+            return
+        if not bool(batch.pos):
+            raise ValueError("MTP process requires explicit target positions")
+        for i in range(n_tokens):
+            if (bool(batch.n_seq_id) and int(batch.n_seq_id[i]) != 1) or (
+                bool(batch.seq_id) and int(batch.seq_id[i][0]) != seq_id
+            ):
+                raise NotImplementedError("MTP speculative decoding currently supports one sequence")
+
+        embeddings = None
+        media_positions = None
+        if has_tokens:
+            positions = [int(batch.pos[i]) for i in range(n_tokens)]
+            tokens = [int(batch.token[i]) for i in range(n_tokens)]
+        else:
+            n_pos = 4 if self.target_model.rope_type() in (
+                self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+                self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
+            ) else 1
+            pos_rows = np.ctypeslib.as_array(
+                batch.pos, shape=(n_tokens * n_pos,)
+            ).reshape(n_pos, n_tokens).T
+            positions = pos_rows[:, 0].tolist()
+            media_positions = pos_rows.tolist() if n_pos > 1 else positions
+            tokens = []
+            embeddings = self._copy_rows(
+                batch.embd, n_tokens, self.target_model.n_embd_inp()
+            )
         # MTP currently supports one sequence and target nextn embeddings are
         # unmasked, so output rows are contiguous in physical batch order. Fetch
         # the dense block once instead of crossing ctypes once per row. This also
@@ -1764,27 +1814,54 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.target_context.get_embeddings_nextn(), n_tokens, self.n_embd
         )
 
-        self._process_target_rows(tokens, positions, target_h)
+        self._process_target_rows(
+            tokens, positions, target_h,
+            embeddings=embeddings, media_positions=media_positions,
+        )
 
     def _process_target_rows(
         self,
         tokens: Sequence[int],
         positions: Sequence[int],
         target_h: npt.NDArray[np.float32],
+        *,
+        embeddings: Optional[npt.NDArray[np.float32]] = None,
+        media_positions: Optional[Sequence[Any]] = None,
     ) -> None:
         """Catch the draft context up using already-computed target hidden rows."""
-        if len(tokens) == 0:
+        n_rows = len(positions)
+        if n_rows == 0:
             return
+        if target_h.shape != (n_rows, self.n_embd):
+            raise ValueError("MTP target hidden rows do not match positions or output width")
+        if (embeddings is None and len(tokens) != n_rows) or (
+            embeddings is not None and len(embeddings) != n_rows
+        ):
+            raise ValueError("MTP input rows do not match target positions")
 
         if not self.is_mem_shared:
             shifted_h = np.empty_like(target_h)
             shifted_h[0] = self.pending_h
-            if len(tokens) > 1:
+            if n_rows > 1:
                 shifted_h[1:] = target_h[:-1]
 
-            self.batch.reset()
-            for token, pos, hidden in zip(tokens, positions, shifted_h):
-                self.batch.add_token_embedding(token, hidden, pos, [0], False)
+            if embeddings is None:
+                catchup_batch = self.batch
+                catchup_batch.reset()
+                for token, pos, hidden in zip(tokens, positions, shifted_h):
+                    catchup_batch.add_token_embedding(token, hidden, pos, [0], False)
+            else:
+                if self.embedding_batch is None:
+                    from llama_cpp import _internals as internals
+
+                    self.embedding_batch = internals.LlamaBatchExt(context=self.draft_context)
+                catchup_batch = self.embedding_batch
+                catchup_batch.reset()
+                catchup_batch.add_embeddings(
+                    embeddings,
+                    positions=positions if media_positions is None else media_positions,
+                    states=shifted_h,
+                )
 
             try:
                 for head in range(self.n_mtp_layers):
@@ -1796,7 +1873,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                                 "MTP chained-head catch-up rollback failed"
                             )
                         self.draft_context.set_nextn_layer_offset(head)
-                    status = self.draft_context.decode(self.batch)
+                    status = self.draft_context.decode(catchup_batch)
                     if status != 0:
                         raise RuntimeError(
                             f"MTP catch-up decode failed with status {status}"
@@ -1804,10 +1881,14 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             finally:
                 if self.chain_heads:
                     self.draft_context.set_nextn_layer_offset(0)
+                if embeddings is not None:
+                    catchup_batch.reset()
 
         self.verify_h = target_h
         self.verify_tokens = list(tokens)
         self.verify_positions = list(positions)
+        self.verify_embeddings = embeddings
+        self.verify_media_positions = media_positions
         self.pending_h[:] = target_h[-1]
 
     def can_follow_target_native_rollback(self) -> bool:
@@ -1818,11 +1899,18 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         self, checkpoint: Any, n_accepted: int, seq_id: int = 0
     ) -> None:
         """Replay only the sampled token and accepted draft prefix after RS rollback."""
-        count = min(1 + max(0, int(n_accepted)), len(self.verify_tokens))
+        count = min(1 + max(0, int(n_accepted)), len(self.verify_positions))
         tokens = self.verify_tokens[:count]
         positions = self.verify_positions[:count]
         target_h = self.verify_h[:count].copy()
-        if self._use_native_draft_rollback and tokens:
+        embeddings = None if self.verify_embeddings is None else self.verify_embeddings[:count].copy()
+        media_positions = None if self.verify_media_positions is None else self.verify_media_positions[:count]
+        # A pinned image position can contain both accepted and rejected rows.
+        # Position-based truncation cannot separate them; replay the prefix instead.
+        pinned_suffix = bool(positions) and count < len(self.verify_positions) and (
+            self.verify_positions[count] <= positions[-1]
+        )
+        if self._use_native_draft_rollback and positions and not pinned_suffix:
             # Target verification has already advanced the draft context through
             # every proposed token. Native snapshots let us discard only the
             # rejected suffix, avoiding a full restore and accepted-prefix replay.
@@ -1837,8 +1925,11 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             )
         else:
             self.restore(checkpoint, seq_id)
-            if tokens:
-                self._process_target_rows(tokens, positions, target_h)
+            if positions:
+                self._process_target_rows(
+                    tokens, positions, target_h,
+                    embeddings=embeddings, media_positions=media_positions,
+                )
 
     def draft(
         self,
@@ -2529,7 +2620,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         n_max: int,
         seq_id: int = 0,
     ) -> npt.NDArray[np.intc]:
-        """Decode one masked block and return its confidence-filtered proposals."""
+        """Decode the configured block, filter by minimum length, then cap the prefix."""
         _ = input_ids
         if seq_id != 0:
             raise NotImplementedError(
@@ -2539,7 +2630,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         if limit <= 0:
             return np.empty(0, dtype=np.intc)
 
-        n_block_tokens = limit + (
+        # Non-causal predictions depend on the full configured noise block.
+        # The per-call cap truncates proposals after confidence/minimum filtering.
+        n_block_tokens = self.draft_limit + (
             0 if self.is_dspark and self.sample_from_anchor else 1
         )
         self.noise_batch.reset()
@@ -2598,6 +2691,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
         if len(result) < self.draft_min:
             result.clear()
+        del result[limit:]
         if result:
             self._pending_verification_checkpoint = checkpoint
         return np.asarray(result, dtype=np.intc)

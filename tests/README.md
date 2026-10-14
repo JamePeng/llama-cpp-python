@@ -9,6 +9,8 @@
 | `LLAMA_TEST_MMPROJ` | `mmproj-Qwen3.5-0.8b-Q8_0.gguf` | Vision input with the Qwen3.5 model |
 | `LLAMA_TEST_MULTIMODAL_EMBEDDING_MODEL` | `embeddinggemma-2-BF16.gguf` | Optional non-causal embedding tests |
 | `LLAMA_TEST_MULTIMODAL_EMBEDDING_MMPROJ` | `mmproj-embeddinggemma-2-BF16.gguf` | Optional image embedding test |
+| `LLAMA_TEST_DFLASH_MODEL` / `LLAMA_TEST_DFLASH_DRAFT` | Qwen3.6-27B Q5 target / DFlash Q8 sidecar | Optional DFlash block limits, verification and interrupted retry |
+| `LLAMA_TEST_DFLASH2_MODEL` / `LLAMA_TEST_DFLASH2_DRAFT` | Qwen3.8-27B Q5 target / DFlash2 Q8 sidecar | Optional selector drafting with the same recovery checks |
 
 Qwen2.5 comes from [Qwen/Qwen2.5-0.5B-Instruct-GGUF](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF).
 The Qwen3.5 model, including MTP weights, and its matching projector come from
@@ -25,17 +27,26 @@ Each module combines focused unit tests with model tests where needed.
 | `test_runtime.py` | `llama_cpp_model_path`, `completion_model` | Qwen2.5: native decode, sampling, prefix append/rollback, save/load and embedding |
 | `test_runtime.py` | `LLAMA_TEST_HYBRID_MODEL` | Qwen3.5: extended token/state inputs vs legacy MTP, and embedding/state inputs vs the direct native API |
 | `test_state.py` | `hybrid_model` | Qwen3.5: host/device checkpoints, prefix reuse, snapshots and failure recovery |
-| `test_speculation.py` | `mtp_model` | Qwen3.5: MTP verification, native/device checkpoint paths and interrupted-request recovery |
+| `test_speculation.py` | `mtp_model` | Qwen3.5: MTP verification, embedding catch-up vs direct native submission, native/device checkpoint paths and interrupted-request recovery |
+| `test_speculation.py` | `dflash_model` | DFlash/DFlash2: full-block prefix equivalence under runtime caps, minimum-length ordering, verification and interrupted retry |
 | `test_media.py` | `vision_model` | Qwen3.5 + mmproj: plain/NGRAM image requests, image changes and partial-decode recovery |
 | `test_formats.py` | `grammar_model` | Qwen2.5: native grammar acceptance and constrained generation; unit tests cover chat formatting |
 
 Tokenization also uses the vocabulary-only GGUF in `vendor/llama.cpp/models`.
-DFlash and generated-audio paths use test doubles; they do not load dedicated draft or TTS models.
+DFlash/DSpark unit tests use test doubles, with optional DFlash/DFlash2 target
+and sidecar model tests. Generated-audio tests do not load dedicated TTS models.
 `test_runtime.py` checks multimodal entrypoint initialization and projector configuration.
 Its optional EmbeddingGemma 2 test covers lazy projector loading, text/image embeddings,
 marker-free parts, output dimensions, embedding-mode restoration, unsupported image
 input, resource closure and rejection after closure.
-MTP with image prefill is not a supported combination; real image tests use plain or NGRAM decoding.
+High-level MTP with image prefill is not a supported combination; real image
+tests use plain or NGRAM decoding. Lower-level MTP tests submit synthetic feature
+rows and compare continuation hidden outputs and candidates with the direct
+native API; unit tests cover scalar/M-RoPE/IM-RoPE positions, cross-batch state
+handoff, shared-memory/chained-head paths, failures and media checkpoint replay.
+With `LLAMA_TEST_MMPROJ` configured, the lower-level MTP image test also encodes
+a real test image, processes text/media chunks, drafts tokens, verifies them and
+rolls both contexts back under native and device checkpoint modes.
 
 ## Running
 
@@ -51,6 +62,10 @@ exist, and model load failures are errors. A single module can be run with
 `python -m pytest tests/test_state.py`.
 Set both `LLAMA_TEST_MULTIMODAL_EMBEDDING_*` variables to enable the optional
 EmbeddingGemma 2 test; missing configuration skips it locally and in Actions.
+Each optional DFlash pair also skips when its paths are unset. Set
+`LLAMA_TEST_N_GPU_LAYERS=-1` to offload both target and draft for those tests;
+the default is `0`. Run only these model cases with
+`python -m pytest tests/test_speculation.py -k real_dflash`.
 
 Keep fixtures local, parameterize equivalent cases, and preserve ABI, boundary,
 failure-recovery and ownership coverage. Avoid tests of private structure,
