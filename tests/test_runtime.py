@@ -7,6 +7,7 @@ import gc
 import weakref
 from types import SimpleNamespace
 from unittest.mock import Mock
+from contextlib import closing
 
 import pytest
 import numpy as np
@@ -32,7 +33,6 @@ def test_multimodal_embedding_requires_initialization():
 
 def test_real_multimodal_embedding_entrypoint_readiness():
     import io
-    from contextlib import closing
     from PIL import Image
     from llama_cpp.llama_multimodal import MTMDEmbeddingHandler
 
@@ -103,15 +103,15 @@ def batch_runtime(runtime_context, monkeypatch):
         rows.append(dict(token=token, seq_ids=[sid]))
         return len(rows) - 1
 
-    def embedding(_, idx, embd):
-        if state.fail:
+    def payload(_, idx, embd, field):
+        if state.fail == field:
             return False
-        rows[idx]["embedding"] = np.ctypeslib.as_array(embd.data, shape=(embd.n_rows * embd.n_embd,)).copy()
+        rows[idx][field] = np.ctypeslib.as_array(embd.data, shape=(embd.n_rows * embd.n_embd,)).copy()
         return True
 
     def add_embd(p, sid, embd):
         idx = add(p, sid, None)
-        return idx if embedding(p, idx, embd) else -2
+        return idx if payload(p, idx, embd, "embedding") else -2
 
     def sequence(_, idx, sid):
         rows[idx]["seq_ids"].append(sid)
@@ -132,7 +132,8 @@ def batch_runtime(runtime_context, monkeypatch):
 
     monkeypatch.setattr(lib, "llama_batch_ext_add_token", add)
     monkeypatch.setattr(lib, "llama_batch_ext_add_embd", add_embd)
-    monkeypatch.setattr(lib, "llama_batch_ext_set_embd_token", embedding)
+    monkeypatch.setattr(lib, "llama_batch_ext_set_embd_token", lambda *args: payload(*args, "embedding"))
+    monkeypatch.setattr(lib, "llama_batch_ext_set_embd_state", lambda *args: payload(*args, "state"))
     monkeypatch.setattr(lib, "llama_batch_ext_add_seq", sequence)
     monkeypatch.setattr(lib, "llama_batch_ext_set_pos", position)
     monkeypatch.setattr(lib, "llama_batch_ext_set_output_logits", output)
@@ -314,22 +315,25 @@ def test_interleaved_range_preserves_positions_and_output_mapping(batch_runtime)
         r.context.decode(r.batch)
 
 
-@pytest.mark.parametrize("failure", ["embedding", "position"])
+@pytest.mark.parametrize("failure", ["embedding", "position", "state"])
 def test_batch_render_failure_clears_partial_rows_and_can_retry(batch_runtime, monkeypatch, failure):
     r = batch_runtime
-    r.batch.add_embedding([1, 2], (0, 0, 0, 0))
-    r.batch.add_embedding([3, 4], (1, 1, 1, 0))
-    original = internals.llama_cpp.llama_batch_ext_set_pos
-    if failure == "embedding":
-        r.state.fail = True
-    else:
-        monkeypatch.setattr(internals.llama_cpp, "llama_batch_ext_set_pos", lambda _, idx, pos: idx == 0)
-    with pytest.raises(RuntimeError, match="-2" if failure == "embedding" else "position at logical entry 1"):
-        r.context.decode(r.batch)
+    invalidations = []
+    r.context._invalidate_checkpoints = lambda: invalidations.append(True)
+    for i in range(2):
+        r.batch.add_embedding([1, 2], (i, i, i, 0), state=[3, 4])
+    symbol = "llama_batch_ext_set_embd_state" if failure == "state" else "llama_batch_ext_set_pos"
+    with monkeypatch.context() as patch:
+        if failure == "embedding":
+            patch.setattr(r.state, "fail", "embedding")
+        else:
+            patch.setattr(internals.llama_cpp, symbol, lambda _, idx, value: idx == 0)
+        message = "-2" if failure == "embedding" else f"{'state embedding' if failure == 'state' else failure} at logical entry 1"
+        with pytest.raises(RuntimeError, match=message):
+            r.context.decode(r.batch)
     assert r.rows == [] and r.calls == []
-    assert len(r.batch) == 2 and r.batch.submitted_indices == ()
-    r.state.fail = False
-    monkeypatch.setattr(internals.llama_cpp, "llama_batch_ext_set_pos", original)
+    assert invalidations == [] and len(r.batch) == 2
+    assert r.batch.submitted_indices == r.batch.output_indices == ()
     assert r.context.decode(r.batch) == 0
 
 
@@ -347,11 +351,87 @@ def test_bulk_append_validation_is_atomic_and_paired_mode_is_distinct(batch_runt
     assert len(r.calls) == 1
 
 
+@pytest.mark.parametrize("kind", ["token", "embedding", "paired"])
+def test_extended_batch_keeps_input_embedding_and_hidden_state_separate(batch_runtime, kind):
+    r = batch_runtime
+    hidden = np.arange(6, dtype=np.float32).reshape(2, 3)
+    embedding = np.arange(4, dtype=np.float32)
+    if kind == "token":
+        r.batch.add_token(1, 2, seq_ids=(0, 1), output=True, state=hidden)
+    elif kind == "embedding":
+        r.batch.add_embedding(embedding, (2, 3, 4, 0), seq_ids=(0, 1), output=True, state=hidden)
+    else:
+        r.batch.add_token_embedding(1, embedding, 2, seq_ids=(0, 1), output=True, state=hidden)
+    hidden[:] = -1
+    embedding[:] = -1
+    assert r.context.decode(r.batch) == 0
+    np.testing.assert_array_equal(r.rows[0]["state"], np.arange(6))
+    if kind == "token":
+        assert "embedding" not in r.rows[0]
+    else:
+        np.testing.assert_array_equal(r.rows[0]["embedding"], np.arange(4))
+    assert r.rows[0]["position"] == ((2, 3, 4, 0) if kind == "embedding" else (2,))
+    assert r.rows[0]["seq_ids"] == [0, 1]
+    assert r.batch.output_indices == (0,)
+
+
+@pytest.mark.parametrize("kind,field", [("tokens", "state"), ("embeddings", "state"), ("embeddings", "embedding")])
+def test_bulk_payload_ownership_range_and_reset(batch_runtime, kind, field):
+    r = batch_runtime
+    source = np.arange(24, dtype=np.float32).reshape(4, 6)
+    kwargs = {"states": source} if field == "state" else {}
+    if kind == "tokens":
+        r.batch.add_tokens([1, 2, 3, 4], positions=range(4), **kwargs)
+    else:
+        r.batch.add_embeddings(source if field == "embedding" else np.ones((4, 2)),
+                               positions=[(i, i, i, 0) for i in range(4)], **kwargs)
+    snapshot = r.batch.entries
+    owner = getattr(snapshot[0], field).base
+    assert all(getattr(entry, field).base is owner and not getattr(entry, field).flags.writeable for entry in snapshot)
+    reference = weakref.ref(owner)
+    source[:] = -1
+    assert r.context.decode(r.batch, start=1, count=2) == 0
+    np.testing.assert_array_equal(r.rows[0][field], np.arange(6, 12))
+    np.testing.assert_array_equal(r.rows[1][field], np.arange(12, 18))
+    assert r.batch.submitted_indices == (1, 2)
+    r.batch.reset()
+    assert len(r.batch) == 0 and r.rows == []
+    assert r.batch.output_indices == r.batch.submitted_indices == ()
+    assert reference() is not None  # retained snapshots keep their payloads alive
+    del snapshot, owner
+    gc.collect()
+    assert reference() is None
+
+
+@pytest.mark.parametrize("kind", ["tokens", "embeddings"])
+def test_invalid_bulk_states_do_not_append_partial_inputs(batch_runtime, kind):
+    r = batch_runtime
+    r.batch.add_token(3, 0)
+    for states in ([1, 2], [[1, 2]], np.ones((2, 1, 2)), np.empty((2, 0))):
+        with pytest.raises(ValueError, match="states"):
+            if kind == "tokens":
+                r.batch.add_tokens([1, 2], positions=[1, 2], states=states)
+            else:
+                r.batch.add_embeddings([[1, 2], [3, 4]], positions=[(1, 1, 1, 0), (2, 2, 2, 0)], states=states)
+        assert len(r.batch) == 1 and r.calls == []
+
+
+@pytest.mark.parametrize("invalid", [None, [1, 2, 3]])
+def test_state_presence_and_width_are_validated_per_range(batch_runtime, invalid):
+    r = batch_runtime
+    r.batch.add_token(1, 0, state=[1, 2])
+    r.batch.add_token(2, 1, state=invalid)
+    with pytest.raises(ValueError, match="State embeddings|state embeddings"):
+        r.context.decode(r.batch)
+    assert r.rows == [] and r.calls == []
+    assert r.context.decode(r.batch, count=1) == 0
+
+
 @pytest.mark.parametrize("extended", [False, True], ids=["legacy", "extended"])
 @pytest.mark.parametrize("status", [0, 1, 2, -1, -2])
 def test_context_decode_status_and_checkpoint_invalidation(batch_runtime, monkeypatch, status, extended):
     r = batch_runtime
-    r.batch.add_token(1, 0)
+    r.batch.add_token(1, 0, state=[1, 2] if extended else None)
     r.state.status = status
     invalidations = []
     r.context._invalidate_checkpoints = lambda: invalidations.append(True)
@@ -411,70 +491,41 @@ def test_invalid_positions_sequences_and_widths_never_reach_processing(batch_run
     assert r.context.decode(r.batch) == 0
 
 
-def test_reset_releases_owned_embedding_storage(batch_runtime):
+@pytest.mark.parametrize("cleanup", ["close", "gc_cycle", "close_failure"])
+def test_batch_cleanup_releases_payloads_context_and_native_handle(batch_runtime, monkeypatch, cleanup):
     r = batch_runtime
-    r.batch.add_embeddings(np.ones((2, 4), dtype=np.float32), positions=[(0, 0, 0, 0), (1, 1, 1, 0)])
-    snapshot = r.batch.entries
-    owner = snapshot[0].embedding.base
-    assert owner is snapshot[1].embedding.base
-    storage = weakref.ref(owner)
-    del owner
-    r.batch.render()
-    r.batch.reset()
-    # A caller retaining entries intentionally retains their data.
-    assert storage() is not None
-    del snapshot
-    gc.collect()
-    assert storage() is None
-
-
-def test_gc_frees_native_batch_once_even_in_a_cycle(batch_runtime):
-    r = batch_runtime
-    batch = internals.LlamaBatchExt(context=r.context)
-    batch.add_embedding([1, 2], (0, 0, 0, 0))
-    batch.cycle = batch
-    reference = weakref.ref(batch)
-    del batch
-    gc.collect()
-    assert reference() is None
-    assert r.freed == [456]
-    gc.collect()
-    assert r.freed == [456]
-
-
-def test_close_releases_context_keepalive(batch_runtime):
     context = internals.LlamaContext.__new__(internals.LlamaContext)
-    context.__dict__.update({k: v for k, v in batch_runtime.context.__dict__.items() if k != "_batch_ext_refs"})
-    reference = weakref.ref(context)
+    context.__dict__.update({k: v for k, v in r.context.__dict__.items() if k != "_batch_ext_refs"})
+    context_ref = weakref.ref(context)
+    if cleanup == "close_failure":
+        def fail(pointer):
+            r.freed.append(pointer)
+            raise RuntimeError("cleanup failed")
+        monkeypatch.setattr(internals.llama_cpp, "llama_batch_ext_free", fail)
     batch = internals.LlamaBatchExt(context=context)
+    batch.add_embedding([1, 2], (0, 0, 0, 0), state=[3, 4, 5])
+    payload_refs = [weakref.ref(getattr(batch.entries[0], field)) for field in ("embedding", "state")]
+    batch_ref = weakref.ref(batch)
     del context
     gc.collect()
-    assert reference() is not None
-    batch.close()
-    gc.collect()
-    assert reference() is None
-
-
-def test_close_failure_disarms_native_ownership_and_releases_python_data(batch_runtime, monkeypatch):
-    calls = []
-
-    def fail(pointer):
-        calls.append(pointer)
-        raise RuntimeError("cleanup failed")
-
-    monkeypatch.setattr(internals.llama_cpp, "llama_batch_ext_free", fail)
-    batch = internals.LlamaBatchExt(context=batch_runtime.context)
-    batch.add_embedding([1, 2], (0, 0, 0, 0))
-    storage = weakref.ref(batch.entries[0].embedding)
-    with pytest.raises(RuntimeError, match="cleanup failed"):
+    assert context_ref() is not None
+    if cleanup == "gc_cycle":
+        batch.cycle = batch
+    else:
+        if cleanup == "close_failure":
+            with pytest.raises(RuntimeError, match="cleanup failed"):
+                batch.close()
+        else:
+            batch.close()
+        assert len(batch) == 0 and batch._context is None
         batch.close()
-    gc.collect()
-    assert storage() is None and len(batch) == 0
-    assert batch._context is None
-    batch.close()
     del batch
     gc.collect()
-    assert calls == [456]
+    assert batch_ref() is None and context_ref() is None
+    assert all(reference() is None for reference in payload_refs)
+    assert r.freed == [456]
+    gc.collect()
+    assert r.freed == [456]
 
 
 def test_context_close_releases_batches_before_native_context(batch_runtime, monkeypatch):
@@ -1108,38 +1159,78 @@ def test_high_level_interleaved_batch_matches_native_submission(completion_model
         model.reset()
 
 
-def test_high_level_paired_batch_matches_legacy_mtp(llama_cpp_model_path):
-    model = llama_cpp.Llama(llama_cpp_model_path, load_mtp=True, n_ctx=64, n_batch=32, n_ubatch=32, verbose=False)
-    try:
+@pytest.fixture(scope="module")
+def shared_mtp_runtime():
+    model_path = os.environ.get("LLAMA_TEST_HYBRID_MODEL")
+    if not model_path:
+        if os.environ.get("GITHUB_ACTIONS") == "true":
+            pytest.fail("LLAMA_TEST_HYBRID_MODEL is required in Actions")
+        pytest.skip("Set LLAMA_TEST_HYBRID_MODEL to run real MTP tests")
+    assert os.path.isfile(model_path), model_path
+    with closing(llama_cpp.Llama(model_path, load_mtp=True, n_ctx=64, n_batch=32, n_ubatch=32, verbose=False)) as model:
         if model._model.n_layer_nextn() == 0:
-            pytest.skip("Model has no MTP heads")
+            pytest.fail("Configured hybrid model must have MTP heads")
         params = type(model.context_params).from_buffer_copy(model.context_params)
         params.ctx_type = llama_cpp.llama_context_type.LLAMA_CONTEXT_TYPE_MTP
         params.ctx_other = model._ctx.ctx
         params.n_outputs_max = params.n_outputs_max_per_seq = 1
-        draft = internals.LlamaContext(model=model._model, params=params, verbose=False)
-        try:
-            width = model._model.n_embd_out()
-            hidden = np.zeros(width, dtype=np.float32)
-            token = model.tokenize(b"Hello", add_bos=True)[0]
-            old = internals.LlamaBatch(n_tokens=1, embd=width, n_seq_max=1, mixed=True)
-            try:
-                draft.memory_clear(True)
-                old.add_token_embedding(token, hidden, 0, [0], True)
-                assert draft.decode(old) == 0
-                expected = np.ctypeslib.as_array(draft.get_logits_ith(-1), shape=(model.n_vocab(),)).copy()
-            finally:
-                old.close()
-            draft.memory_clear(True)
-            with internals.LlamaBatchExt(context=draft) as batch:
-                batch.add_token_embedding(token, hidden, 0, output=True)
-                assert draft.decode(batch) == 0
-                actual = np.ctypeslib.as_array(draft.get_logits_ith(-1), shape=(model.n_vocab(),))
-                np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
-        finally:
-            draft.close()
+        with closing(internals.LlamaContext(model=model._model, params=params, verbose=False)) as draft:
+            yield model, draft
+
+
+@pytest.fixture
+def mtp_runtime(shared_mtp_runtime):
+    model, draft = shared_mtp_runtime
+    draft.memory_clear(True)
+    try:
+        yield model, draft
     finally:
-        model.close()
+        draft.memory_clear(True)
+        model.reset()
+
+
+@pytest.mark.parametrize("input_kind", ["token", "embedding"])
+def test_extended_state_batch_matches_native_mtp(mtp_runtime, input_kind):
+    model, draft = mtp_runtime
+    width = model._model.n_embd_out()
+    rng = np.random.default_rng(42)
+    hidden = rng.normal(0, 0.1, width).astype(np.float32)
+    token = model.tokenize(b"Hello", add_bos=True)[0]
+    embedding = rng.normal(0, 0.1, model._model.n_embd_inp()).astype(np.float32)
+    mrope = model._model.rope_type() in (
+        llama_cpp.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+        llama_cpp.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
+    )
+    position = (0, 1, 2, 0) if mrope else 0
+    if input_kind == "token":
+        with closing(internals.LlamaBatch(n_tokens=1, embd=width, n_seq_max=1, mixed=True)) as old:
+            old.add_token_embedding(token, hidden, 0, [0], True)
+            assert draft.decode(old) == 0
+    else:
+        native = llama_cpp.llama_batch_ext_init(draft.ctx)
+        assert native
+        try:
+            embd = llama_cpp.llama_embd(embedding.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), 1, embedding.size)
+            state = llama_cpp.llama_embd(hidden.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), 1, hidden.size)
+            idx = llama_cpp.llama_batch_ext_add_embd(native, 0, embd)
+            assert idx == 0
+            assert llama_cpp.llama_batch_ext_set_embd_state(native, idx, state)
+            pos = (llama_cpp.llama_pos * 4)(*(position if mrope else (position,)))
+            assert llama_cpp.llama_batch_ext_set_pos(native, idx, pos)
+            assert llama_cpp.llama_batch_ext_set_output_logits(native, idx, True)
+            assert llama_cpp.llama_process(draft.ctx, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, native) == 0
+        finally:
+            llama_cpp.llama_batch_ext_free(native)
+    expected = np.ctypeslib.as_array(draft.get_logits_ith(-1), shape=(model.n_vocab(),)).copy()
+    draft.memory_clear(True)
+    with internals.LlamaBatchExt(context=draft) as batch:
+        if input_kind == "token":
+            batch.add_token(token, 0, output=True, state=hidden)
+        else:
+            batch.add_embedding(embedding, position, output=True, state=hidden)
+        assert draft.decode(batch) == 0
+        actual = np.ctypeslib.as_array(draft.get_logits_ith(-1), shape=(model.n_vocab(),))
+        np.testing.assert_allclose(actual, expected, rtol=1e-5, atol=1e-5)
 
 
 def test_extended_batch_native_gc_and_context_cleanup(completion_model, monkeypatch):

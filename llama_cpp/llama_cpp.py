@@ -3340,7 +3340,10 @@ def llama_batch_ext_set_embd_token(batch: llama_batch_ext_p, idx: int, embd: lla
     ctypes.c_bool,
 )
 def llama_batch_ext_set_embd_state(batch: llama_batch_ext_p, idx: int, embd: llama_embd, /) -> bool:
-    """Set state embeddings. The current native implementation returns False."""
+    """Set hidden state; return False for unsupported contexts or invalid input.
+
+    Currently MTP contexts accept states with the model's output embedding width.
+    """
     ...
 
 

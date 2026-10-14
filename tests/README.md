@@ -23,6 +23,7 @@ Each module combines focused unit tests with model tests where needed.
 | File | Real-model entry points | Model and coverage |
 | --- | --- | --- |
 | `test_runtime.py` | `llama_cpp_model_path`, `completion_model` | Qwen2.5: native decode, sampling, prefix append/rollback, save/load and embedding |
+| `test_runtime.py` | `LLAMA_TEST_HYBRID_MODEL` | Qwen3.5: extended token/state inputs vs legacy MTP, and embedding/state inputs vs the direct native API |
 | `test_state.py` | `hybrid_model` | Qwen3.5: host/device checkpoints, prefix reuse, snapshots and failure recovery |
 | `test_speculation.py` | `mtp_model` | Qwen3.5: MTP verification, native/device checkpoint paths and interrupted-request recovery |
 | `test_media.py` | `vision_model` | Qwen3.5 + mmproj: plain/NGRAM image requests, image changes and partial-decode recovery |

@@ -1641,7 +1641,7 @@ class LlamaContext:
 class LlamaBatchEntry:
     """One logical input. Position and row index are independent.
 
-    Embeddings are owned, contiguous float32 storage, shared by row views for
+    Input embeddings and states are owned, contiguous float32 storage, shared by row views for
     bulk additions. Treat the exposed arrays as read-only.
     """
 
@@ -1651,6 +1651,7 @@ class LlamaBatchEntry:
     seq_ids: Tuple[int, ...]
     output: bool = False
     decision_order: int = 0
+    state: Optional[npt.NDArray[np.float32]] = None
 
 
 class LlamaBatchExt:
@@ -1661,8 +1662,10 @@ class LlamaBatchExt:
 
     * ``add_token(s)``: vocabulary IDs resolved through the model's lookup table.
     * ``add_embedding(s)``: external features; media encoding is done separately.
-    * ``add_token_embedding``: an ID and features for one MTP-style entry.
+    * ``add_token_embedding``: an ID and a token embedding for one entry.
       Paired entries cannot share a submitted range with unpaired entries.
+    * ``state=`` / ``states=``: separate hidden states, e.g. from the MTP target.
+      A submitted range must carry states on every entry or on none.
 
     Single-entry methods append one input; bulk methods append a validated span.
     Text/paired positions are scalar; embedding positions have one or four axes
@@ -1750,7 +1753,7 @@ class LlamaBatchExt:
             raise ValueError("seq_ids must be nonempty and within context sequence capacity")
         return ids
 
-    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, validated_seq_ids=None):
+    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, state=None, validated_seq_ids=None):
         """Validate input metadata and construct a logical entry without copying features."""
         if token is not None:
             token = self._integer(token, "token")
@@ -1769,16 +1772,26 @@ class LlamaBatchExt:
         order = self._integer(decision_order, "decision_order")
         if order not in self._decision_orders:
             raise ValueError("Unknown decision_order")
-        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order)
+        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order, state)
 
     @staticmethod
-    def _embedding(data):
+    def _embedding(data, name="embedding"):
         """Copy a nonempty vector/matrix to owned, read-only contiguous float32 storage."""
         array = np.array(data, dtype=np.float32, order="C", copy=True)
         if array.ndim not in (1, 2) or array.size == 0:
-            raise ValueError("embedding must be a nonempty vector or matrix")
+            raise ValueError(f"{name} must be a nonempty vector or matrix")
         array.setflags(write=False)
         return array
+
+    @classmethod
+    def _states(cls, states, count):
+        """Copy one state matrix and share its rows across a bulk insertion."""
+        if states is None:
+            return [None] * count
+        data = cls._embedding(states, "states")
+        if data.ndim != 2 or len(data) != count:
+            raise ValueError("states must be a 2-D matrix with one row per entry")
+        return data
 
     @property
     def entries(self) -> Tuple[LlamaBatchEntry, ...]:
@@ -1797,68 +1810,78 @@ class LlamaBatchExt:
         """Return the maximum entries per native submission (context.n_batch())."""
         return self._capacity
 
-    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0) -> int:
+    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0, state=None) -> int:
         """Append one text entry and return its logical index (int).
 
         token (int): Vocabulary ID; position (int): Scalar model position.
         seq_ids (Sequence[int]): Context sequences sharing this entry, default (0,).
         output (bool): Request an output row, default False.
-        decision_order (int): Decision-head metadata, default 0 for ordinary text."""
+        decision_order (int): Decision-head metadata, default 0 for ordinary text.
+        state (array-like or None): Separate hidden state, copied when supplied."""
         self._require_open()
-        entry = self._entry(token, None, position, seq_ids, output, decision_order)
+        state = None if state is None else self._embedding(state, "state")
+        entry = self._entry(token, None, position, seq_ids, output, decision_order, state=state)
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_embedding(self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False) -> int:
+    def add_embedding(self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None) -> int:
         """Copy one external feature entry and return its logical index (int).
 
         embedding (array-like): Vector or matrix forming one entry's payload.
         position (int or Sequence[int]): Scalar, or four axes for M-RoPE/IM-RoPE.
         seq_ids (Sequence[int]): Sequences sharing the entry, default (0,).
-        output (bool): Request an output row, default False."""
+        output (bool): Request an output row, default False.
+        state (array-like or None): Separate hidden state, copied when supplied."""
         self._require_open()
-        entry = self._entry(None, self._embedding(embedding), position, seq_ids, output, 0)
+        state = None if state is None else self._embedding(state, "state")
+        entry = self._entry(None, self._embedding(embedding), position, seq_ids, output, 0, state=state)
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_token_embedding(self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False) -> int:
-        """Append one paired MTP-style entry and return its logical index (int).
+    def add_token_embedding(self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None) -> int:
+        """Append a token ID and token embedding; return its logical index (int).
 
         token (int): Vocabulary ID; embedding (array-like): Copied feature payload.
         position (int): Scalar model position.
         seq_ids (Sequence[int]): Sequences sharing the entry, default (0,).
         output (bool): Request an output row, default False.
+        state (array-like or None): Separate hidden state, copied when supplied.
+        For MTP token IDs plus hidden states, use add_token(..., state=hidden).
         All entries submitted with this entry must also be paired."""
         self._require_open()
-        entry = self._entry(token, self._embedding(embedding), position, seq_ids, output, 0)
+        state = None if state is None else self._embedding(state, "state")
+        entry = self._entry(token, self._embedding(embedding), position, seq_ids, output, 0, state=state)
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_tokens(self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None) -> Tuple[int, ...]:
+    def add_tokens(self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None) -> Tuple[int, ...]:
         """Append a validated text span; return logical indices (Tuple[int, ...]).
 
         tokens (Sequence[int]): Vocabulary IDs; positions (Sequence[int]):
             One scalar model position per token.
         seq_ids (Sequence[int]): Common sequence IDs, default (0,).
         outputs (Optional[Sequence[bool]]): One flag per token; None means all False.
+        states (array-like or None): Matrix [entries, state_width], copied once.
         Lengths must match; validation failure leaves existing entries unchanged."""
         self._require_open()
         flags = [False] * len(tokens) if outputs is None else outputs
         if len(positions) != len(tokens) or len(flags) != len(tokens):
             raise ValueError("tokens, positions and outputs must have equal lengths")
         ids = self._seq_ids(seq_ids)
-        entries = [self._entry(t, None, p, ids, o, 0, validated_seq_ids=ids) for t, p, o in zip(tokens, positions, flags)]
+        state_rows = self._states(states, len(tokens))
+        entries = [self._entry(t, None, p, ids, o, 0, state=s, validated_seq_ids=ids) for t, p, o, s in zip(tokens, positions, flags, state_rows)]
         start = len(self)
         self._entries.extend(entries)
         return tuple(range(start, len(self)))
 
-    def add_embeddings(self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None) -> Tuple[int, ...]:
+    def add_embeddings(self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None) -> Tuple[int, ...]:
         """Copy a feature span once; return logical indices (Tuple[int, ...]).
 
         embeddings (array-like): Matrix [entries, width], one entry per row.
         positions (Sequence): Scalars, or [entries, 4] for M-RoPE/IM-RoPE.
         seq_ids (Sequence[int]): Common sequence IDs, default (0,).
         outputs (Optional[Sequence[bool]]): One flag per entry; None means all False.
+        states (array-like or None): Matrix [entries, state_width], copied once.
         Lengths must match; validation failure leaves existing entries unchanged."""
         self._require_open()
         data = self._embedding(embeddings)
@@ -1868,7 +1891,8 @@ class LlamaBatchExt:
         if len(positions) != len(data) or len(flags) != len(data):
             raise ValueError("embeddings, positions and outputs must have equal lengths")
         ids = self._seq_ids(seq_ids)
-        entries = [self._entry(None, row, p, ids, o, 0, validated_seq_ids=ids) for row, p, o in zip(data, positions, flags)]
+        state_rows = self._states(states, len(data))
+        entries = [self._entry(None, row, p, ids, o, 0, state=s, validated_seq_ids=ids) for row, p, o, s in zip(data, positions, flags, state_rows)]
         start = len(self)
         self._entries.extend(entries)
         return tuple(range(start, len(self)))
@@ -1898,6 +1922,11 @@ class LlamaBatchExt:
         paired = sum(e.token is not None and e.embedding is not None for e in entries)
         if paired and paired != count:
             raise ValueError("Paired token/embedding entries cannot mix with other entry types")
+        state_widths = {e.state.size for e in entries if e.state is not None}
+        if state_widths and any(e.state is None for e in entries):
+            raise ValueError("State embeddings must be present on all submitted entries or on none")
+        if len(state_widths) > 1:
+            raise ValueError("All submitted state embeddings must have the same flattened width")
         self.submitted_indices = self.output_indices = ()
         llama_cpp.llama_batch_ext_clear(self._native)
         try:
@@ -1919,6 +1948,13 @@ class LlamaBatchExt:
                     self._check(llama_cpp.llama_batch_ext_add_seq(self._native, idx, sid), "sequence", start + i)
                 if e.token is not None and embd is not None:
                     self._check(llama_cpp.llama_batch_ext_set_embd_token(self._native, idx, embd), "embedding", start + i)
+                if e.state is not None:
+                    data = e.state
+                    state = llama_cpp.llama_embd(
+                        data.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+                        1 if data.ndim == 1 else data.shape[0], data.shape[-1],
+                    )
+                    self._check(llama_cpp.llama_batch_ext_set_embd_state(self._native, idx, state), "state embedding", start + i)
                 pos = self._pos_buffer
                 for j, value in enumerate(e.position):
                     pos[j] = value

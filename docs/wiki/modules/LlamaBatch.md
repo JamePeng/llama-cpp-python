@@ -60,8 +60,10 @@ or none.
 
 For MTP contexts accepting state features, the adapter interprets legacy batches
 with both `token` and `embd` as token IDs plus **state embeddings**. Python's
-`add_token_embedding()` sets a **token embedding**, not that separate state
-field, so it is not a direct replacement for those legacy MTP batches. Extended
+`add_token_embedding()` sets a **token embedding**, while `state=` supplies the
+separate **state embedding**. Use `add_token(token, position, state=hidden)` to
+replace a legacy MTP token/state row, or `add_embedding(features, position,
+state=hidden)` for an image feature/state row. Extended
 submission avoids the legacy adapter but still performs rendering and internal
 flattening; it does not guarantee fewer copies or faster inference.
 
@@ -88,11 +90,11 @@ embedding and mixed inputs require the corresponding specialized methods.
 `LlamaBatchExt` insertion signatures:
 
 ```text
-add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0)
-add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None)
-add_embedding(embedding, position, seq_ids=(0,), output=False)
-add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None)
-add_token_embedding(token, embedding, position, seq_ids=(0,), output=False)
+add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0, state=None)
+add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None, states=None)
+add_embedding(embedding, position, seq_ids=(0,), output=False, *, state=None)
+add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None, states=None)
+add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, state=None)
 ```
 
 | Input | Type and meaning |
@@ -100,6 +102,7 @@ add_token_embedding(token, embedding, position, seq_ids=(0,), output=False)
 | `token` / `tokens` | Vocabulary integer ID / sequence of IDs, resolved through the model's embedding table. |
 | `embedding` | Array-like vector or matrix forming one entry's feature payload. |
 | `embeddings` | Matrix `[entries, width]`; each row becomes one entry. |
+| `state` / `states` | Separate hidden state: vector or matrix for one entry, or matrix `[entries, state_width]` for bulk insertion. Copied into owned storage; currently accepted by native MTP contexts. |
 | `position` / `positions` | Nonnegative int32 model position / one position per entry. Token and paired entries use scalars; embedding-only entries use four coordinates for M-RoPE/IM-RoPE, otherwise scalars. Bulk coordinates are entry-major: `[entries, 4]`. |
 | `seq_ids` | Nonempty sequence of integer IDs in `[0, context.n_seq_max())`. Multiple IDs share the same input and position; bulk calls apply the same IDs to every entry. |
 | `output` / `outputs` | Boolean flag / one flag per entry. Defaults request no outputs. |
@@ -113,7 +116,29 @@ contiguous text or feature spans. `add_token_embedding()` attaches both a token
 ID and external features to one entry. A submitted range containing such paired
 entries must contain only paired entries. All embeddings in a range must have
 the same flattened width, and native validation checks it against the context.
-The separate native state-embedding setter is not exposed by this builder.
+States are rendered through `llama_batch_ext_set_embd_state()` independently of
+token embeddings. Every entry in a submitted range must carry a state, or none
+may carry one. State widths must agree within that range and are checked
+separately from input embedding widths. The native context validates the exact
+width and whether states are supported; a rejected state raises `RuntimeError`
+and clears the partial native batch so the logical inputs can be retried.
+Bulk states are copied once and shared by read-only row views.
+
+For an MTP context, text and image catch-up inputs can be prepared as separate
+submissions (support for interleaving in one submission depends on the context):
+
+```python
+with LlamaBatchExt(context=draft_context) as batch:
+    batch.add_token(token_id, position, state=previous_hidden, output=True)
+    draft_context.decode(batch)
+    batch.reset()
+    batch.add_embeddings(image_features, positions=image_positions, states=shifted_hidden)
+    draft_context.decode(batch)
+```
+
+Input feature width and hidden-state width may differ. The caller supplies the
+correctly shifted target states and consumes outputs before the next decode;
+the builder does not compute states or enable MTP in the high-level MTMD handler.
 
 ## Submission and outputs
 
