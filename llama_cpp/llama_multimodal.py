@@ -2058,6 +2058,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         )
 
         prefill_started = False
+        media_callback = getattr(llama.speculative, "process_media", None)
         try:
             if self.verbose:
                 print(f"{self.log_prefix}(__call__): Prepared virtual token ledger of length {len(full_prompt_ids)}.", file=sys.stderr)
@@ -2067,9 +2068,15 @@ class MTMDChatHandler(MTMDBaseHandler):
             ):
                 raise NotImplementedError(
                     "This speculative engine cannot consume MTMD prefilled prompts; "
-                    "use NGRAM_MAP_K/K4V or disable speculative decoding for this handler"
+                    "use MTP or NGRAM_MAP_K/K4V, or disable speculative decoding for this handler"
                 )
             prefill_started = True
+            if media_callback is not None:
+                # Public prompt checkpoints contain only target state. MTP also
+                # needs its draft context and pending NextN row reconstructed.
+                llama.reset()
+                if len(full_prompt_ids) > llama.n_ctx():
+                    raise ValueError("MTMD speculative prompt exceeds n_ctx; increase n_ctx")
             llama._last_eval_output_start = 0
             llama._last_eval_output_count = 0
             llama._prefilled_prompt = None
@@ -2160,6 +2167,8 @@ class MTMDChatHandler(MTMDBaseHandler):
 
                     # Stage 5: Multimodal Physical OOM Defense
                     if n_past + chunk_n_tokens > llama.n_ctx():
+                        if media_callback is not None:
+                            raise ValueError("MTMD speculative media exceeds n_ctx; increase n_ctx")
                         if not llama._ctx.memory_can_shift():
                             raise RuntimeError(
                                 f"{self.log_prefix}(__call__): Context Shift is explicitly disabled by the C++ backend "
@@ -2196,22 +2205,43 @@ class MTMDChatHandler(MTMDBaseHandler):
                             n_past -= n_discard
                             llama.n_tokens = n_past
 
-                    # Execute C++ Multimodal Black-box Extraction
+                    # Decode media and consume each target sub-batch before the
+                    # helper reuses its embedding and position buffers.
                     new_n_past = llama_cpp_lib.llama_pos(0)
-                    result = self._mtmd_cpp.mtmd_helper_eval_chunk_single(
-                        self.mtmd_ctx,
-                        llama._ctx.ctx,
-                        chunk_ptr,
-                        llama_cpp_lib.llama_pos(n_past),
-                        llama_cpp_lib.llama_seq_id(0),
-                        llama.n_batch,
-                        True, # logits_last = True, drastically saves computational overhead
-                        ctypes.byref(new_n_past)
-                    )
+                    if media_callback is None:
+                        result = self._mtmd_cpp.mtmd_helper_eval_chunk_single(
+                            self.mtmd_ctx, llama._ctx.ctx, chunk_ptr,
+                            llama_cpp_lib.llama_pos(n_past), llama_cpp_lib.llama_seq_id(0),
+                            llama.n_batch, True, ctypes.byref(new_n_past),
+                        )
+                    else:
+                        result = self._mtmd_cpp.mtmd_encode_chunk(self.mtmd_ctx, chunk_ptr)
+                        if result == 0:
+                            callback_errors = []
+
+                            @self._mtmd_cpp.mtmd_helper_post_decode_callback
+                            def post_decode(batch, user_data):
+                                # ctypes cannot propagate exceptions across C.
+                                # Abort native batching and re-raise after return.
+                                try:
+                                    media_callback(batch.contents)
+                                except BaseException as exc:
+                                    callback_errors.append(exc)
+                                    return -1
+                                return 0
+
+                            result = self._mtmd_cpp.mtmd_helper_decode_image_chunk(
+                                self.mtmd_ctx, llama._ctx.ctx, chunk_ptr,
+                                self._mtmd_cpp.mtmd_get_output_embd(self.mtmd_ctx),
+                                llama_cpp_lib.llama_pos(n_past), llama_cpp_lib.llama_seq_id(0),
+                                llama.n_batch, ctypes.byref(new_n_past), post_decode, None,
+                            )
+                            if callback_errors:
+                                raise callback_errors[0]
 
                     if result != 0:
                         message = (
-                            f"{self.log_prefix}(mtmd_helper_eval_chunk_single): "
+                            f"{self.log_prefix}(media prefill): "
                             f"Media evaluation failed with error code {result} "
                             f"(start_pos={n_past}, media_tokens={chunk_n_tokens}, "
                             f"n_ctx={llama.n_ctx()}, n_batch={llama.n_batch})."
@@ -2229,7 +2259,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                         raise ValueError(message)
 
                     if not n_past <= new_n_past.value <= llama.n_ctx():
-                        raise ValueError(f"{self.log_prefix}(mtmd_helper_eval_chunk_single): Invalid output position {new_n_past.value}.")
+                        raise ValueError(f"{self.log_prefix}(media prefill): Invalid output position {new_n_past.value}.")
 
                     # Update Ledger with "Negative Reverse Vocabulary" IDs
                     llama.input_ids[n_past : new_n_past.value] = media_id
@@ -2257,6 +2287,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             # Anchors the state ONLY after the entire multi-modal turn is processed
             if (
                 llama.is_hybrid
+                and media_callback is None
                 and llama._hybrid_cache_mgr is not None
                 and llama._hybrid_cache_mgr.max_checkpoints > 0
             ):

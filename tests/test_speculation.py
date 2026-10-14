@@ -334,7 +334,11 @@ def test_mtp_process_media_positions_and_cross_batch_hidden_shift(mtp_process_en
         np.testing.assert_array_equal([row[1] for row in decoded[-1]], [[1, 2], target_h[0]])
         np.testing.assert_array_equal(engine.pending_h, target_h[-1])
         # Reuse the builder and carry the last target row across media batches.
-        engine.process(source.batch)
+        from llama_cpp.mtmd_cpp import mtmd_helper_embd_batch
+        engine.process_media(mtmd_helper_embd_batch(
+            2, source.batch.embd, 3, source.batch.pos,
+            1 if rope == llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_NONE else 4, 0,
+        ))
         np.testing.assert_array_equal(decoded[-1][0][1], target_h[-1])
         assert allocations == [True]
         np.ctypeslib.as_array(source.batch.embd, shape=(6,))[:] = -1
@@ -394,7 +398,7 @@ def test_mtp_media_rollback_restores_accepted_rows_and_coordinates(mtp_process_e
         assert decoded[-1][0][2] == coordinates[0]
 
 
-@pytest.mark.parametrize("invalid", ["position", "sequence", "membership"])
+@pytest.mark.parametrize("invalid", ["position", "sequence", "membership", "media-width", "media-axes", "media-sequence"])
 def test_mtp_process_rejects_invalid_metadata_before_reading_hidden_rows(mtp_process_engine, invalid):
     engine, _, decoded, _, allocations = mtp_process_engine
     with _target_batch([8, 9], embeddings=np.arange(6, dtype=np.float32).reshape(2, 3),
@@ -406,8 +410,17 @@ def test_mtp_process_rejects_invalid_metadata_before_reading_hidden_rows(mtp_pro
         elif invalid == "sequence":
             batch.seq_id[0][0] = 1
         engine.target_context.get_embeddings_nextn = lambda: pytest.fail("Invalid metadata must not read target states")
-        with pytest.raises(ValueError if invalid == "position" else NotImplementedError):
-            engine.process(batch)
+        if invalid.startswith("media-"):
+            from llama_cpp.mtmd_cpp import mtmd_helper_embd_batch
+            view = mtmd_helper_embd_batch(2, batch.embd,
+                4 if invalid == "media-width" else 3, batch.pos,
+                4 if invalid == "media-axes" else 1,
+                1 if invalid == "media-sequence" else 0)
+            with pytest.raises(NotImplementedError if invalid == "media-sequence" else ValueError):
+                engine.process_media(view)
+        else:
+            with pytest.raises(ValueError if invalid == "position" else NotImplementedError):
+                engine.process(batch)
     assert decoded == allocations == []
     np.testing.assert_array_equal(engine.pending_h, [1, 2])
 

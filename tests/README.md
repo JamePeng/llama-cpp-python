@@ -29,7 +29,7 @@ Each module combines focused unit tests with model tests where needed.
 | `test_state.py` | `hybrid_model` | Qwen3.5: host/device checkpoints, prefix reuse, snapshots and failure recovery |
 | `test_speculation.py` | `mtp_model` | Qwen3.5: MTP verification, embedding catch-up vs direct native submission, native/device checkpoint paths and interrupted-request recovery |
 | `test_speculation.py` | `dflash_model` | DFlash/DFlash2: full-block prefix equivalence under runtime caps, minimum-length ordering, verification and interrupted retry |
-| `test_media.py` | `vision_model` | Qwen3.5 + mmproj: plain/NGRAM image requests, image changes and partial-decode recovery |
+| `test_media.py` | `vision_model` | Qwen3.5 + mmproj: plain/NGRAM/MTP image requests, image changes, native/device rollback and partial-decode recovery |
 | `test_formats.py` | `grammar_model` | Qwen2.5: native grammar acceptance and constrained generation; unit tests cover chat formatting |
 
 Tokenization also uses the vocabulary-only GGUF in `vendor/llama.cpp/models`.
@@ -39,8 +39,12 @@ and sidecar model tests. Generated-audio tests do not load dedicated TTS models.
 Its optional EmbeddingGemma 2 test covers lazy projector loading, text/image embeddings,
 marker-free parts, output dimensions, embedding-mode restoration, unsupported image
 input, resource closure and rejection after closure.
-High-level MTP with image prefill is not a supported combination; real image
-tests use plain or NGRAM decoding. Lower-level MTP tests submit synthetic feature
+High-level MTP image tests use MTMD post-decode callbacks for every media batch,
+compare greedy output with target-only generation, and cover repeated/changed
+images, interrupted requests and partial-decode recovery under native and device
+checkpoint modes. These requests rebuild both contexts; target-only prefix
+checkpoints cannot restore draft state, and the prompt must fit without context
+shifting. Lower-level MTP tests submit synthetic feature
 rows and compare continuation hidden outputs and candidates with the direct
 native API; unit tests cover scalar/M-RoPE/IM-RoPE positions, cross-batch state
 handoff, shared-memory/chained-head paths, failures and media checkpoint replay.

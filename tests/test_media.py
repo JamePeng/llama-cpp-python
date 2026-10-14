@@ -150,6 +150,70 @@ def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
         llm._hybrid_cache_mgr.save_checkpoint.assert_called_once()
 
 
+@pytest.mark.parametrize("failure", [None, "encode", "decode", "callback", "interrupt", "overflow", "media-overflow"])
+def test_chat_prefill_mtp_callback_and_cleanup(chat_prefill, failure):
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    handler, llm, backend = chat_prefill
+    embeddings = (ctypes.c_float * 4)(1, 2, 3, 4)
+    positions = (ctypes.c_int32 * 8)(0, 0, 0, 1, 0, 1, 0, 0)
+    received = []
+
+    def process_media(batch):
+        received.append((batch.n_tokens, batch.n_embd, batch.n_pos,
+                         list(batch.embd[:4]), list(batch.pos[:8])))
+        if failure == "callback":
+            raise RuntimeError("MTP callback failed")
+        if failure == "interrupt":
+            raise KeyboardInterrupt
+
+    llm.speculative = SimpleNamespace(supports_predecoded_media=True,
+                                     process_media=process_media, clear=Mock())
+    llm.is_hybrid = True
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=2, clear=Mock(),
+                                          save_checkpoint=Mock(), find_best_checkpoint=Mock())
+    handler._process_mtmd_prompt.return_value = (
+        [-9, -9], [(0, 2, object(), 1, -9)], object(), []
+    )
+    if failure == "overflow":
+        handler._process_mtmd_prompt.return_value = (
+            [-9] * 7, [(0, 7, object(), 1, -9)], object(), []
+        )
+    if failure == "media-overflow":
+        backend.mtmd_input_chunk_get_n_tokens = lambda chunk: 7
+    backend.mtmd_encode_chunk = Mock(return_value=1 if failure == "encode" else 0)
+    backend.mtmd_get_output_embd = Mock(return_value=embeddings)
+    backend.mtmd_helper_post_decode_callback = module.mtmd_helper_post_decode_callback
+
+    def decode(mtmd, ctx, chunk, embd, pos, seq, batch_size, output, callback, data):
+        # Invoke the real ctypes trampoline, including exception transport.
+        view = module.mtmd_helper_embd_batch(2, embd, 2, positions, 4, 0)
+        result = callback(ctypes.byref(view), data)
+        output._obj.value = 2
+        return result or (1 if failure == "decode" else 0)
+
+    backend.mtmd_helper_decode_image_chunk = Mock(side_effect=decode)
+    if failure is None:
+        assert handler(llama=llm, messages=[]) == "completed"
+        assert llm.create_completion.call_args.kwargs["prompt"] == [-9, -9]
+        assert llm.reset.call_count == 1
+        llm._mark_prefilled_prompt.assert_called_once()
+    else:
+        with pytest.raises((ValueError, RuntimeError, KeyboardInterrupt)):
+            handler(llama=llm, messages=[])
+        assert llm.n_tokens == 0 and llm.reset.call_count == 2
+        llm.create_completion.assert_not_called()
+    if failure not in ("encode", "overflow", "media-overflow"):
+        assert received == [(2, 2, 4, [1, 2, 3, 4], list(positions))]
+    else:
+        backend.mtmd_helper_decode_image_chunk.assert_not_called()
+    backend.mtmd_helper_eval_chunk_single.assert_not_called()
+    llm._ctx.memory_seq_rm.assert_not_called()
+    llm._hybrid_cache_mgr.find_best_checkpoint.assert_not_called()
+    llm._hybrid_cache_mgr.save_checkpoint.assert_not_called()
+    assert llm.speculative.clear.call_count == llm.reset.call_count
+    handler._free_mtmd_resources.assert_called_once()
+
+
 def test_mtmd_decoder_pos_abi():
     module = importlib.import_module("llama_cpp.mtmd_cpp")
     position = module.mtmd_decoder_pos
@@ -739,7 +803,7 @@ def test_tts_invalid_output_cleans_up_and_can_retry(audio_pipeline):
     assert generator.create_speech(llama=llama, text="hello", response_format="pcm_f32").finish_reason == "stop"
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["plain", "ngram"])
+@pytest.fixture(scope="module", params=["plain", "ngram", "mtp", "mtp-device"])
 def vision_model(request):
     from llama_cpp import Llama
     from llama_cpp.llama_multimodal import Qwen35ChatHandler
@@ -755,11 +819,18 @@ def vision_model(request):
                                image_max_tokens=64, verbose=False, enable_thinking=False)
     llm = None
     try:
+        configs = {
+            "ngram": SpecConfig(spec_type=SpeculativeType.NGRAM_MAP_K,
+                                ngram_size_n=2, ngram_size_m=4),
+            "mtp": SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3),
+            "mtp-device": SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3),
+        }
         llm = Llama(model_path=paths[0], chat_handler=handler, n_ctx=512,
-                    n_batch=128, n_ubatch=128, n_gpu_layers=0, verbose=False,
-                    speculative=SpecConfig(spec_type=SpeculativeType.NGRAM_MAP_K,
-                                           ngram_size_n=2, ngram_size_m=4)
-                    if request.param else None)
+                    n_batch=32, n_ubatch=32, n_gpu_layers=0, verbose=False,
+                    ctx_checkpoints=4, speculative=configs.get(request.param))
+        if request.param == "mtp-device":
+            llm._ctx.n_rs_seq = lambda: 0
+            llm.speculative._use_native_draft_rollback = False
         yield llm, handler
     finally:
         if llm is not None:
@@ -772,7 +843,7 @@ def _color_chat(llm, color, stream=False):
     import io
     from PIL import Image
     buffer = io.BytesIO()
-    Image.new("RGB", (96, 96), color).save(buffer, format="PNG")
+    Image.new("RGB", (256, 256), color).save(buffer, format="PNG")
     url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     return llm.create_chat_completion(messages=[{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": url}},
@@ -780,14 +851,41 @@ def _color_chat(llm, color, stream=False):
     ]}], max_tokens=8, temperature=0, seed=42, stream=stream)
 
 
-def test_real_media_changed_image_and_interrupted_retry(vision_model):
+def test_real_media_changed_image_and_interrupted_retry(vision_model, monkeypatch):
     llm, _ = vision_model
     references = {}
     ledgers = {}
+    engine = llm.speculative
+    is_mtp = getattr(engine, "process_media", None) is not None
+    media_rows = []
+    if is_mtp:
+        original = engine.process_media
+        def consume(batch):
+            media_rows.append(batch.n_tokens)
+            return original(batch)
+        monkeypatch.setattr(engine, "process_media", consume)
     for color in ("red", "blue"):
+        target_reference = None
+        if is_mtp:
+            # Greedy target-only output is an independent correctness reference.
+            llm.reset()
+            llm.speculative = None
+            try:
+                target_reference = _color_chat(llm, color)["choices"][0]["message"]["content"]
+            finally:
+                llm.speculative = engine
+                llm.reset()
         llm.reset()
+        media_rows.clear()
         references[color] = _color_chat(llm, color)["choices"][0]["message"]["content"]
         assert references[color]
+        if target_reference is not None:
+            assert references[color] == target_reference
+            assert len(media_rows) > 1 and max(media_rows) <= llm.n_batch
+            stats = llm.last_speculative_stats
+            assert stats["drafted"] > 0 and stats["verified"] > 0
+            assert stats["checkpoint_device_captures" if not engine._use_native_draft_rollback
+                         else "checkpoint_native_captures"] > 0
         ledgers[color] = [int(t) for t in llm._input_ids if t < 0]
         assert ledgers[color]
     assert ledgers["red"] != ledgers["blue"]
@@ -807,19 +905,25 @@ def test_real_media_partial_decode_failure_then_retry(vision_model, monkeypatch)
     llm, handler = vision_model
     llm.reset()
     reference = _color_chat(llm, "blue")["choices"][0]["message"]["content"]
-    original = handler._mtmd_cpp.mtmd_helper_eval_chunk_single
+    helper = ("mtmd_helper_decode_image_chunk" if
+              getattr(llm.speculative, "process_media", None) is not None else
+              "mtmd_helper_eval_chunk_single")
+    original = getattr(handler._mtmd_cpp, helper)
     committed = []
     def fail_after_commit(*args):
         assert original(*args) == 0
         committed.append(llm._ctx.memory_seq_pos_max(0))
         return 1
     with monkeypatch.context() as patch:
-        patch.setattr(handler._mtmd_cpp, "mtmd_helper_eval_chunk_single", fail_after_commit)
+        patch.setattr(handler._mtmd_cpp, helper, fail_after_commit)
         with pytest.raises(ValueError, match="Media evaluation failed"):
             _color_chat(llm, "red")
     assert committed and committed[0] >= 0
     assert llm.n_tokens == 0 and llm._ctx.memory_seq_pos_max(0) == -1
     assert llm._prefilled_prompt is None and llm._restored_logits is None
     assert not llm._hybrid_cache_mgr.checkpoints
+    if getattr(llm.speculative, "process_media", None) is not None:
+        assert llm.speculative.draft_context.memory_seq_pos_max(0) == -1
+        assert not llm.speculative.pending_h.any()
     assert _color_chat(llm, "blue")["choices"][0]["message"]["content"] == reference
     llm.reset()

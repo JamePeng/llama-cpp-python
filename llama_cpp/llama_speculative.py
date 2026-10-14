@@ -1392,6 +1392,20 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
     hidden-state handoff and the speculative draft branch.
     """
 
+    supports_predecoded_media = True
+
+    def process_media(self, batch: Any) -> None:
+        """Consume the borrowed MTMD sub-batch before its buffers are reused."""
+        expected_n_pos = 4 if self.target_model.rope_type() in (
+            self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+            self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
+        ) else 1
+        if batch.n_embd != self.target_model.n_embd_inp() or batch.n_pos != expected_n_pos:
+            raise ValueError("MTMD embedding width or position axes do not match the MTP target")
+        self.process(self._llama_cpp_lib.llama_batch(
+            n_tokens=batch.n_tokens, embd=batch.embd, pos=batch.pos,
+        ), seq_id=int(batch.seq_id))
+
     def __init__(
         self,
         config: SpecConfig,
