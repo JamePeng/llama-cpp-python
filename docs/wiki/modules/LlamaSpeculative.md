@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-09-17
+last_updated: 2026-10-15
 version_target: "latest"
 ---
 
@@ -19,8 +19,8 @@ New code should pass a `SpecConfig` to `Llama(speculative=...)`. The old
 `Llama(draft_model=...)` callback path and `LlamaDraftModel` are deprecated
 compatibility APIs.
 
-The current engines support one sequence (`seq_id=0`). High-level MTP generation
-is text-only; its lower-level `process()` also accepts embedding batches.
+The current engines support one sequence (`seq_id=0`). High-level MTP supports
+Qwen3.5 MTMD image chat; its lower-level `process()` also accepts embedding batches.
 N-gram engines can use an MTMD-prefilled prompt. Their history retains media IDs,
 but proposed continuations stop before the first negative media ID.
 DFlash-family engines can consume target token or
@@ -682,18 +682,21 @@ same position (the first and last row positions match), following llama.cpp's
 image handling. Injecting these rows can exhaust a windowed draft cache. Single
 embedding rows and batches with advancing positions still pass through normally.
 
-High-level speculative generation currently requires contiguous text positions.
+High-level speculative generation requires generated-token native positions
+consistent with the Python token cursor.
 It checks the next native target position against the token cursor and rejects a
 mismatch before drafting: target verification and rollback still use token-based
-positions. The low-level position interface does not by itself enable end-to-end
-multimodal speculative generation.
+positions. MTMD records media spans using the helper's returned native position.
 
 The MTMD chat handler accepts prefilled prompts for `NGRAM_MAP_K` and
 `NGRAM_MAP_K4V`. Media is evaluated by MTMD first; n-gram history and lookup keys
 retain negative media IDs, while proposals are truncated before the first such
-ID so only vocabulary tokens are drafted. MTP and DFlash-family
-engines are rejected by this handler before prefill starts. Lower-level MTP and
-DFlash embedding processing does not override this high-level restriction.
+ID so only vocabulary tokens are drafted. MTP consumes every media sub-batch
+through a post-decode callback, preserving embedding positions and forwarding
+right-shifted target hidden states to its draft context. Qwen3.5-9B-MTP with its
+matching projector is covered by high-level image tests under native and device
+rollback modes. See the [image-chat example](../examples/vision/vision-qwen.md#mtp-image-chat).
+DFlash-family engines are rejected by this handler before prefill starts.
 
 ### Draft checkpoint lifetime
 
@@ -724,7 +727,9 @@ matching draft checkpoint could leave the two contexts misaligned. Consequently,
 cross-request longest-prefix reuse is not currently available while speculative
 decoding is enabled through ordinary text generation. An explicit MTMD prefill
 handoff follows its own path and preserves the already evaluated prompt for
-supported n-gram engines. These behaviors are separate from checkpoints and
+MTP and n-gram engines. MTP media requests rebuild both contexts before prefill
+and require the complete prompt to fit without context shifting. These behaviors
+are separate from checkpoints and
 rollback inside one speculative generation.
 
 Do not use `reset=False` as a cache-reuse workaround. It blindly appends the
@@ -734,7 +739,8 @@ strictly new suffix tokens. Supporting general prefix reuse requires a coupled
 checkpoint containing both the target state and the corresponding speculative
 state.
 
-* High-level MTP generation is text-only; MTMD-prefilled generation supports n-gram engines. MTP and DFlash-family embedding processing remain lower-level capabilities.
+* MTMD-prefilled generation supports MTP and n-gram engines. DFlash-family
+  embedding processing remains a lower-level capability.
 * Current engines support only `seq_id=0`; parallel sequence decoding is not yet
   supported.
 * Speculation still runs target verification. Low acceptance or expensive

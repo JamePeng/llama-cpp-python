@@ -31,6 +31,7 @@ This package provides:
         - [How to use the ReasoningBudgetSampler](https://github.com/JamePeng/llama-cpp-python#reasoning-budget-first-reasoning-block)
     - [Speculative Decoding](https://github.com/JamePeng/llama-cpp-python#speculative-decoding)
         - [MTP speculative decoding](https://github.com/JamePeng/llama-cpp-python#mtp-speculative-decoding)
+            - [Qwen3.5 image chat with MTP](#qwen35-image-chat-with-mtp)
         - [DFlash, DFlash2, and DSpark speculative decoding](https://github.com/JamePeng/llama-cpp-python#dflash-dflash2-and-dspark-speculative-decoding)
         - [N-gram speculative decoding](https://github.com/JamePeng/llama-cpp-python#n-gram-speculative-decoding)
     - [Multi-modal Models Support](https://github.com/JamePeng/llama-cpp-python#multi-modal-models)
@@ -1046,19 +1047,20 @@ deprecated and is kept only for compatibility with stateless draft callbacks.
 > `0.3.48`. DFlash, DFlash2, and DSpark speculative decoding are available
 > starting with `0.3.49`.
 
-The current implementation supports one sequence (`seq_id=0`) and provides
-five usable modes. MTP is text-only. N-gram engines can consume a completed
-MTMD prefill; proposals stop before negative media ledger IDs. The DFlash family
-can process token or embedding batches at the lower level, but MTMD chat still
-rejects MTP and DFlash-family engines.
+The implemented engines support one sequence (`seq_id=0`). Choose a draft
+source based on the model and workload:
 
-| Mode | `SpeculativeType` | Draft source |
-|---|---|---|
-| MTP | `DRAFT_MTP` | Target model NextN/MTP heads or an external MTP GGUF |
-| DFlash / DFlash2 | `DRAFT_DFLASH` | External block-diffusion draft GGUF; DFlash2 is detected from selector metadata |
-| DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads |
-| N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history |
-| N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key, matching `llama.cpp` |
+| Mode | `SpeculativeType` | Draft source | MTMD chat support |
+|---|---|---|---|
+| MTP | `DRAFT_MTP` | Target NextN/MTP heads or a compatible external MTP GGUF | Image chat validated with Qwen3.5-9B-MTP |
+| DFlash / DFlash2 | `DRAFT_DFLASH` | External block-diffusion draft GGUF; selector metadata identifies DFlash2 | Not supported |
+| DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads | Not supported |
+| N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history | Supports MTMD-prefilled prompts |
+| N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key | Supports MTMD-prefilled prompts |
+
+MTP consumes each decoded media batch through an MTMD callback. N-gram engines
+use the completed prefill and stop proposals before negative media ledger IDs.
+DFlash-family embedding processing is available through the lower-level API.
 
 Eagle3, draft-simple, and the other n-gram variants appear in
 `SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
@@ -1115,8 +1117,7 @@ Set `draft_model_path` when the MTP tensors are stored in a separate compatible
 GGUF. Target and draft vocabularies and output embedding dimensions must match.
 For a `gemma4 + gemma4-assistant` pair, the engine automatically links the
 assistant to the target context and follows its shared-KV, same-position draft
-workflow. This tested path is currently text-only, like the other stateful MTP
-modes.
+workflow. This tested assistant path is currently text-only.
 
 ```python
 llm = Llama(
@@ -1142,6 +1143,49 @@ actual deployment environment.
 The verification batch contains `[id_last, draft...]`, so the maximum draft
 length must not exceed `n_batch - 1`. Longer drafts only help when their
 additional acceptance outweighs verification and rollback cost.
+
+#### Qwen3.5 image chat with MTP
+
+Use a Qwen3.5 target GGUF containing MTP heads and its matching vision
+projector. The [image-chat example](examples/high_level_api/high_level_api_mtp_image_chat.py)
+uses `Qwen35ChatHandler` and has been run with `Qwen3.5-9B-MTP-Q8_0.gguf`
+and `mmproj-Qwen3.5-9B-MTP-BF16.gguf`.
+
+Run from the repository root, replacing the paths with your local files:
+
+```bash
+# MTP enabled (default)
+python -m examples.high_level_api.high_level_api_mtp_image_chat \
+  --model ./Qwen3.5-9B-MTP-Q8_0.gguf \
+  --mmproj ./mmproj-Qwen3.5-9B-MTP-BF16.gguf \
+  --image ./picture.png
+
+# Ordinary decoding with the same input
+python -m examples.high_level_api.high_level_api_mtp_image_chat \
+  --model ./Qwen3.5-9B-MTP-Q8_0.gguf \
+  --mmproj ./mmproj-Qwen3.5-9B-MTP-BF16.gguf \
+  --image ./picture.png --no-mtp
+```
+
+Defaults are `n_ctx=8192`, `max_tokens=4096`, `draft_n_max=3`, full target
+GPU offload and GPU projector execution. Use `--n-gpu-layers 0` together with
+`--no-projector-gpu` for CPU execution. Set `--prompt` to change the question;
+`--draft-tokens`, `--draft-min` and `--draft-p-min` tune MTP proposals.
+
+Both modes print their configuration, answer, decode tokens/s, sustained
+tokens/s, decode TTFT and request wall time. MTP also prints proposal counts,
+acceptance, verification steps, rollbacks and phase timings. The example uses
+the same generator timing in both modes: decode excludes media prefill and
+caller processing, sustained speed excludes the first token, and request wall
+time includes media prefill. Model loading is excluded from these measurements.
+Keep the image, prompt, output budget and hardware settings identical when
+comparing modes.
+
+Each MTP image request rebuilds target and draft state together. The complete
+prompt must fit `n_ctx`, and media must fit without context shifting. Increase
+`--n-ctx` or reduce `--image-max-tokens` if needed. See the
+[Qwen3.5 image-chat guide](docs/wiki/examples/vision/vision-qwen.md#mtp-image-chat)
+for PowerShell commands and recovery behavior.
 
 ### DFlash, DFlash2, and DSpark speculative decoding
 
@@ -1271,6 +1315,9 @@ Use the included examples for repeatable comparisons:
 # Ordinary vs built-in/external MTP
 python -m examples.high_level_api.high_level_api_mtp_speculative -h
 
+# Image chat with MTP or an ordinary --no-mtp baseline
+python -m examples.high_level_api.high_level_api_mtp_image_chat -h
+
 # Ordinary vs external DFlash, DFlash2, or DSpark
 python -m examples.high_level_api.high_level_api_dflash_dspark_speculative -h
 
@@ -1285,10 +1332,10 @@ python -m examples.benchmark.benchmark_speculative -h
 * Greedy speculative and ordinary runs can diverge because verification uses a
   different batch shape and may change floating-point tie-breaking. The
   DFlash/DFlash2/DSpark benchmark reports the first divergent generated token.
-* Stateful engines currently support one sequence. MTMD prefill supports
-  `NGRAM_MAP_K` and `NGRAM_MAP_K4V`; MTP and DFlash-family engines remain
-  unsupported by the MTMD chat handler. High-level verification also requires
-  native positions consistent with the token cursor.
+* Stateful engines support one sequence (`seq_id=0`). High-level verification
+  requires native positions consistent with the token cursor. MTMD chat support
+  is listed in the mode table above; MTP image requests require both contexts
+  to be rebuilt and enough context capacity to avoid shifting.
 * A speculative reset clears target and draft state together. Fresh speculative
   text requests do not reuse the ordinary cross-request prefix cache. Loading a
   `LlamaState` does not restore draft state; start a full-prompt request with
@@ -1307,6 +1354,10 @@ models. Depending on the model and its multimodal projector (`mmproj`), inputs
 can include images, audio, and video in addition to text. Video is implemented
 as timestamped image-frame sampling through the llama.cpp MTMD helper and
 therefore requires a vision-capable projector plus `ffmpeg` and `ffprobe`.
+
+For Qwen3.5 image chat with speculative decoding, see
+[MTP image chat](#qwen35-image-chat-with-mtp) for a runnable GPU example and an
+ordinary-decoding comparison.
 
 For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
 with Qwen3-TTS Base and Pocket TTS. See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)

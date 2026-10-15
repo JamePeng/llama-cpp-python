@@ -81,8 +81,58 @@ speculative = SpecConfig(spec_type=SpeculativeType.NGRAM_MAP_K)
 
 `NGRAM_MAP_K4V` is also supported by the prefilled-media path. MTMD first evaluates
 the media; n-gram proposals never emit its negative ledger IDs as decoder tokens.
-MTP and DFlash-family engines are rejected by this chat handler before prefill,
-even if the GGUF contains MTP weights or a lower-level draft API accepts embeddings.
+DFlash-family engines are rejected by this chat handler before prefill.
+
+## MTP image chat
+
+For a Qwen3.5 GGUF containing MTP heads, pass the following configuration to
+`Llama(...)` in the image-chat example above:
+
+```python
+from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+
+speculative = SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3)
+# Add speculative=speculative to Llama(...).
+```
+
+The runnable [MTP image-chat example](../../../../examples/high_level_api/high_level_api_mtp_image_chat.py)
+accepts local model, projector and image paths. For the Qwen3.5-9B-MTP Q8 target
+and BF16 projector used in integration testing, run from the repository root:
+
+```powershell
+python -m examples.high_level_api.high_level_api_mtp_image_chat `
+  --model "D:\git_project\Qwen3.5-9B-MTP\Qwen3.5-9B-MTP-Q8_0.gguf" `
+  --mmproj "D:\git_project\Qwen3.5-9B-MTP\mmproj-Qwen3.5-9B-MTP-BF16.gguf" `
+  --image ".\picture.png" `
+  --prompt "Describe this image briefly."
+```
+
+The script defaults to GPU execution for both the target and projector, with
+`n_ctx=8192` and `max_tokens=4096`. Use `--n-gpu-layers 0 --no-projector-gpu`
+for CPU execution. Use `--draft-tokens`, `--draft-min` and `--draft-p-min` to
+adjust proposal limits and the confidence threshold. The script prints MTP and
+runtime parameters, the answer, draft acceptance, verification steps and rollbacks.
+
+MTP is enabled by default. Repeat the command with `--no-mtp` for ordinary
+decoding, keeping the image, prompt, GPU and token-budget arguments identical.
+Use `--mtp` to enable it explicitly. Both modes report decode speed, sustained
+speed, decode TTFT and request wall time; MTP also reports proposal statistics.
+
+Both modes time active calls to the token generator with the same clock,
+excluding media prefill, model loading, caller processing and final cleanup.
+This includes sampler setup after prefill, and the token count includes yielded
+end-of-generation tokens. Sustained decode tokens/s also excludes the first
+token; decode TTFT starts after prefill. MTP phase timings cover drafting, target
+decode/synchronization, hidden-state processing and acceptance. Request wall time
+includes media prefill and response assembly, but excludes model loading.
+
+MTMD forwards each decoded media sub-batch to MTP, preserving image positions
+and pairing embeddings with right-shifted target hidden states. The handler
+rebuilds target and draft state together for each request. Target-only prefix
+checkpoints are not reused. The complete prompt must fit `--n-ctx` (default
+8192), and media batches must fit without context shifting; reduce
+`--image-max-tokens` or increase `--n-ctx` if necessary. High-level image MTP was
+validated with Qwen3.5-9B-MTP and its matching projector.
 
 ## Reuse and failure recovery
 
