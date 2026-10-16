@@ -2376,7 +2376,8 @@ Available starting with `0.4.3-preview`.
 
 `LlamaEmbedding.embed_multimodal()` returns one pooled vector from ordered text,
 image, and audio inputs using `MTMDEmbeddingHandler`. It requires a matching MTMD
-projector, non-causal attention, and MEAN, CLS, or LAST pooling. The projector
+projector and MEAN, CLS, or LAST pooling. The model's causal or bidirectional
+attention mode is preserved. The projector
 loads lazily; the model owns and closes it.
 
 This example requires matching EmbeddingGemma 2 model/projector GGUFs and an
@@ -2406,9 +2407,30 @@ The full input, including media tokens, must fit `n_ctx`, `n_batch`, and
 `n_ubatch`. This API does not truncate or split oversized requests, and rejects
 video and NONE/RANK pooling. Each call resets generation state once execution
 starts. `create_embedding()` remains a text API.
+The pooled path preserves the model's attention mode and rejects causal models
+whose media requires a separate bidirectional-attention phase; the native media
+helper's per-chunk attention switches cannot be applied to this joint decode.
 See [LlamaEmbedding](docs/wiki/modules/LlamaEmbedding.md) and the
 [multimodal embedding example](examples/multimodal_embedding.py) for audio,
 mixed inputs, projector settings, and token counts.
+
+Qwen3-VL-Embedding uses **causal attention**, **LAST pooling**, and the model's
+instruction/user/assistant prompt format. Keep its native attention mode;
+forcing bidirectional attention changes its embedding semantics. The CLI's
+`--profile qwen3-vl` selects LAST pooling and adds the required prompt wrapper:
+
+```bash
+python -m examples.multimodal_embedding --profile qwen3-vl \
+  --model ./Qwen3-VL-Embedding-8B-Q8_0.gguf \
+  --mmproj ./mmproj-Qwen3-VL-Embedding-8b-BF16.gguf \
+  --prompt '<__media__>' --media ./image.png --n-gpu-layers -1
+```
+
+The tested 8B model returns a normalized 4096-dimensional vector. Omit `--media`
+and supply text in `--prompt` for text-only input, or combine one `<__media__>`
+marker per file with text. `--instruction` defaults to `Represent the user's input.`.
+The low-level `embed_multimodal()` API inserts no prompt wrapper automatically;
+callers must supply the model-specific formatting.
 
 ### Using the standard `Llama` class
 

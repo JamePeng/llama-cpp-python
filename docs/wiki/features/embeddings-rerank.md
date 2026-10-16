@@ -41,7 +41,7 @@ embedding capabilities.
 | Inspect a vector for every token | `embed()` | `LLAMA_POOLING_TYPE_NONE` |
 | Score documents against a query | `LlamaEmbedding.rank()` | `LLAMA_POOLING_TYPE_RANK` |
 | Return raw arrays or a cosine-similarity matrix | `LlamaEmbedding.create_embedding()` | Sequence pooling |
-| Embed text together with images or audio | `LlamaEmbedding.embed_multimodal()` | Non-causal model with MEAN/CLS/LAST pooling |
+| Embed text together with images or audio | `LlamaEmbedding.embed_multimodal()` | Model-required attention mode and MEAN/CLS/LAST pooling |
 
 Use the pooling configuration documented by the model author whenever one is
 provided. `LLAMA_POOLING_TYPE_UNSPECIFIED` lets model metadata select the
@@ -159,6 +159,30 @@ native batches, but non-causal attention still requires the full input in one
 decode. Video bytes, token-level pooling and RANK pooling are not supported by
 this interface. See the [API reference](../modules/LlamaEmbedding.md)
 and [CLI example](../../../examples/multimodal_embedding.py).
+For causal models, projectors requiring chunk-local bidirectional attention
+are also unsupported by joint pooled decoding; these requests raise explicitly.
+
+### Qwen3-VL-Embedding
+
+Qwen3-VL-Embedding requires causal attention, LAST pooling, and a formatted
+instruction/user message ending in `<|im_start|>assistant\n`. Preserve the
+model's native attention mode. `embed_multimodal()` accepts the completed prompt
+or ordered parts; it does not apply chat templates automatically.
+
+The [CLI example](../../../examples/multimodal_embedding.py) provides this wrapper:
+
+```bash
+python -m examples.multimodal_embedding --profile qwen3-vl \
+  --model ./Qwen3-VL-Embedding-8B-Q8_0.gguf \
+  --mmproj ./mmproj-Qwen3-VL-Embedding-8b-BF16.gguf \
+  --prompt '<__media__>' --media ./image.png --n-gpu-layers -1
+```
+
+Use one marker per media file, or omit `--media` for text-only input. The default
+instruction is `Represent the user's input.`; set `--instruction` for a different
+retrieval task. This profile returns an L2-normalized vector with 4096 dimensions
+for the tested 8B model. EmbeddingGemma 2 remains the default CLI profile with its
+MEAN pooling and task prefixes.
 
 ### Sentence Embeddings with `Llama`
 
