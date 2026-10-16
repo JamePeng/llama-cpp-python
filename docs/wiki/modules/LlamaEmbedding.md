@@ -138,8 +138,9 @@ Rank output remains unnormalized; returned vectors are independent Python data.
 Available starting with `0.4.3-preview`.
 
 Produce one pooled vector for a text/image/audio input. This requires an open
-model, a configured projector, non-causal attention, and active MEAN, CLS or LAST
-pooling. Use the pooling strategy required by the model; EmbeddingGemma 2 uses MEAN.
+model, a configured projector, and active MEAN, CLS or LAST pooling. The model's
+attention mode is preserved: EmbeddingGemma 2 uses bidirectional attention and
+MEAN pooling; Qwen3-VL-Embedding uses causal attention and LAST pooling.
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
@@ -156,7 +157,7 @@ which may differ from its input feature width. EmbeddingGemma 2 projects
 
 The projector initializes automatically on first use. Native library loading
 checks the required MTMD symbols; context initialization checks model binding.
-Closed or uninitialized objects, unsupported pooling/attention and unsupported
+Closed or uninitialized objects, unsupported pooling and unsupported
 media raise before encoding or decoding. Images and audio are detected from
 their encoded bytes. Video bytes are currently rejected by this embedding path.
 
@@ -164,6 +165,13 @@ The complete input must fit `n_ctx`, `n_batch` and `n_ubatch`, including media
 feature tokens. There is no automatic truncation or splitting of a multimodal
 embedding request. MTMD may batch compatible media chunks separately during
 encoding; this does not relax the decoder microbatch limit.
+
+The native media helper can temporarily enable bidirectional attention for a
+media chunk (for example, some Gemma projectors). Joint pooled decoding cannot
+apply that chunk-local switch to a causal model. Such requests raise
+`NotImplementedError` instead of silently changing the attention semantics.
+Globally bidirectional embedding models and causal projectors such as
+Qwen3-VL-Embedding retain their existing behavior.
 
 Requests reset inference state once validation/tokenization succeeds and during
 final cleanup. Embedding output is explicitly enabled before decoding. Native
@@ -187,7 +195,9 @@ the scope exits.
 The returned tuple of `MTMDEncodedChunk` objects preserves input order. Each chunk
 holds text `tokens` or a copied, read-only float32 `embeddings` matrix, absolute
 decoder `positions`, its position span `n_pos`, and `use_non_causal` metadata.
-Positions may be scalars or four-axis M-RoPE coordinates. These owned results
+Text positions are scalars, as required by native token entries, even for M-RoPE
+models. Media positions have one or four axes according to the projector.
+These owned results
 remain usable after request cleanup and subsequent encoding.
 
 `MTMDEmbeddingHandler.embed(model, ...)` applies pooling and normalization on top
