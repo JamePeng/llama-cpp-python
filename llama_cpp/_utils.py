@@ -25,15 +25,19 @@ def normalize_embedding(vector, mode=2):
     if mode < 0:
         return values
     array = np.asarray(values, dtype=np.float32)
+    # common_embd_normalize accumulates in double precision. In particular,
+    # Lp powers can overflow float32 even when the final norm is representable.
+    work = array.astype(np.float64)
     if mode == 0:
         norm = float(np.max(np.abs(array))) if array.size else 0.0
     elif mode == 1:
-        norm = float(np.sum(np.abs(array)))
+        norm = float(np.sum(np.abs(work)))
     elif mode == 2:
-        norm = float(np.linalg.norm(array))
+        norm = float(np.linalg.norm(work))
     else:
-        norm = float(np.sum(np.abs(array) ** mode) ** (1.0 / mode))
-    return values if norm == 0 else ((array / norm) * (32760.0 if mode == 0 else 1.0)).tolist()
+        norm = float(np.sum(np.abs(work) ** mode) ** (1.0 / mode))
+    scale = (32760.0 if mode == 0 else 1.0) / norm if norm > 0 else 0.0
+    return (array * np.float32(scale)).tolist()
 
 # Avoid "LookupError: unknown encoding: ascii" when open() called in a destructor
 outnull_file = open(os.devnull, "w")

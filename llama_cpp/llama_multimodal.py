@@ -463,7 +463,9 @@ class MTMDBaseHandler:
                     n_pos = native.mtmd_input_chunk_get_n_pos(chunk)
                     non_causal = native.mtmd_decode_use_non_causal(self.mtmd_ctx, chunk)
                     positions = tuple(range(position, position + count))
-                    if mrope:
+                    # Native batch_ext token entries take one scalar position,
+                    # including M-RoPE models; only media entries carry axes.
+                    if mrope and not self._is_text_chunk(kind):
                         if self._is_image_chunk(kind):
                             image = native.mtmd_input_chunk_get_tokens_image(chunk)
                             coords = [native.mtmd_image_tokens_get_decoder_pos(image, position, i)
@@ -837,8 +839,9 @@ class MTMDBaseHandler:
 class MTMDEmbeddingHandler(MTMDBaseHandler):
     """Pool text/image/audio without chat templates or generation state.
 
-    Requires non-causal attention and MEAN, CLS or LAST pooling. The whole
-    input must fit one decoder microbatch; media encoding batches are separate.
+    Preserves the model's attention mode and requires MEAN, CLS or LAST pooling.
+    The whole input must fit one decoder microbatch; media encoding batches are
+    separate. Chunk-local bidirectional attention in a causal model is unsupported.
     """
 
     def embed(self, model: llama_core.Llama, prompt: Optional[str] = None,
@@ -863,11 +866,11 @@ class MTMDEmbeddingHandler(MTMDBaseHandler):
             if ctx is None or not ctx.ctx:
                 raise RuntimeError("Llama model is not initialized or has been closed")
             params = getattr(model, "context_params", None)
-            if (params is None or not params.embeddings or ctx.get_causal_attn()
+            if (params is None or not params.embeddings
                     or ctx.pooling_type() not in (llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN,
                                                  llama_cpp_lib.LLAMA_POOLING_TYPE_CLS,
                                                  llama_cpp_lib.LLAMA_POOLING_TYPE_LAST)):
-                raise ValueError("Use a non-causal embedding model with MEAN, CLS or LAST pooling")
+                raise ValueError("Use an embedding model with MEAN, CLS or LAST pooling")
             if not isinstance(normalize, int):
                 raise TypeError("normalize must be a bool or int")
             # Native symbols are checked when importing MTMD; initialization checks binding.
@@ -882,8 +885,21 @@ class MTMDEmbeddingHandler(MTMDBaseHandler):
                 try:
                     # No native getter exists for this mutable mode; ensure output is enabled.
                     model._ctx.set_embeddings(True)
+                    encoded = request.encode()
+                    if ctx.get_causal_attn() and any(
+                        chunk.embeddings is not None and chunk.use_non_causal
+                        for chunk in encoded
+                    ):
+                        # The native media helper switches attention per chunk.
+                        # Splitting this decode would change pooled MEAN/CLS
+                        # semantics; disabling causal attention globally would
+                        # also change the text model's semantics.
+                        raise NotImplementedError(
+                            "Pooled multimodal embeddings do not support media requiring "
+                            "chunk-local non-causal attention in a causal model"
+                        )
                     with LlamaBatchExt(context=model._ctx) as batch:
-                        for chunk in request.encode():
+                        for chunk in encoded:
                             if chunk.embeddings is None:
                                 batch.add_tokens(chunk.tokens, positions=chunk.positions,
                                                  outputs=[True] * len(chunk.tokens))

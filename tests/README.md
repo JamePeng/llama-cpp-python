@@ -9,6 +9,7 @@
 | `LLAMA_TEST_MMPROJ` | `mmproj-Qwen3.5-0.8b-Q8_0.gguf` | Vision input with the Qwen3.5 model |
 | `LLAMA_TEST_MULTIMODAL_EMBEDDING_MODEL` | `embeddinggemma-2-BF16.gguf` | Optional non-causal embedding tests |
 | `LLAMA_TEST_MULTIMODAL_EMBEDDING_MMPROJ` | `mmproj-embeddinggemma-2-BF16.gguf` | Optional image embedding test |
+| `LLAMA_TEST_QWEN3VL_EMBEDDING_MODEL` / `LLAMA_TEST_QWEN3VL_EMBEDDING_MMPROJ` | Qwen3-VL-Embedding-8B Q8 target / BF16 projector | Optional causal LAST-pooling text/image embeddings and native submission comparison |
 | `LLAMA_TEST_DFLASH_MODEL` / `LLAMA_TEST_DFLASH_DRAFT` | Qwen3.6-27B Q5 target / DFlash Q8 sidecar | Optional DFlash block limits, verification and interrupted retry |
 | `LLAMA_TEST_DFLASH2_MODEL` / `LLAMA_TEST_DFLASH2_DRAFT` | Qwen3.8-27B Q5 target / DFlash2 Q8 sidecar | Optional selector drafting with the same recovery checks |
 
@@ -39,6 +40,11 @@ and sidecar model tests. Generated-audio tests do not load dedicated TTS models.
 Its optional EmbeddingGemma 2 test covers lazy projector loading, text/image embeddings,
 marker-free parts, output dimensions, embedding-mode restoration, unsupported image
 input, resource closure and rejection after closure.
+The same parameterized test covers Qwen3-VL-Embedding with its causal attention
+mode, scalar text positions, four-axis media positions and direct native batch
+equivalence. Set `LLAMA_TEST_N_GPU_LAYERS=-1` for target GPU offload in these tests.
+Aggregated unit cases cover attention-mode compatibility, failure cleanup and
+normalization modes, including large-value Lp inputs that overflow float32 powers.
 High-level MTP image tests use MTMD post-decode callbacks for every media batch,
 compare greedy output with target-only generation, and cover repeated/changed
 images, interrupted requests and partial-decode recovery under native and device
@@ -74,6 +80,11 @@ the default is `0`. Run only these model cases with
 Keep fixtures local, parameterize equivalent cases, and preserve ABI, boundary,
 failure-recovery and ownership coverage. Avoid tests of private structure,
 fixed log text or algorithms reimplemented only inside tests.
+Runtime cases aggregate normalization inputs within each mode, graph-reservation
+validation and recovery, initialization ownership failures, borrowed-reference
+lifetimes, legacy batch layouts and sampling constraints. Native sampler checks
+reuse the shared model and verify valid output/state progression without relying
+on a particular randomly generated sentence.
 
 `examples/multimodal_embedding.py` uses `LlamaEmbedding.embed_multimodal()`.
 For marker-free inputs, pass `parts=["title: none | text: ", image_bytes]`.
