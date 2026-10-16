@@ -832,6 +832,24 @@ def test_high_level_abort_updates_python_and_native_flags():
     assert llama_cpp.llama._llama_native_abort_callback(data) is True
 
 
+def test_model_extensions_with_vocabulary_only_model():
+    params = llama_cpp.llama_model_default_params()
+    params.vocab_only = True
+    params.n_gpu_layers = 0
+    model = llama_cpp.llama_model_load_from_file(os.fsencode(MODEL), params)
+    assert model
+    try:
+        assert llama_cpp.llama_model_n_tokens_delay(model) == 0
+        llama_cpp.llama_model_set_attn_rot(model, False)
+        llama_cpp.llama_model_set_attn_rot(model, True)
+        tokens = (llama_cpp.llama_token * 1)(0)
+        output = (ctypes.c_float * 1)(123)
+        assert llama_cpp.llama_model_get_tok_embd_rows(model, tokens, 1, output) == 0
+        assert output[0] == 123
+    finally:
+        llama_cpp.llama_model_free(model)
+
+
 def test_llama_cpp_tokenization():
     """
     Test the tokenizer API (Llama.tokenize and Llama.detokenize).
@@ -970,6 +988,27 @@ def test_backend_sampling_with_varying_extended_batch_outputs(completion_model):
     finally:
         context.close()
         sampler.close()
+
+
+def test_model_token_embedding_rows_preserve_order(completion_model):
+    model = completion_model._model.model
+    width = llama_cpp.llama_model_n_embd(model)
+    ids = completion_model.tokenize(b"Hello world", add_bos=False)
+    assert len(ids) >= 2
+    selected = (llama_cpp.llama_token * 3)(ids[1], ids[0], ids[1])
+    output = (ctypes.c_float * (3 * width))()
+    assert llama_cpp.llama_model_get_tok_embd_rows(model, selected, 3, output) == 3 * width
+    rows = np.ctypeslib.as_array(output).reshape(3, width)
+    assert np.isfinite(rows).all()
+    for index, token in enumerate(selected):
+        single = (ctypes.c_float * width)()
+        assert llama_cpp.llama_model_get_tok_embd_rows(
+            model, (llama_cpp.llama_token * 1)(token), 1, single
+        ) == width
+        np.testing.assert_array_equal(rows[index], np.ctypeslib.as_array(single))
+    assert llama_cpp.llama_model_get_tok_embd_rows(model, selected, 3, None) == 0
+    invalid = (llama_cpp.llama_token * 1)(-1)
+    assert llama_cpp.llama_model_get_tok_embd_rows(model, invalid, 1, output) == 0
 
 
 def test_context_graph_reserve_preserves_decode_results(completion_model):

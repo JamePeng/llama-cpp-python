@@ -1113,6 +1113,145 @@ def mtmd_get_cap_from_file(mmproj_fname: c_char_p) -> mtmd_caps:
     ...
 
 
+# // EXPERIMENTAL API for realtime audio input, subjected to breaking changes
+
+mtmd_audio_stream_p = NewType("mtmd_audio_stream_p", int)
+mtmd_audio_stream_p_ctypes = c_void_p
+
+# struct mtmd_audio_stream_params {
+#     int32_t step_ms; // audio encoded per encoder call, rounded up to the model step (default: 320)
+# };
+class mtmd_audio_stream_params(Structure):
+    """Encoder step size in milliseconds, rounded up to a model step."""
+
+    _fields_ = [("step_ms", c_int32)]
+
+    if TYPE_CHECKING:
+        step_ms: int
+
+
+# MTMD_API struct mtmd_audio_stream_params mtmd_audio_stream_params_default(void);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_params_default", [], mtmd_audio_stream_params, required=False
+)
+def mtmd_audio_stream_params_default() -> mtmd_audio_stream_params:
+    """Return default stream parameters (step_ms=320)."""
+    ...
+
+
+# // whether the current model supports mtmd_audio_stream
+# MTMD_API bool mtmd_support_audio_stream(const mtmd_context * ctx);
+@ctypes_function_mtmd(
+    "mtmd_support_audio_stream", [mtmd_context_p_ctypes], c_bool, required=False
+)
+def mtmd_support_audio_stream(ctx: mtmd_context_p) -> bool:
+    """Whether the model supports realtime audio input with decoder feedback."""
+    ...
+
+
+# // returns nullptr on failure
+# MTMD_API mtmd_audio_stream * mtmd_audio_stream_init(mtmd_context * ctx, struct mtmd_audio_stream_params params);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_init",
+    [mtmd_context_p_ctypes, mtmd_audio_stream_params],
+    mtmd_audio_stream_p_ctypes,
+    required=False,
+)
+def mtmd_audio_stream_init(
+    ctx: mtmd_context_p, params: mtmd_audio_stream_params
+) -> mtmd_audio_stream_p:
+    """Create a stream, or return NULL on failure.
+
+    The MTMD context must have been initialized with a text model. Keep both
+    alive until the stream is released with mtmd_audio_stream_free().
+    """
+    ...
+
+
+# MTMD_API void mtmd_audio_stream_free(mtmd_audio_stream * stream);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_free", [mtmd_audio_stream_p_ctypes], None, required=False
+)
+def mtmd_audio_stream_free(stream: mtmd_audio_stream_p) -> None:
+    """Release a stream and its encoder state."""
+    ...
+
+
+# // samples are PCM F32 at mtmd_get_audio_sample_rate()
+# // returns 0 on success, 1 if the stream has ended
+# MTMD_API int32_t mtmd_audio_stream_push(mtmd_audio_stream * stream, const float * samples, size_t n_samples);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_push",
+    [mtmd_audio_stream_p_ctypes, POINTER(c_float), c_size_t],
+    c_int32,
+    required=False,
+)
+def mtmd_audio_stream_push(
+    stream: mtmd_audio_stream_p, samples: _Pointer[c_float], n_samples: int
+) -> int:
+    """Copy PCM F32 samples at mtmd_get_audio_sample_rate() into the stream.
+
+    Return 0 on success, or 1 if the stream has ended.
+    """
+    ...
+
+
+# // pad the stream so that all pending rows can be produced
+# // end = false: the stream stays open (use it on a pause, to get a partial transcript)
+# // end = true:  no more push() is accepted
+# // returns 0 on success, 1 if the stream has ended
+# MTMD_API int32_t mtmd_audio_stream_flush(mtmd_audio_stream * stream, bool end);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_flush", [mtmd_audio_stream_p_ctypes, c_bool], c_int32,
+    required=False,
+)
+def mtmd_audio_stream_flush(stream: mtmd_audio_stream_p, end: bool) -> int:
+    """Pad pending audio for decoding; end=True also prevents further pushes.
+
+    Use end=False on a pause to get a partial transcript and keep the stream
+    open. Return 0 on success, or 1 if it has already ended.
+    """
+    ...
+
+
+# // produce the next decoder rows
+# // last_token is the token sampled from the previous row, LLAMA_TOKEN_NULL before the first sample
+# // return value:
+# //   > 0 number of rows ready, read them with mtmd_audio_stream_get_output_embd()
+# //   0   more audio is needed
+# //   -1  end of stream, nothing more will be produced
+# //   -2  error
+# MTMD_API int32_t mtmd_audio_stream_step(mtmd_audio_stream * stream, llama_token last_token);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_step",
+    [mtmd_audio_stream_p_ctypes, llama_cpp_lib.llama_token],
+    c_int32,
+    required=False,
+)
+def mtmd_audio_stream_step(stream: mtmd_audio_stream_p, last_token: int) -> int:
+    """Produce decoder rows using the token sampled from the previous step.
+
+    Pass LLAMA_TOKEN_NULL before the first sample. Return a positive row
+    count, 0 for more audio, -1 for end of stream, or -2 on error.
+    """
+    ...
+
+
+# // rows of the last step, the reading size (in bytes) is n_rows * llama_model_n_embd_inp(model) * sizeof(float)
+# MTMD_API const float * mtmd_audio_stream_get_output_embd(const mtmd_audio_stream * stream);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_get_output_embd", [mtmd_audio_stream_p_ctypes],
+    POINTER(c_float), required=False,
+)
+def mtmd_audio_stream_get_output_embd(stream: mtmd_audio_stream_p) -> _Pointer[c_float]:
+    """Borrow the rows produced by the last step; copy before the next step.
+
+    Read n_rows * llama_model_n_embd_inp(model) floats. The stream owns the
+    buffer; it also becomes invalid when the stream is freed.
+    """
+    ...
+
+
 # // EXPERIMENTAL API for audio generation, subjected to breaking changes
 
 # // represent the pipeline type

@@ -5819,6 +5819,23 @@ def llama_model_get_device(
     """
     ...
 
+# LLAMA_API void llama_model_set_attn_rot(struct llama_model * model, bool value);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_set_attn_rot",
+        "?llama_model_set_attn_rot@@YAXPEAUllama_model@@_N@Z",
+        "__Z24llama_model_set_attn_rotP11llama_modelb",
+        "_Z24llama_model_set_attn_rotP11llama_modelb",
+    ],
+    [llama_model_p_ctypes, ctypes.c_bool],
+    None,
+    required=False,
+)
+def llama_model_set_attn_rot(model: llama_model_p, value: bool) -> None:
+    """Toggle KV attention rotation for contexts subsequently created from this model."""
+    ...
+
+
 # // Set whether the context outputs nextn embeddings or not
 # // If masked == true,  output the embeddings only for the tokens with batch.logits != 0
 # // If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
@@ -6146,4 +6163,49 @@ def llama_model_get_tok_embd(
         The number of float elements, or zero when the matrix is unavailable
         or cannot be converted. The caller retains ownership of out.
     """
+    ...
+
+
+# LLAMA_API uint32_t llama_model_get_tok_embd_rows(const struct llama_model * model,
+#         const llama_token * tokens, uint32_t n_tokens, float * out);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_get_tok_embd_rows",
+        "?llama_model_get_tok_embd_rows@@YAIPEBUllama_model@@PEBHIPEAM@Z",
+        "__Z29llama_model_get_tok_embd_rowsPK11llama_modelPKijPf",
+        "_Z29llama_model_get_tok_embd_rowsPK11llama_modelPKijPf",
+    ],
+    [llama_model_p_ctypes, llama_token_p, ctypes.c_uint32, ctypes.POINTER(ctypes.c_float)],
+    ctypes.c_uint32,
+    required=False,
+)
+def llama_model_get_tok_embd_rows(
+    model: llama_model_p,
+    tokens: CtypesArray[llama_token],
+    n_tokens: int,
+    out: CtypesArray[ctypes.c_float],
+) -> int:
+    """Copy token embedding rows into caller-owned F32 storage, in token order.
+
+    Allocate n_tokens * llama_model_n_embd(model) floats for out. These are
+    token rows, without multimodal deepstack features. Return the number of
+    floats written, or 0 on error; NULL out is not a size query.
+    """
+    ...
+
+
+# LLAMA_API uint32_t llama_model_n_tokens_delay(const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_n_tokens_delay",
+        "?llama_model_n_tokens_delay@@YAIPEBUllama_model@@@Z",
+        "__Z26llama_model_n_tokens_delayPK11llama_model",
+        "_Z26llama_model_n_tokens_delayPK11llama_model",
+    ],
+    [llama_model_p_ctypes],
+    ctypes.c_uint32,
+    required=False,
+)
+def llama_model_n_tokens_delay(model: llama_model_p) -> int:
+    """Return realtime audio output delay in tokens, or 0 when not applicable."""
     ...

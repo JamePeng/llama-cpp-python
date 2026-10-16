@@ -214,6 +214,18 @@ def test_chat_prefill_mtp_callback_and_cleanup(chat_prefill, failure):
     handler._free_mtmd_resources.assert_called_once()
 
 
+def test_mtmd_audio_stream_default_params_abi():
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    if getattr(module.mtmd_audio_stream_params_default, "__ctypes_optional__", False):
+        pytest.skip("This libmtmd does not provide realtime audio input")
+    params = module.mtmd_audio_stream_params_default()
+    assert ctypes.sizeof(params) == ctypes.sizeof(ctypes.c_int32)
+    assert ctypes.alignment(params) == ctypes.alignment(ctypes.c_int32)
+    assert type(params).step_ms.offset == 0
+    assert params.step_ms == 320
+    module.mtmd_audio_stream_free(None)
+
+
 def test_mtmd_decoder_pos_abi():
     module = importlib.import_module("llama_cpp.mtmd_cpp")
     position = module.mtmd_decoder_pos
