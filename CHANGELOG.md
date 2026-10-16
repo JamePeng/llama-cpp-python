@@ -7,6 +7,122 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.3] Multimodal Embeddings, MTP Image Speculation & Extended Batch / Audio Stream APIs
+
+- fix: support causal multimodal embeddings and stable normalization
+    - Preserve model attention modes and scalar text positions
+    - Reject unsupported chunk-local attention combinations
+    - Prevent float32 overflow during Lp normalization
+    - Add Qwen3-VL embedding regression coverage
+    - Consolidate runtime tests and ensure deterministic resource cleanup
+
+- feat(examples): add `Qwen3-VL embedding` CLI profile
+    - Select LAST pooling and wrap instruction, user and assistant prompts
+    - Add instruction, GPU offload and image token options
+    - Retain EmbeddingGemma 2 as the default profile
+
+- docs: clarify multimodal embedding attention and position contracts
+    - Describe model-specific attention modes and pooling requirements
+    - Document rejection of unsupported chunk-local attention combinations
+    - Distinguish scalar text positions from media position axes
+
+- docs: add Qwen3-VL multimodal embedding usage guide
+    - Add CLI examples for text and image embeddings
+    - Explain causal attention, LAST pooling and prompt formatting
+    - Document normalized output dimensions and joint-decoding limitations
+
+- feat(mtmd/mtp): enable MTMD image chat with MTP speculative decoding
+    - Forward media sub-batches with positions and shifted target hidden states
+    - Rebuild target and draft state together and handle prefill failures
+    - Consolidate coverage for native/device rollback and image request recovery
+    - Add a GPU image-chat example with MTP toggle and comparable decode metrics
+    - Update documentation and validate with Qwen3.5-9B-MTP and mmproj
+
+- feat(mtmd/mtp): add MTP image chat example with decode benchmarks
+    - Support toggling MTP for comparison with ordinary decoding
+    - Report configuration, acceptance, rollbacks and decode timing
+    - Default to GPU execution with an 8192-token context and 4096-token output limit
+    - Update README and guides with usage, metrics and MTMD support boundaries
+
+- fix(speculative): align MTP media handling and DFlash draft filtering
+    - **Support MTP embedding inputs with hidden states and media positions**
+    - Clean up attention KV after partial device checkpoint restores
+    - Replay pinned media prefixes during rollback
+    - Apply DFlash/DFlash2 minimum-length checks before per-call truncation
+    - Consolidate speculative tests and add real MTP, DFlash and DFlash2 coverage
+    - Document decoding behavior and model test configuration
+
+- feat(batch): support separate hidden states in `LlamaBatchExt`
+    - Add state and states parameters for token and embedding inputs
+    - Render hidden states through `llama_batch_ext_set_embd_state`
+    - Validate state presence and widths within submitted ranges
+    - Consolidate runtime tests and share MTP model fixtures
+    - Update batch documentation and native binding descriptions
+
+- feat(mtmd/embedding): add MTMD-based multimodal embeddings
+    - Add `MTMDEmbeddingHandler` and LlamaEmbedding.embed_multimodal() for
+    pooled text, image, and audio embeddings without chat templates.
+    - Support marker-based prompts and ordered text/media parts. Batch
+    compatible media chunks and return owned features with decoder positions.
+    - Manage projector and request resources explicitly, validate model and
+    media support, and require full inputs to fit one decoder microbatch.
+    - Add an embedding example and focused `EmbeddingGemma 2` runtime tests.
+
+- docs(embedding): document MTMD multimodal embedding APIs and workflows
+
+- docs(README): expand README with batch and multimodal embedding guidance
+
+- docs(wiki): document batch APIs and align runtime guidance with current source
+    - Add LlamaBatch and LlamaBatchExt usage, native conversion paths,
+    range submission, output indexing, and resource ownership
+    - Document MoE caching and clarify context output and embedding limits
+    - Correct embedding return shapes, pooling examples, normalization,
+    and batching memory expectations
+    - Clarify logging precedence, verbosity thresholds, and native level mapping
+    - Update OpenVINO support, execution modes, device selection, and caching
+    - Refresh MTMD handler references and context-specific media markers
+    - Replace legacy wiki links and update navigation
+
+- refactor(embedding): share embedding normalization for future multimodal embeddings
+    - Extract normalization into a shared utility and reuse it in Llama.embed().
+    - Preserve existing normalization modes, bool compatibility, zero-vector
+    handling, and raw ranking scores.
+
+- fix(Llama): use output embedding dimensions and respect non-causal microbatch limits
+    - Read embeddings using n_embd_out instead of the hidden dimension to avoid
+    truncating projected outputs, such as `EmbeddingGemma 2`'s 768-dimensional vectors.
+    - Limit non-causal embedding batches to n_ubatch so each input fits in a single
+    microbatch, preventing native assertions and preserving full-context attention.
+
+- feat(batch): add `LlamaBatchExt` and harden context resource management
+    - Support text, embedding, and paired MTP inputs with explicit batch ranges
+    - Route extended batches through llama_process for encoding and decoding
+    - Add synchronized graph reservation with dimension validation
+    - Retain attached LoRA adapters and guard closed-context operations
+    - Complete resource cleanup before reporting errors and prevent double frees
+    - Document batch insertion methods, ownership, and lifecycle
+    - Consolidate batch and context regression tests in test_runtime
+
+- build: Reuse native libraries during the Python wheel build process to reduce compilation time
+    - Build native libraries once per CUDA configuration using Python 3.10.
+    - Package wheels in parallel for Python 3.10 through 3.14 without recompiling.
+    - Add a shared backend packaging helper with native build manifest validation.
+    - Preserve runtime library hashes and synchronize wheel version metadata.
+    - Install each wheel and verify package versions and native library loading.
+    - Publish only after all Python packaging jobs succeed.
+    - **The total build time for GitHub Actions has been reduced from over 3–4 hours to 1.5–2 hours**.
+
+- fix(ci): propagate native CUDA version to wheel packaging
+    - Read the backend version from native build job outputs instead of hardcoding it.
+    - Keep compilation and packaging versions aligned across all CUDA workflows.
+    - Report differing fields and values when native manifest validation fails.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20261016
+
+- Thanks to (**@KLL535**) for testing feedback of MTMD Embedding: https://github.com/JamePeng/llama-cpp-python/issues/184
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/8fe0a5f5514cdbd3fff1c60b3ff21fb0eb7b5059...6c22029fe41885e1875823b96d5b2076e152c7ba
+
 ## [0.4.2] RPC Device Selection and Extended Batch / Runtime Bindings
 
 - feat(rpc): support remote device selection in Llama
