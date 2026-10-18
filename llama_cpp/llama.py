@@ -3064,10 +3064,12 @@ class Llama:
                     f"checkpoint {speculative_checkpoint_rollbacks:,})",
                 ]
                 print("\n".join(stats_lines), file=sys.stderr)
-            # Preserve a usable final prefix, but do not allocate an empty
-            # checkpoint after cancellation or failure has reset the context.
+            # Preserve ordinary prompt history. Speculative requests reset both
+            # contexts on the next request; their target-only final snapshot
+            # cannot restore the engine and is never used for verification.
             if (
                 self.is_hybrid
+                and self.speculative is None
                 and self.n_tokens > 0
                 and self._hybrid_cache_mgr is not None
                 and self._hybrid_cache_mgr.max_checkpoints > 0

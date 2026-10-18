@@ -1266,6 +1266,19 @@ def test_real_mtp_zero_checkpoints_interrupted_continuation(mtp_model, stop_afte
     assert not llm._hybrid_cache_mgr.checkpoints
 
 
+def test_real_mtp_target_checkpoints_are_only_captured_for_verification(mtp_model, monkeypatch):
+    llm, fallback = mtp_model
+    capture = Mock(wraps=llm._hybrid_cache_mgr._get_data_ext)
+    monkeypatch.setattr(llm._hybrid_cache_mgr, "_get_data_ext", capture)
+    prompt = llm.tokenize(b"Count from 1 to 20: 1,")
+    with closing(llm.generate(prompt, temp=0, top_k=1, repeat_penalty=1, seed=42)) as stream:
+        for _ in range(8):
+            next(stream)
+    steps = llm.last_speculative_stats["verification_steps"]
+    assert steps > 0
+    assert capture.call_count == (steps if fallback else 0)
+
+
 @pytest.mark.parametrize("logits_all", [False, True])
 def test_real_mtp_zero_checkpoint_score_hooks_match_ordinary(mtp_model, monkeypatch, logits_all):
     llm, _ = mtp_model

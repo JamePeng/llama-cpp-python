@@ -263,6 +263,25 @@ def test_abort_only_criteria_do_not_copy_logits(generation_model, needs_scores):
     assert llm.eval_calls[0][1]["copy_logits"] is needs_scores
 
 
+@pytest.mark.parametrize("speculative", [False, True])
+def test_final_hybrid_checkpoint_is_saved_only_for_reusable_prompt_history(
+    generation_model, speculative
+):
+    llm, _ = generation_model
+    llm.n_tokens, llm.n_batch = 0, 8
+    llm.is_hybrid = True
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=4, save_checkpoint=Mock())
+    if speculative:
+        llm._ctx.n_rs_seq = lambda: 3
+        llm._ctx.memory_seq_pos_max = lambda seq: llm.n_tokens - 1
+        llm.speculative = Mock()
+        llm.speculative.draft_at_position.return_value = np.empty(0, dtype=np.intc)
+        llm.speculative.checkpoint_stats.return_value = {}
+    with closing(llm.generate([1])) as stream:
+        assert next(stream) == 1
+    assert llm._hybrid_cache_mgr.save_checkpoint.call_count == int(not speculative)
+
+
 def test_disabled_periodic_checkpoints_do_not_prepare_histories(model):
     llm, _ = model
 
