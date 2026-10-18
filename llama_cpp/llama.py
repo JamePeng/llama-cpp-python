@@ -97,6 +97,8 @@ class AbortCriteria:
     Listen for external interruption signals to trigger a stop condition.
     When an external thread calls `llama.abort()`, a loop interrupt is generated.
     """
+    requires_logits = False
+
     def __init__(self, abort_event: threading.Event):
         self.abort_event = abort_event
 
@@ -1728,7 +1730,11 @@ class Llama:
         # Adaptive Periodic Checkpointing for Hybrid Models
         # Following the "no more than three times" principle :)
         # when pre-filling very large blocks, dilute the save frequency to minimize I/O blocking.
-        if self.is_hybrid and self._hybrid_cache_mgr is not None:
+        checkpointing_enabled = (
+            self.is_hybrid and self._hybrid_cache_mgr is not None
+            and self._hybrid_cache_mgr.max_checkpoints > 0
+        )
+        if checkpointing_enabled:
             dynamic_interval = max(self.checkpoint_interval, n_eval // 3)  # Maximum of 3 triggers
 
         # If KV slots are full, `current_batch_size` will be halved.
@@ -1820,7 +1826,7 @@ class Llama:
             i += current_batch_size
 
             # Periodic Checkpoint: Save states for hybrid models to avoid massive rollbacks
-            if self.is_hybrid and self._hybrid_cache_mgr is not None:
+            if checkpointing_enabled:
                 current_pos = self.n_tokens
                 if (current_pos - last_ckpt_pos >= dynamic_interval) and (i < n_eval):
 
@@ -2160,16 +2166,18 @@ class Llama:
             # 1. First, check for a 100% exact match of the entire sequence
             full_match_prefix = self.longest_token_prefix(self._input_ids, tokens, self.verbose)
 
-            # --- FAST PATH: Zero-latency bypass for Hybrid Single-Turn & Multimodal ---
-            # If the cache is disabled (max_checkpoints <= 0) and we have a 100% match,
-            # we completely skip the N-1 truncation. This ensures that multimodal handlers
-            # (which just finished evaluating and already hold fresh logits) don't trigger
-            # unnecessary N-1 rollbacks or catastrophic KV cache clears.
+            # Reuse a valid final output when rollback is disabled or the snapshot
+            # owns its logits. MTMD prefill uses the separate handoff above.
             if (
                 full_match_prefix == len(tokens)
                 and full_match_prefix == self.n_tokens
                 and self.is_hybrid
-                and (self._hybrid_cache_mgr is None or self._hybrid_cache_mgr.max_checkpoints <= 0)
+                and (
+                    self._hybrid_cache_mgr is None or self._hybrid_cache_mgr.max_checkpoints <= 0
+                    or self._restored_logits is not None
+                )
+                and self._last_eval_output_start <= self.n_tokens - 1
+                < self._last_eval_output_start + self._last_eval_output_count
             ):
                 reset = False
                 longest_prefix = len(tokens)
@@ -2181,30 +2189,21 @@ class Llama:
             else:
                 # By matching against `tokens[:-1]`, we intentionally drop the last token.
                 # This forces the engine to re-evaluate the final token to refresh sampling logits.
-                longest_prefix = self.longest_token_prefix(self._input_ids, tokens[:-1], self.verbose)
+                longest_prefix = min(full_match_prefix, max(0, len(tokens) - 1))
 
                 if longest_prefix > 0:
                     reset = False
 
-                    # Note: Kept for legacy compatibility. Triggers if the prefix matching
-                    # somehow equals the full token length (e.g., edge cases in tokenization).
-                    if longest_prefix == len(tokens):
-                        if self.is_hybrid and (self._hybrid_cache_mgr is None or self._hybrid_cache_mgr.max_checkpoints <= 0):
-                            if self.verbose:
-                                print(f"Llama.generate: Full match on disabled hybrid cache. Skipping prefix-- to use existing fresh logits.", file=sys.stderr)
-                        else:
-                            if self.verbose:
-                                print(f"Llama.generate: Full match. Forcing prefix-- to evaluate 1 token.", file=sys.stderr)
-                            longest_prefix -= 1
-
                     # Physically erase trailing "ghost" tokens from the C++ KV cache
                     # to prevent attention misalignment in multi-round chats.
                     if longest_prefix < self.n_tokens:
-                        if self.is_hybrid and self._hybrid_cache_mgr is not None:
+                        if self.is_hybrid:
                             if self.verbose:
                                 print(f"Llama.generate: Hybrid model rollback triggered.", file=sys.stderr)
 
-                            best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(original_tokens[:-1], 0)
+                            best_ckpt = None
+                            if self._hybrid_cache_mgr is not None and self._hybrid_cache_mgr.max_checkpoints > 0:
+                                best_ckpt = self._hybrid_cache_mgr.find_best_checkpoint(original_tokens[:-1], 0)
                             if best_ckpt is not None and self._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
                                 actual_prefix = best_ckpt.pos
                             else:
@@ -2347,8 +2346,17 @@ class Llama:
         copy_logits = (
             self._logits_all
             or logits_processor is not None
-            or stopping_criteria is not None
+            or (stopping_criteria is not None and getattr(stopping_criteria, "requires_logits", True))
         )
+
+        if not tokens and self.n_tokens > 0 and copy_logits:
+            logits = self._restored_logits
+            if logits is None:
+                logits = np.ctypeslib.as_array(
+                    self._ctx.get_logits_ith(self.n_tokens - 1 - self._last_eval_output_start),
+                    shape=(self._n_vocab,),
+                )
+            self.scores[self.n_tokens - 1 if self._logits_all else 0] = logits
 
         sample_idx = self.n_tokens + len(tokens) - 1
         tokens = list(tokens)
@@ -2619,7 +2627,7 @@ class Llama:
                     if stopping_criteria is not None:
                         if stopping_criteria(
                             self._input_ids[: sample_idx],
-                            self._scores[0 if not self._logits_all else sample_idx - self.n_tokens, :]
+                            self._scores[sample_idx - 1 if self._logits_all else 0, :]
                         ):
                             return
 
@@ -3488,17 +3496,27 @@ class Llama:
                 "logprobs is not supported for models created with logits_all=False"
             )
 
-        if self.cache:
+        if self.cache and getattr(self, "speculative", None) is None:
+            live_prefix_length = Llama.longest_token_prefix(
+                self._input_ids, prompt_tokens, self.verbose
+            )
             try:
-                cache_item = self.cache[prompt_tokens]
-                cache_prefix_len = Llama.longest_token_prefix(
-                    cache_item.input_ids, prompt_tokens, self.verbose
+                get_matching_state = getattr(self.cache, "get_matching_state", None)
+                cached_state = (
+                    get_matching_state(prompt_tokens, min_prefix_length=live_prefix_length)
+                    if get_matching_state is not None else self.cache[prompt_tokens]
                 )
-                eval_prefix_len = Llama.longest_token_prefix(
-                    self._input_ids, prompt_tokens, self.verbose
+                cached_prefix_length = Llama.longest_token_prefix(
+                    cached_state.input_ids[:cached_state.n_tokens], prompt_tokens, self.verbose
                 )
-                if cache_prefix_len > eval_prefix_len:
-                    self.load_state(cache_item)
+                # Loading a full state invalidates partial checkpoints. A hybrid
+                # snapshot must therefore be appendable or own its final logits.
+                can_reuse_cached_state = not self.is_hybrid or (
+                    cached_prefix_length == cached_state.n_tokens
+                    and (cached_prefix_length < len(prompt_tokens) or getattr(cached_state, "last_logits", None) is not None)
+                )
+                if cached_prefix_length > live_prefix_length and can_reuse_cached_state:
+                    self.load_state(cached_state)
                     if self.verbose:
                         print("Llama._create_completion: cache hit", file=sys.stderr)
             except KeyError:
@@ -3867,18 +3885,20 @@ class Llama:
                     }
                 ],
             }
-            if self.cache and finish_reason != "abort":
+            if self.cache and finish_reason != "abort" and getattr(self, "speculative", None) is None:
                 if self.verbose:
                     print("Llama._create_completion: cache save", file=sys.stderr)
-                self.cache[prompt_tokens + completion_tokens] = self.save_state()
+                state = self.save_state()
+                self.cache[state.input_ids[:state.n_tokens].tolist()] = state
                 if self.verbose:
                     print("Llama._create_completion: cache saved", file=sys.stderr)
             return
 
-        if self.cache and finish_reason != "abort":
+        if self.cache and finish_reason != "abort" and getattr(self, "speculative", None) is None:
             if self.verbose:
                 print("Llama._create_completion: cache save", file=sys.stderr)
-            self.cache[prompt_tokens + completion_tokens] = self.save_state()
+            state = self.save_state()
+            self.cache[state.input_ids[:state.n_tokens].tolist()] = state
 
         text_str = text.decode("utf-8", errors="ignore")
 
@@ -5155,6 +5175,10 @@ StoppingCriteria = Callable[[npt.NDArray[np.intc], npt.NDArray[np.single]], bool
 
 
 class StoppingCriteriaList(List[StoppingCriteria]):
+    @property
+    def requires_logits(self) -> bool:
+        return any(getattr(criteria, "requires_logits", True) for criteria in self)
+
     def __call__(
         self, input_ids: npt.NDArray[np.intc], logits: npt.NDArray[np.single]
     ) -> bool:
