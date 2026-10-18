@@ -1912,32 +1912,43 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
     def rollback_verified(
         self, checkpoint: Any, n_accepted: int, seq_id: int = 0
     ) -> None:
-        """Replay only the sampled token and accepted draft prefix after RS rollback."""
+        """Keep the sampled token and accepted draft prefix by truncation or replay."""
+        if seq_id != 0:
+            raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
+        owner = getattr(self, "_checkpoint_owner", None)
+        if owner is None or not isinstance(checkpoint, dict) or checkpoint.get("owner") is not owner:
+            raise RuntimeError("Draft checkpoint is stale or belongs to another engine")
         count = min(1 + max(0, int(n_accepted)), len(self.verify_positions))
-        tokens = self.verify_tokens[:count]
-        positions = self.verify_positions[:count]
-        target_h = self.verify_h[:count].copy()
-        embeddings = None if self.verify_embeddings is None else self.verify_embeddings[:count].copy()
-        media_positions = None if self.verify_media_positions is None else self.verify_media_positions[:count]
         # A pinned image position can contain both accepted and rejected rows.
         # Position-based truncation cannot separate them; replay the prefix instead.
-        pinned_suffix = bool(positions) and count < len(self.verify_positions) and (
-            self.verify_positions[count] <= positions[-1]
+        pinned_suffix = count > 0 and count < len(self.verify_positions) and (
+            self.verify_positions[count] <= self.verify_positions[count - 1]
         )
-        if self._use_native_draft_rollback and positions and not pinned_suffix:
+        if self._use_native_draft_rollback and count > 0 and not pinned_suffix:
             # Target verification has already advanced the draft context through
             # every proposed token. Native snapshots let us discard only the
             # rejected suffix, avoiding a full restore and accepted-prefix replay.
-            if not self.is_mem_shared and not self.draft_context.memory_seq_rm(
-                seq_id, positions[-1] + 1, -1
-            ):
-                raise RuntimeError("MTP native verification rollback failed")
-            self.pending_h[:] = target_h[-1]
+            try:
+                if not self.is_mem_shared and not self.draft_context.memory_seq_rm(
+                    seq_id, self.verify_positions[count - 1] + 1, -1
+                ):
+                    raise RuntimeError("MTP native verification rollback failed")
+                self.pending_h[:] = self.verify_h[count - 1]
+            except BaseException:
+                self._checkpoint_owner = None
+                raise
             self._checkpoint_stats["native_verification_rollbacks"] = (
                 int(self._checkpoint_stats.get("native_verification_rollbacks", 0))
                 + 1
             )
         else:
+            # Restore clears verification buffers. Only the replay path needs
+            # independent copies of the accepted feature rows.
+            tokens = self.verify_tokens[:count]
+            positions = self.verify_positions[:count]
+            target_h = self.verify_h[:count].copy()
+            embeddings = None if self.verify_embeddings is None else self.verify_embeddings[:count].copy()
+            media_positions = None if self.verify_media_positions is None else self.verify_media_positions[:count]
             self.restore(checkpoint, seq_id)
             if positions:
                 self._process_target_rows(

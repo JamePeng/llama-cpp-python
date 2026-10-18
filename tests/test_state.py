@@ -167,6 +167,34 @@ def test_live_prefix_matching_is_computed_once_and_disabled_checkpoints_are_not_
     llm._hybrid_cache_mgr.find_best_checkpoint.assert_not_called()
 
 
+@pytest.mark.parametrize("checkpoints,native_slots,requested,expected", [
+    (0, 1, 8, 1), (0, 3, 8, 3), (0, 3, 1, 1), (4, 1, 8, 7),
+])
+def test_zero_checkpoint_draft_limit_respects_native_rollback_capacity(
+    model, checkpoints, native_slots, requested, expected
+):
+    llm, _ = model
+    llm.is_hybrid, llm.n_batch = True, 8
+    llm.speculative = object()
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=checkpoints)
+    llm._ctx.n_rs_seq = lambda: native_slots
+    assert llm._limit_speculative_draft_n_max(requested) == expected
+
+
+def test_unsupported_zero_checkpoint_speculation_preserves_prefill_handoff(model):
+    llm, _ = model
+    llm.is_hybrid = True
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=0)
+    llm._ctx.n_rs_seq = lambda: 0
+    llm.speculative = SimpleNamespace(can_follow_target_native_rollback=lambda: False)
+    llm._prefilled_prompt = (1, 2)
+    with pytest.raises(RuntimeError, match="ctx_checkpoints > 0"):
+        next(llm.generate([1, 2]))
+    assert llm._prefilled_prompt == (1, 2)
+    assert llm.n_tokens == 2
+    llm._ctx.memory_clear.assert_not_called()
+
+
 @pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("logits_all", [False, True])
 def test_disabled_hybrid_fast_path_refreshes_scores_for_hooks(generation_model, restored, logits_all):
@@ -256,6 +284,34 @@ def test_disabled_periodic_checkpoints_do_not_prepare_histories(model):
     llm.eval(list(range(64)), copy_logits=False)
     assert llm.n_tokens == 64
     llm._hybrid_cache_mgr.save_checkpoint.assert_not_called()
+
+
+@pytest.mark.parametrize("native_slots,engine_support,allowed", [
+    (0, False, False), (16, False, False), (0, True, False), (16, True, True),
+])
+def test_disabled_hybrid_speculation_checks_rollback_before_mutation(
+    model, monkeypatch, native_slots, engine_support, allowed
+):
+    llm, _ = model
+    llm._model = object()
+    llm.is_hybrid = True
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=0)
+    llm._ctx.n_rs_seq = lambda: native_slots
+    llm.speculative = SimpleNamespace(
+        can_follow_target_native_rollback=lambda: engine_support, clear=Mock(),
+    )
+    llm.eval = Mock()
+
+    class SamplingBoundary(Exception):
+        pass
+
+    monkeypatch.setattr("llama_cpp.llama.LlamaSamplingContext", Mock(side_effect=SamplingBoundary))
+    error, message = (SamplingBoundary, None) if allowed else (RuntimeError, "ctx_checkpoints > 0")
+    with pytest.raises(error, match=message):
+        next(llm.generate([1, 2]))
+    llm.eval.assert_not_called()
+    assert llm._ctx.memory_clear.call_count == int(allowed)
+    assert llm.n_tokens == (0 if allowed else 2)
 
 
 @pytest.mark.parametrize("cache_type", [LlamaRAMCache, LlamaTrieCache, LlamaDiskCache])
@@ -426,10 +482,11 @@ def test_embedding_request_cleans_generation_state_and_preserves_result_order(mo
 
 @pytest.mark.parametrize("entry", ["batch", "generate"])
 @pytest.mark.parametrize("speculative", [False, True])
-def test_fatal_decode_cleanup_allows_retry(model, monkeypatch, entry, speculative):
+@pytest.mark.parametrize("checkpoints", [0, 4])
+def test_fatal_decode_cleanup_allows_retry(model, monkeypatch, entry, speculative, checkpoints):
     llm, _ = model
     llm.is_hybrid = True
-    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=4, save_checkpoint=Mock())
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=checkpoints, save_checkpoint=Mock())
     llm._model = object()
     llm._abort_event = threading.Event()
     llm._active_speculative_phase_stats = None
@@ -438,6 +495,7 @@ def test_fatal_decode_cleanup_allows_retry(model, monkeypatch, entry, speculativ
     if speculative:
         llm.speculative.checkpoint_stats.return_value = {}
     llm._ctx.synchronize = Mock()
+    llm._ctx.n_rs_seq = lambda: 16
     llm._ctx.decode = Mock(side_effect=RuntimeError("partial native decode"))
     monkeypatch.setattr("llama_cpp.llama.LlamaSamplingContext", Mock())
 

@@ -497,6 +497,55 @@ def test_mtp_native_verification_rollback_removes_only_rejected_suffix():
     assert stats["native_verification_rollbacks"] == 1
 
 
+def test_mtp_native_rollback_does_not_copy_accepted_feature_blocks():
+    class NoCopy(np.ndarray):
+        def copy(self, *args, **kwargs):
+            raise AssertionError("Native rollback only needs the last accepted row")
+
+    engine = _checkpoint_test_engine(native=True)
+    checkpoint = engine.checkpoint()
+    engine.verify_tokens, engine.verify_positions = [10, 11, 12], [8, 9, 10]
+    engine.verify_h = np.arange(6, dtype=np.float32).reshape(3, 2).view(NoCopy)
+    engine.verify_embeddings = np.ones((3, 4), dtype=np.float32).view(NoCopy)
+    engine.rollback_verified(checkpoint, n_accepted=1)
+    np.testing.assert_array_equal(engine.pending_h, [2, 3])
+    assert engine.draft_context.removals == [(0, 10, -1)]
+
+
+@pytest.mark.parametrize("invalid", ["stale", "foreign", "missing", "sequence"])
+def test_mtp_native_rollback_rejects_invalid_checkpoint_before_mutation(invalid):
+    engine = _checkpoint_test_engine(native=True)
+    checkpoint = engine.checkpoint()
+    engine.verify_tokens, engine.verify_positions = [10, 11], [8, 9]
+    engine.verify_h = np.arange(4, dtype=np.float32).reshape(2, 2)
+    if invalid == "stale":
+        engine.checkpoint()
+    elif invalid == "foreign":
+        checkpoint = _checkpoint_test_engine(native=True).checkpoint()
+    elif invalid == "missing":
+        checkpoint = None
+    with pytest.raises(NotImplementedError if invalid == "sequence" else RuntimeError):
+        engine.rollback_verified(checkpoint, 0, seq_id=int(invalid == "sequence"))
+    assert engine.draft_context.removals == []
+    np.testing.assert_array_equal(engine.pending_h, [1, 2])
+
+
+@pytest.mark.parametrize("failure", [False, RuntimeError("partial rollback")])
+def test_mtp_native_rollback_failure_invalidates_checkpoint(failure):
+    engine = _checkpoint_test_engine(native=True)
+    checkpoint = engine.checkpoint()
+    engine.verify_positions = [8, 9]
+    engine.verify_h = np.arange(4, dtype=np.float32).reshape(2, 2)
+    engine.draft_context.memory_seq_rm = Mock(
+        side_effect=failure if isinstance(failure, Exception) else None,
+        return_value=failure,
+    )
+    with pytest.raises(RuntimeError):
+        engine.rollback_verified(checkpoint, 0)
+    with pytest.raises(RuntimeError, match="stale"):
+        engine.restore(checkpoint)
+
+
 def test_mtp_close_does_not_import_during_interpreter_shutdown():
     class _Closable:
         def __init__(self, *, context=None):
@@ -636,7 +685,8 @@ def test_interrupted_speculation_restores_committed_boundary(mode):
     llm._ctx = _FakeCheckpointContext()
     llm.speculative = SimpleNamespace(rollback_verified=Mock(), restore=Mock(), truncate=Mock())
     checkpoint = SimpleNamespace(pos=6)
-    llm._hybrid_cache_mgr = SimpleNamespace(find_best_checkpoint=Mock(return_value=checkpoint),
+    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=0 if mode == "native" else 4,
+                                          find_best_checkpoint=Mock(return_value=checkpoint),
                                           restore_checkpoint=Mock(return_value=True))
     llm.is_hybrid = mode != "truncate"
     llm.input_ids = np.array([1, 2, 3, 4, 5, 6, 10, 11, 12], dtype=np.intc)
@@ -1120,7 +1170,10 @@ def test_real_dflash_block_limits_verification_and_interrupted_retry(dflash_mode
         llm.reset()
 
 
-@pytest.fixture(scope="module", params=[False, True], ids=["native", "device-fallback"])
+@pytest.fixture(
+    scope="module", params=[(False, 4), (True, 4), (False, 0)],
+    ids=["native", "device-fallback", "native-no-checkpoints"],
+)
 def shared_mtp_model(request):
     path = os.environ.get("LLAMA_TEST_HYBRID_MODEL")
     if not path:
@@ -1128,16 +1181,23 @@ def shared_mtp_model(request):
             pytest.fail("LLAMA_TEST_HYBRID_MODEL is required in Actions")
         pytest.skip("Set LLAMA_TEST_HYBRID_MODEL to run real-model tests")
     assert os.path.isfile(path), path
+    fallback, checkpoints = request.param
     with closing(llama_cpp.Llama(
         model_path=path, n_ctx=256, n_batch=64, n_ubatch=64,
-        n_gpu_layers=0, verbose=False, ctx_checkpoints=4,
+        n_gpu_layers=int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0")),
+        verbose=False, ctx_checkpoints=checkpoints,
         speculative=SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3),
     )) as llm:
         assert llm.is_hybrid and llm._model.n_layer_nextn() > 0
-        if request.param:
+        if fallback:
             llm._ctx.n_rs_seq = lambda: 0
             llm.speculative._use_native_draft_rollback = False
-        yield llm, request.param
+        if checkpoints == 0:
+            capture = Mock(side_effect=AssertionError("Target checkpoints are disabled"))
+            llm._hybrid_cache_mgr._get_data_ext = capture
+        yield llm, fallback
+        if checkpoints == 0:
+            capture.assert_not_called()
 
 
 @pytest.fixture
@@ -1177,6 +1237,84 @@ def test_real_mtp_verification_and_interrupted_retry(mtp_model):
     llm.reset()
     assert llm._ctx.memory_seq_pos_max(0) == -1
     assert llm.speculative.draft_context.memory_seq_pos_max(0) == -1
+
+
+@pytest.mark.parametrize("stop_after", [1, 2, 4, 7])
+def test_real_mtp_zero_checkpoints_interrupted_continuation(mtp_model, stop_after):
+    llm, _ = mtp_model
+    if llm.ctx_checkpoints != 0:
+        pytest.skip("Exercises native rollback with Python checkpoints disabled")
+    assert llm.cache is None
+    prompt = llm.tokenize(b"Count from 1 to 20: 1,")
+
+    def stream(tokens, reset=True):
+        return llm.generate(tokens, temp=0, top_k=1, repeat_penalty=1, seed=42, reset=reset)
+
+    with closing(stream(prompt)) as reference_stream:
+        reference = [next(reference_stream) for _ in range(16)]
+    llm.reset()
+    with closing(stream(prompt)) as interrupted:
+        delivered = [next(interrupted) for _ in range(stop_after)]
+    history = prompt + delivered
+    assert llm.n_tokens <= len(history)
+    assert llm._input_ids.tolist() == history[:llm.n_tokens]
+    assert llm._ctx.memory_seq_pos_max(0) == llm.n_tokens - 1
+    assert llm.speculative.draft_context.memory_seq_pos_max(0) == llm.n_tokens - 1
+    with closing(stream(history[llm.n_tokens:], reset=False)) as continuation:
+        delivered.extend(next(continuation) for _ in range(16 - stop_after))
+    assert delivered == reference
+    assert not llm._hybrid_cache_mgr.checkpoints
+
+
+@pytest.mark.parametrize("logits_all", [False, True])
+def test_real_mtp_zero_checkpoint_score_hooks_match_ordinary(mtp_model, monkeypatch, logits_all):
+    llm, _ = mtp_model
+    if llm.ctx_checkpoints != 0:
+        pytest.skip("Exercises the default cache=None, native rollback path")
+    assert llm.cache is None
+    prompt = llm.tokenize(b"1,")
+    if logits_all:
+        monkeypatch.setattr(llm, "_logits_all", True)
+        monkeypatch.setattr(llm, "scores", np.zeros((llm._n_ctx, llm._n_vocab), dtype=np.single))
+
+    def collect():
+        processors, criteria, tokens = [], [], []
+
+        def check_native_row(ids, scores):
+            index = len(ids) - 1 - llm._last_eval_output_start
+            native = np.ctypeslib.as_array(llm._ctx.get_logits_ith(index), shape=(llm._n_vocab,))
+            np.testing.assert_array_equal(scores, native)
+
+        def process(ids, scores):
+            check_native_row(ids, scores)
+            processors.append((ids.tolist(), scores.copy()))
+            return scores
+
+        def observe(ids, scores):
+            check_native_row(ids, scores)
+            criteria.append((ids.tolist(), scores.copy()))
+            return False
+
+        with closing(llm.generate(
+            prompt, temp=0, top_k=1, repeat_penalty=1, seed=42,
+            logits_processor=llama_cpp.LogitsProcessorList([process]),
+            stopping_criteria=llama_cpp.StoppingCriteriaList([observe]),
+        )) as stream:
+            tokens = [next(stream) for _ in range(8)]
+        return tokens, processors, criteria
+
+    with monkeypatch.context() as patch:
+        patch.setattr(llm, "speculative", None)
+        llm.reset()
+        reference = collect()
+    llm.reset()
+    result = collect()
+    assert llm.last_speculative_stats["drafted"] > 0
+    assert result[0] == reference[0]
+    for actual_hooks, expected_hooks in zip(result[1:], reference[1:]):
+        assert len(actual_hooks) == len(expected_hooks)
+        for (ids, _), (expected_ids, _) in zip(actual_hooks, expected_hooks):
+            assert ids == expected_ids
 
 
 def test_real_mtp_media_then_text_matches_native_catchup(mtp_model):

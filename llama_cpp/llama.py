@@ -1426,8 +1426,14 @@ class Llama:
         return pos0
 
     def _limit_speculative_draft_n_max(self, requested: int) -> int:
-        """Keep ``[id_last, draft...]`` within one atomic target batch."""
-        return min(max(0, int(requested)), max(0, self.n_batch - 1))
+        """Keep verification within one batch and the available rollback window."""
+        limit = min(max(0, int(requested)), max(0, self.n_batch - 1))
+        if (
+            self.is_hybrid and self.speculative is not None
+            and (self._hybrid_cache_mgr is None or self._hybrid_cache_mgr.max_checkpoints <= 0)
+        ):
+            limit = min(limit, self._ctx.n_rs_seq())
+        return limit
 
     def _decode_eval_batch(
         self, chunk: Sequence[int], initial_batch_size: int
@@ -2139,6 +2145,15 @@ class Llama:
         clears partial state. Completion APIs report finish_reason="abort".
         """
         original_tokens = list(tokens)
+        if (
+            self.is_hybrid and self.speculative is not None
+            and (self._hybrid_cache_mgr is None or self._hybrid_cache_mgr.max_checkpoints <= 0)
+            and (self._ctx.n_rs_seq() <= 0 or not self.speculative.can_follow_target_native_rollback())
+        ):
+            raise RuntimeError(
+                "Speculative decoding on this hybrid/recurrent target requires "
+                "ctx_checkpoints > 0 or native recurrent-state rollback support"
+            )
         prefilled = getattr(self, "_prefilled_prompt", None)
         self._prefilled_prompt = None
         use_prefill = (
@@ -2316,10 +2331,10 @@ class Llama:
         if logits_processor:
             def adapter(token_data_array: llama_cpp_lib.llama_token_data_array):
                 if self._logits_all:
-                    current_scores = self._scores[self.n_tokens - 1, :]
+                    current_scores = self._scores[sample_idx, :]
                 else:
                     current_scores = self._scores[0, :]
-                new_scores = logits_processor(self._input_ids, current_scores)
+                new_scores = logits_processor(self._input_ids[:sample_idx + 1], current_scores)
 
                 size = token_data_array.size
                 data_ptr = token_data_array.data
@@ -2579,7 +2594,7 @@ class Llama:
                             tokens,
                             active_loras=active_loras,
                             control_vector=control_vector,
-                            copy_logits=copy_logits,
+                            copy_logits=copy_logits and not self._speculative_verifying,
                         )
 
                 if self.speculative is not None and not speculative_begun:
@@ -2610,6 +2625,12 @@ class Llama:
                             f"token_index={sample_idx}, output_start="
                             f"{self._last_eval_output_start}, output_count="
                             f"{self._last_eval_output_count}"
+                        )
+                    if self._speculative_verifying and copy_logits and not self._logits_all:
+                        # Verification contains several output rows. Refresh the
+                        # hook buffer for this sample, not the batch's last row.
+                        self.scores[0] = np.ctypeslib.as_array(
+                            self._ctx.get_logits_ith(output_idx), shape=(self._n_vocab,),
                         )
                     token = self._sample_output(self._sampling_ctx, sample_idx)
                     self._sampling_ctx.accept(token, False if grammar is None else True)
