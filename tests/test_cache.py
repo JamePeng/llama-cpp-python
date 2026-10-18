@@ -28,24 +28,24 @@ def cache(request, tmp_path):
         instance.cache.close()
 
 
-@pytest.mark.parametrize("query,expected", [
-    ([1, 2, 3, 4], [1, 2, 3, 4]),
-    ([1, 2, 3, 4, 5], [1, 2, 3, 4]),
-    ([1, 2, 3], [1, 2, 3, 4]),
-    ([1, 2, 9], [1, 2, 3, 4]),
-    ([1, 8, 9], [1, 8]),
-    ([9], None),
-    ([], None),
-])
-def test_cache_backends_select_longest_common_prefix(cache, query, expected):
+def test_cache_backends_select_longest_common_prefix(cache):
     cache[[1, 2, 3, 4]] = snapshot([1, 2, 3, 4])
     cache[[1, 8]] = snapshot([1, 8])
-    assert (query in cache) is (expected is not None)
-    if expected is None:
-        with pytest.raises(KeyError):
-            cache[query]
-    else:
-        assert cache[query].input_ids.tolist() == expected
+    for query, expected in (
+        ([1, 2, 3, 4], [1, 2, 3, 4]),
+        ([1, 2, 3, 4, 5], [1, 2, 3, 4]),
+        ([1, 2, 3], [1, 2, 3, 4]),
+        ([1, 2, 9], [1, 2, 3, 4]),
+        ([1, 8, 9], [1, 8]),
+        ([9], None),
+        ([], None),
+    ):
+        assert (query in cache) is (expected is not None), query
+        if expected is None:
+            with pytest.raises(KeyError):
+                cache[query]
+        else:
+            assert cache[query].input_ids.tolist() == expected, query
 
 
 def test_equal_prefix_selection_is_stable_across_reads_and_replacement(cache):
@@ -64,19 +64,19 @@ def test_zero_length_prefix_is_not_a_hit(cache):
     assert [] not in cache and [1] not in cache
 
 
-@pytest.mark.parametrize("prefix_length", [1, 31, 32, 33, 287, 288, 289, 543, 544, 1023, 1024])
-def test_long_prefix_selection_and_minimum_threshold(cache, prefix_length):
+def test_long_prefix_selection_and_minimum_threshold(cache):
     tokens = list(range(1024))
     cache[tokens] = snapshot(tokens)
-    # Lists and NumPy token arrays must select the same saved state.
-    query = tokens[:prefix_length] + [2048]
-    for key in (query, np.asarray(query, dtype=np.intc)):
-        state = cache.get_matching_state(key, min_prefix_length=prefix_length - 1)
-        assert state.input_ids.tolist() == tokens
-        with pytest.raises(KeyError):
-            cache.get_matching_state(key, min_prefix_length=prefix_length)
-    # Ending the query inside a saved history is also a common-prefix hit.
-    assert cache[tokens[:prefix_length]].input_ids.tolist() == tokens
+    for prefix_length in (1, 31, 32, 33, 287, 288, 289, 543, 544, 1023, 1024):
+        # Lists and NumPy token arrays must select the same saved state.
+        query = tokens[:prefix_length] + [2048]
+        for key in (query, np.asarray(query, dtype=np.intc)):
+            state = cache.get_matching_state(key, min_prefix_length=prefix_length - 1)
+            assert state.input_ids.tolist() == tokens, prefix_length
+            with pytest.raises(KeyError):
+                cache.get_matching_state(key, min_prefix_length=prefix_length)
+        # Ending the query inside a saved history is also a common-prefix hit.
+        assert cache[tokens[:prefix_length]].input_ids.tolist() == tokens, prefix_length
 
 
 def test_disk_rejects_unhelpful_candidates_before_deserializing(tmp_path, monkeypatch):

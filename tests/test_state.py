@@ -16,7 +16,7 @@ import pytest
 from llama_cpp import Llama
 from llama_cpp.llama import AbortCriteria, LlamaState, StoppingCriteriaList
 from llama_cpp import llama_cpp as lib
-from llama_cpp._internals import LlamaContext, LlamaSampler, LlamaSamplingContext
+from llama_cpp._internals import LlamaBatch, LlamaContext, LlamaSampler, LlamaSamplingContext
 from llama_cpp.llama_cache import HybridCheckpoint, HybridCheckpointCache, LlamaDiskCache, LlamaRAMCache, LlamaTrieCache
 from llama_cpp.llama_embedding import LlamaEmbedding
 
@@ -50,8 +50,7 @@ def test_generation_keyboard_interrupt_discards_partial_logits_state(model, monk
         assert captured.err == ""
 
 
-@pytest.fixture
-def model(monkeypatch):
+def _state_model(monkeypatch):
     llm = object.__new__(Llama)
     llm.verbose = False
     llm._n_ctx, llm._n_vocab = 8, 3
@@ -82,6 +81,11 @@ def model(monkeypatch):
     monkeypatch.setattr(lib, "llama_state_get_data", save)
     monkeypatch.setattr(lib, "llama_state_set_data", lambda ctx, buf, size: size)
     return llm, native_logits
+
+
+@pytest.fixture
+def model(monkeypatch):
+    return _state_model(monkeypatch)
 
 
 @pytest.fixture
@@ -138,33 +142,22 @@ def test_hybrid_full_match_requires_valid_output(generation_model, checkpoints, 
         llm._hybrid_cache_mgr.save_checkpoint.assert_not_called()
 
 
-@pytest.mark.parametrize("prompt,expected", [([1, 2, 0], [[0]]), ([1, 0], [[1, 0]])])
+@pytest.mark.parametrize("prompt,expected", [
+    ([1, 2, 0], [[0]]), ([1, 0], [[1, 0]]), ([2, 1], [[2, 1]]), ([1], [[1]]),
+])
 def test_disabled_hybrid_checkpoints_append_or_rebuild(generation_model, prompt, expected):
     llm, _ = generation_model
     llm.is_hybrid = True
-    llm._hybrid_cache_mgr = HybridCheckpointCache(llm._ctx.ctx, max_checkpoints=0)
+    cache = llm._hybrid_cache_mgr = HybridCheckpointCache(llm._ctx.ctx, max_checkpoints=0)
+    cache.find_best_checkpoint = Mock(side_effect=AssertionError("Disabled"))
+    llm.longest_token_prefix = Mock(wraps=Llama.longest_token_prefix)
     with closing(llm.generate(prompt)) as stream:
         assert next(stream) == 1
     assert [tokens for tokens, _ in llm.eval_calls] == expected
     assert llm._input_ids.tolist() == prompt
-    assert llm._hybrid_cache_mgr.cache_size == 0
-
-
-@pytest.mark.parametrize("prompt", [[1, 2, 0], [1, 0], [2, 1], [1]])
-def test_live_prefix_matching_is_computed_once_and_disabled_checkpoints_are_not_searched(
-    generation_model, prompt
-):
-    llm, _ = generation_model
-    llm.is_hybrid = True
-    llm._hybrid_cache_mgr = SimpleNamespace(
-        max_checkpoints=0, find_best_checkpoint=Mock(side_effect=AssertionError("Disabled")),
-        save_checkpoint=Mock(),
-    )
-    llm.longest_token_prefix = Mock(wraps=Llama.longest_token_prefix)
-    with closing(llm.generate(prompt)) as stream:
-        assert next(stream) == 1
+    assert cache.cache_size == 0
     llm.longest_token_prefix.assert_called_once()
-    llm._hybrid_cache_mgr.find_best_checkpoint.assert_not_called()
+    cache.find_best_checkpoint.assert_not_called()
 
 
 @pytest.mark.parametrize("checkpoints,native_slots,requested,expected", [
@@ -181,23 +174,12 @@ def test_zero_checkpoint_draft_limit_respects_native_rollback_capacity(
     assert llm._limit_speculative_draft_n_max(requested) == expected
 
 
-def test_unsupported_zero_checkpoint_speculation_preserves_prefill_handoff(model):
-    llm, _ = model
-    llm.is_hybrid = True
-    llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=0)
-    llm._ctx.n_rs_seq = lambda: 0
-    llm.speculative = SimpleNamespace(can_follow_target_native_rollback=lambda: False)
-    llm._prefilled_prompt = (1, 2)
-    with pytest.raises(RuntimeError, match="ctx_checkpoints > 0"):
-        next(llm.generate([1, 2]))
-    assert llm._prefilled_prompt == (1, 2)
-    assert llm.n_tokens == 2
-    llm._ctx.memory_clear.assert_not_called()
-
-
 @pytest.mark.parametrize("restored", [False, True])
 @pytest.mark.parametrize("logits_all", [False, True])
-def test_disabled_hybrid_fast_path_refreshes_scores_for_hooks(generation_model, restored, logits_all):
+@pytest.mark.parametrize("hook", ["processor", "criteria"])
+def test_disabled_hybrid_fast_path_refreshes_scores_for_hooks(
+    generation_model, monkeypatch, restored, logits_all, hook
+):
     llm, native_logits = generation_model
     llm._logits_all = logits_all
     if logits_all:
@@ -207,48 +189,37 @@ def test_disabled_hybrid_fast_path_refreshes_scores_for_hooks(generation_model, 
     if restored:
         llm.load_state(llm.save_state())
     llm.scores.fill(99)
-    seen = []
-
-    def stop(ids, scores):
-        seen.append(scores.copy())
-        return False
-
-    with closing(llm.generate([1, 2], stopping_criteria=StoppingCriteriaList([stop]))) as stream:
-        assert next(stream) == 1
-    assert llm.eval_calls == []
-    np.testing.assert_array_equal(seen, [native_logits])
-
-
-@pytest.mark.parametrize("logits_all", [False, True])
-def test_disabled_hybrid_fast_path_runs_logits_processor_with_fresh_scores(
-    generation_model, monkeypatch, logits_all
-):
-    llm, native_logits = generation_model
-    llm._logits_all = logits_all
-    if logits_all:
-        llm.scores = np.full((llm._n_ctx, llm._n_vocab), 99, dtype=np.single)
-    llm.is_hybrid = True
-    llm._hybrid_cache_mgr = HybridCheckpointCache(llm._ctx.ctx, max_checkpoints=0)
-    seen = []
+    seen = {"processor": [], "criteria": []}
 
     def processor(ids, scores):
-        seen.append(scores.copy())
+        assert ids.tolist() == [1, 2]
+        seen["processor"].append(scores.copy())
         return np.array([0, 0, 10], dtype=np.single)
+
+    def stop(ids, scores):
+        assert ids.tolist() == [1, 2]
+        seen["criteria"].append(scores.copy())
+        return False
 
     monkeypatch.setattr("llama_cpp.llama.CustomSampler", lambda callback: callback)
 
     def sampling_context(params, model):
         def sample(*args, **kwargs):
+            if not params.custom_samplers:
+                return 1
             data = [SimpleNamespace(id=i, logit=0.0) for i in range(3)]
             params.custom_samplers[0](SimpleNamespace(size=3, data=data))
             return max(data, key=lambda item: item.logit).id
         return SimpleNamespace(sample=sample, accept=lambda *args: None, close=lambda: None)
 
     monkeypatch.setattr("llama_cpp.llama.LlamaSamplingContext", sampling_context)
-    with closing(llm.generate([1, 2], logits_processor=processor)) as stream:
-        assert next(stream) == 2
+    hooks = ({"logits_processor": processor} if hook == "processor" else
+             {"stopping_criteria": StoppingCriteriaList([stop])})
+    with closing(llm.generate([1, 2], **hooks)) as stream:
+        assert next(stream) == (2 if hook == "processor" else 1)
     assert llm.eval_calls == []
-    np.testing.assert_array_equal(seen, [native_logits])
+    np.testing.assert_array_equal(seen[hook], [native_logits])
+    assert seen["criteria" if hook == "processor" else "processor"] == []
 
 
 @pytest.mark.parametrize("needs_scores", [False, True])
@@ -319,6 +290,7 @@ def test_disabled_hybrid_speculation_checks_rollback_before_mutation(
     llm.speculative = SimpleNamespace(
         can_follow_target_native_rollback=lambda: engine_support, clear=Mock(),
     )
+    llm._prefilled_prompt = None if allowed else (1, 2)
     llm.eval = Mock()
 
     class SamplingBoundary(Exception):
@@ -331,77 +303,81 @@ def test_disabled_hybrid_speculation_checks_rollback_before_mutation(
     llm.eval.assert_not_called()
     assert llm._ctx.memory_clear.call_count == int(allowed)
     assert llm.n_tokens == (0 if allowed else 2)
+    if not allowed:
+        assert llm._prefilled_prompt == (1, 2)
 
 
 @pytest.mark.parametrize("cache_type", [LlamaRAMCache, LlamaTrieCache, LlamaDiskCache])
-@pytest.mark.parametrize("mode,should_load", [
-    ("equal", False), ("better", True), ("speculative", False),
-    ("hybrid_branch", False), ("hybrid_append", True),
-    ("hybrid_exact_no_logits", False), ("hybrid_exact_owned", True),
-])
 @pytest.mark.parametrize("stream", [False, True])
 def test_completion_only_restores_usable_states_and_saves_actual_history(
-    model, monkeypatch, tmp_path, cache_type, mode, should_load, stream
+    monkeypatch, tmp_path, cache_type, stream
 ):
-    llm, _ = model
-    llm._model = SimpleNamespace(
-        vocab=object(), token_bos=lambda: 1, token_eos=lambda: 2,
-        token_sep=lambda: -1, token_fim_pre=lambda: -1,
-        token_fim_mid=lambda: -1, token_fim_suf=lambda: -1, get_add_sep=lambda: False,
-    )
-    llm._abort_event = threading.Event()
-    llm.metadata = {}
-    llm.spm_infill = False
-    llm.model_path = "fake.gguf"
-    llm.is_hybrid = mode.startswith("hybrid")
-    cached_tokens = [1, 2] if mode == "hybrid_append" else [1, 2, 0]
-    llm.n_tokens = len(cached_tokens)
-    llm.input_ids[:llm.n_tokens] = cached_tokens
-    llm._last_eval_output_start, llm._last_eval_output_count = 0, llm.n_tokens
-    cached = llm.save_state()
-    if mode == "hybrid_exact_no_logits":
-        cached.last_logits = None
-    cache = LlamaDiskCache(str(tmp_path)) if cache_type is LlamaDiskCache else cache_type()
-    llm.cache = cache
-    cache[cached_tokens] = cached
-    llm.n_tokens = 2 if mode == "equal" else 0
-    llm.speculative = object() if mode == "speculative" else None
-    prompt = [1, 2, 1] if mode in ("equal", "hybrid_branch") else [1, 2, 0]
-    load = Mock(wraps=llm.load_state)
-    save = Mock(wraps=llm.save_state)
-    monkeypatch.setattr(llm, "load_state", load)
-    monkeypatch.setattr(llm, "save_state", save)
-    reads = []
-    if cache_type is LlamaDiskCache:
-        original_read = type(cache.cache).__getitem__
+    for mode, should_load in (
+        ("equal", False), ("better", True), ("speculative", False),
+        ("hybrid_branch", False), ("hybrid_append", True),
+        ("hybrid_exact_no_logits", False), ("hybrid_exact_owned", True),
+    ):
+        # Fresh models and patch scopes keep all 42 combinations independent.
+        with monkeypatch.context() as patch:
+            llm, _ = _state_model(patch)
+            llm._model = SimpleNamespace(
+                vocab=object(), token_bos=lambda: 1, token_eos=lambda: 2,
+                token_sep=lambda: -1, token_fim_pre=lambda: -1,
+                token_fim_mid=lambda: -1, token_fim_suf=lambda: -1, get_add_sep=lambda: False,
+            )
+            llm._abort_event = threading.Event()
+            llm.metadata = {}
+            llm.spm_infill = False
+            llm.model_path = "fake.gguf"
+            llm.is_hybrid = mode.startswith("hybrid")
+            cached_tokens = [1, 2] if mode == "hybrid_append" else [1, 2, 0]
+            llm.n_tokens = len(cached_tokens)
+            llm.input_ids[:llm.n_tokens] = cached_tokens
+            llm._last_eval_output_start, llm._last_eval_output_count = 0, llm.n_tokens
+            cached = llm.save_state()
+            if mode == "hybrid_exact_no_logits":
+                cached.last_logits = None
+            cache = LlamaDiskCache(str(tmp_path / mode)) if cache_type is LlamaDiskCache else cache_type()
+            llm.cache = cache
+            cache[cached_tokens] = cached
+            llm.n_tokens = 2 if mode == "equal" else 0
+            llm.speculative = object() if mode == "speculative" else None
+            prompt = [1, 2, 1] if mode in ("equal", "hybrid_branch") else [1, 2, 0]
+            load = Mock(wraps=llm.load_state)
+            save = Mock(wraps=llm.save_state)
+            patch.setattr(llm, "load_state", load)
+            patch.setattr(llm, "save_state", save)
+            reads = []
+            if cache_type is LlamaDiskCache:
+                original_read = type(cache.cache).__getitem__
 
-        def read(instance, key):
-            reads.append(key)
-            return original_read(instance, key)
+                def read(instance, key):
+                    reads.append(key)
+                    return original_read(instance, key)
 
-        monkeypatch.setattr(type(cache.cache), "__getitem__", read)
+                patch.setattr(type(cache.cache), "__getitem__", read)
 
-    def generate(tokens, **kwargs):
-        llm.n_tokens = len(tokens)
-        llm.input_ids[:llm.n_tokens] = tokens
-        llm._last_eval_output_start, llm._last_eval_output_count = llm.n_tokens - 1, 1
-        yield 1  # This sampled token has not been decoded into native state.
+            def generate(tokens, **kwargs):
+                llm.n_tokens = len(tokens)
+                llm.input_ids[:llm.n_tokens] = tokens
+                llm._last_eval_output_start, llm._last_eval_output_count = llm.n_tokens - 1, 1
+                yield 1  # This sampled token has not been decoded into native state.
 
-    llm.generate = generate
-    llm.detokenize = lambda tokens, **kwargs: b"x" * len(tokens)
-    monkeypatch.setattr(lib, "llama_token_is_eog", lambda *args: False)
-    try:
-        list(llm._create_completion(prompt=prompt, max_tokens=1, stream=stream))
-        assert load.call_count == int(should_load)
-        assert save.call_count == int(mode != "speculative")
-        if mode in ("equal", "speculative"):
-            assert reads == []
-        if mode != "speculative":
-            assert cache._find_longest_prefix_key(tuple(prompt)) == tuple(prompt)
-            assert cache[prompt].n_tokens == len(prompt)
-    finally:
-        if cache_type is LlamaDiskCache:
-            cache.cache.close()
+            llm.generate = generate
+            llm.detokenize = lambda tokens, **kwargs: b"x" * len(tokens)
+            patch.setattr(lib, "llama_token_is_eog", lambda *args: False)
+            try:
+                list(llm._create_completion(prompt=prompt, max_tokens=1, stream=stream))
+                assert load.call_count == int(should_load), mode
+                assert save.call_count == int(mode != "speculative"), mode
+                if mode in ("equal", "speculative"):
+                    assert reads == [], mode
+                if mode != "speculative":
+                    assert cache._find_longest_prefix_key(tuple(prompt)) == tuple(prompt), mode
+                    assert cache[prompt].n_tokens == len(prompt), mode
+            finally:
+                if cache_type is LlamaDiskCache:
+                    cache.cache.close()
 
 
 def test_state_owns_native_logits_not_stale_scores_and_survives_pickle(model):
@@ -983,6 +959,42 @@ def test_hybrid_checkpoint_preserves_native_positions_and_removes_suffix(monkeyp
     assert removals == [(memory, 3, 43, -1)]
 
 
+def _native_greedy_reference(llm, context, batch, chunks, max_tokens):
+    """Decode fixed batches in a separate context without Python prefix reuse."""
+    context.memory_clear(True)
+    position = 0
+    prompt = []
+    for chunk in chunks:
+        if not chunk:
+            continue
+        batch.reset()
+        outputs = [True] * len(chunk) if llm._logits_all else [False] * (len(chunk) - 1) + [True]
+        batch.add_sequence(chunk, list(range(position, position + len(chunk))), [0], outputs)
+        assert context.decode(batch) == 0
+        position += len(chunk)
+        prompt.extend(chunk)
+    logits = np.ctypeslib.as_array(context.get_logits_ith(-1), shape=(llm._n_vocab,)).copy()
+    pos_min, pos_max = context.memory_seq_pos_min(0), context.memory_seq_pos_max(0)
+    generated = []
+    with closing(LlamaSampler()) as sampler:
+        sampler.add_greedy()
+        for index in range(max_tokens):
+            token = sampler.sample(context, -1)
+            if lib.llama_token_is_eog(llm._model.vocab, token):
+                break
+            generated.append(token)
+            sampler.accept(token)
+            if index + 1 < max_tokens:
+                batch.reset()
+                batch.add_sequence([token], [position], [0], [True])
+                assert context.decode(batch) == 0
+                position += 1
+    return SimpleNamespace(
+        logits=logits, pos_min=pos_min, pos_max=pos_max,
+        text=llm.detokenize(generated, prev_tokens=prompt).decode("utf-8", errors="ignore"),
+    )
+
+
 @pytest.fixture(scope="module", params=[False, True], ids=["host", "device"])
 def hybrid_model(request):
     path = os.environ.get("LLAMA_TEST_HYBRID_MODEL")
@@ -1068,34 +1080,74 @@ def test_real_hybrid_zero_checkpoints_reuses_or_rebuilds_output(
     llm.reset()
 
 
+@pytest.fixture(scope="module")
+def hybrid_completion_cases(hybrid_model):
+    llm = hybrid_model
+    tokens = llm.tokenize(b"The capital of France is")
+    prompts = {
+        "exact": tokens,
+        "append": tokens + llm.tokenize(b" and Italy is", add_bos=False),
+        "branch": tokens[:-1] + llm.tokenize(b" was", add_bos=False),
+    }
+    suffix = prompts["append"][len(tokens):]
+    batches = {
+        "exact": (tokens,),
+        "append": (tokens, suffix[:-1], suffix[-1:]),
+        "branch": (prompts["branch"][:-1], prompts["branch"][-1:]),
+    }
+    references = {}
+    llm.reset()
+    try:
+        # Match native prefill shapes: cache append retains the whole snapshot,
+        # while a fresh Hybrid request evaluates its final token separately.
+        with closing(LlamaContext(model=llm._model, params=llm.context_params,
+                                  verbose=False)) as context:
+            with closing(LlamaBatch(n_tokens=llm.n_batch, embd=0, n_seq_max=1,
+                                    verbose=False)) as batch:
+                for kind, chunks in batches.items():
+                    references[kind] = _native_greedy_reference(llm, context, batch, chunks, 4).text
+        llm.eval(tokens)
+        state = llm.save_state()
+        for array in (state.input_ids, state.scores, state.last_logits):
+            array.flags.writeable = False
+    finally:
+        llm.reset()
+    return tokens, prompts, batches, references, state
+
+
 @pytest.mark.parametrize("cache_type", [LlamaRAMCache, LlamaTrieCache, LlamaDiskCache])
 @pytest.mark.parametrize("request_kind", ["exact", "append", "branch"])
 def test_real_hybrid_completion_cache_matches_cold_generation(
-    hybrid_model, monkeypatch, tmp_path, cache_type, request_kind
+    hybrid_model, hybrid_completion_cases, monkeypatch, tmp_path, cache_type, request_kind
 ):
     llm = hybrid_model
-    tokens = llm.tokenize(b"The capital of France is")
-    prompt = tokens
-    if request_kind == "append":
-        prompt = tokens + llm.tokenize(b" and Italy is", add_bos=False)
-    elif request_kind == "branch":
-        prompt = tokens[:-1] + llm.tokenize(b" was", add_bos=False)
+    tokens, prompts, batches, references, state = hybrid_completion_cases
     options = dict(max_tokens=4, temperature=0, seed=42)
-    llm.reset()
-    reference = llm.create_completion(prompt, **options)["choices"][0]["text"]
-    llm.reset()
-    llm.eval(tokens)
-    state = llm.save_state()
     cache = LlamaDiskCache(str(tmp_path)) if cache_type is LlamaDiskCache else cache_type()
     cache[tokens] = state
     llm.set_cache(cache)
     llm.reset()
     restore = Mock(wraps=llm.load_state)
     monkeypatch.setattr(llm, "load_state", restore)
+    evaluated = []
+    native_eval = llm.eval
+
+    def evaluate(tokens, **kwargs):
+        evaluated.append((llm.n_tokens, list(tokens)))
+        return native_eval(tokens, **kwargs)
+
+    monkeypatch.setattr(llm, "eval", evaluate)
     try:
-        result = llm.create_completion(prompt, **options)
-        assert result["choices"][0]["text"] == reference
+        result = llm.create_completion(prompts[request_kind], **options)
+        assert result["choices"][0]["text"] == references[request_kind]
         assert restore.call_count == int(request_kind != "branch")
+        retained = len(tokens) if request_kind != "branch" else 0
+        expected, position = [], 0
+        for chunk in batches[request_kind]:
+            if chunk and position >= retained:
+                expected.append((position, chunk))
+            position += len(chunk)
+        assert [(pos, chunk) for pos, chunk in evaluated if pos < len(prompts[request_kind])] == expected
     finally:
         llm.set_cache(None)
         llm.reset()
@@ -1104,7 +1156,7 @@ def test_real_hybrid_completion_cache_matches_cold_generation(
 
 
 @pytest.mark.parametrize("logits_all", [False, True])
-def test_real_hybrid_zero_checkpoints_multiturn_matches_cold_generation(logits_all):
+def test_real_hybrid_zero_checkpoints_multiturn_matches_cold_generation(monkeypatch, logits_all):
     path = os.environ.get("LLAMA_TEST_HYBRID_MODEL")
     if not path:
         pytest.skip("Set LLAMA_TEST_HYBRID_MODEL to run real-model tests")
@@ -1120,29 +1172,53 @@ def test_real_hybrid_zero_checkpoints_multiturn_matches_cold_generation(logits_a
         base = llm.tokenize(b"The capital of France is")
         append = base + llm.tokenize(b" and Italy is", add_bos=False)
         branch = base[:-1] + llm.tokenize(b" was", add_bos=False)
-        prompts = [base, base, append, base, branch, base[:1], base]
+        cases = (
+            ("cold", base, 0), ("exact", base, len(base)),
+            ("append", append, len(base)), ("shorter", base, 0),
+            ("branch", branch, 0), ("single-token", base[:1], 0),
+            ("append-after-single", base, 1),
+        )
+        evaluated = []
+        native_eval = llm.eval
 
-        def complete(prompt):
-            def observe(ids, scores):
-                assert scores.shape == (llm._n_vocab,)
-                assert np.isfinite(scores).all()
-                expected = np.ctypeslib.as_array(
-                    llm._ctx.get_logits_ith(-1), shape=(llm._n_vocab,)
-                )
-                np.testing.assert_array_equal(scores, expected)
-                return False
+        def evaluate(tokens, **kwargs):
+            evaluated.append((llm.n_tokens, list(tokens)))
+            return native_eval(tokens, **kwargs)
 
-            return llm.create_completion(
-                prompt, max_tokens=1, temperature=0, seed=42,
-                stopping_criteria=StoppingCriteriaList([observe]),
-            )["choices"][0]["text"]
+        monkeypatch.setattr(llm, "eval", evaluate)
+        # Quantized backends can change greedy tokens across batch shapes.
+        # Rebuild each reference in an independent context with the same split;
+        # do not derive the expected split from the path under test.
+        with closing(LlamaContext(model=llm._model, params=llm.context_params,
+                                  verbose=False)) as reference:
+            with closing(LlamaBatch(n_tokens=llm.n_batch, embd=0, n_seq_max=1,
+                                    verbose=False)) as batch:
+                for name, prompt, retained in cases:
+                    chunks = (prompt[:retained], prompt[retained:]) if retained else (prompt,)
+                    expected = _native_greedy_reference(llm, reference, batch, chunks, 1)
+                    seen = []
 
-        reference = []
-        for prompt in prompts:
-            llm.reset()
-            reference.append(complete(prompt))
-        llm.reset()
-        assert [complete(prompt) for prompt in prompts] == reference
+                    def observe(ids, scores):
+                        assert ids.tolist() == prompt, name
+                        assert scores.shape == (llm._n_vocab,) and np.isfinite(scores).all(), name
+                        native = np.ctypeslib.as_array(llm._ctx.get_logits_ith(-1), shape=(llm._n_vocab,))
+                        np.testing.assert_array_equal(scores, native, err_msg=name)
+                        np.testing.assert_array_equal(scores, expected.logits, err_msg=name)
+                        seen.append(True)
+                        return False
+
+                    evaluated.clear()
+                    result = llm.create_completion(
+                        prompt, max_tokens=1, temperature=0, seed=42,
+                        stopping_criteria=StoppingCriteriaList([observe]),
+                    )
+                    assert result["choices"][0]["text"] == expected.text, name
+                    assert seen, name
+                    assert evaluated == ([] if retained == len(prompt) else [(retained, prompt[retained:])]), name
+                    assert llm._input_ids.tolist() == prompt, name
+                    assert llm.n_tokens == len(prompt), name
+                    assert llm._ctx.memory_seq_pos_min(0) == expected.pos_min, name
+                    assert llm._ctx.memory_seq_pos_max(0) == expected.pos_max == len(prompt) - 1, name
         assert not cache.checkpoints and cache.cache_size == 0
         cache._get_size_ext.assert_not_called()
         cache._get_data_ext.assert_not_called()
