@@ -915,6 +915,13 @@ class HybridCheckpointCache(BaseLlamaCache):
         pos_min = self._memory_seq_pos_min(memory, seq_id)
         pos_max = self._memory_seq_pos_max(memory, seq_id)
 
+        # Replace the same cursor only after the new capture succeeds.
+        self.checkpoints[:] = [
+            cp for cp in self.checkpoints
+            if cp.seq_id != seq_id or cp.pos != current_pos
+        ]
+        self._current_size = sum(cp.size for cp in self.checkpoints)
+
         # 3. Store the newly extracted checkpoint
         self.checkpoints.append(HybridCheckpoint(
             pos=current_pos,
@@ -963,19 +970,16 @@ class HybridCheckpointCache(BaseLlamaCache):
 
         flags = self._flags
 
-        # Size is a compatibility check, not proof that the KV prefix is valid.
-        current_size = self._get_size_ext(self._ctx, seq_id, flags)
-        if current_size != cp.size:
-            if self.verbose:
-                print(f"HybridCheckpointCache(restore_checkpoint): [Warning] State size mismatch before restore: "
-                      f"expected checkpoint size={cp.size}, got current size={current_size} -> possible invalidation")
+        if cp.size <= 0 or cp.size != len(cp.data):
             return False
 
-        buffer = (ctypes.c_uint8 * cp.size).from_buffer_copy(cp.data)
+        # Native consumes const bytes synchronously. Keep their owner alive.
+        state_bytes = bytes(cp.data)
+        state_pointer = ctypes.cast(ctypes.c_char_p(state_bytes), ctypes.POINTER(ctypes.c_uint8))
         suffix_start = cp.pos_max + 1 if cp.pos_max is not None else cp.pos
         try:
             success = self._set_data_ext(
-                self._ctx, buffer, cp.size, seq_id, flags
+                self._ctx, state_pointer, cp.size, seq_id, flags
             ) == cp.size
             if success:
                 success = bool(self._memory_seq_rm(

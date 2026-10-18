@@ -580,6 +580,52 @@ def test_checkpoint_restore_transaction_updates_all_registered_caches(tracked_ca
     assert not cache.restore_checkpoint(future)
 
 
+def test_checkpoint_restore_borrows_bytes_and_accepts_changed_live_size(tracked_cache):
+    context, cache, native = tracked_cache
+    cp = cache.checkpoints[0]
+    cp.data, cp.size = b"a\0b", 3
+    cache._get_size_ext = Mock(side_effect=AssertionError("Live export size is not a restore constraint"))
+    expected_address = ctypes.cast(ctypes.c_char_p(cp.data), ctypes.c_void_p).value
+
+    def restore(ctx, buffer, size, seq_id, flags):
+        assert ctx is context.ctx and seq_id == cp.seq_id
+        assert size == 3 and ctypes.string_at(buffer, size) == b"a\0b"
+        assert ctypes.cast(buffer, ctypes.c_void_p).value == expected_address
+        return size
+
+    native["state_seq_set_data_ext"].side_effect = restore
+    assert cache.restore_checkpoint(cp)
+    cache._get_size_ext.assert_not_called()
+    native["memory_seq_rm"].assert_called_once_with(native["get_memory"].return_value, 0, 3, -1)
+
+
+@pytest.mark.parametrize("size", [0, 2])
+def test_checkpoint_invalid_payload_size_is_rejected_before_native_restore(tracked_cache, size):
+    _, cache, native = tracked_cache
+    cp = cache.checkpoints[0]
+    cp.size = size
+    assert not cache.restore_checkpoint(cp)
+    native["state_seq_set_data_ext"].assert_not_called()
+    native["memory_seq_rm"].assert_not_called()
+
+
+def test_duplicate_host_checkpoint_replaces_cursor_after_success(tracked_cache):
+    _, cache, native = tracked_cache
+    cache._get_size_ext = Mock(return_value=1)
+    cache._get_memory = lambda ctx: object()
+    cache._memory_seq_pos_min = lambda *args: 2
+    cache._memory_seq_pos_max = lambda *args: 2
+    previous = cache.checkpoints[0]
+    for _ in range(2):
+        assert cache.save_checkpoint(3, [1, 2, 3])
+        assert len(cache.checkpoints) == 3 and cache.cache_size == 6
+    assert not cache.restore_checkpoint(previous)
+    retained = list(cache.checkpoints)
+    native["state_seq_get_data_ext"].return_value = 0
+    assert not cache.save_checkpoint(3, [1, 2, 3])
+    assert cache.checkpoints == retained and cache.cache_size == 6
+
+
 def test_hybrid_checkpoint_preserves_native_positions_and_removes_suffix(monkeypatch):
     state = bytes([1, 2, 3, 4])
     memory = object()
@@ -624,7 +670,8 @@ def hybrid_model(request):
         pytest.skip("Set LLAMA_TEST_HYBRID_MODEL to run real-model tests")
     assert os.path.isfile(path), path
     with closing(Llama(model_path=path, n_ctx=256, n_batch=64, n_ubatch=64,
-               n_gpu_layers=0, verbose=False, ctx_checkpoints=4,
+               n_gpu_layers=int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0")),
+               verbose=False, ctx_checkpoints=4,
                checkpoint_interval=32, checkpoint_on_device=request.param)) as llm:
         assert llm.is_hybrid
         yield llm
