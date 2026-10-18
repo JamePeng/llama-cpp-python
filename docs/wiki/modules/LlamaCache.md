@@ -2,7 +2,7 @@
 title: Llama Cache
 module_name: llama_cpp.llama_cache
 source_file: llama_cpp/llama_cache.py
-last_updated: 2026-09-17
+last_updated: 2026-10-18
 version_target: "latest"
 ---
 
@@ -33,6 +33,9 @@ LlamaCache = LlamaTrieCache
 ```
 
 This means that code importing `LlamaCache` receives the trie-based cache implementation.
+`Llama.cache` defaults to `None`; attach an optional snapshot cache with
+`llm.set_cache(cache)`. Live native prefix reuse and Hybrid checkpoints work
+independently of these snapshot caches.
 
 Defined in: `llama_cpp/llama_cache.py`
 
@@ -380,18 +383,18 @@ Replacement subtracts the previous state's size before adding the new state.
 
 ### Example
 
+This example requires a compatible text GGUF at `./models/model.gguf`.
+
 ```python
+from contextlib import closing
+
 from llama_cpp import Llama
 from llama_cpp.llama_cache import LlamaRAMCache
 
-llm = Llama(
-    model_path="./models/model.gguf",
-    cache=LlamaRAMCache(capacity_bytes=1 << 30),
-)
-
-response = llm("Q: What is llama.cpp?\nA:", max_tokens=64)
-
-print(response["choices"][0]["text"])
+with closing(Llama(model_path="./models/model.gguf")) as llm:
+    llm.set_cache(LlamaRAMCache(capacity_bytes=1 << 30))
+    response = llm("Q: What is llama.cpp?\nA:", max_tokens=64)
+    print(response["choices"][0]["text"])
 ```
 
 ---
@@ -552,7 +555,12 @@ Behavior:
 
 ### Example
 
+This example requires a compatible text GGUF at `./models/model.gguf`.
+The caller owns the disk cache and closes it after the model.
+
 ```python
+from contextlib import closing
+
 from llama_cpp import Llama
 from llama_cpp.llama_cache import LlamaDiskCache
 
@@ -561,14 +569,13 @@ cache = LlamaDiskCache(
     capacity_bytes=2 << 30,
 )
 
-llm = Llama(
-    model_path="./models/model.gguf",
-    cache=cache,
-)
-
-response = llm("Q: What is llama.cpp?\nA:", max_tokens=64)
-
-print(response["choices"][0]["text"])
+try:
+    with closing(Llama(model_path="./models/model.gguf")) as llm:
+        llm.set_cache(cache)
+        response = llm("Q: What is llama.cpp?\nA:", max_tokens=64)
+        print(response["choices"][0]["text"])
+finally:
+    cache.cache.close()
 ```
 
 ---
@@ -829,18 +836,18 @@ Behavior:
 
 ### Example
 
+This example requires a compatible text GGUF at `./models/model.gguf`.
+
 ```python
+from contextlib import closing
+
 from llama_cpp import Llama
 from llama_cpp.llama_cache import LlamaCache
 
-llm = Llama(
-    model_path="./models/model.gguf",
-    cache=LlamaCache(capacity_bytes=2 << 30),
-)
-
-response = llm("Q: What is llama.cpp?\nA:", max_tokens=64)
-
-print(response["choices"][0]["text"])
+with closing(Llama(model_path="./models/model.gguf")) as llm:
+    llm.set_cache(LlamaCache(capacity_bytes=2 << 30))
+    response = llm("Q: What is llama.cpp?\nA:", max_tokens=64)
+    print(response["choices"][0]["text"])
 ```
 
 Because `LlamaCache` is an alias for `LlamaTrieCache`, this example uses the trie-based cache.
@@ -896,16 +903,12 @@ This means users can import `LlamaCache` and receive the trie-based implementati
 
 ### Example
 
+For an existing `llm`, attach a trie snapshot cache through the alias:
+
 ```python
-from llama_cpp import Llama
 from llama_cpp.llama_cache import LlamaCache
 
-cache = LlamaCache(capacity_bytes=2 << 30)
-
-llm = Llama(
-    model_path="./models/model.gguf",
-    cache=cache,
-)
+llm.set_cache(LlamaCache(capacity_bytes=2 << 30))
 ```
 
 ---

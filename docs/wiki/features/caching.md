@@ -7,6 +7,13 @@ requires truncation, checkpoint restoration, or a fresh prefill.
 
 `Llama.cache` defaults to `None`. Live native KV reuse and Hybrid checkpoints
 work independently of the optional RAM, disk, and trie snapshot caches below.
+For an existing `llm`, attach an optional snapshot cache explicitly:
+
+```python
+from llama_cpp.llama_cache import LlamaRAMCache
+
+llm.set_cache(LlamaRAMCache(capacity_bytes=1 << 30))
+```
 
 RAM, disk, and trie caches select the longest nonempty common token prefix,
 including a shorter request or a branch from an older history. Equal matches
@@ -80,15 +87,20 @@ engines. A full hybrid snapshot can be reused by appending to its complete prefi
 or by sampling its owned final logits; it does not restore historical checkpoints.
 Speculative requests also skip the automatic target-only final checkpoint;
 verification still captures target checkpoints when native rollback cannot be used.
-Supported MTMD handlers have a separate prefill handoff for n-gram engines.
+Supported MTMD handlers have a separate prefill handoff for MTP and n-gram
+engines. Qwen3.5 MTP image requests rebuild both contexts before media prefill;
+the complete prompt must fit without context shifting. See
+[MTP image chat](../examples/vision/vision-qwen.md#mtp-image-chat) for model requirements.
 See [speculative lifecycle](../modules/LlamaSpeculative.md#prefix-cache-reuse-and-reset).
 
-Set `ctx_checkpoints=0` only when the workflow does not need checkpoint-backed
-rollback. Keep it positive for n-gram speculation on a hybrid target. Checkpoint
+Set `ctx_checkpoints=0` to disable Python prompt checkpoints. Keep it positive
+for n-gram speculation on a hybrid target. Checkpoint
 sizes reported by Python exclude context-owned device tensor storage.
-MTP can use zero Python checkpoints when both contexts support native recurrent
-rollback. Verification length is capped by the target's native rollback window;
-native recurrent snapshots and temporary draft checkpoint metadata remain active.
+MTP can use zero Python checkpoints when the target has native recurrent rollback
+slots and the engine can follow target rollback. The draft context may use native
+rollback or device checkpoint restoration and replay. Verification length is
+capped by the target's native rollback window; native recurrent snapshots and
+temporary draft checkpoint metadata remain active.
 Zero Python checkpoints avoid target checkpoint exports and history searches.
 Appending to the live prefix still evaluates only the suffix, but branching or
 shortening a Hybrid history requires a full prefill without a usable checkpoint.
@@ -103,3 +115,19 @@ row and its decoded prefix, excluding unaccepted future draft tokens.
 Wrapped native operations notify registered caches on the same context. Raw C
 calls, automatic SWA eviction, and cross-context shared-KV changes are outside
 that notification mechanism; do not assume arbitrary low-level mutations are safe.
+
+## Quantization and batch shapes
+
+Evaluating a full prompt in one batch can produce different logits from evaluating
+its prefix and suffix separately. Backend kernels and reduced precision, including
+quantized GGUF weights such as Q4_K_M, can change numerical rounding. When leading
+logits are close, the next greedy token can change even with `temperature=0` and a
+fixed seed. Speculative verification also changes batch shapes. FP16/BF16 weights
+do not guarantee identical results across batch shapes or backends.
+
+Different generated text alone does not establish a cache or rollback error.
+To isolate state reuse, compare against an independent native context using the
+same model, runtime settings, batch boundaries, and requested output rows. Compare
+the logits as well as token history and native positions; separately check that
+only the intended suffix was evaluated to distinguish numerical differences from
+incorrect restoration.

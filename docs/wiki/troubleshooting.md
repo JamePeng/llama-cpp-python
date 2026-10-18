@@ -25,6 +25,14 @@ replace the one needed by an earlier prompt. Fresh speculative text requests
 reset target and engine together and do not perform ordinary cross-request prefix
 reuse. See [caching and state reuse](features/caching.md).
 
+## Reused prompts produce different greedy text
+
+Full prefill, prefix extension, and speculative verification can use different
+batch shapes. With quantized models, close logits can change order even at
+`temperature=0` with a fixed seed. Compare logits and state against an independent
+context with matching batch boundaries before attributing this to cache corruption.
+See [quantization and batch shapes](features/caching.md#quantization-and-batch-shapes).
+
 ## A state or checkpoint cannot be restored
 
 `LlamaState` restore checks model/context compatibility and payload shape before
@@ -54,8 +62,11 @@ Use a projector matching the model and a valid image payload. If a media chunk
 cannot fit alongside retained context, reduce the image token budget or increase
 context capacity. The handler will not advance its ledger after failed native
 removal or accept an out-of-range helper position. A partial prefill failure
-clears uncertain state, so retry with the full messages. Use ordinary or n-gram
-decoding for the Qwen MTMD handler, not MTP/DFlash.
+clears uncertain state, so retry with the full messages. Qwen3.5 image chat supports
+MTP with compatible MTP heads and a matching projector, as well as `NGRAM_MAP_K`
+and `NGRAM_MAP_K4V`. DFlash-family engines are rejected before media prefill.
+For MTP, the complete media prompt must fit without context shifting; see
+[MTP image chat](examples/vision/vision-qwen.md#mtp-image-chat).
 
 ## Embedding changed the generation context
 

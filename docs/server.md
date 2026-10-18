@@ -46,8 +46,9 @@ multi-model JSON configuration can set `"load_mode"` for each model.
 
 | Value | Mode | Description |
 |---:|---|---|
+| `-1` | `LLAMA_LOAD_MODE_AUTO` | Default. Let llama.cpp choose from device capabilities: mmap where supported, ordinary loading otherwise. |
 | `0` | `LLAMA_LOAD_MODE_NONE` | Use no special model-loading mode. |
-| `1` | `LLAMA_LOAD_MODE_MMAP` | Memory-map the model. This is the default. |
+| `1` | `LLAMA_LOAD_MODE_MMAP` | Memory-map the model. |
 | `2` | `LLAMA_LOAD_MODE_MLOCK` | Keep the loaded model in RAM rather than allowing it to be swapped or compressed. |
 | `3` | `LLAMA_LOAD_MODE_MMAP_MLOCK` | Memory-map the model and keep its mapped pages in RAM. |
 | `4` | `LLAMA_LOAD_MODE_DIRECT_IO` | Use direct I/O when it is available. |
@@ -80,12 +81,10 @@ Then just update your settings in `.vscode/settings.json` to point to your code 
 
 ```json
 {
-    // ...
     "github.copilot.advanced": {
         "debug.testOverrideProxyUrl": "http://<host>:<port>",
         "debug.overrideProxyUrl": "http://<host>:<port>"
     }
-    // ...
 }
 ```
 
@@ -110,8 +109,8 @@ Check out this [example notebook](https://github.com/abetlen/llama-cpp-python/bl
 
 ### Multimodal Models
 
-`llama-cpp-python` supports the llava1.5 family of multi-modal models which allow the language model to
-read information from both text and images.
+The server supports image input through model-specific chat handlers.
+Use a matching GGUF model, projector, and `chat_format`.
 
 You'll first need to download one of the available multi-modal models in GGUF format:
 
@@ -121,7 +120,9 @@ You'll first need to download one of the available multi-modal models in GGUF fo
 - [llava-v1.6-34b](https://huggingface.co/cjpais/llava-v1.6-34B-gguf)
 - [moondream2](https://huggingface.co/vikhyatk/moondream2)
 
-Then when you run the server you'll need to also specify the path to the clip model used for image embedding and the `llava-1-5` chat_format
+Pass the projector path as `--clip_model_path`. For LLaVA 1.5 and BakLLaVA,
+use `--chat_format llava-1-5`; LLaVA 1.6 uses `llava-1-6`, and Moondream2 uses
+`moondream`. For example, with a LLaVA 1.5 model:
 
 ```bash
 python3 -m llama_cpp.server --model <model_path> --clip_model_path <clip_model_path> --chat_format llava-1-5

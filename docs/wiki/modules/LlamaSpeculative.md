@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-10-15
+last_updated: 2026-10-18
 version_target: "latest"
 ---
 
@@ -154,7 +154,8 @@ additional Python-engine settings.
 `max_draft_tokens()` resolves the active algorithm's real verification length:
 draft-family engines use `draft_n_max`, while K and K4V use `ngram_size_m`.
 The resulting length must not exceed `Llama.n_batch - 1` because `id_last` and
-all draft tokens must remain in one verification batch.
+all draft tokens must remain in one verification batch. With `ctx_checkpoints=0`
+on a hybrid target, its native recurrent rollback window also caps this length.
 
 Other configuration helpers are `enabled()`, which tests for a non-`NONE`
 algorithm; `resolved_draft_n_gpu_layers()`, which maps `"auto"` and `"all"` to
@@ -572,6 +573,10 @@ llm = Llama(
 On-device checkpoints avoid copying recurrent tensor payloads through host
 memory. Checkpoint count and timing are exposed in `last_speculative_stats`.
 
+MTP can use `ctx_checkpoints=0` when the target has native recurrent rollback
+slots and the engine can follow target rollback. Draft rollback can still use
+device checkpoints and replay. See [Hybrid checkpoint limits](../features/caching.md#hybrid-checkpoints-and-cache-misses).
+
 ## Engine Factories
 
 ### `create_spec_engine(config)`
@@ -750,8 +755,9 @@ state.
 * Speculation still runs target verification. Low acceptance or expensive
   rollback can make it slower than ordinary decoding.
 * Greedy runs can diverge from ordinary output because different verification
-  batch shapes may change floating-point tie-breaking. Benchmarks report the
-  first divergent token as a diagnostic rather than hiding it.
+  batch shapes may change rounding and the order of close logits, including with
+  quantized weights. Benchmarks report the first divergent token as a diagnostic.
+  See [quantization and batch shapes](../features/caching.md#quantization-and-batch-shapes).
 * Explicitly call `Llama.close()` in long-running applications so external draft
   resources are released before interpreter shutdown.
 
