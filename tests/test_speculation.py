@@ -1285,7 +1285,7 @@ def test_real_mtp_target_checkpoints_are_only_captured_for_verification(mtp_mode
 @pytest.mark.parametrize("shared_mtp_model", [_MTP_WITHOUT_CHECKPOINTS],
                          indirect=True, scope="module", ids=["native-no-checkpoints"])
 @pytest.mark.parametrize("logits_all", [False, True])
-def test_real_mtp_zero_checkpoint_score_hooks_match_ordinary(mtp_model, monkeypatch, logits_all):
+def test_real_mtp_zero_checkpoint_score_hooks_match_native_batches(mtp_model, monkeypatch, logits_all):
     llm, _ = mtp_model
     assert llm.cache is None and llm.ctx_checkpoints == 0
     prompt = llm.tokenize(b"1,")
@@ -1293,42 +1293,77 @@ def test_real_mtp_zero_checkpoint_score_hooks_match_ordinary(mtp_model, monkeypa
         monkeypatch.setattr(llm, "_logits_all", True)
         monkeypatch.setattr(llm, "scores", np.zeros((llm._n_ctx, llm._n_vocab), dtype=np.single))
 
-    def collect():
-        processors, criteria = [], []
+    engine = llm.speculative
+    # Ordinary prefill and MTP verification have different batch shapes. Use
+    # independent native contexts with matching batches, not cross-mode tokens.
+    with closing(internals.LlamaContext(
+        model=llm._model, params=llm.context_params, verbose=False,
+    )) as reference, closing(internals.LlamaSampler()) as sampler:
+        reference.set_embeddings_nextn(True, masked=False)
+        sampler.add_greedy()
+        decode, remove = llm._ctx.decode, llm._ctx.memory_seq_rm
+        for speculative in (None, engine):
+            llm.reset()
+            reference.memory_clear(True)
+            sampler.reset()
+            delivered, processors, criteria, sample_rows = [], [], [], []
+            batch_start = batch_size = 0
 
-        def check_native_row(ids, scores):
-            index = len(ids) - 1 - llm._last_eval_output_start
-            native = np.ctypeslib.as_array(llm._ctx.get_logits_ith(index), shape=(llm._n_vocab,))
-            np.testing.assert_array_equal(scores, native)
+            def decode_reference(batch):
+                nonlocal batch_start, batch_size
+                status = decode(batch)
+                assert status == 0
+                assert reference.decode(batch) == 0
+                batch_start = int(batch.batch.pos[0])
+                batch_size = int(batch.batch.n_tokens)
+                return status
 
-        def process(ids, scores):
-            check_native_row(ids, scores)
-            processors.append(ids.tolist())
-            return scores
+            def remove_reference(seq_id, p0, p1):
+                status = remove(seq_id, p0, p1)
+                assert reference.memory_seq_rm(seq_id, p0, p1) == status
+                return status
 
-        def observe(ids, scores):
-            check_native_row(ids, scores)
-            criteria.append(ids.tolist())
-            return False
+            def check_native_row(ids, scores):
+                assert ids.tolist() == prompt + delivered
+                assert llm._last_eval_output_start == batch_start
+                assert llm._last_eval_output_count == batch_size
+                index = len(ids) - 1 - batch_start
+                assert 0 <= index < batch_size
+                assert scores.shape == (llm._n_vocab,) and np.isfinite(scores).all()
+                for context in (llm._ctx, reference):
+                    native = np.ctypeslib.as_array(context.get_logits_ith(index), shape=(llm._n_vocab,))
+                    np.testing.assert_array_equal(scores, native)
+                return index
 
-        with closing(llm.generate(
-            prompt, temp=0, top_k=1, repeat_penalty=1, seed=42,
-            logits_processor=llama_cpp.LogitsProcessorList([process]),
-            stopping_criteria=llama_cpp.StoppingCriteriaList([observe]),
-        )) as stream:
-            tokens = [next(stream) for _ in range(8)]
-        return tokens, processors, criteria
+            def process(ids, scores):
+                sample_rows.append((check_native_row(ids, scores), batch_size))
+                processors.append(ids.tolist())
+                return scores
 
-    with monkeypatch.context() as patch:
-        patch.setattr(llm, "speculative", None)
-        llm.reset()
-        reference = collect()
-    llm.reset()
-    result = collect()
-    assert llm.last_speculative_stats["drafted"] > 0
-    assert result[0] == reference[0]
-    for actual_hooks, expected_hooks in zip(result[1:], reference[1:]):
-        assert actual_hooks == expected_hooks
+            def observe(ids, scores):
+                check_native_row(ids, scores)
+                criteria.append(ids.tolist())
+                return False
+
+            with monkeypatch.context() as patch:
+                patch.setattr(llm, "speculative", speculative)
+                patch.setattr(llm._ctx, "decode", decode_reference)
+                patch.setattr(llm._ctx, "memory_seq_rm", remove_reference)
+                with closing(llm.generate(
+                    prompt, temp=0, top_k=1, repeat_penalty=1, seed=42,
+                    logits_processor=llama_cpp.LogitsProcessorList([process]),
+                    stopping_criteria=llama_cpp.StoppingCriteriaList([observe]),
+                )) as stream:
+                    for _ in range(8):
+                        token = next(stream)
+                        assert token == sampler.sample(reference, sample_rows[-1][0])
+                        delivered.append(token)
+                assert llm._ctx.memory_seq_pos_max(0) == reference.memory_seq_pos_max(0) == llm.n_tokens - 1
+            expected_histories = [prompt + delivered[:i] for i in range(8)]
+            assert processors == criteria == expected_histories
+            if speculative is not None:
+                assert llm.last_speculative_stats["drafted"] > 0
+                assert any(index < count - 1 for index, count in sample_rows)
 
 
 def test_real_mtp_media_then_text_matches_native_catchup(mtp_model):
