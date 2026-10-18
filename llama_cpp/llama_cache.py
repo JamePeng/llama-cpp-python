@@ -5,10 +5,12 @@ import ctypes
 from dataclasses import dataclass
 import diskcache
 import hashlib
+import heapq
 import sys
 from typing import (
     Any,
     List,
+    NamedTuple,
     Optional,
     Sequence,
     Tuple,
@@ -18,6 +20,27 @@ import llama_cpp.llama as llama_core
 import llama_cpp.llama_cpp as llama_cpp_lib
 
 from .llama_types import *
+
+
+def _common_prefix_length(
+    cached_tokens: Tuple[int, ...], query_tokens: Tuple[int, ...]
+) -> int:
+    if cached_tokens is query_tokens:
+        return len(cached_tokens)
+    length = min(len(cached_tokens), len(query_tokens))
+    # Avoid allocations for early mismatches. Compare long matching runs in C
+    # using bounded tuple slices, without converting entire histories to NumPy.
+    probe_length = min(length, 32)
+    for index in range(probe_length):
+        if cached_tokens[index] != query_tokens[index]:
+            return index
+    for start in range(probe_length, length, 256):
+        stop = min(start + 256, length)
+        if cached_tokens[start:stop] != query_tokens[start:stop]:
+            for index in range(start, stop):
+                if cached_tokens[index] != query_tokens[index]:
+                    return index
+    return length
 
 
 class BaseLlamaCache(ABC):
@@ -37,6 +60,33 @@ class BaseLlamaCache(ABC):
     ) -> Optional[Tuple[int, ...]]:
         pass
 
+    def _get_matching_key(
+        self, key: Sequence[int], min_prefix_length: int
+    ) -> Tuple[int, ...]:
+        if len(key) <= min_prefix_length:
+            raise KeyError("No better prefix in cache")
+        query_key = tuple(key)
+        cached_key = self._find_longest_prefix_key(query_key)
+        if cached_key is None or _common_prefix_length(cached_key, query_key) <= min_prefix_length:
+            raise KeyError("No better prefix in cache")
+        return cached_key
+
+    def get_matching_state(
+        self, key: Sequence[int], min_prefix_length: int = 0
+    ) -> "llama_core.LlamaState":
+        """Read the best match only if its common prefix exceeds min_prefix_length.
+
+        Custom caches retain their dictionary interface. Built-in caches also
+        check key metadata before materializing a snapshot.
+        """
+        state = self[key]
+        prefix_length = llama_core.Llama.longest_token_prefix(
+            state.input_ids[:state.n_tokens], key
+        )
+        if prefix_length <= min_prefix_length:
+            raise KeyError("No better prefix in cache")
+        return state
+
     @abstractmethod
     def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
         raise NotImplementedError
@@ -55,7 +105,7 @@ class BaseLlamaCache(ABC):
 class LlamaDiskCache(BaseLlamaCache):
     """
     Disk cache for a llama.cpp model.
-    Delegates LRU and size management natively to the SQLite-backed `diskcache` library.
+    Delegates eviction and size management to the SQLite-backed `diskcache` library.
     """
 
     def __init__(
@@ -63,7 +113,7 @@ class LlamaDiskCache(BaseLlamaCache):
     ):
         super().__init__(capacity_bytes)
         self.cache_dir = cache_dir
-        # Native SQLite size limit and LRU eviction
+        # Keep diskcache's configured eviction policy.
         self.cache = diskcache.Cache(cache_dir, size_limit=capacity_bytes)
         self.verbose = verbose
 
@@ -80,32 +130,27 @@ class LlamaDiskCache(BaseLlamaCache):
         if len(self.cache) == 0:
             return None
 
-        min_len = 0
-        min_key: Optional[Tuple[int, ...]] = None
-        target_len = len(key)
-        for k in self.cache.iterkeys():  # type: ignore
-            prefix_len = llama_core.Llama.longest_token_prefix(k, key, self.verbose)
-            if prefix_len > min_len:
-                min_len = prefix_len
-                min_key = k  # type: ignore
+        best_prefix_length = 0
+        best_key: Optional[Tuple[int, ...]] = None
+        query_length = len(key)
+        for cached_key in self.cache.iterkeys():  # type: ignore
+            prefix_length = _common_prefix_length(cached_key, key)
+            if prefix_length > best_prefix_length:
+                best_prefix_length = prefix_length
+                best_key = cached_key  # type: ignore
             # Perfect match found, break to prevent full-table disk scan
-            if min_len == target_len:
+            if best_prefix_length == query_length:
                 break
 
-        return min_key
+        return best_key
 
     def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
-        print("LlamaDiskCache.__getitem__: called", file=sys.stderr)
-        if len(self.cache) == 0:
-            raise KeyError("Cache is empty")
+        return self.get_matching_state(key)
 
-        key = tuple(key)
-        _key = self._find_longest_prefix_key(key)
-        if _key is None:
-            raise KeyError("Key not found")
-        # Non-destructive read: automatically updates access time for LRU
-        value: "llama_core.LlamaState" = self.cache[_key]  # type: ignore
-        return value
+    def get_matching_state(
+        self, key: Sequence[int], min_prefix_length: int = 0
+    ) -> "llama_core.LlamaState":
+        return self.cache[self._get_matching_key(key, min_prefix_length)]
 
     def __contains__(self, key: Sequence[int]) -> bool:
         if len(self.cache) == 0:
@@ -113,7 +158,6 @@ class LlamaDiskCache(BaseLlamaCache):
         return self._find_longest_prefix_key(tuple(key)) is not None
 
     def __setitem__(self, key: Sequence[int], value: "llama_core.LlamaState"):
-        print("LlamaDiskCache.__setitem__: called", file=sys.stderr)
         # diskcache natively handles capacity check and eviction upon assignment
         self.cache[tuple(key)] = value
 
@@ -132,6 +176,8 @@ class LlamaRAMCache(BaseLlamaCache):
         ] = OrderedDict()
         self._current_size = 0
         self.verbose = verbose
+        self._insertion_order: dict[Tuple[int, ...], int] = {}
+        self._next_insertion_order = 0
 
     @property
     def cache_size(self):
@@ -141,28 +187,27 @@ class LlamaRAMCache(BaseLlamaCache):
         self,
         key: Tuple[int, ...],
     ) -> Optional[Tuple[int, ...]]:
-        min_len = 0
-        min_key = None
-        keys = (
-            (k, llama_core.Llama.longest_token_prefix(k, key, self.verbose))
-            for k in self.cache_state.keys()
-        )
-        for k, prefix_len in keys:
-            if prefix_len > min_len:
-                min_len = prefix_len
-                min_key = k
-        return min_key
+        best_prefix_length = 0
+        best_key = None
+        for cached_key in self.cache_state:
+            prefix_length = _common_prefix_length(cached_key, key)
+            if prefix_length > best_prefix_length or (
+                prefix_length > 0 and prefix_length == best_prefix_length and best_key is not None
+                and self._insertion_order[cached_key] < self._insertion_order[best_key]
+            ):
+                best_prefix_length = prefix_length
+                best_key = cached_key
+        return best_key
 
     def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
-        if not self.cache_state:
-            raise KeyError("Cache is empty")
+        return self.get_matching_state(key)
 
-        key = tuple(key)
-        _key = self._find_longest_prefix_key(key)
-        if _key is None:
-            raise KeyError("Key not found")
-        value = self.cache_state[_key]
-        self.cache_state.move_to_end(_key)
+    def get_matching_state(
+        self, key: Sequence[int], min_prefix_length: int = 0
+    ) -> "llama_core.LlamaState":
+        cached_key = self._get_matching_key(key, min_prefix_length)
+        value = self.cache_state[cached_key]
+        self.cache_state.move_to_end(cached_key)
         return value
 
     def __contains__(self, key: Sequence[int]) -> bool:
@@ -172,16 +217,22 @@ class LlamaRAMCache(BaseLlamaCache):
         return self._find_longest_prefix_key(tuple(key)) is not None
 
     def __setitem__(self, key: Sequence[int], value: "llama_core.LlamaState"):
+        if getattr(value, "nbytes", value.llama_state_size) > self.capacity_bytes:
+            return
         key = tuple(key)
         if key in self.cache_state:
             previous = self.cache_state.pop(key)
             self._current_size -= getattr(previous, "nbytes", previous.llama_state_size)
 
         self.cache_state[key] = value
+        if key not in self._insertion_order:
+            self._insertion_order[key] = self._next_insertion_order
+            self._next_insertion_order += 1
         self._current_size += getattr(value, "nbytes", value.llama_state_size)
 
         while self._current_size > self.capacity_bytes and len(self.cache_state) > 0:
-            _, popped_state = self.cache_state.popitem(last=False)
+            popped_key, popped_state = self.cache_state.popitem(last=False)
+            del self._insertion_order[popped_key]
             self._current_size -= getattr(popped_state, "nbytes", popped_state.llama_state_size)
             self._current_size = max(0, self._current_size)
 
@@ -189,13 +240,33 @@ class LlamaRAMCache(BaseLlamaCache):
             self._current_size = 0
 
 
+class _TrieCacheEntry(NamedTuple):
+    insertion_order: int
+    cache_key: Tuple[int, ...]
+
+
 class TrieNode:
     """A node in the prefix tree (Trie)."""
-    def __init__(self):
+    __slots__ = (
+        "tokens", "children", "state", "cache_key", "insertion_order", "earliest_entry",
+        "_child_entries",
+    )
+
+    def __init__(
+        self, earliest_entry: Optional[_TrieCacheEntry] = None,
+        tokens: Tuple[int, ...] = (),
+    ):
+        self.tokens = tokens  # Compressed incoming edge; empty only at the root.
         # Child nodes: {token_id: TrieNode}
         self.children: Dict[int, "TrieNode"] = {}
         # Stores the LlamaState if this node marks the end of a cached sequence.
         self.state: Optional["llama_core.LlamaState"] = None
+        self.cache_key: Optional[Tuple[int, ...]] = None
+        self.insertion_order = 0
+        # Earliest inserted cache entry in this node's subtree, including itself.
+        self.earliest_entry = earliest_entry
+        # Allocate a heap only for wide branches that need repeated reselection.
+        self._child_entries: Optional[List[Tuple[int, int]]] = None
 
 
 class LlamaTrieCache(BaseLlamaCache):
@@ -207,12 +278,18 @@ class LlamaTrieCache(BaseLlamaCache):
     - N = total number of items in the cache
 
     This solves the O(N*K) lookup bottleneck of the linear scan cache.
+    Unbranched paths are compressed into token-tuple edges, so insertion and
+    eviction do not allocate or discard a Python node per token.
+    Wide branches use bounded lazy heaps when eviction changes their earliest
+    entry; ordinary single-child paths need no heap allocation.
     """
 
     def __init__(self, capacity_bytes: int = (2 << 30)):
         super().__init__(capacity_bytes)
         self.root = TrieNode() # The root node of the Trie
         self._current_size = 0  # O(1) tracking of cache size in bytes
+        self._next_insertion_order = 0
+        self._last_inserted_node: Optional[TrieNode] = None
 
         # LRU Tracker:
         # Key: Cached token sequence (Tuple[int, ...])
@@ -230,114 +307,260 @@ class LlamaTrieCache(BaseLlamaCache):
         self, key: Tuple[int, ...]
     ) -> Tuple[Optional[TrieNode], Optional[Tuple[int, ...]]]:
         """
-        Finds the longest cached prefix for a given key in O(K) time.
+        Find a state with the longest common prefix, including descendants.
 
         Returns: (The matching TrieNode, The matching key)
         """
         node = self.root
-        longest_prefix_node: Optional[TrieNode] = None
-        longest_prefix_key: Optional[Tuple[int, ...]] = None
-        current_prefix: List[int] = []
-
-        # Check if the empty prefix (root) is cached
-        if node.state is not None:
-            longest_prefix_node = node
-            longest_prefix_key = tuple(current_prefix)
-
-        for token in key:
-            if token not in node.children:
-                # Path ends, no further prefix matches
+        depth = 0
+        query_length = len(key)
+        while depth < query_length:
+            child = node.children.get(key[depth])
+            if child is None:
                 break
+            edge_length = len(child.tokens)
+            if edge_length == 1:  # The dictionary lookup already matched it.
+                node = child
+                depth += 1
+                continue
+            matched = _common_prefix_length(child.tokens, key[depth:depth + edge_length])
+            node = child
+            depth += matched
+            if matched < edge_length:
+                break
+        entry = node.earliest_entry if depth > 0 else None
+        if entry is None:
+            return None, None
+        return self.lru_tracker[entry.cache_key], entry.cache_key
 
-            node = node.children[token]
-            current_prefix.append(token)
-
-            if node.state is not None:
-                # Found a valid, longer prefix; update our best match
-                longest_prefix_node = node
-                longest_prefix_key = tuple(current_prefix)
-
-        return longest_prefix_node, longest_prefix_key
+    def _find_longest_prefix_key(self, key: Tuple[int, ...]) -> Optional[Tuple[int, ...]]:
+        return self._find_longest_prefix_node(key)[1]
 
     def __getitem__(self, key: Sequence[int]) -> "llama_core.LlamaState":
         """
         Retrieves the state for the longest matching prefix in O(K) time.
         Updates the LRU status.
         """
-        key_tuple = tuple(key)
-        node, prefix_key = self._find_longest_prefix_node(key_tuple)
+        return self.get_matching_state(key)
 
-        if node is None or node.state is None or prefix_key is None:
-            raise KeyError(f"Key prefix not found in cache for: {key_tuple}")
-
-        # Move the accessed key to the end (most recently used) in O(1)
-        self.lru_tracker.move_to_end(prefix_key)
-
+    def get_matching_state(
+        self, key: Sequence[int], min_prefix_length: int = 0
+    ) -> "llama_core.LlamaState":
+        cached_key = self._get_matching_key(key, min_prefix_length)
+        node = self.lru_tracker[cached_key]
+        self.lru_tracker.move_to_end(cached_key)
+        assert node.state is not None
         return node.state
 
     def __contains__(self, key: Sequence[int]) -> bool:
-        """Checks if any prefix of the key is cached in O(K) time."""
+        """Check for a nonempty common prefix without reading the state."""
         node, _ = self._find_longest_prefix_node(tuple(key))
         return node is not None
+
+    @staticmethod
+    def _rebuild_child_entries(node: TrieNode) -> None:
+        node._child_entries = [
+            (child.earliest_entry.insertion_order, token)
+            for token, child in node.children.items()
+            if child.earliest_entry is not None
+        ]
+        heapq.heapify(node._child_entries)
+
+    @classmethod
+    def _record_child_entry(cls, node: TrieNode, token: int) -> None:
+        if node._child_entries is None:
+            return
+        if len(node.children) <= 8:
+            node._child_entries = None
+            return
+        child = node.children.get(token)
+        if child is not None and child.earliest_entry is not None:
+            heapq.heappush(node._child_entries, (child.earliest_entry.insertion_order, token))
+        # Bound stale heap entries even if the subtree's oldest entry stays live.
+        if len(node._child_entries) > 2 * len(node.children):
+            cls._rebuild_child_entries(node)
+
+    @classmethod
+    def _update_earliest_entry(cls, node: TrieNode) -> None:
+        if len(node.children) > 8:
+            if node._child_entries is None:
+                cls._rebuild_child_entries(node)
+            while node._child_entries:
+                insertion_order, token = node._child_entries[0]
+                child = node.children.get(token)
+                if (
+                    child is not None and child.earliest_entry is not None
+                    and child.earliest_entry.insertion_order == insertion_order
+                ):
+                    entry = child.earliest_entry
+                    break
+                heapq.heappop(node._child_entries)
+            else:
+                entry = None
+        else:
+            node._child_entries = None
+            if not node.children:
+                entry = None
+            elif len(node.children) == 1:
+                entry = next(iter(node.children.values())).earliest_entry
+            else:
+                entry = min(
+                    (child.earliest_entry for child in node.children.values()
+                     if child.earliest_entry is not None),
+                    key=lambda item: item.insertion_order, default=None,
+                )
+        if node.state is not None:
+            assert node.cache_key is not None
+            if entry is None or node.insertion_order < entry.insertion_order:
+                entry = _TrieCacheEntry(node.insertion_order, node.cache_key)
+        node.earliest_entry = entry
 
     def _prune(self, key: Tuple[int, ...]):
         """
         (Helper) Removes a key and its state from the Trie.
         Also removes empty parent nodes (branch pruning).
         """
-        path: List[Tuple[TrieNode, int]] = [] # Stores (parent_node, token)
+        path: List[Tuple[TrieNode, int]] = []
         node = self.root
-
-        # 1. Find the node and record the path
-        for token in key:
-            if token not in node.children:
-                return # Key not found
+        depth = 0
+        key_length = len(key)
+        while depth < key_length:
+            token = key[depth]
+            child = node.children.get(token)
+            if child is None:
+                return
+            edge_length = len(child.tokens)
+            if edge_length > 1 and key[depth:depth + edge_length] != child.tokens:
+                return
             path.append((node, token))
-            node = node.children[token]
+            depth += edge_length
+            node = child
 
         # 2. Remove the state
         if node.state is None:
             return # Node has no state
 
         self._current_size -= getattr(node.state, "nbytes", node.state.llama_state_size)
+        if node is self._last_inserted_node:
+            self._last_inserted_node = None
+        removed_order = node.insertion_order
         node.state = None
+        node.cache_key = None
+        # Removing a later terminal entry cannot change any ancestor's best match.
+        if node.earliest_entry is None or node.earliest_entry.insertion_order != removed_order:
+            if path:
+                self._compress_child(*path[-1])
+            return
+        if node.children:
+            self._update_earliest_entry(node)
+            if path:
+                self._compress_child(*path[-1])
+        else:
+            node.earliest_entry = None
+            if not path:
+                return
+            parent, token = path[-1]
+            del parent.children[token]
 
-        # 3. Prune empty parent nodes backward
-        for parent, token in reversed(path):
-            child = parent.children[token]
-
-            # If the child node is now empty (no children, no state), delete it
-            if not child.children and child.state is None:
-                del parent.children[token]
-            else:
-                # Node is still in use, stop pruning
+        # Only surviving ancestors can need a new prefix candidate.
+        for index in range(len(path) - 1, -1, -1):
+            parent, token = path[index]
+            if parent._child_entries is not None:
+                self._record_child_entry(parent, token)
+            candidate_changed = (
+                parent.earliest_entry is not None
+                and parent.earliest_entry.insertion_order == removed_order
+            )
+            if candidate_changed:
+                self._update_earliest_entry(parent)
+            if index > 0:
+                self._compress_child(*path[index - 1])
+            if not candidate_changed:
                 break
+
+    @staticmethod
+    def _compress_child(parent: TrieNode, token: int) -> None:
+        node = parent.children[token]
+        if node.state is None:
+            if not node.children:
+                del parent.children[token]
+            elif len(node.children) == 1:
+                child = next(iter(node.children.values()))
+                child.tokens = node.tokens + child.tokens
+                parent.children[token] = child
 
     def __setitem__(self, key: Sequence[int], value: "llama_core.LlamaState"):
         """
-        Adds a (key, state) pair to the cache in O(K) time.
-        Handles LRU updates and eviction.
+        Adds a (key, state) pair, maintaining prefix candidates and LRU order.
+        Eviction updates only affected ancestors and wide-branch candidate heaps.
         """
+        state_size = getattr(value, "nbytes", value.llama_state_size)
+        if state_size > self.capacity_bytes:
+            return
         key_tuple = tuple(key)
 
-        # 1. Find or create nodes for the key (O(K))
+        # 1. Find a terminal node, splitting compressed edges only at a branch
+        # or at a newly cached prefix. Existing candidates precede new entries.
         node = self.root
-        for token in key_tuple:
-            node = node.children.setdefault(token, TrieNode())
+        entry = None
+        depth = 0
+        key_length = len(key_tuple)
+        previous = self._last_inserted_node
+        if previous is not None and previous.cache_key is not None:
+            previous_length = len(previous.cache_key)
+            if key_length > previous_length and key_tuple[:previous_length] == previous.cache_key:
+                node, depth = previous, previous_length
+        while depth < key_length:
+            token = key_tuple[depth]
+            child = node.children.get(token)
+            if child is None:
+                if entry is None:
+                    entry = _TrieCacheEntry(self._next_insertion_order, key_tuple)
+                    self._next_insertion_order += 1
+                child = node.children[token] = TrieNode(entry, key_tuple[depth:])
+                # Insertion orders only increase, so a new entry cannot replace
+                # an existing subtree candidate. New nodes start with it directly.
+                if node.earliest_entry is None:
+                    node.earliest_entry = entry
+                if node._child_entries is not None:
+                    self._record_child_entry(node, token)
+                node = child
+                break
+            edge_length = len(child.tokens)
+            if edge_length == 1:
+                node = child
+                depth += 1
+                continue
+            matched = _common_prefix_length(child.tokens, key_tuple[depth:depth + edge_length])
+            if matched < edge_length:
+                assert matched > 0
+                branch = TrieNode(child.earliest_entry, child.tokens[:matched])
+                child.tokens = child.tokens[matched:]
+                branch.children[child.tokens[0]] = child
+                node.children[token] = branch
+                node = branch
+                depth += matched
+                continue
+            depth += edge_length
+            node = child
 
         # 2. Check if updating an existing item
         if node.state is not None:
             self._current_size -= getattr(node.state, "nbytes", node.state.llama_state_size)
+            self.lru_tracker.move_to_end(key_tuple)
+        else:
+            if entry is None:
+                entry = _TrieCacheEntry(self._next_insertion_order, key_tuple)
+                self._next_insertion_order += 1
+            node.insertion_order = entry.insertion_order
+            if node.earliest_entry is None:
+                node.earliest_entry = entry
+            self.lru_tracker[key_tuple] = node
 
         # 3. Set new state and update O(1) size
         node.state = value
-        self._current_size += getattr(value, "nbytes", value.llama_state_size)
-
-        # 4. Update LRU tracker (O(1))
-        if key_tuple in self.lru_tracker:
-            self.lru_tracker.move_to_end(key_tuple)
-        else:
-            self.lru_tracker[key_tuple] = node
+        node.cache_key = key_tuple
+        self._current_size += state_size
 
         # 5. Eviction logic
         while self._current_size > self.capacity_bytes and self.lru_tracker:
@@ -346,6 +569,7 @@ class LlamaTrieCache(BaseLlamaCache):
 
             # Remove the evicted item from the Trie
             self._prune(evicted_key)
+        self._last_inserted_node = node
 
 # Alias for backwards compatibility
 LlamaCache = LlamaTrieCache
