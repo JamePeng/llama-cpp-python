@@ -706,6 +706,10 @@ and a failure during restoration also invalidate the capture identity. Restoring
 checkpoint or one from another engine raises `RuntimeError` before native restore.
 This preliminary rejection does not invalidate the current valid capture.
 The same valid draft-time checkpoint can still be reused during verification.
+MTP's native `rollback_verified()` also validates the capture before mutating
+state. Native rollback failures invalidate it. This path keeps the accepted
+hidden row directly; accepted feature blocks are copied only when restoration
+and replay are necessary, including media rows that share a native position.
 
 These transient checkpoints are separate from `HybridCheckpointCache` prompt
 history and from `LlamaState`. A complete target snapshot does not include draft

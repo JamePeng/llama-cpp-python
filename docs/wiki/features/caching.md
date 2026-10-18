@@ -5,6 +5,17 @@ With speculation disabled, `Llama` automatically reuses a matching live prefix.
 An exact prefix extension evaluates only the new suffix; changing earlier tokens
 requires truncation, checkpoint restoration, or a fresh prefill.
 
+`Llama.cache` defaults to `None`. Live native KV reuse and Hybrid checkpoints
+work independently of the optional RAM, disk, and trie snapshot caches below.
+
+RAM, disk, and trie caches select the longest nonempty common token prefix,
+including a shorter request or a branch from an older history. Equal matches
+prefer the first inserted entry. RAM and trie reads update LRU recency without
+changing this tie; disk eviction follows its configured diskcache policy.
+Built-in caches support `get_matching_state(tokens, min_prefix_length=...)` to reject a
+candidate before reading its snapshot when the live context matches as well.
+Completion cache keys contain only tokens already decoded into native memory.
+
 ## Choose the state you need
 
 | Mechanism | What it preserves | Lifetime and limits |
@@ -18,11 +29,9 @@ requires truncation, checkpoint restoration, or a fresh prefill.
 See [Llama state methods](../core/Llama.md#save_state-and-load_statestate) and
 [cache APIs](../modules/LlamaCache.md) for the detailed contracts.
 
-RAM and disk caches select the stored key with the longest nonempty common
-prefix, which may diverge later in the query. Trie lookup requires a complete
-stored key to be a prefix of the query. For example, with only `(1, 2, 3)`
-cached, a query for `(1, 2, 4)` can hit RAM/disk but misses the trie. A cache hit
-returns the stored snapshot; generation must still reconcile the matching prefix.
+For example, with only `(1, 2, 3)` cached, a query for `(1, 2, 4)` hits all
+three backends with a common-prefix length of two. A cache hit returns the
+stored snapshot; generation must still reconcile the matching prefix.
 
 ## Saving a text prefix
 
@@ -66,12 +75,30 @@ the high-level generation path clears and rebuilds when it cannot reuse it.
 
 Fresh text requests with a speculative engine reset target and engine together.
 Their within-request rollback checkpoints do not imply cross-request prompt
-reuse. Supported MTMD handlers have a separate prefill handoff for n-gram engines.
+reuse. Automatic completion snapshot reads and writes are skipped for these
+engines. A full hybrid snapshot can be reused by appending to its complete prefix
+or by sampling its owned final logits; it does not restore historical checkpoints.
+Speculative requests also skip the automatic target-only final checkpoint;
+verification still captures target checkpoints when native rollback cannot be used.
+Supported MTMD handlers have a separate prefill handoff for n-gram engines.
 See [speculative lifecycle](../modules/LlamaSpeculative.md#prefix-cache-reuse-and-reset).
 
 Set `ctx_checkpoints=0` only when the workflow does not need checkpoint-backed
 rollback. Keep it positive for n-gram speculation on a hybrid target. Checkpoint
 sizes reported by Python exclude context-owned device tensor storage.
+MTP can use zero Python checkpoints when both contexts support native recurrent
+rollback. Verification length is capped by the target's native rollback window;
+native recurrent snapshots and temporary draft checkpoint metadata remain active.
+Zero Python checkpoints avoid target checkpoint exports and history searches.
+Appending to the live prefix still evaluates only the suffix, but branching or
+shortening a Hybrid history requires a full prefill without a usable checkpoint.
+With checkpoints disabled, an identical prompt bypasses evaluation only when
+the final output is valid. Missing output requires a fresh text prefill. Score
+callbacks receive refreshed logits even when evaluation is skipped. Custom stop
+criteria require logits by default; `requires_logits=False` opts out of that
+copy when the callback does not inspect scores, as with `AbortCriteria`.
+During speculative verification, score callbacks receive the current sampling
+row and its decoded prefix, excluding unaccepted future draft tokens.
 
 Wrapped native operations notify registered caches on the same context. Raw C
 calls, automatic SWA eviction, and cross-context shared-KV changes are outside

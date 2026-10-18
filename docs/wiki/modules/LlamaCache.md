@@ -55,7 +55,7 @@ There are two main caching strategies:
    * `LlamaTrieCache`
    * `LlamaCache`
 
-   These caches map token sequences to `llama_core.LlamaState` objects. RAM and disk lookup select the cached key with the longest nonempty common prefix, even if that key later diverges from the query. Trie lookup requires the complete cached key to be a prefix of the query. All return the stored snapshot without truncating it.
+   These caches map token sequences to `llama_core.LlamaState` objects. All three select the cached key with the longest nonempty common prefix, even if it later diverges from the query or extends beyond it. Equal matches prefer the first inserted entry independently of LRU recency. All return the stored snapshot without truncating it.
 
 2. **Hybrid / recurrent checkpoint caching**
 
@@ -187,6 +187,21 @@ The expected behavior is longest-prefix matching rather than strict exact-key lo
 
 ---
 
+#### `get_matching_state`
+
+```python
+def get_matching_state(self, key: Sequence[int], min_prefix_length: int = 0) -> "llama_core.LlamaState":
+    ...
+```
+
+Returns the best matching state only when its common prefix is strictly longer
+than `min_prefix_length`; otherwise raises `KeyError`. Built-in caches check
+key metadata before reading the state, avoiding disk deserialization for a
+candidate that cannot improve the live prefix. The base implementation delegates
+to a custom cache's dictionary interface and then checks the returned state.
+
+---
+
 #### `__contains__`
 
 ```python
@@ -245,7 +260,7 @@ def __init__(self, capacity_bytes: int = (2 << 30), verbose: bool = False):
 | Parameter        | Type   |   Default | Required | Description                                                                                                                   |
 | ---------------- | ------ | --------: | -------: | ----------------------------------------------------------------------------------------------------------------------------- |
 | `capacity_bytes` | `int`  | `2 << 30` |       No | Maximum total size of cached states in bytes.                                                                                 |
-| `verbose`        | `bool` |   `False` |       No | Whether to enable verbose behavior when computing token-prefix matches. This value is passed to `Llama.longest_token_prefix`. |
+| `verbose`        | `bool` |   `False` |       No | Compatibility flag; cache-key comparisons do not emit per-candidate diagnostics. |
 
 ---
 
@@ -256,7 +271,7 @@ def __init__(self, capacity_bytes: int = (2 << 30), verbose: bool = False):
 | `capacity_bytes` | `int`                                                 | Maximum cache capacity in bytes.                                                                                |
 | `cache_state`    | `OrderedDict[Tuple[int, ...], llama_core.LlamaState]` | Stores cached token sequences and their corresponding `LlamaState` objects. The order is used for LRU eviction. |
 | `_current_size`  | `int`                                                 | Current total size of cached states in bytes.                                                                   |
-| `verbose`        | `bool`                                                | Passed to `llama_core.Llama.longest_token_prefix` during prefix comparison.                                     |
+| `verbose`        | `bool`                                                | Compatibility flag retained on the cache instance.                                     |
 
 ---
 
@@ -288,11 +303,9 @@ def _find_longest_prefix_key(
 
 Finds the cached token sequence with the longest prefix match against `key`.
 
-This implementation scans every key in `cache_state` and calls:
-
-```python
-llama_core.Llama.longest_token_prefix(k, key, self.verbose)
-```
+This implementation scans the keys in `cache_state`. Short mismatches return
+immediately; long matching runs use bounded tuple comparisons without converting
+each full history to NumPy. First-insertion metadata resolves equal matches.
 
 #### Complexity
 
@@ -320,10 +333,10 @@ Returns the cached `LlamaState` for the longest matching token prefix.
 
 Behavior:
 
-1. Raises `KeyError("Cache is empty")` if the cache has no entries.
+1. Raises `KeyError` if the cache has no matching entry.
 2. Converts the input key to a tuple.
 3. Finds the cached key with the longest nonempty common prefix.
-4. Raises `KeyError("Key not found")` if no matching prefix exists.
+4. Raises `KeyError` if no nonempty common prefix exists.
 5. Moves the matched key to the end of `cache_state` to mark it as recently used.
 6. Returns the matched `LlamaState`.
 
@@ -360,7 +373,8 @@ Behavior:
 5. Evicts least-recently-used entries while `_current_size > capacity_bytes`.
 6. Resets `_current_size` to `0` if the cache becomes empty.
 
-> Note: The current implementation increments `_current_size` by the new value size when replacing an existing key, but it does not subtract the old value size before deletion. This may cause size tracking to overcount replaced entries.
+Oversized entries are rejected before replacing or evicting existing states.
+Replacement subtracts the previous state's size before adding the new state.
 
 ---
 
@@ -427,7 +441,7 @@ def __init__(
 | ---------------- | ------ | ---------------------: | -------: | ---------------------------------------------------------------------------------------------- |
 | `cache_dir`      | `str`  | `".cache/llama_cache"` |       No | Directory used by `diskcache.Cache` to store cached state data.                                |
 | `capacity_bytes` | `int`  |              `2 << 30` |       No | Maximum disk cache size in bytes. Passed to `diskcache.Cache(..., size_limit=capacity_bytes)`. |
-| `verbose`        | `bool` |                `False` |       No | Passed to `Llama.longest_token_prefix` when searching for the best prefix match.               |
+| `verbose`        | `bool` |                `False` |       No | Compatibility flag; cache-key comparisons do not emit per-candidate diagnostics.               |
 
 ---
 
@@ -474,7 +488,7 @@ Behavior:
 
 1. Returns `None` immediately if the disk cache is empty.
 2. Iterates over `self.cache.iterkeys()`.
-3. Uses `llama_core.Llama.longest_token_prefix(k, key, self.verbose)` to compare each cached key.
+3. Compares common prefixes using the same bounded tuple comparisons as the RAM cache.
 4. Stops early if a perfect match is found.
 
 #### Complexity
@@ -498,12 +512,10 @@ Retrieves the cached state associated with the longest matching prefix.
 
 Behavior:
 
-1. Prints `"LlamaDiskCache.__getitem__: called"` to `stderr`.
-2. Raises `KeyError("Cache is empty")` if no entries exist.
-3. Converts `key` to a tuple.
-4. Finds the longest prefix key.
-5. Raises `KeyError("Key not found")` if no match exists.
-6. Reads and returns the cached `LlamaState`.
+1. Converts `key` to a tuple.
+2. Finds the key with the longest nonempty common prefix using key metadata.
+3. Raises `KeyError` if no match exists.
+4. Reads and returns the matched `LlamaState`.
 
 The read is non-destructive. Access tracking and eviction follow the effective `diskcache` settings; this wrapper does not explicitly enable an LRU policy.
 
@@ -531,9 +543,8 @@ Stores a `LlamaState` in the disk cache.
 
 Behavior:
 
-1. Prints `"LlamaDiskCache.__setitem__: called"` to `stderr`.
-2. Converts `key` to a tuple.
-3. Assigns the value to `self.cache[tuple(key)]`.
+1. Converts `key` to a tuple.
+2. Assigns the value to `self.cache[tuple(key)]`.
 
 `diskcache` handles capacity checks and eviction.
 
@@ -576,7 +587,7 @@ print(response["choices"][0]["text"])
 * Disk-backed caching can be slower than RAM caching.
 * The cache depends on the third-party `diskcache` package.
 * Prefix lookup still scans cached keys linearly, even though storage and eviction are handled by `diskcache`.
-* The implementation prints debug messages to `stderr` on get and set operations.
+* Get and set operations do not emit unconditional diagnostic messages.
 
 ---
 
@@ -586,7 +597,8 @@ print(response["choices"][0]["text"])
 
 `TrieNode` is an internal helper class used by `LlamaTrieCache`.
 
-Each node represents one position in a token-prefix tree.
+Each node ends a compressed token edge. Unbranched paths share one node rather
+than allocating a node for every token.
 
 Defined in: `llama_cpp/llama_cache.py`
 
@@ -606,11 +618,12 @@ It stores:
 ### Constructor: `__init__`
 
 ```python
-def __init__(self):
+def __init__(self, earliest_entry=None, tokens=()):
     ...
 ```
 
-The constructor takes no parameters.
+The optional arguments initialize the subtree's candidate and incoming edge.
+These are internal metadata; the root has an empty incoming edge.
 
 ---
 
@@ -618,6 +631,7 @@ The constructor takes no parameters.
 
 | Name       | Type                              | Description                                                                               |
 | ---------- | --------------------------------- | ----------------------------------------------------------------------------------------- |
+| `tokens` | `Tuple[int, ...]` | Token segment on the compressed incoming edge; empty only at the root. |
 | `children` | `Dict[int, TrieNode]`             | Child trie nodes keyed by token ID.                                                       |
 | `state`    | `Optional[llama_core.LlamaState]` | Cached state stored at this node if the node represents a complete cached token sequence. |
 
@@ -629,7 +643,10 @@ The constructor takes no parameters.
 
 `LlamaTrieCache` is a trie-based cache implementation for `llama_core.LlamaState` objects.
 
-It optimizes longest-prefix lookup by storing token sequences in a prefix tree rather than scanning all cached keys.
+It optimizes longest-prefix lookup with compressed token edges rather than
+scanning all cached keys. A query can end or diverge inside an edge and still
+select the state with the longest nonempty common prefix. Splitting and merging
+edges preserves first-insertion tie order and LRU eviction order.
 
 Defined in: `llama_cpp/llama_cache.py`
 
@@ -705,7 +722,8 @@ def _find_longest_prefix_node(
     ...
 ```
 
-Finds the trie node containing the longest cached prefix for the given token sequence.
+Finds the terminal node whose cached key shares the longest nonempty common
+prefix with the query, including keys below the deepest matching query node.
 
 Returns:
 
@@ -720,10 +738,10 @@ The second item is the matching cached key.
 #### Behavior
 
 1. Starts at the root node.
-2. Checks whether the empty prefix has a cached state.
-3. Walks one token at a time through the trie.
-4. Updates the best match each time it reaches a node with a stored state.
-5. Stops when the token path no longer exists.
+2. Compares compressed edges until the query ends or diverges, including inside an edge.
+3. Rejects a zero-length common prefix, including an empty query.
+4. Uses the deepest node's earliest inserted surviving entry to resolve ties.
+5. Returns that entry's terminal node and complete cached key.
 
 #### Complexity
 
@@ -761,7 +779,7 @@ def __contains__(self, key: Sequence[int]) -> bool:
     ...
 ```
 
-Returns `True` if any prefix of `key` is cached.
+Returns `True` if any cached key shares a nonempty common prefix with `key`.
 
 This lookup is `O(K)`.
 
@@ -784,7 +802,7 @@ Behavior:
 2. Returns immediately if the key does not exist.
 3. Removes the stored state from the terminal node.
 4. Subtracts the state size from `_current_size`.
-5. Walks backward through the path and removes empty trie nodes.
+5. Updates affected ancestor candidates, removes empty branches, and merges nonterminal single-child edges.
 
 ---
 
@@ -800,7 +818,7 @@ Stores a `LlamaState` in the trie cache.
 Behavior:
 
 1. Converts `key` to a tuple.
-2. Creates trie nodes for each token if needed.
+2. Creates a compressed edge for an unseen suffix, or splits an edge at a new branch or cached prefix.
 3. If the terminal node already has a state, subtracts the old state size.
 4. Stores the new state.
 5. Adds `value.nbytes` to `_current_size`, falling back to `value.llama_state_size` for legacy state objects.
@@ -1296,7 +1314,7 @@ Returns `False` if:
 
 * The checkpoint sequence id does not match the requested `seq_id`.
 * The cache is closed, or the exact checkpoint object is no longer tracked by it, in either host or device mode.
-* The current backend state size differs from the checkpoint size.
+* The payload is empty or its byte length differs from `cp.size`.
 * The backend does not report the expected number of restored bytes.
 * The backend cannot remove the memory suffix after the restored native `pos_max`.
 
@@ -1304,13 +1322,13 @@ Returns `False` if:
 
 1. Verifies `cp.seq_id == seq_id`.
 2. Rejects a closed cache or a checkpoint whose object identity is absent from its registry.
-3. Queries current expected host-visible state size from the backend.
-4. Verifies it matches `cp.size`.
-5. Copies checkpoint bytes into a ctypes buffer.
+3. Verifies that `cp.size` is positive and equals the checkpoint payload length.
+4. Keeps the immutable checkpoint bytes alive for the synchronous native call.
+5. Borrows a ctypes pointer to those bytes without duplicating the payload.
 6. Calls `_set_data_ext` to restore the state.
 7. Removes the remaining attention-memory suffix beginning at `cp.pos_max + 1`.
 8. On success, invalidates checkpoints at or beyond the restored suffix across registered caches on the same context.
-9. If native restoration or suffix removal fails, invalidates affected sequence checkpoints because native state may already have changed. Exceptions from these operations are propagated. Preliminary rejection in steps 1–4 does not invalidate current checkpoints.
+9. If native restoration or suffix removal fails, invalidates affected sequence checkpoints because native state may already have changed. Exceptions from these operations are propagated. Preliminary rejection in steps 1–3 does not invalidate current checkpoints.
 10. Returns whether both state restoration and suffix removal succeeded. High-level callers reset or rebuild after failure.
 
 The native memory range is stored separately from `pos` because token counts do not
@@ -1457,7 +1475,7 @@ Only one active checkpoint per `seq_id` is safe.
 * Passing `ctx=None` raises `ValueError`.
 * `max_checkpoints <= 0` disables checkpointing.
 * Restoring a checkpoint with the wrong `seq_id` fails.
-* Restore fails if the current backend state size no longer matches the checkpoint size.
+* Restore rejects a payload whose byte length differs from its recorded size; the current live export size is not a compatibility constraint.
 * Both host and device objects become stale after invalidation or eviction. Device capture additionally overwrites the previous slot for that sequence.
 * In device mode, `cache_size` does not include `llama_context`-owned device tensor storage.
 * `clear()` removes Python-side checkpoint metadata but does not explicitly free llama.cpp-owned device buffers.
