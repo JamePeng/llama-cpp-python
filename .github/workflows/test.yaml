@@ -74,7 +74,7 @@ jobs:
       # Don't cancel other jobs in the matrix if one fails
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-2022]
+        os: [ubuntu-24.04, windows-2022]
         python-version: ["3.9", "3.14"]
         include:
           # Apple Silicon macOS with Metal
