@@ -1845,6 +1845,9 @@ class MTMDChatHandler(MTMDBaseHandler):
         """Optional cache for templates that rewrite text after the media prefix."""
         return None
 
+    def _save_media_checkpoint(self, llama, cache):
+        return cache.save_checkpoint(llama.n_tokens, llama.input_ids[:llama.n_tokens].tolist(), seq_id=0)
+
     def _process_mtmd_prompt(
         self,
         llama: llama_core.Llama,
@@ -2141,6 +2144,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                         checkpoint_cache = llama._hybrid_cache_mgr
                         best_ckpt = checkpoint_cache.find_best_checkpoint(full_prompt_ids[:longest_prefix], seq_id=0)
                         if best_ckpt is None and media_cache is not None:
+                            # A rewritten assistant suffix can leave only the media prefix reusable.
                             checkpoint_cache = media_cache
                             best_ckpt = checkpoint_cache.find_best_checkpoint(full_prompt_ids[:longest_prefix], seq_id=0)
                         if best_ckpt and checkpoint_cache.restore_checkpoint(best_ckpt, seq_id=0):
@@ -2324,7 +2328,8 @@ class MTMDChatHandler(MTMDBaseHandler):
                     prompt_evaluated = True
                     if media_cache is not None and end_idx == last_media_end:
                         # Keep a stable prefix before the template's changing assistant suffix.
-                        media_cache.save_checkpoint(n_past, llama.input_ids[:n_past].tolist(), seq_id=0)
+                        # Capture once after all media, avoiding an export for every video frame.
+                        self._save_media_checkpoint(llama, media_cache)
 
             if perf_enabled and prompt_evaluated:
                 # mtmd_helper_eval_chunk_single() bypasses LlamaContext.decode(),
@@ -2512,7 +2517,10 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         **kwargs
     ) -> None:
         self._qwen_vision_template = False
+        # One native prefix snapshot, separate from the negative media ID mappings.
         self._media_checkpoint_cache = None
+        # Stick to host storage after a failed device export on the current context.
+        self._media_checkpoint_device_failed = False
         self.chat_format = chat_format
         self.chat_template_name = chat_template_name
         self.verbose = verbose
@@ -2639,16 +2647,43 @@ class GenericMTMDChatHandler(MTMDChatHandler):
                 self._media_checkpoint_cache.clear()
             return None
         cache = self._media_checkpoint_cache
-        if cache is None or cache._context_ref is None or cache._context_ref() is not llama._ctx:
+        same_context = cache is not None and cache._context_ref is not None and cache._context_ref() is llama._ctx
+        if not same_context:
+            # A new context may have device storage available again.
+            self._media_checkpoint_device_failed = False
+        # Native device snapshots share one slot per sequence. Leave it to
+        # speculative engines or other device caches, even when currently empty.
+        on_device = (
+            llama.speculative is None
+            and not manager.on_device
+            and not self._media_checkpoint_device_failed
+            and not any(
+                other is not cache and other.on_device and other._context_ref is not None
+                for other in getattr(llama._ctx, "_checkpoint_caches", ())
+            )
+        )
+        if not same_context or cache.on_device != on_device:
             from .llama_cache import HybridCheckpointCache
 
             if cache is not None:
+                # Host and device payloads are not interchangeable; discard the old snapshot.
                 cache.close()
-            # A separate host snapshot survives normal prompt/generation checkpoint eviction.
-            cache = HybridCheckpointCache(llama._ctx.ctx, max_checkpoints=1, on_device=False, verbose=self.verbose)
+            # Keep the media prefix independent of ordinary checkpoint eviction.
+            cache = HybridCheckpointCache(llama._ctx.ctx, max_checkpoints=1, on_device=on_device, verbose=self.verbose)
+            # Include this cache in context and device-slot invalidation.
             llama._ctx._register_checkpoint_cache(cache)
             self._media_checkpoint_cache = cache
         return cache
+
+    def _save_media_checkpoint(self, llama, cache):
+        saved = super()._save_media_checkpoint(llama, cache)
+        if not saved and cache.on_device:
+            # A failed device export leaves the live sequence available for a
+            # host capture. Avoid retrying device allocation on this context.
+            self._media_checkpoint_device_failed = True
+            cache = self._get_media_checkpoint_cache(llama)
+            return super()._save_media_checkpoint(llama, cache)
+        return saved
 
     def close(self):
         if self._media_checkpoint_cache is not None:

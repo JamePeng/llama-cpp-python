@@ -327,7 +327,7 @@ def test_generic_media_checkpoint_lifecycle(tmp_path, monkeypatch, enabled, hybr
 
     created = []
     def cache_factory(ctx, **kwargs):
-        cache = SimpleNamespace(_context_ref=None, clear=Mock(), close=Mock())
+        cache = SimpleNamespace(_context_ref=None, on_device=kwargs["on_device"], clear=Mock(), close=Mock())
         created.append((ctx, kwargs, cache))
         return cache
 
@@ -336,15 +336,15 @@ def test_generic_media_checkpoint_lifecycle(tmp_path, monkeypatch, enabled, hybr
     handler._qwen_vision_template = qwen
     ctx = SimpleNamespace(ctx=object())
     ctx._register_checkpoint_cache = lambda cache: setattr(cache, "_context_ref", lambda: ctx)
-    llm = SimpleNamespace(_ctx=ctx, is_hybrid=hybrid,
-                          _hybrid_cache_mgr=SimpleNamespace(max_checkpoints=4 if enabled else 0))
+    llm = SimpleNamespace(_ctx=ctx, is_hybrid=hybrid, speculative=None,
+                          _hybrid_cache_mgr=SimpleNamespace(max_checkpoints=4 if enabled else 0, on_device=False))
     try:
         cache = handler._get_media_checkpoint_cache(llm)
         if enabled and hybrid and qwen:
             assert cache is handler._get_media_checkpoint_cache(llm)
             assert len(created) == 1
             assert created[0][1]["max_checkpoints"] == 1
-            assert created[0][1]["on_device"] is False
+            assert created[0][1]["on_device"] is True
             llm._hybrid_cache_mgr.max_checkpoints = 0
             assert handler._get_media_checkpoint_cache(llm) is None
             cache.clear.assert_called_once()
@@ -354,6 +354,156 @@ def test_generic_media_checkpoint_lifecycle(tmp_path, monkeypatch, enabled, hybr
         handler.close()
     if created:
         created[0][2].close.assert_called_once()
+
+
+@pytest.fixture
+def media_checkpoint(make_handler, monkeypatch):
+    import numpy as np
+    from llama_cpp import llama_cpp as lib
+    from llama_cpp._internals import LlamaContext
+    from llama_cpp.llama_cache import HybridCheckpointCache
+
+    native = {}
+    for name, result in (("state_seq_get_size_ext", 4), ("state_seq_get_data_ext", 4),
+                         ("state_seq_set_data_ext", 4), ("get_memory", object()),
+                         ("memory_seq_pos_min", 0), ("memory_seq_pos_max", 2),
+                         ("memory_seq_rm", True)):
+        native[name] = Mock(return_value=result)
+        monkeypatch.setattr(lib, "llama_" + name, native[name])
+    ctx = SimpleNamespace(ctx=object(), _checkpoint_caches=[])
+    def register(cache):
+        ctx._checkpoint_caches.append(cache)
+        cache._context_ref = lambda: ctx
+    ctx._register_checkpoint_cache = register
+    ctx._invalidate_checkpoints = lambda *a, **kw: LlamaContext._invalidate_checkpoints(ctx, *a, **kw)
+    manager = HybridCheckpointCache(ctx.ctx, max_checkpoints=4)
+    register(manager)
+    handler = make_handler("GenericMTMDChatHandler", chat_format="hello")
+    handler._qwen_vision_template = True
+    llm = SimpleNamespace(_ctx=ctx, is_hybrid=True, speculative=None, _hybrid_cache_mgr=manager,
+                          n_tokens=3, input_ids=np.array([1, -9, -9, 0]))
+    yield handler, llm, native
+    for cache in ctx._checkpoint_caches:
+        cache.close()
+
+
+@pytest.mark.parametrize("conflict", [None, "manager", "speculative", "peer", "host-peer", "closed-peer"])
+def test_media_checkpoint_reserves_only_an_unused_device_slot(media_checkpoint, conflict):
+    from llama_cpp.llama_cache import HybridCheckpointCache
+
+    handler, llm, _ = media_checkpoint
+    if conflict == "manager":
+        llm._hybrid_cache_mgr.on_device = True
+    elif conflict == "speculative":
+        llm.speculative = object()  # Also exclude engines without process_media().
+    elif conflict in ("peer", "host-peer", "closed-peer"):
+        peer = HybridCheckpointCache(llm._ctx.ctx, on_device=conflict != "host-peer")
+        llm._ctx._register_checkpoint_cache(peer)
+        if conflict == "closed-peer":
+            peer.close()
+    cache = handler._get_media_checkpoint_cache(llm)
+    assert cache.on_device is (conflict in (None, "host-peer", "closed-peer"))
+    assert handler._get_media_checkpoint_cache(llm) is cache
+    assert handler._save_media_checkpoint(llm, cache)
+    checkpoint = cache.find_best_checkpoint([1, -9, -9])
+    assert checkpoint is not None and cache.restore_checkpoint(checkpoint)
+
+
+@pytest.mark.parametrize("conflict", ["manager", "speculative", "peer"])
+def test_media_checkpoint_mode_change_discards_old_device_snapshot(media_checkpoint, conflict):
+    from llama_cpp.llama_cache import HybridCheckpointCache
+
+    handler, llm, native = media_checkpoint
+    old = handler._get_media_checkpoint_cache(llm)
+    assert handler._save_media_checkpoint(llm, old)
+    checkpoint = old.checkpoints[0]
+    if conflict == "manager":
+        llm._hybrid_cache_mgr.on_device = True
+    elif conflict == "speculative":
+        llm.speculative = object()
+    else:
+        peer = HybridCheckpointCache(llm._ctx.ctx, on_device=True)
+        llm._ctx._register_checkpoint_cache(peer)
+    cache = handler._get_media_checkpoint_cache(llm)
+    assert cache is not old and not cache.on_device
+    assert old._ctx is None and not old.restore_checkpoint(checkpoint)
+    native["state_seq_set_data_ext"].assert_not_called()
+    assert handler._save_media_checkpoint(llm, cache)
+    llm._hybrid_cache_mgr.on_device = False
+    llm.speculative = None
+    if conflict == "peer":
+        peer.close()
+    assert handler._get_media_checkpoint_cache(llm).on_device
+    assert cache._ctx is None
+
+
+@pytest.mark.parametrize("failure", ["size", "export"])
+def test_media_checkpoint_device_export_failure_retries_host_once(media_checkpoint, failure):
+    from llama_cpp import llama_cpp as lib
+
+    handler, llm, native = media_checkpoint
+    if failure == "size":
+        native["state_seq_get_size_ext"].side_effect = lambda ctx, seq, flags: (
+            0 if flags & lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE else 4
+        )
+    else:
+        native["state_seq_get_data_ext"].side_effect = lambda ctx, dst, size, seq, flags: (
+            0 if flags & lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE else size
+        )
+    device_cache = handler._get_media_checkpoint_cache(llm)
+    assert handler._save_media_checkpoint(llm, device_cache)
+    host_cache = handler._get_media_checkpoint_cache(llm)
+    assert host_cache is not device_cache and not host_cache.on_device
+    assert device_cache._ctx is None
+    assert host_cache.restore_checkpoint(host_cache.checkpoints[0])
+    assert handler._save_media_checkpoint(llm, host_cache)
+    flags = [call.args[-1] for call in native["state_seq_get_size_ext"].call_args_list]
+    assert [bool(flag & lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE) for flag in flags] == [True, False, False]
+    native["state_seq_get_data_ext"].return_value = 0
+    native["state_seq_get_data_ext"].side_effect = None
+    assert not handler._save_media_checkpoint(llm, host_cache)
+    assert native["state_seq_get_size_ext"].call_count == 4
+
+
+def test_media_checkpoint_context_change_resets_device_failure(media_checkpoint):
+    handler, llm, _ = media_checkpoint
+    old = handler._get_media_checkpoint_cache(llm)
+    handler._media_checkpoint_device_failed = True
+    new_context = SimpleNamespace(ctx=object())
+    new_context._register_checkpoint_cache = lambda cache: setattr(cache, "_context_ref", lambda: new_context)
+    llm._ctx = new_context
+    cache = handler._get_media_checkpoint_cache(llm)
+    assert cache is not old and old._ctx is None
+    assert cache.on_device and not handler._media_checkpoint_device_failed
+    assert cache._ctx is new_context.ctx
+
+
+@pytest.mark.parametrize("overwrite", ["peer-save", "context-export"])
+def test_media_device_snapshot_survives_host_save_but_not_slot_overwrite(media_checkpoint, overwrite):
+    from llama_cpp import llama_cpp as lib
+    from llama_cpp._internals import LlamaContext
+    from llama_cpp.llama_cache import HybridCheckpointCache
+
+    handler, llm, native = media_checkpoint
+    cache = handler._get_media_checkpoint_cache(llm)
+    assert handler._save_media_checkpoint(llm, cache)
+    checkpoint = cache.checkpoints[0]
+    assert llm._hybrid_cache_mgr.save_checkpoint(3, [1, -9, -9])
+    assert cache.find_best_checkpoint([1, -9, -9]) is checkpoint
+    if overwrite == "peer-save":
+        peer = HybridCheckpointCache(llm._ctx.ctx, on_device=True)
+        llm._ctx._register_checkpoint_cache(peer)
+        assert peer.save_checkpoint(3, [1, -9, -9])
+    else:
+        llm._ctx._assert_ctx = lambda: None
+        LlamaContext.get_state_seq_data_ext(
+            llm._ctx, (ctypes.c_uint8 * 4)(), 4, 0,
+            lib.LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY | lib.LLAMA_STATE_SEQ_FLAGS_ON_DEVICE,
+        )
+    assert cache.find_best_checkpoint([1, -9, -9]) is None
+    assert not cache.restore_checkpoint(checkpoint)
+    assert llm._hybrid_cache_mgr.checkpoints
+    native["state_seq_set_data_ext"].assert_not_called()
 
 
 @pytest.mark.parametrize("failure", [None, "encode", "decode", "callback", "interrupt", "overflow", "media-overflow"])
@@ -1228,6 +1378,8 @@ def _color_chat(llm, color, stream=False):
 
 
 def test_real_media_changed_image_and_interrupted_retry(vision_model, monkeypatch):
+    import numpy as np
+
     llm, _ = vision_model
     references = {}
     ledgers = {}
@@ -1238,25 +1390,20 @@ def test_real_media_changed_image_and_interrupted_retry(vision_model, monkeypatc
         original = engine.process_media
         def consume(batch):
             media_rows.append(batch.n_tokens)
-            return original(batch)
+            target_h = engine._copy_rows(llm._ctx.get_embeddings_nextn(), batch.n_tokens, engine.n_embd)
+            result = original(batch)
+            np.testing.assert_array_equal(engine.pending_h, target_h[-1])
+            assert engine.draft_context.memory_seq_pos_max(0) == llm._ctx.memory_seq_pos_max(0)
+            return result
         monkeypatch.setattr(engine, "process_media", consume)
     for color in ("red", "blue"):
-        target_reference = None
-        if is_mtp:
-            # Greedy target-only output is an independent correctness reference.
-            llm.reset()
-            llm.speculative = None
-            try:
-                target_reference = _color_chat(llm, color)["choices"][0]["message"]["content"]
-            finally:
-                llm.speculative = engine
-                llm.reset()
+        # Keep the cold reference on the same decoding path: quantized target-only
+        # and MTP verification batches need not produce identical greedy text.
         llm.reset()
         media_rows.clear()
         references[color] = _color_chat(llm, color)["choices"][0]["message"]["content"]
         assert references[color]
-        if target_reference is not None:
-            assert references[color] == target_reference
+        if is_mtp:
             assert len(media_rows) > 1 and max(media_rows) <= llm.n_batch
             stats = llm.last_speculative_stats
             assert stats["drafted"] > 0 and stats["verified"] > 0
