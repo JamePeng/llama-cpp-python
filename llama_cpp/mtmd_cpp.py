@@ -1094,16 +1094,19 @@ def mtmd_log_set(log_callback: ggml_log_callback, user_data: c_void_p): # type: 
 # struct mtmd_caps {
 #     bool inp_vision;
 #     bool inp_audio;
+#     bool gen_audio;
 # };
 class mtmd_caps(Structure):
     _fields_ = [
         ("inp_vision", c_bool),
         ("inp_audio", c_bool),
+        ("gen_audio", c_bool),
     ]
 
     if TYPE_CHECKING:
         inp_vision: c_bool
         inp_audio: c_bool
+        gen_audio: c_bool
 
 
 # MTMD_API struct mtmd_caps mtmd_get_cap_from_file(const char * mmproj_fname);
@@ -2076,6 +2079,7 @@ class mtmd_helper_gen_audio_outtype(enum.IntEnum):
     MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV = 1  # WAV PCM 16-bit LE, mono
 
 # struct mtmd_helper_gen_audio_inp {
+#     bool stream; // if true, output() must be called after each step_gen()
 #     llama_seq_id seq_id;
 #     const char * prompt;
 #     size_t       prompt_len;
@@ -2088,6 +2092,7 @@ class mtmd_helper_gen_audio_outtype(enum.IntEnum):
 # };
 class mtmd_helper_gen_audio_inp(Structure):
     _fields_ = [
+        ("stream", c_bool),
         ("seq_id", c_int32),
         ("prompt", c_char_p),
         ("prompt_len", c_size_t),
@@ -2100,6 +2105,7 @@ class mtmd_helper_gen_audio_inp(Structure):
     ]
 
     if TYPE_CHECKING:
+        stream: bool
         seq_id: int
         prompt: bytes
         prompt_len: int
@@ -2109,6 +2115,13 @@ class mtmd_helper_gen_audio_inp(Structure):
         top_p: float
         seed: int
         out_type: int
+
+# MTMD_API struct mtmd_helper_gen_audio_inp mtmd_helper_gen_audio_inp_default(void);
+@ctypes_function_mtmd("mtmd_helper_gen_audio_inp_default", [], mtmd_helper_gen_audio_inp)
+def mtmd_helper_gen_audio_inp_default() -> mtmd_helper_gen_audio_inp:
+    """Return native defaults for audio generation requests."""
+    ...
+
 
 # MTMD_API mtmd_helper_gen_audio * mtmd_helper_gen_audio_init(
 #                                     struct llama_context * lctx,
@@ -2242,6 +2255,7 @@ def mtmd_helper_gen_audio_step_gen(
 
 # // out_data valid until next get_output() or reset() call
 # // out_n_samples (optional, can be NULL) receives the number of generated PCM samples
+# // in stream mode, returns only new audio; out_data_len is zero until a window is ready
 # MTMD_API int32_t mtmd_helper_gen_audio_get_output(
 #                         mtmd_helper_gen_audio * ctx,
 #                         int32_t * out_sample_rate,
@@ -2274,5 +2288,15 @@ def mtmd_helper_gen_audio_get_output(
     get_output() or reset() call.
 
     out_n_samples (optional, can be NULL) receives the number of generated PCM samples.
+    In stream mode, returns only new audio; out_data_len is zero until a window is ready.
     """
+    ...
+
+
+# MTMD_API int32_t mtmd_helper_gen_audio_flush(mtmd_helper_gen_audio * ctx);
+@ctypes_function_mtmd(
+    "mtmd_helper_gen_audio_flush", [mtmd_helper_gen_audio_p_ctypes], c_int32,
+)
+def mtmd_helper_gen_audio_flush(ctx: mtmd_helper_gen_audio_p, /) -> int:
+    """Decode buffered frames; call before the final get_output() in stream mode."""
     ...

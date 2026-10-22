@@ -1201,7 +1201,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 llama.reset()
                 prompt = text.encode("utf-8")
                 inp = mtmd.mtmd_helper_gen_audio_inp(
-                    seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
+                    stream=False, seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
                     lang=language.encode("utf-8") if language is not None else None,
                     top_k=top_k, top_p=top_p, seed=actual_seed,
                     out_type=(mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
