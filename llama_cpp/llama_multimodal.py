@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import io
 import math
 import os
+import re
 import sys
 import threading
-import zlib
 import wave
 
 from contextlib import ExitStack, contextmanager
@@ -506,7 +507,7 @@ class MTMDBaseHandler:
         Supported formats:
           - Images (via stb_image): jpg, png, bmp, etc.
           - Audio (via miniaudio): wav, mp3, flac.
-          - Video: depends on whether MTMD_VIDEO was enabled at build time.
+          - Video: requires MTMD_VIDEO support and ffmpeg/ffprobe at runtime.
 
         Note:
           - Media types (Image vs. Audio) are auto-detected by the C++ backend using magic bytes.
@@ -1314,6 +1315,12 @@ class MTMDChatHandler(MTMDBaseHandler):
         self.chat_template = None
         self._chat_format_parser_tags = []
         self._template_initialized = False
+        # Keep media identity mappings across requests for input_ids prefix matching;
+        # these store bookkeeping only, not embeddings or KV state, and clear on close().
+        # Serialized full chunk identity -> stable negative int32 placeholder token.
+        self._media_cache_ids: Dict[bytes, int] = {}
+        # Reverse lookup detects hash collisions before assigning a token to a new identity.
+        self._media_cache_keys: Dict[int, bytes] = {}
 
         # Pre-compile Jinja template
         if self.chat_format is None:
@@ -1337,9 +1344,10 @@ class MTMDChatHandler(MTMDBaseHandler):
         if self.mtmd_ctx is not None:
             return
 
-        # Cache the model's eos token and bos token
-        self.mtmd_eos_token=llama_model.detokenize([llama_model.token_eos()]).decode('utf-8', errors='ignore')
-        self.mtmd_bos_token=llama_model.detokenize([llama_model.token_bos()]).decode('utf-8', errors='ignore')
+        # Default detokenization hides control tokens; templates need their actual text.
+        bos, eos = llama_model.token_bos(), llama_model.token_eos()
+        self.mtmd_bos_token = llama_model._model.token_get_text(bos) if bos != -1 else ""
+        self.mtmd_eos_token = llama_model._model.token_get_text(eos) if eos != -1 else ""
 
         super()._init_mtmd_context(llama_model)
 
@@ -1349,6 +1357,8 @@ class MTMDChatHandler(MTMDBaseHandler):
         self.chat_template_override = None
         self._template_initialized = False
         self._chat_format_parser_tags = []
+        self._media_cache_ids.clear()
+        self._media_cache_keys.clear()
         super().close()
 
     def _get_media_url(
@@ -1731,16 +1741,13 @@ class MTMDChatHandler(MTMDBaseHandler):
         chunks: Optional[Any] = None,
     ) -> Any:
         """
-        Perform MTMD hybrid tokenization.
+        Tokenize text and media into native MTMD chunks.
 
         This function isolates the llama.cpp mtmd_tokenize call
         so that prompt construction logic is decoupled from runtime execution.
 
-        It guarantees:
-        - stable interface for future async/batch decoding
-        - isolated error handling for tokenizer failures
-        - clean separation between prompt building and C++ binding
-        - strict Python-side marker/bitmap validation before native tokenization
+        Validates marker/bitmap alignment before calling the native tokenizer.
+        Allocated chunks are freed on failure; caller-provided chunks are borrowed.
 
         Pure text input is valid:
             bitmaps is None or []
@@ -1753,6 +1760,16 @@ class MTMDChatHandler(MTMDBaseHandler):
             text=text,
             bitmaps=bitmaps,
         )
+
+        # MTMD adds vocabulary-configured boundaries without deduplicating template output.
+        # Remove only the outer copy; preserve turn-ending tokens inside the conversation.
+        bos, eos = self.mtmd_bos_token, self.mtmd_eos_token
+        if bos and llama._model.get_add_bos() and text.lstrip().startswith(bos):
+            start = len(text) - len(text.lstrip())
+            text = text[:start] + text[start + len(bos):]
+        if eos and llama._model.get_add_eos() and text.rstrip().endswith(eos):
+            end = len(text.rstrip())
+            text = text[:end - len(eos)] + text[end:]
 
         with ExitStack() as cleanup:
             if chunks is None:
@@ -1768,7 +1785,8 @@ class MTMDChatHandler(MTMDBaseHandler):
             encoded_text = text.encode("utf-8")
             input_text.text = ctypes.c_char_p(encoded_text)
             input_text.text_len = len(encoded_text)
-            input_text.add_special = (llama.n_tokens == 0)
+            # Tokenize the full chat with stable special tokens, independent of cached history.
+            input_text.add_special = True
             input_text.parse_special = True
 
             n_bitmaps = len(bitmaps)
@@ -1808,6 +1826,25 @@ class MTMDChatHandler(MTMDBaseHandler):
             cleanup.pop_all()
             return chunks
 
+    def _media_cache_token(self, identity: tuple) -> int:
+        """Map a full chunk identity to an int32 ledger token, checking collisions."""
+        # Negative media vocabulary IDs for prefix caching, designed by JamePeng.
+        key = json.dumps(identity, separators=(",", ":")).encode("utf-8")
+        if key in self._media_cache_ids:
+            return self._media_cache_ids[key]
+        # Stay in the negative int32 range, separate from vocabulary token IDs.
+        token = -100 - int.from_bytes(hashlib.sha256(key).digest()[:4], "big") % (2**31 - 100)
+        # Probe for an unused ID without changing any previously assigned mapping.
+        while token in self._media_cache_keys and self._media_cache_keys[token] != key:
+            token = token - 1 if token > -(2**31) + 1 else -100
+        self._media_cache_ids[key] = token
+        self._media_cache_keys[token] = key
+        return token
+
+    def _get_media_checkpoint_cache(self, llama: llama_core.Llama):
+        """Optional cache for templates that rewrite text after the media prefix."""
+        return None
+
     def _process_mtmd_prompt(
         self,
         llama: llama_core.Llama,
@@ -1822,18 +1859,16 @@ class MTMDChatHandler(MTMDBaseHandler):
         Core multimodal preprocessing pipeline.
         Converts raw chat messages into C++ MTMD chunk structures and a virtual token ledger.
 
-        Features:
-        - Thread-safe concurrent media decoding to eliminate I/O bottlenecks.
-        - "Negative Reverse Vocabulary" mapping for O(1) prefix matching of media tokens.
-        - Strict RAII-style C++ memory management to prevent leaks on failure.
+        Loads media concurrently within a request, assigns negative IDs for prefix
+        matching, and releases owned native resources if preprocessing fails.
 
         Returns:
-            full_prompt_ids: Ledger of text tokens and negative media IDs for prefix matching.
-            chunk_token_spans: Tuples of (start_idx, end_idx, chunk_ptr, chunk_type, media_id).
+            full_prompt_ids: Position ledger of text tokens and negative media IDs for prefix matching.
+            chunk_token_spans: Tuples of (start_pos, end_pos, chunk_ptr, chunk_type, media_id).
             chunks: Allocated C++ mtmd_input_chunks pointer (must be freed by the caller).
             bitmap_cleanup: List of C++ bitmap pointers to be freed after evaluation.
         """
-        # 1. Inject default system prompt if omitted by the user
+        # 1. Inject the default system prompt when absent or empty.
         system_prompt = next((msg["content"] for msg in messages if msg.get("role") == "system"), "")
         if system_prompt == "" and self.DEFAULT_SYSTEM_MESSAGE is not None:
             messages = [{"role": "system", "content": self.DEFAULT_SYSTEM_MESSAGE}] + messages
@@ -1905,10 +1940,10 @@ class MTMDChatHandler(MTMDBaseHandler):
                     if self.verbose:
                         print(f"{self.log_prefix}(_create_bitmap_func with {max_workers} threads): {len(media_items)} bitmaps were successfully created.")
             else:
-                # If there are no images, set the bitmaps to empty.
+                # Text-only requests have no media bitmaps.
                 bitmaps = []
 
-            # 4. Hybrid Tokenization (Text + Media)
+            # 4. Tokenize text and media into native chunks.
             chunks = self._mtmd_tokenize(
                 llama=llama,
                 text=text,
@@ -1925,10 +1960,19 @@ class MTMDChatHandler(MTMDBaseHandler):
             current_idx = 0
             n_chunks = self._mtmd_cpp.mtmd_input_chunks_size(chunks)
 
-            # Cursor to track the actual media contents (URLs or base64 data) provided by the user
-            media_items_count = len(media_items)
-            media_items_cur = 0
-            last_media_id = None
+            # Source media can expand into multiple frame/tile/audio chunks.
+            # Native IDs describe those chunks after expansion, unlike input URLs.
+            media_occurrences: Dict[bytes, int] = {}
+            # Missing native IDs must not produce cache hits across requests.
+            request_nonce = os.urandom(16).hex()
+            video_params = self._mtmd_helper_init_opt.video_params
+            projector_stat = os.stat(self.mmproj_path)
+            # Separate identities when the projector or preprocessing settings change.
+            media_namespace = (
+                os.path.realpath(self.mmproj_path), projector_stat.st_size, projector_stat.st_mtime_ns,
+                self.image_min_tokens, self.image_max_tokens,
+                float(video_params.fps_target), int(video_params.timestamp_interval_ms),
+            )
 
             for i in range(n_chunks):
                 chunk = self._mtmd_cpp.mtmd_input_chunks_get(chunks, i)
@@ -1945,54 +1989,29 @@ class MTMDChatHandler(MTMDBaseHandler):
                         full_prompt_ids.extend(tokens)
                         current_idx += len(tokens)
                 elif self._is_image_chunk(chunk_type) or self._is_audio_chunk(chunk_type):
-                    # Extract media properties
-                    # Note(JamePeng):
-                    # The M-RoPE model is based on `n_pos` instead of `n_tokens` (of course, there's no difference in non-M-RoPE models).
-                    # However, I still keep `n_tokens` because if `n_pos` is used, the underlying system will assume it is a full-match and will skip eval and sample.
-                    # chunk_n_pos = self._mtmd_cpp.mtmd_input_chunk_get_n_pos(chunk) # equals to max(t,h,w) for M-RoPE; equals to `n_tokens` otherwise
                     chunk_n_tokens = self._mtmd_cpp.mtmd_input_chunk_get_n_tokens(chunk)
+                    chunk_n_pos = self._mtmd_cpp.mtmd_input_chunk_get_n_pos(chunk)
 
-                    if media_items_cur < media_items_count:
-                        # The C++ parser only sees identical placeholders (e.g., "<__media__>").
-                        # We MUST inject the actual media content's identity here.
-                        real_media_url = media_items[media_items_cur]["url"]
-                        # Vocabulary Positive forward: 0 to 248,319 (Qwen3.5)
-                        # Generate a deterministic, unique negative ID for this specific image/audio.
-                        # - zlib.crc32 ensures cross-platform and cross-run consistency (unlike Python's hash()).
-                        # - We map it to a negative space (-100 to -16,777,316) to avoid colliding with
-                        #   positive text token IDs (e.g., Qwen3.5 vocab goes up to ~152k).
-                        # This empowers `longest_token_prefix` to correctly identify and reuse cached images,
-                        # while instantly breaking the match if the image content changes.
-                        # media_id = - (zlib.crc32(real_media_url.encode('utf-8')) % (2**24)) - 100
-                        media_id = - (zlib.crc32(real_media_url.encode('utf-8')) & 0xFFFFFF) - 100
-                        last_media_id = media_id
-                        media_items_cur += 1
-                    elif last_media_id is not None:
-                        # video may expand into multiple image chunks from one media marker
-                        media_id = last_media_id
-                    else:
-                        # Magic Negative Number as fallback :)
-                        media_id = -314159
+                    native_id = self._mtmd_cpp.mtmd_input_chunk_get_id(chunk) or b""
+                    # Distinguish repeated chunks that share the same native content ID.
+                    occurrence = media_occurrences.get(native_id, 0)
+                    media_occurrences[native_id] = occurrence + 1
+                    media_id = self._media_cache_token((
+                        media_namespace, chunk_type, native_id.hex(), occurrence,
+                        chunk_n_tokens, chunk_n_pos,
+                        request_nonce if not native_id else None,
+                    ))
 
                     if self.verbose:
                         print(f"{self.log_prefix}(mtmd_input_chunk_media_id): chunk_n_tokens: {chunk_n_tokens}, media_id: {media_id}, ")
 
-                    chunk_token_spans.append((current_idx, current_idx + chunk_n_tokens, chunk, chunk_type, media_id))
+                    chunk_token_spans.append((current_idx, current_idx + chunk_n_pos, chunk, chunk_type, media_id))
 
-                    # Pad the ledger with the pseudo-ID to mimic the physical space taken in the KV cache
-                    full_prompt_ids.extend([media_id] * chunk_n_tokens)
-                    current_idx += chunk_n_tokens
+                    # Match native sequence positions, not embedding rows or KV cells.
+                    full_prompt_ids.extend([media_id] * chunk_n_pos)
+                    current_idx += chunk_n_pos
                 else:
                     raise TypeError(f"{self.log_prefix}(mtmd_input_chunk_get_type): Invalid chunk type, chunk_type = {chunk_type}.")
-
-            if media_items_cur != media_items_count:
-                raise RuntimeError(
-                    f"{self.log_prefix}(_process_mtmd_prompt): not all media inputs were consumed by MTMD chunks\n"
-                    f"- consumed={media_items_cur}\n"
-                    f"- media_items={media_items_count}\n"
-                    "This usually means the rendered prompt did not produce enough media chunks, "
-                    "or the chat template/media marker normalization is incorrect."
-                )
 
             # Transfer chunks and bitmaps to __call__ for cleanup after prompt evaluation.
             return full_prompt_ids, chunk_token_spans, chunks, bitmap_cleanup
@@ -2087,6 +2106,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                     "use MTP or NGRAM_MAP_K/K4V, or disable speculative decoding for this handler"
                 )
             prefill_started = True
+            media_cache = self._get_media_checkpoint_cache(llama) if media_callback is None else None
             if media_callback is not None:
                 # Public prompt checkpoints contain only target state. MTP also
                 # needs its draft context and pending NextN row reconstructed.
@@ -2099,9 +2119,16 @@ class MTMDChatHandler(MTMDBaseHandler):
             llama._restored_logits = None
 
             # 3. KV Cache Synchronization & State Rollback
-            # Compares the virtual ledger with physical history to prevent Cache Poisoning.
+            # Subclasses must preserve input_ids; this base path owns cache rollback/reset.
             current_history = llama.input_ids[:llama.n_tokens].tolist()
+            # Re-evaluate the final prompt position to obtain fresh generation logits.
             longest_prefix = llama.longest_token_prefix(current_history, full_prompt_ids[:-1], self.verbose)
+            # Media must be reused or evaluated as a whole, including when the
+            # final-position exclusion above cuts through a media-only prompt.
+            for start_idx, end_idx, _, chunk_type, _ in chunk_token_spans:
+                if not self._is_text_chunk(chunk_type) and start_idx < longest_prefix < end_idx:
+                    longest_prefix = start_idx
+                    break
 
             if longest_prefix < llama.n_tokens:
                 if llama.is_hybrid and llama._hybrid_cache_mgr is not None:
@@ -2110,8 +2137,13 @@ class MTMDChatHandler(MTMDBaseHandler):
                             print(f"{self.log_prefix}(__call__): Hybrid prefix mismatch (matched {longest_prefix}/{llama.n_tokens}). "
                                 f"Searching for nearest checkpoint...", file=sys.stderr)
 
-                        best_ckpt = llama._hybrid_cache_mgr.find_best_checkpoint(full_prompt_ids[:-1], seq_id=0)
-                        if best_ckpt and llama._hybrid_cache_mgr.restore_checkpoint(best_ckpt, seq_id=0):
+                        # Restore only within the prefix clipped to whole media chunks.
+                        checkpoint_cache = llama._hybrid_cache_mgr
+                        best_ckpt = checkpoint_cache.find_best_checkpoint(full_prompt_ids[:longest_prefix], seq_id=0)
+                        if best_ckpt is None and media_cache is not None:
+                            checkpoint_cache = media_cache
+                            best_ckpt = checkpoint_cache.find_best_checkpoint(full_prompt_ids[:longest_prefix], seq_id=0)
+                        if best_ckpt and checkpoint_cache.restore_checkpoint(best_ckpt, seq_id=0):
                             llama.n_tokens = best_ckpt.pos
                             if self.verbose:
                                 print(f"{self.log_prefix}(__call__): Successfully rolled back to checkpoint at pos {llama.n_tokens}.", file=sys.stderr)
@@ -2143,6 +2175,8 @@ class MTMDChatHandler(MTMDBaseHandler):
                 for _, end_idx, _, _, _ in chunk_token_spans
             )
             prompt_evaluated = False
+            last_media_end = max((end for _, end, _, kind, _ in chunk_token_spans
+                                  if not self._is_text_chunk(kind)), default=-1)
             if perf_enabled and has_prompt_work:
                 llama._ctx.synchronize()
                 llama._ctx.reset_timings()
@@ -2169,19 +2203,20 @@ class MTMDChatHandler(MTMDBaseHandler):
                                     file=sys.stderr,
                                 )
 
-                            # Text evaluation delegates shift and chunking to native llama.eval
+                            # Llama.eval handles text batching and context shifts.
                             llama.eval(tokens_to_eval)
                             prompt_evaluated = True
                             n_past = llama.n_tokens
 
                 elif self._is_image_chunk(chunk_type) or self._is_audio_chunk(chunk_type):
                     chunk_n_tokens = self._mtmd_cpp.mtmd_input_chunk_get_n_tokens(chunk_ptr)
+                    chunk_n_pos = self._mtmd_cpp.mtmd_input_chunk_get_n_pos(chunk_ptr)
 
                     if self.verbose:
                         media_str = "IMAGE" if self._is_image_chunk(chunk_type) else "AUDIO"
                         print(f"{self.log_prefix}(__call__): Evaluating {media_str} chunk ({chunk_n_tokens} tokens) at pos {llama.n_tokens}...", file=sys.stderr)
 
-                    # Stage 5: Multimodal Physical OOM Defense
+                    # Conservatively check capacity using embedding rows, not M-RoPE positions.
                     if n_past + chunk_n_tokens > llama.n_ctx():
                         if media_callback is not None:
                             raise ValueError("MTMD speculative media exceeds n_ctx; increase n_ctx")
@@ -2193,7 +2228,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                                 f"You MUST increase n_ctx to fit the dialogue."
                             )
                         else:
-                            # Safely discard oldest tokens while preserving system prompts
+                            # Discard old positions while retaining the n_keep prefix.
                             n_discard = (n_past + chunk_n_tokens) - llama.n_ctx() + llama.n_batch
                             n_keep = min(llama.n_keep, n_past)
                             n_discard = min(n_discard, n_past - n_keep)
@@ -2274,14 +2309,22 @@ class MTMDChatHandler(MTMDBaseHandler):
                             )
                         raise ValueError(message)
 
-                    if not n_past <= new_n_past.value <= llama.n_ctx():
-                        raise ValueError(f"{self.log_prefix}(media prefill): Invalid output position {new_n_past.value}.")
+                    # Native evaluation must advance by n_pos, even when n_tokens differs.
+                    expected_pos = n_past + chunk_n_pos
+                    if new_n_past.value != expected_pos or not n_past <= new_n_past.value <= llama.n_ctx():
+                        raise ValueError(
+                            f"{self.log_prefix}(media prefill): Invalid output position {new_n_past.value}; "
+                            f"expected {expected_pos} (start_pos={n_past}, media_positions={chunk_n_pos})."
+                        )
 
-                    # Update Ledger with "Negative Reverse Vocabulary" IDs
+                    # Record the media ID over the positions advanced by native decode.
                     llama.input_ids[n_past : new_n_past.value] = media_id
                     n_past = new_n_past.value
                     llama.n_tokens = n_past
                     prompt_evaluated = True
+                    if media_cache is not None and end_idx == last_media_end:
+                        # Keep a stable prefix before the template's changing assistant suffix.
+                        media_cache.save_checkpoint(n_past, llama.input_ids[:n_past].tolist(), seq_id=0)
 
             if perf_enabled and prompt_evaluated:
                 # mtmd_helper_eval_chunk_single() bypasses LlamaContext.decode(),
@@ -2294,13 +2337,12 @@ class MTMDChatHandler(MTMDBaseHandler):
                     )
                     llama._ctx.print_timings()
 
-            # Extract the final, perfectly synchronized prompt sequence
+            # Pass the evaluated position ledger to completion generation.
             prompt = llama.input_ids[: llama.n_tokens].tolist()
             if prompt_evaluated:
                 llama._mark_prefilled_prompt()
 
-            # End-of-Turn Checkpoint
-            # Anchors the state ONLY after the entire multi-modal turn is processed
+            # Save the fully evaluated prompt state before response generation.
             if (
                 llama.is_hybrid
                 and media_callback is None
@@ -2324,7 +2366,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             # Generation no longer needs these resources once prompt evaluation ends.
             self._free_mtmd_resources(chunks, bitmap_cleanup)
 
-        # Handle response format and tools (same as before)
+        # Configure response formatting and tool selection.
         if response_format is not None and response_format["type"] == "json_object":
             grammar = _grammar_for_response_format(response_format)
 
@@ -2469,6 +2511,8 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         chat_template_name: Optional[str] = None,
         **kwargs
     ) -> None:
+        self._qwen_vision_template = False
+        self._media_checkpoint_cache = None
         self.chat_format = chat_format
         self.chat_template_name = chat_template_name
         self.verbose = verbose
@@ -2576,6 +2620,41 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         ]
 
         self._template_initialized = True
+
+        architecture = getattr(llama, "metadata", {}).get("general.architecture", "")
+        self._qwen_vision_template = architecture.startswith("qwen") and "<|vision_start|>" in self.chat_format
+
+    def _replace_media_placeholders(self, text, media_items):
+        text = super()._replace_media_placeholders(text, media_items)
+        if self._qwen_vision_template:
+            # Qwen's stored template wraps placeholders; MTMD wraps each expanded frame.
+            pattern = r"<\|vision_start\|>\s*" + re.escape(self.media_marker) + r"\s*<\|vision_end\|>"
+            text = re.sub(pattern, lambda _: self.media_marker, text)
+        return text
+
+    def _get_media_checkpoint_cache(self, llama):
+        manager = llama._hybrid_cache_mgr
+        if not self._qwen_vision_template or not llama.is_hybrid or manager is None or manager.max_checkpoints <= 0:
+            if self._media_checkpoint_cache is not None:
+                self._media_checkpoint_cache.clear()
+            return None
+        cache = self._media_checkpoint_cache
+        if cache is None or cache._context_ref is None or cache._context_ref() is not llama._ctx:
+            from .llama_cache import HybridCheckpointCache
+
+            if cache is not None:
+                cache.close()
+            # A separate host snapshot survives normal prompt/generation checkpoint eviction.
+            cache = HybridCheckpointCache(llama._ctx.ctx, max_checkpoints=1, on_device=False, verbose=self.verbose)
+            llama._ctx._register_checkpoint_cache(cache)
+            self._media_checkpoint_cache = cache
+        return cache
+
+    def close(self):
+        if self._media_checkpoint_cache is not None:
+            self._media_checkpoint_cache.close()
+            self._media_checkpoint_cache = None
+        super().close()
 
     def __call__(self, **kwargs):
         llama = kwargs["llama"]
@@ -3030,11 +3109,6 @@ class MiniCPMv45ChatHandler(MTMDChatHandler):
         # Set stop token patch
         kwargs['stop'] = [self.MINICPMV_EOS_TOKEN, self.MINICPMV_PAD_TOKEN]
 
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
         return super().__call__(**kwargs)
@@ -3046,7 +3120,7 @@ class MiniCPMV46ChatHandler(MTMDChatHandler):
 
     Features:
     - Aligned with official tokenizer_config.json special tokens.
-    - Custom `<|image_pad|>` and `<|video_pad|>` multimodal tokens.
+    - Image rendering with `<|image_pad|>`; video rendering is not implemented.
     - Integrated MTMD-style URL and Base64 injection for visual content.
     - Specialized `<tool_call>` and `<tool_response>` block generation.
     - Autonomously folds previous reasoning paths using `last_query_index`.
@@ -3834,11 +3908,6 @@ class GLM41VChatHandler(MTMDChatHandler):
         stop_tokens = [self.GLM41V_EOS_TOKEN, "<|user|>", "<|observation|>", "</answer>"] # Stop token patch
         kwargs['stop'] = stop_tokens
 
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")
 
@@ -3923,11 +3992,6 @@ class GLM46VChatHandler(MTMDChatHandler):
         # https://huggingface.co/zai-org/GLM-4.6V-Flash/blob/main/generation_config.json
         kwargs['stop'] = [self.GLM46V_EOS_TOKEN, "<|user|>", "<|observation|>", "<|code_middle|>"] # Stop token patch
 
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}) - Start processing")
 
@@ -3998,11 +4062,6 @@ class GraniteDoclingChatHandler(MTMDChatHandler):
         self.DEFAULT_SYSTEM_MESSAGE = None
         kwargs['stop'] = [self.GRANITE_EOS_TOKEN]
 
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")
 
@@ -4051,11 +4110,6 @@ class LFM2VLChatHandler(MTMDChatHandler):
         super().__init__(image_min_tokens=self.image_min_tokens, image_max_tokens=self.image_max_tokens, **kwargs)
 
     def __call__(self, **kwargs):
-
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
 
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")
@@ -4257,11 +4311,6 @@ class PaddleOCRChatHandler(MTMDChatHandler):
         # Set the specific stop token defined in the PaddleOCR template
         kwargs['stop'] = [self.PADDLEOCR_EOS_TOKEN]
 
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")
 
@@ -4274,6 +4323,7 @@ class Qwen25VLChatHandler(MTMDChatHandler):
     QWEN25_VL_PAD_TOKEN = "<|endoftext|>"
     QWEN25_VL_EOS_TOKEN = "<|im_end|>"
 
+    # MTMD supplies vision boundaries for each image/frame chunk.
     CHAT_FORMAT = (
         "{% set image_count = namespace(value=0) %}"
         "{% for message in messages %}"
@@ -4289,10 +4339,10 @@ class Qwen25VLChatHandler(MTMDChatHandler):
         "{% if content['type'] == 'image_url' %}"
         "{% if content.image_url is string %}"
         "{% set image_count.value = image_count.value + 1 %}"
-        "Picture {{ image_count.value }}: <|vision_start|> {{ content.image_url }} <|vision_end|>"
+        "Picture {{ image_count.value }}: {{ content.image_url }}"
         "{% else %}"
         "{% set image_count.value = image_count.value + 1 %}"
-        "Picture {{ image_count.value }}: <|vision_start|> {{ content.image_url.url }} <|vision_end|>"
+        "Picture {{ image_count.value }}: {{ content.image_url.url }}"
         "{% endif %}"
         "{% elif content['type'] == 'text' %}"
         "{{ content['text'] }}"
@@ -4306,11 +4356,6 @@ class Qwen25VLChatHandler(MTMDChatHandler):
 
     def __call__(self, **kwargs):
         kwargs['stop'] = [self.QWEN25_VL_EOS_TOKEN, self.QWEN25_VL_PAD_TOKEN]
-
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
 
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")
@@ -4389,13 +4434,8 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
-        # Qwen3 models universally use `<|endoftext|>` and `<|im_end|>` as the stop token
+        # Stop on the ASR audio padding and end markers.
         kwargs['stop'] = [self.QWEN3_ASR_AUDIO_PAD_TOKEN, self.QWEN3_ASR_AUDIO_EOS_TOKEN]
-
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
 
         if self.verbose:
             print(f"{self.log_prefix} - Start processing Qwen3-ASR (Audio Only)")
@@ -4408,6 +4448,7 @@ class Qwen3VLChatHandler(MTMDChatHandler):
     QWEN3_VL_PAD_TOKEN = "<|endoftext|>"
     QWEN3_VL_EOS_TOKEN = "<|im_end|>"
 
+    # MTMD supplies vision boundaries for each image/frame chunk.
     CHAT_FORMAT = (
         "{%- set image_count = namespace(value=0) -%}"
         "{%- set video_count = namespace(value=0) -%}"
@@ -4426,7 +4467,6 @@ class Qwen3VLChatHandler(MTMDChatHandler):
                             "{{- image_count.value | string -}}"
                             "{{- ': ' -}}"
                         "{%- endif -%}"
-                        "{{- '<|vision_start|>' -}}"
                         "{%- if 'image' in item -%}"
                             "{%- if item.image is string -%}"
                                 "{{- item.image -}}"
@@ -4440,7 +4480,6 @@ class Qwen3VLChatHandler(MTMDChatHandler):
                                 "{{- item.image_url.url -}}"
                             "{%- endif -%}"
                         "{%- endif -%}"
-                        "{{- '<|vision_end|>' -}}"
                     "{%- endif -%}"
                     "{%- if 'video_url' in item or 'video' in item -%}"
                         "{%- if do_vision_count %}"
@@ -4451,7 +4490,6 @@ class Qwen3VLChatHandler(MTMDChatHandler):
                             "{{- video_count.value | string -}}"
                             "{{- ': ' -}}"
                         "{%- endif -%}"
-                        "{{- '<|vision_start|>' -}}"
                         "{%- if 'video_url' in item -%}"
                             "{%- if item.video_url is string -%}"
                                 "{{- item.video_url -}}"
@@ -4466,7 +4504,6 @@ class Qwen3VLChatHandler(MTMDChatHandler):
                                 "{{- item.video.url -}}"
                             "{%- endif -%}"
                         "{%- endif -%}"
-                        "{{- '<|vision_end|>' -}}"
                     "{%- endif -%}"
                     "{%- if 'text' in item -%}"
                         "{{- item.text -}}"
@@ -4591,11 +4628,6 @@ class Qwen3VLChatHandler(MTMDChatHandler):
     def __call__(self, **kwargs):
         kwargs['stop'] = [self.QWEN3_VL_EOS_TOKEN, self.QWEN3_VL_PAD_TOKEN]
 
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix}(force_reasoning={self.force_reasoning}) - Start processing")
 
@@ -4606,6 +4638,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
     """
     Handler for Qwen3.5/Qwen3.6/Qwen3.8 models.
     """
+    # MTMD supplies vision boundaries for each image/frame chunk.
     CHAT_FORMAT = (
         "{%- set image_count = namespace(value=0) -%}"
         "{%- set video_count = namespace(value=0) -%}"
@@ -4626,13 +4659,11 @@ class Qwen35ChatHandler(MTMDChatHandler):
         "                    {{- image_count.value | string -}}"
         "                    {{- ': ' -}}"
         "                {%- endif -%}"
-        "                {{- '<|vision_start|>' -}}"
         "                {%- if item.image_url is string -%}"
         "                    {{- item.image_url -}}"
         "                {%- else -%}"
         "                    {{- item.image_url.url -}}"
         "                {%- endif -%}"
-        "                {{- '<|vision_end|>' -}}"
         "            {%- elif 'video' in item or 'video_url' in item or item.type == 'video' or item.type == 'video_url' -%}"
         "                {%- if is_system_content -%}"
         "                    {{- raise_exception('System message cannot contain videos.') -}}"
@@ -4643,13 +4674,11 @@ class Qwen35ChatHandler(MTMDChatHandler):
         "                {%- if add_vision_id -%}"
         "                    {{- 'Video ' ~ video_count.value ~ ': ' -}}"
         "                {%- endif -%}"
-        "                {{- '<|vision_start|>' -}}"
         "                {%- if 'video' in item -%}"
         "                    {{- item.video if item.video is string else item.video.url -}}"
         "                {%- elif 'video_url' in item -%}"
         "                    {{- item.video_url if item.video_url is string else item.video_url.url -}}"
         "                {%- endif -%}"
-        "                {{- '<|vision_end|>' -}}"
         "            {%- elif 'text' in item -%}"
         "                {{- item.text -}}"
         "            {%- else -%}"
@@ -4800,11 +4829,6 @@ class Qwen35ChatHandler(MTMDChatHandler):
         self.extra_template_arguments["preserve_thinking"] = preserve_thinking
 
     def __call__(self, **kwargs):
-        llama = kwargs['llama']
-
-        if hasattr(llama, 'input_ids'):
-            llama.input_ids.fill(0)
-
         if self.verbose:
             print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}, preserve_thinking={self.preserve_thinking}) - Start processing")
 

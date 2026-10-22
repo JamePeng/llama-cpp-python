@@ -5,18 +5,30 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 import threading
 import struct
+from contextlib import ExitStack
 
 import pytest
 from jinja2.exceptions import TemplateError
 
 
 @pytest.fixture
-def chat_prefill(tmp_path, monkeypatch):
+def make_handler(tmp_path):
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    with ExitStack() as cleanup:
+        def create(name="MTMDChatHandler", **kwargs):
+            options = {"mmproj_path": str(tmp_path), "verbose": False, **kwargs}
+            handler = getattr(multimodal, name)(**options)
+            return cleanup.enter_context(handler)
+        yield create
+
+
+@pytest.fixture
+def chat_prefill(make_handler, monkeypatch):
     import numpy as np
     from llama_cpp import Llama
     from llama_cpp import llama_multimodal as multimodal
 
-    handler = multimodal.MTMDChatHandler(mmproj_path=str(tmp_path), verbose=False)
+    handler = make_handler()
     monkeypatch.setattr(handler, "mtmd_ctx", object())
     monkeypatch.setattr(handler, "_init_mtmd_context", Mock())
     monkeypatch.setattr(handler, "_free_mtmd_resources", Mock())
@@ -52,13 +64,95 @@ def chat_prefill(tmp_path, monkeypatch):
 
     backend = SimpleNamespace(
         mtmd_input_chunk_get_n_tokens=lambda chunk: 2,
+        mtmd_input_chunk_get_n_pos=lambda chunk: 2,
         mtmd_helper_eval_chunk_single=Mock(side_effect=evaluate),
     )
     monkeypatch.setattr(handler, "_mtmd_cpp", backend)
     yield handler, llm, backend
 
 
-@pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "interrupt"])
+@pytest.fixture
+def chat_tokenizer(chat_prefill):
+    from llama_cpp import mtmd_cpp
+
+    handler, llm, backend = chat_prefill
+    handler.media_marker = "<__media__>"
+    handler.mtmd_bos_token, handler.mtmd_eos_token = "<bos>", "<eos>"
+    llm._model = SimpleNamespace(get_add_bos=lambda: True, get_add_eos=lambda: True)
+    backend.mtmd_input_text = mtmd_cpp.mtmd_input_text
+    backend.mtmd_bitmap_p_ctypes = mtmd_cpp.mtmd_bitmap_p_ctypes
+    observed = []
+
+    def tokenize(ctx, output, input_ptr, bitmap_array, count):
+        inp = ctypes.cast(input_ptr, ctypes.POINTER(mtmd_cpp.mtmd_input_text)).contents
+        observed.append((ctypes.string_at(inp.text, inp.text_len), inp.add_special,
+                         inp.parse_special, count))
+        return 0
+
+    backend.mtmd_tokenize = Mock(side_effect=tokenize)
+    return handler, llm, observed
+
+
+@pytest.mark.parametrize("with_media", [False, True])
+def test_full_chat_tokenization_keeps_special_tokens_across_turns(chat_tokenizer, with_media):
+    from llama_cpp import mtmd_cpp
+
+    handler, llm, observed = chat_tokenizer
+    bitmaps = [mtmd_cpp.mtmd_bitmap_p_ctypes(1)] if with_media else []
+    text = "user: " + (handler.media_marker if with_media else "hello")
+    chunks = object()
+    for n_tokens, prompt in ((0, text), (3, text + "\nassistant: hello\nuser: again")):
+        llm.n_tokens = n_tokens
+        assert handler._mtmd_tokenize(llm, prompt, bitmaps, chunks) is chunks
+        assert llm.n_tokens == n_tokens
+    # Both calls describe a full chat, even when the decoder already holds history.
+    assert observed == [(prompt.encode(), True, True, len(bitmaps)) for prompt in
+                        (text, text + "\nassistant: hello\nuser: again")]
+
+
+@pytest.mark.parametrize("add_bos, add_eos", [(False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("whitespace", ["", " \n"])
+def test_auto_special_tokens_preserve_inner_turn_boundaries(chat_tokenizer, add_bos, add_eos, whitespace):
+    handler, llm, observed = chat_tokenizer
+    llm._model.get_add_bos = lambda: add_bos
+    llm._model.get_add_eos = lambda: add_eos
+    middle = "user: hello<eos>assistant: answer<eos>user: <bos>quoted"
+    text = whitespace + "<bos>" + middle + "<eos>" + whitespace
+    handler._mtmd_tokenize(llm, text, chunks=object())
+    expected = whitespace + ("" if add_bos else "<bos>") + middle + ("" if add_eos else "<eos>") + whitespace
+    assert observed == [(expected.encode(), True, True, 0)]
+
+
+@pytest.mark.parametrize("handler_name", [
+    "MTMDChatHandler", "GenericMTMDChatHandler", "Llava15ChatHandler", "ObsidianChatHandler",
+    "MoondreamChatHandler", "Llava16ChatHandler", "NanoLlavaChatHandler", "Llama3VisionAlphaChatHandler",
+    "MiniCPMv26ChatHandler", "MiniCPMv45ChatHandler", "MiniCPMV46ChatHandler", "Gemma3ChatHandler",
+    "Gemma4ChatHandler", "GLM41VChatHandler", "GLM46VChatHandler", "GraniteDoclingChatHandler",
+    "LFM2VLChatHandler", "LFM25VLChatHandler", "PaddleOCRChatHandler", "Qwen25VLChatHandler",
+    "Qwen3ASRChatHandler", "Qwen3VLChatHandler", "Qwen35ChatHandler", "Step3VLChatHandler",
+])
+@pytest.mark.parametrize("generation", [False, True])
+def test_builtin_templates_do_not_duplicate_auto_boundaries(chat_tokenizer, handler_name, generation):
+    from llama_cpp import llama_multimodal as multimodal
+
+    handler, llm, observed = chat_tokenizer
+    cls = getattr(multimodal, handler_name)
+    handler._change_chat_template(cls.CHAT_FORMAT)
+    handler.extra_template_arguments.update({name: value for name, value in vars(cls).items()
+                                            if name.endswith("_TOKEN") and isinstance(value, str)})
+    text = handler._render_mtmd_prompt(messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "answer"},
+    ], add_generation_prompt=generation)
+    handler._mtmd_tokenize(llm, text, chunks=object())
+    normalized = observed[0][0].decode()
+    assert not normalized.startswith("<bos>")
+    assert not normalized.endswith("<eos>")
+    # Removing an outer copy must leave all internal turn delimiters intact.
+    assert normalized == text.removeprefix("<bos>").removesuffix("<eos>")
+
+
+@pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "position-in-context", "interrupt"])
 def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, failure):
     handler, llm, backend = chat_prefill
     evaluate = backend.mtmd_helper_eval_chunk_single.side_effect
@@ -72,15 +166,16 @@ def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, fail
         )
     elif failure == "helper":
         backend.mtmd_helper_eval_chunk_single.side_effect = lambda *args: -1
-    elif failure == "position":
+    elif failure in ("position", "position-in-context"):
         def invalid_position(*args):
-            args[-1]._obj.value = 7
+            args[-1]._obj.value = 7 if failure == "position" else 3
             return 0
         backend.mtmd_helper_eval_chunk_single.side_effect = invalid_position
     elif failure == "interrupt":
         backend.mtmd_helper_eval_chunk_single.side_effect = KeyboardInterrupt
 
-    with pytest.raises((RuntimeError, ValueError, KeyboardInterrupt)):
+    match = "expected 4" if failure == "position-in-context" else None
+    with pytest.raises((RuntimeError, ValueError, KeyboardInterrupt), match=match):
         handler(llama=llm, messages=[])
     llm.reset.assert_called_once()
     assert llm.n_tokens == 0 and llm._last_eval_output_count == 0
@@ -119,10 +214,36 @@ def test_mtmd_media_eval_error_explains_video_context_usage(chat_prefill, video)
     assert ("chat_handler_kwargs" in error) is video
 
 
-@pytest.mark.parametrize("mode", ["plain", "hybrid", "shift"])
-def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
+@pytest.mark.parametrize("handler_name", [
+    "MiniCPMv45ChatHandler", "GLM41VChatHandler", "GLM46VChatHandler",
+    "GraniteDoclingChatHandler", "LFM2VLChatHandler", "PaddleOCRChatHandler",
+    "Qwen25VLChatHandler", "Qwen3ASRChatHandler", "Qwen3VLChatHandler", "Qwen35ChatHandler",
+])
+def test_handlers_preserve_ledger_for_base_cache_matching(make_handler, monkeypatch, handler_name):
+    import numpy as np
+    from llama_cpp import llama_multimodal as multimodal
+
+    handler = make_handler(handler_name)
+    llm = SimpleNamespace(input_ids=np.array([1, -9, -9, 2]))
+    seen = []
+    monkeypatch.setattr(multimodal.MTMDChatHandler, "__call__",
+                        lambda self, **kwargs: seen.append(kwargs["llama"].input_ids.tolist()))
+    handler(llama=llm, messages=[])
+    assert seen == [[1, -9, -9, 2]]
+
+
+@pytest.mark.parametrize("mode, embedding_rows", [
+    ("plain", 2), ("hybrid", 2), ("shift", 2),
+    ("partial", 2), ("hybrid-partial", 2), ("plain", 4),
+])
+def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode, embedding_rows):
     handler, llm, backend = chat_prefill
     expected = [1, 2, -9, -9]
+    # Embedding rows may exceed the two positions occupied by this media chunk.
+    backend.mtmd_input_chunk_get_n_tokens = lambda chunk: embedding_rows
+    if "partial" in mode:
+        llm.input_ids[:4] = expected
+        llm.n_tokens = 4
     if mode == "shift":
         llm.n_tokens = 6
         llm.input_ids[:] = [1, 2, 3, 4, 5, 6]
@@ -130,7 +251,7 @@ def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
             [1, 2, 3, 4, 5, 6, -9, -9], [(6, 8, object(), 1, -9)], object(), []
         )
         expected = [4, 5, 6, -9, -9]
-    if mode == "hybrid":
+    if mode.startswith("hybrid"):
         llm.is_hybrid = True
         llm._hybrid_cache_mgr = SimpleNamespace(
             max_checkpoints=2, clear=Mock(), save_checkpoint=Mock(),
@@ -145,9 +266,94 @@ def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode):
     handler._free_mtmd_resources.assert_called_once()
     if mode == "shift":
         llm._ctx.memory_seq_add.assert_called_once_with(0, 3, 6, -3)
-    if mode == "hybrid":
+    if mode.startswith("hybrid"):
         llm._hybrid_cache_mgr.clear.assert_not_called()
         llm._hybrid_cache_mgr.save_checkpoint.assert_called_once()
+    if "partial" in mode:
+        assert backend.mtmd_helper_eval_chunk_single.call_args.args[3].value == 2
+        if mode.startswith("hybrid"):
+            llm._hybrid_cache_mgr.find_best_checkpoint.assert_called_once_with([1, 2], seq_id=0)
+        else:
+            llm._ctx.memory_seq_rm.assert_called_once_with(0, 2, -1)
+
+
+@pytest.mark.parametrize("restore", [True, False])
+def test_media_checkpoint_restores_before_rewritten_assistant_suffix(chat_prefill, monkeypatch, restore):
+    handler, llm, backend = chat_prefill
+    llm.is_hybrid = True
+    llm.n_tokens = 5
+    llm.input_ids[:5] = [1, 2, -9, -9, 7]
+    llm._hybrid_cache_mgr = SimpleNamespace(
+        max_checkpoints=4, clear=Mock(), save_checkpoint=Mock(),
+        find_best_checkpoint=Mock(return_value=None), restore_checkpoint=Mock(),
+    )
+    media_cache = SimpleNamespace(find_best_checkpoint=Mock(return_value=SimpleNamespace(pos=4)),
+                                 restore_checkpoint=Mock(return_value=restore), save_checkpoint=Mock())
+    monkeypatch.setattr(handler, "_get_media_checkpoint_cache", lambda llama: media_cache)
+    monkeypatch.setattr(handler, "_is_text_chunk", lambda kind: kind == 0)
+    handler._process_mtmd_prompt.return_value = (
+        [1, 2, -9, -9, 8], [(0, 2, [1, 2], 0, None), (2, 4, object(), 1, -9),
+                             (4, 5, [8], 0, None)], object(), [],
+    )
+
+    def tokens(chunk, count):
+        count._obj.value = len(chunk)
+        return chunk
+
+    def evaluate(text):
+        llm.input_ids[llm.n_tokens:llm.n_tokens + len(text)] = text
+        llm.n_tokens += len(text)
+
+    backend.mtmd_input_chunk_get_tokens_text = tokens
+    llm.eval = Mock(side_effect=evaluate)
+    assert handler(llama=llm, messages=[]) == "completed"
+    media_cache.find_best_checkpoint.assert_called_once_with([1, 2, -9, -9], seq_id=0)
+    llm._hybrid_cache_mgr.restore_checkpoint.assert_not_called()
+    assert llm.create_completion.call_args.kwargs["prompt"] == [1, 2, -9, -9, 8]
+    if restore:
+        backend.mtmd_helper_eval_chunk_single.assert_not_called()
+        llm.eval.assert_called_once_with([8])
+        llm.reset.assert_not_called()
+    else:
+        llm.reset.assert_called_once()
+        backend.mtmd_helper_eval_chunk_single.assert_called_once()
+        media_cache.save_checkpoint.assert_called_once_with(4, [1, 2, -9, -9], seq_id=0)
+
+
+@pytest.mark.parametrize("enabled, hybrid, qwen", [(True, True, True), (False, True, True),
+                                                  (True, False, True), (True, True, False)])
+def test_generic_media_checkpoint_lifecycle(tmp_path, monkeypatch, enabled, hybrid, qwen):
+    from llama_cpp import llama_cache, llama_multimodal
+
+    created = []
+    def cache_factory(ctx, **kwargs):
+        cache = SimpleNamespace(_context_ref=None, clear=Mock(), close=Mock())
+        created.append((ctx, kwargs, cache))
+        return cache
+
+    monkeypatch.setattr(llama_cache, "HybridCheckpointCache", cache_factory)
+    handler = llama_multimodal.GenericMTMDChatHandler(chat_format="hello", mmproj_path=str(tmp_path), verbose=False)
+    handler._qwen_vision_template = qwen
+    ctx = SimpleNamespace(ctx=object())
+    ctx._register_checkpoint_cache = lambda cache: setattr(cache, "_context_ref", lambda: ctx)
+    llm = SimpleNamespace(_ctx=ctx, is_hybrid=hybrid,
+                          _hybrid_cache_mgr=SimpleNamespace(max_checkpoints=4 if enabled else 0))
+    try:
+        cache = handler._get_media_checkpoint_cache(llm)
+        if enabled and hybrid and qwen:
+            assert cache is handler._get_media_checkpoint_cache(llm)
+            assert len(created) == 1
+            assert created[0][1]["max_checkpoints"] == 1
+            assert created[0][1]["on_device"] is False
+            llm._hybrid_cache_mgr.max_checkpoints = 0
+            assert handler._get_media_checkpoint_cache(llm) is None
+            cache.clear.assert_called_once()
+        else:
+            assert cache is None and not created
+    finally:
+        handler.close()
+    if created:
+        created[0][2].close.assert_called_once()
 
 
 @pytest.mark.parametrize("failure", [None, "encode", "decode", "callback", "interrupt", "overflow", "media-overflow"])
@@ -224,6 +430,97 @@ def test_mtmd_audio_stream_default_params_abi():
     assert type(params).step_ms.offset == 0
     assert params.step_ms == 320
     module.mtmd_audio_stream_free(None)
+
+
+@pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
+@pytest.mark.parametrize("name, offsets", [
+    ("mtmd_gen_inp", {
+        "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20,
+        "temp": 24, "codes": 32, "n_codes": 40, "feats": 48, "n_feats": 56,
+    }),
+    ("mtmd_gen_out", {
+        "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24,
+        "embd": 32, "is_eos": 40, "audio": 48, "n_samples": 56,
+    }),
+])
+def test_mtmd_gen_struct_abi(name, offsets):
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    struct_type = getattr(module, name)
+    # seed moved into state params; serialized decoder state is no longer public.
+    assert ctypes.sizeof(struct_type) == 64
+    assert ctypes.alignment(struct_type) == 8
+    assert {field: getattr(struct_type, field).offset for field, _ in struct_type._fields_} == offsets
+
+
+def test_mtmd_gen_state_api():
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    params = module.mtmd_gen_state_params_default()
+    assert ctypes.sizeof(params) == ctypes.sizeof(ctypes.c_uint32)
+    assert ctypes.alignment(params) == ctypes.alignment(ctypes.c_uint32)
+    assert type(params).seed.offset == 0
+    assert params.seed == 0xFFFFFFFF
+    assert module.mtmd_gen_state_init.argtypes == [
+        module.mtmd_context_p_ctypes, module.mtmd_gen_state_params,
+    ]
+    assert module.mtmd_gen_state_init.restype is module.mtmd_gen_state_p_ctypes
+    for function in (module.mtmd_gen_state_reset, module.mtmd_gen_state_free):
+        assert function.argtypes == [module.mtmd_gen_state_p_ctypes]
+        assert function.restype is None
+    assert module.mtmd_gen_inp_default.restype is module.mtmd_gen_inp
+    assert module.mtmd_gen_audio_process.argtypes == [
+        module.mtmd_context_p_ctypes, module.mtmd_gen_state_p_ctypes,
+        ctypes.POINTER(module.mtmd_gen_inp), ctypes.POINTER(module.mtmd_gen_out),
+    ]
+    assert module.mtmd_gen_audio_process.restype is ctypes.c_int32
+    module.mtmd_gen_state_free(None)
+
+
+def test_mtmd_caps_abi():
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    caps = module.mtmd_caps
+    assert ctypes.sizeof(caps) == 3
+    assert ctypes.alignment(caps) == 1
+    assert [getattr(caps, field).offset for field in ("inp_vision", "inp_audio", "gen_audio")] == [0, 1, 2]
+    assert module.mtmd_get_cap_from_file.restype is caps
+
+
+def test_mtmd_helper_gen_audio_input_abi():
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    inp = module.mtmd_helper_gen_audio_inp
+    assert inp.stream.offset == 0
+    assert inp.seq_id.offset == 4
+    assert inp.prompt.offset == 8
+    pointer_size = ctypes.sizeof(ctypes.c_void_p)
+    assert ctypes.sizeof(inp) == 24 + 4 * pointer_size
+    assert {field: getattr(inp, field).offset for field in
+            ("prompt_len", "speaker_ref", "lang", "top_k", "top_p", "seed", "out_type")} == {
+        "prompt_len": 8 + pointer_size, "speaker_ref": 8 + 2 * pointer_size,
+        "lang": 8 + 3 * pointer_size, "top_k": 8 + 4 * pointer_size,
+        "top_p": 12 + 4 * pointer_size, "seed": 16 + 4 * pointer_size,
+        "out_type": 20 + 4 * pointer_size,
+    }
+    value = inp(stream=False, seq_id=7)
+    raw = bytes(value)
+    assert raw[0] == 0
+    assert ctypes.c_int32.from_buffer_copy(raw[4:8]).value == 7
+    value.stream = True
+    assert value.seq_id == 7
+
+
+def test_mtmd_helper_gen_audio_defaults_and_flush_api():
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    default = module.mtmd_helper_gen_audio_inp_default
+    assert default.argtypes == []
+    assert default.restype is module.mtmd_helper_gen_audio_inp
+    inp = default()
+    assert not inp.stream and inp.seq_id == 0
+    assert inp.prompt is None and inp.prompt_len == 0
+    assert inp.speaker_ref is None and inp.lang is None
+    assert inp.top_k == 50 and inp.top_p == 1.0
+    assert inp.seed == 0xFFFFFFFF
+    assert inp.out_type == module.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
+    assert module.mtmd_helper_gen_audio_flush.argtypes == [module.mtmd_helper_gen_audio_p_ctypes]
+    assert module.mtmd_helper_gen_audio_flush.restype is ctypes.c_int32
 
 
 def test_mtmd_decoder_pos_abi():
@@ -317,10 +614,8 @@ def test_mtmd_helper_init_opt_abi():
 
 
 @pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
-def test_mtmd_chat_handler_video_options(tmp_path, handler_name):
+def test_mtmd_chat_handler_video_options(tmp_path, make_handler, handler_name):
     module = importlib.import_module("llama_cpp.mtmd_cpp")
-    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
-    handler_class = getattr(multimodal, handler_name)
 
     executable_suffix = ".exe" if os.name == "nt" else ""
     for executable_name in ("ffmpeg", "ffprobe"):
@@ -328,8 +623,8 @@ def test_mtmd_chat_handler_video_options(tmp_path, handler_name):
         executable_path.touch()
         executable_path.chmod(0o755)
 
-    handler = handler_class(
-        mmproj_path=str(tmp_path),
+    handler = make_handler(
+        handler_name,
         video_fps_target=2.5,
         video_ffmpeg_bin_dir=tmp_path,
         video_timestamp_interval_ms=10000,
@@ -340,34 +635,23 @@ def test_mtmd_chat_handler_video_options(tmp_path, handler_name):
     assert video_params.timestamp_interval_ms == 10000
 
     opt = module.mtmd_helper_init_opt_default()
-    handler = handler_class(
-        mmproj_path=str(tmp_path),
-        mtmd_helper_init_opt=opt,
-    )
+    handler = make_handler(handler_name, mtmd_helper_init_opt=opt)
     assert handler._mtmd_helper_init_opt is opt
 
     with pytest.raises(ValueError, match="cannot be combined"):
-        handler_class(
-            mmproj_path=str(tmp_path),
+        make_handler(
+            handler_name,
             mtmd_helper_init_opt=opt,
             video_fps_target=1.0,
         )
 
 
-def test_mtmd_chat_handler_rejects_invalid_ffmpeg_bin_dir(tmp_path):
-    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
-
+def test_mtmd_chat_handler_rejects_invalid_ffmpeg_bin_dir(tmp_path, make_handler):
     with pytest.raises(ValueError, match="is not an existing directory"):
-        multimodal.MTMDChatHandler(
-            mmproj_path=str(tmp_path),
-            video_ffmpeg_bin_dir=tmp_path / "missing",
-        )
+        make_handler(video_ffmpeg_bin_dir=tmp_path / "missing")
 
     with pytest.raises(ValueError, match="ffmpeg and ffprobe"):
-        multimodal.MTMDChatHandler(
-            mmproj_path=str(tmp_path),
-            video_ffmpeg_bin_dir=tmp_path,
-        )
+        make_handler(video_ffmpeg_bin_dir=tmp_path)
 
 
 @pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
@@ -397,7 +681,7 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
     if handler_name == "MTMDChatHandler":
         model.token_eos = lambda: 2
         model.token_bos = lambda: 1
-        model.detokenize = lambda tokens: {1: b"<bos>", 2: b"<eos>"}[tokens[0]]
+        model._model = SimpleNamespace(token_get_text=lambda token: {1: "<bos>", 2: "<eos>"}[token])
     try:
         handler._init_mtmd_context(model)
         handler._init_mtmd_context(model)
@@ -463,103 +747,192 @@ def test_mtmd_chat_constructor_preserves_template_options(tmp_path):
         handler.close()
 
 
-def test_mtmd_chat_template_raise_exception_preserves_message(tmp_path):
-    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
-    handler = multimodal.MTMDChatHandler(
-        mmproj_path=str(tmp_path),
-        verbose=False,
+def test_mtmd_chat_template_raise_exception_preserves_message(make_handler):
+    handler = make_handler(
         chat_template_override=(
             "{% if video %}{{ raise_exception('Video not supported') }}"
             "{% else %}text supported{% endif %}"
         ),
     )
-    try:
-        assert handler.chat_template.render(video=False) == "text supported"
-        with pytest.raises(TemplateError, match="Video not supported"):
-            handler.chat_template.render(video=True)
-    finally:
-        handler.close()
+    assert handler.chat_template.render(video=False) == "text supported"
+    with pytest.raises(TemplateError, match="Video not supported"):
+        handler.chat_template.render(video=True)
 
 
-def test_mtmd_chat_template_strftime_now(tmp_path):
+def test_mtmd_chat_template_strftime_now(make_handler):
     import datetime
 
-    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
-    handler = multimodal.MTMDChatHandler(
-        mmproj_path=str(tmp_path),
-        verbose=False,
+    handler = make_handler(
         chat_template_override="{{ strftime_now('%Y') }}",
     )
-    try:
-        assert handler.chat_template.render() == datetime.datetime.now().strftime("%Y")
-    finally:
-        handler.close()
+    assert handler.chat_template.render() == datetime.datetime.now().strftime("%Y")
 
 
-@pytest.mark.parametrize(
-    "video_item",
-    [
-        {"type": "video", "video": "/path/to/clip.mp4"},
-        {"type": "video", "video": {"url": "/path/to/clip.mp4"}},
-        {"type": "video_url", "video_url": "/path/to/clip.mp4"},
-        {"type": "video_url", "video_url": {"url": "/path/to/clip.mp4"}},
-    ],
-)
-def test_qwen35_video_template_uses_mtmd_marker(tmp_path, video_item):
-    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
-    handler = multimodal.Qwen35ChatHandler(mmproj_path=str(tmp_path), verbose=False)
-    handler.mtmd_bos_token = ""
-    handler.mtmd_eos_token = ""
+@pytest.mark.parametrize("kind, handler_name, path, label, item", [
+    pytest.param("image", handler_name, "/path/to/image.png", "Picture",
+                 {"type": "image_url", "image_url": image_url},
+                 id=f"{handler_name}-{form}")
+    for handler_name in ("Qwen25VLChatHandler", "Qwen35ChatHandler")
+    for form, image_url in (("path", "/path/to/image.png"),
+                            ("object", {"url": "/path/to/image.png"}))
+] + [
+    pytest.param("video", "Qwen35ChatHandler", "/path/to/clip.mp4", "Video", item, id=name)
+    for name, item in [
+        ("video-path", {"type": "video", "video": "/path/to/clip.mp4"}),
+        ("video-object", {"type": "video", "video": {"url": "/path/to/clip.mp4"}}),
+        ("video-url-path", {"type": "video_url", "video_url": "/path/to/clip.mp4"}),
+        ("video-url-object", {"type": "video_url", "video_url": {"url": "/path/to/clip.mp4"}}),
+    ]
+] + [
+    pytest.param("image", "Qwen3VLChatHandler", "/path/to/image.png", "Picture", item, id=name)
+    for name, item in [
+        ("image-untyped", {"image": "/path/to/image.png"}),
+        ("image-url-untyped", {"image_url": {"url": "/path/to/image.png"}}),
+        ("image-object", {"type": "image", "image": {"url": "/path/to/image.png"}}),
+        ("image-url-path", {"type": "image_url", "image_url": "/path/to/image.png"}),
+    ]
+])
+def test_qwen_templates_inject_media_marker(make_handler, kind, handler_name, path, label, item):
+    handler = make_handler(handler_name)
+    handler.mtmd_bos_token = handler.mtmd_eos_token = ""
     handler.media_marker = "<__media__>"
-    handler.is_support_video = True
-    messages = [{"role": "user", "content": [video_item]}]
-    try:
-        media_items = handler._get_media_items(messages)
-        prompt = handler._render_and_replace_media(
-            messages=messages,
-            media_items=media_items,
-            add_generation_prompt=False,
-        )
-        assert media_items == [{"url": "/path/to/clip.mp4", "type": "video"}]
-        assert "Video 1: <|vision_start|><__media__><|vision_end|>" in prompt
-        assert "<|video_pad|>" not in prompt
+    setattr(handler, "is_support_vision" if kind == "image" else "is_support_video", True)
+    messages = [{"role": "user", "content": [item]}]
+    rendered = handler._render_mtmd_prompt(messages=messages, add_generation_prompt=False)
+    assert "<|vision_start|>" not in rendered and "<|vision_end|>" not in rendered
+    assert path in rendered
+    media_items = handler._get_media_items(messages)
+    prompt = handler._render_and_replace_media(
+        messages=messages, media_items=media_items, add_generation_prompt=False,
+    )
+    assert media_items == [{"url": path, "type": kind}]
+    assert f"{label} 1: <__media__>" in prompt
+    assert all(token not in prompt for token in
+               ("<|vision_start|>", "<|vision_end|>", "<|image_pad|>", "<|video_pad|>"))
+    if kind == "video":
         with pytest.raises(TemplateError, match="System message cannot contain videos"):
             handler._render_mtmd_prompt(
-                messages=[{"role": "system", "content": [video_item]}],
+                messages=[{"role": "system", "content": [item]}],
                 add_generation_prompt=False,
             )
-    finally:
-        handler.close()
 
 
-@pytest.mark.parametrize(
-    "image_item",
-    [
-        {"image": "/path/to/image.png"},
-        {"image_url": {"url": "/path/to/image.png"}},
-        {"type": "image", "image": {"url": "/path/to/image.png"}},
-        {"type": "image_url", "image_url": "/path/to/image.png"},
-    ],
-)
-def test_qwen3vl_image_template_injects_media_without_type(tmp_path, image_item):
-    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
-    handler = multimodal.Qwen3VLChatHandler(mmproj_path=str(tmp_path), verbose=False)
-    handler.mtmd_bos_token = ""
-    handler.mtmd_eos_token = ""
+@pytest.mark.parametrize("placeholder", ["<|image_pad|>", "<|video_pad|>", "/path/to/media"])
+@pytest.mark.parametrize("architecture", ["qwen35", "qwen3vl", "gemma4", ""])
+def test_generic_media_normalization_preserves_template_boundaries(make_handler, placeholder, architecture):
+    template = "literal <|vision_start|>text<|vision_end|> <|vision_start|>\n" + placeholder + " <|vision_end|>"
+    handler = make_handler(
+        "GenericMTMDChatHandler", chat_format=template,
+    )
     handler.media_marker = "<__media__>"
-    handler.is_support_vision = True
-    messages = [{"role": "user", "content": [image_item]}]
-    try:
-        media_items = handler._get_media_items(messages)
-        prompt = handler._render_and_replace_media(
-            messages=messages,
-            media_items=media_items,
-            add_generation_prompt=False,
-        )
-        assert media_items == [{"url": "/path/to/image.png", "type": "image"}]
-        assert "Picture 1: <|vision_start|><__media__><|vision_end|>" in prompt
-    finally:
-        handler.close()
+    handler._ensure_chat_template(SimpleNamespace(metadata={"general.architecture": architecture}))
+    prompt = handler._replace_media_placeholders(
+        handler.chat_template.render(), [{"url": "/path/to/media", "type": "image"}],
+    )
+    expected = "<__media__>" if architecture.startswith("qwen") else "<|vision_start|>\n<__media__> <|vision_end|>"
+    assert prompt == "literal <|vision_start|>text<|vision_end|> " + expected
+
+
+@pytest.fixture
+def chunk_ledger(tmp_path, make_handler, monkeypatch):
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    projector = tmp_path / "mmproj.gguf"
+    projector.write_bytes(b"test")
+    handler = make_handler(mmproj_path=str(projector))
+    handler.is_support_vision = handler.is_support_audio = handler.is_support_video = True
+    monkeypatch.setattr(handler, "_render_and_replace_media", lambda **kwargs: "media")
+    monkeypatch.setattr(handler, "load_media", lambda url, kind: url.encode())
+    monkeypatch.setattr(handler, "_create_bitmap_from_bytes", lambda data: (object(), None))
+    monkeypatch.setattr(handler, "_free_mtmd_resources", Mock())
+    chunks = []
+    monkeypatch.setattr(handler, "_mtmd_tokenize", lambda **kwargs: chunks)
+    backend = SimpleNamespace(
+        mtmd_input_chunk_type=module.mtmd_input_chunk_type,
+        mtmd_input_chunks_size=len,
+        mtmd_input_chunks_get=lambda entries, index: entries[index],
+        mtmd_input_chunk_get_type=lambda chunk: chunk.kind,
+        mtmd_input_chunk_get_n_tokens=lambda chunk: 2,
+        mtmd_input_chunk_get_n_pos=lambda chunk: 2,
+        mtmd_input_chunk_get_id=lambda chunk: chunk.identity,
+    )
+    monkeypatch.setattr(handler, "_mtmd_cpp", backend)
+
+    def ledger(identities, media_items):
+        chunks[:] = [SimpleNamespace(kind=kind, identity=identity) for kind, identity in identities]
+        messages = [{"role": "user", "content": media_items}]
+        _, spans, _, _ = handler._process_mtmd_prompt(llama=SimpleNamespace(n_threads=1), messages=messages)
+        return [span[4] for span in spans]
+
+    return handler, ledger
+
+
+@pytest.mark.parametrize("source", ["video", "audio"])
+def test_media_chunk_identity_survives_expansion_before_image(chunk_ledger, source):
+    _, ledger = chunk_ledger
+    kind = 1 if source == "video" else 2
+    media = [{"type": source, source: "first.media"}, {"type": "image_url", "image_url": "last.png"}]
+    identities = [(kind, b"first+0"), (kind, b"first+2"), (1, b"last-image")]
+    first = ledger(identities, media)
+    assert len(set(first)) == 3
+    assert ledger(identities, media) == first
+    changed = ledger([(kind, b"changed+0"), (kind, b"changed+2"), (1, b"last-image")], media)
+    assert changed[:2] != first[:2]
+    assert changed[2] == first[2]
+
+
+def test_media_chunk_identity_uses_content_and_subchunk_not_url(chunk_ledger):
+    _, ledger = chunk_ledger
+    media = [{"type": "image_url", "image_url": "same.png"}]
+    original = ledger([(1, b"original"), (1, b"original")], media)
+    assert original[0] != original[1]
+    assert ledger([(1, b"original"), (1, b"original")], media) == original
+    assert ledger([(1, b"changed"), (1, b"changed")], media) != original
+    assert ledger([(1, b"original"), (1, b"original")],
+                  [{"type": "image_url", "image_url": "renamed.png"}]) == original
+    assert ledger([(1, b"")], media) != ledger([(1, b"")], media)
+
+
+def test_media_chunk_identity_includes_video_sampling(chunk_ledger):
+    handler, ledger = chunk_ledger
+    media = [{"type": "video", "video": "same.mp4"}]
+    first = ledger([(1, b"video+0")], media)
+    handler._mtmd_helper_init_opt.video_params.fps_target = 0.5
+    assert ledger([(1, b"video+0")], media) != first
+
+
+def test_media_ledger_and_following_text_use_native_positions(chunk_ledger, monkeypatch):
+    handler, _ = chunk_ledger
+    backend = handler._mtmd_cpp
+    chunks = [SimpleNamespace(kind=0, tokens=[10, 11]),
+              SimpleNamespace(kind=1, identity=b"image"),
+              SimpleNamespace(kind=0, tokens=[12, 13])]
+    monkeypatch.setattr(handler, "_mtmd_tokenize", lambda **kwargs: chunks)
+    backend.mtmd_input_chunk_get_n_tokens = lambda chunk: 64
+    backend.mtmd_input_chunk_get_n_pos = lambda chunk: 8
+
+    def text_tokens(chunk, count):
+        count._obj.value = len(chunk.tokens)
+        return chunk.tokens
+
+    backend.mtmd_input_chunk_get_tokens_text = text_tokens
+    ledger, spans, _, _ = handler._process_mtmd_prompt(
+        llama=SimpleNamespace(n_threads=1),
+        messages=[{"role": "user", "content": [{"type": "image_url", "image_url": "same.png"}]}],
+    )
+    assert [(span[0], span[1]) for span in spans] == [(0, 2), (2, 10), (10, 12)]
+    assert ledger == [10, 11] + [spans[1][4]] * 8 + [12, 13]
+
+
+def test_media_cache_token_checks_full_identity_on_hash_collision(chunk_ledger, monkeypatch):
+    handler, _ = chunk_ledger
+    multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    monkeypatch.setattr(multimodal.hashlib, "sha256", lambda data: SimpleNamespace(digest=lambda: b"\0" * 32))
+    first = handler._media_cache_token(("first",))
+    second = handler._media_cache_token(("second",))
+    assert first != second
+    assert handler._media_cache_token(("first",)) == first
+    assert handler._media_cache_token(("second",)) == second
+    assert -(2**31) <= second < first < 0
 
 
 def test_mtmd_base_image_loader_uses_subclass_byte_loader():
@@ -600,6 +973,7 @@ def audio_pipeline(tmp_path, monkeypatch):
 
     def set_input(ctx, ptr):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
+        assert inp.stream is False and inp.seq_id == 0
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
         state.steps = 0
         state.out_type = inp.out_type
@@ -691,16 +1065,30 @@ def test_tts_pocket_skips_sampler_and_limits_steps(audio_pipeline):
     backend.mtmd_bitmap_free.assert_called_once_with(789)
 
 
-@pytest.mark.parametrize("stage", ["set_input", "step_prompt", "step_gen", "get_output", "missing_hidden"])
-def test_tts_failure_can_be_followed_by_success(audio_pipeline, stage):
-    generator, llama, backend, state, factory, _ = audio_pipeline
-    state.fail = stage
-    with pytest.raises(RuntimeError):
-        generator.create_speech(llama=llama, text="hello")
-    assert backend.mtmd_helper_gen_audio_reset.call_count == 1
+@pytest.mark.parametrize("stage", [
+    "set_input", "step_prompt", "step_gen", "get_output", "missing_hidden", "abort", "invalid_output",
+])
+def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, stage):
+    generator, llama, backend, state, _, output = audio_pipeline
+    valid = output.raw
+    response_format = "pcm_f32" if stage == "invalid_output" else "wav"
+    with monkeypatch.context() as patch:
+        state.fail = stage
+        if stage == "abort":
+            def abort(ctx, batch):
+                llama._abort_event.set()
+                return -1
+            patch.setattr(backend, "mtmd_helper_gen_audio_step_prompt", abort)
+        elif stage == "invalid_output":
+            ctypes.memmove(output, struct.pack("4f", -1, -1, -1, -1), 16)
+        with pytest.raises(InterruptedError if stage == "abort" else RuntimeError,
+                           match="invalid audio" if stage == "invalid_output" else None):
+            generator.create_speech(llama=llama, text="hello", response_format=response_format)
+    backend.mtmd_helper_gen_audio_reset.assert_called_once()
     assert llama.reset.call_count == 2
+    ctypes.memmove(output, valid, len(valid))
     state.fail = None
-    assert generator.create_speech(llama=llama, text="hello").finish_reason == "stop"
+    assert generator.create_speech(llama=llama, text="hello", response_format=response_format).finish_reason == "stop"
 
 
 def test_tts_validates_model_and_request_before_decode(audio_pipeline):
@@ -725,18 +1113,6 @@ def test_tts_rejects_rebinding_and_closed_generator(audio_pipeline):
     generator.close()
     with pytest.raises(RuntimeError, match="closed"):
         generator.create_speech(llama=llama, text="hello")
-
-
-def test_tts_abort_releases_request_resources(audio_pipeline):
-    generator, llama, backend, state, _, _ = audio_pipeline
-    def abort(ctx, batch):
-        llama._abort_event.set()
-        return -1
-    backend.mtmd_helper_gen_audio_step_prompt = abort
-    with pytest.raises(InterruptedError):
-        generator.create_speech(llama=llama, text="hello")
-    assert llama.reset.call_count == 2
-    backend.mtmd_helper_gen_audio_reset.assert_called_once()
 
 
 @pytest.mark.parametrize("invalid", ["embeddings", "pooling", "closed", "batch"])
@@ -801,18 +1177,6 @@ def test_tts_audio_validation_keeps_quiet_speech_and_checks_lengths():
         MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 5)
     with pytest.raises(RuntimeError, match="malformed WAV"):
         MTMDAudioGenerator._validate_audio(b"bad", "wav", 24000, 4)
-
-
-def test_tts_invalid_output_cleans_up_and_can_retry(audio_pipeline):
-    generator, llama, backend, _, _, output = audio_pipeline
-    valid = output.raw
-    ctypes.memmove(output, struct.pack("4f", -1, -1, -1, -1), 16)
-    with pytest.raises(RuntimeError, match="invalid audio"):
-        generator.create_speech(llama=llama, text="hello", response_format="pcm_f32")
-    backend.mtmd_helper_gen_audio_reset.assert_called_once()
-    assert llama.reset.call_count == 2
-    ctypes.memmove(output, valid, len(valid))
-    assert generator.create_speech(llama=llama, text="hello", response_format="pcm_f32").finish_reason == "stop"
 
 
 @pytest.fixture(scope="module", params=["plain", "ngram", "mtp", "mtp-device"])
