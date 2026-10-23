@@ -292,6 +292,16 @@ class LlamaModel:
 
     # Vocab
 
+    def suppress_tokens(self) -> List[int]:
+        """Copy the model's suppressed vocabulary IDs out of native storage."""
+        if self.vocab is None:
+            raise RuntimeError("LlamaModel.suppress_tokens: vocab is None")
+        count = ctypes.c_int32()
+        tokens = llama_cpp.llama_vocab_get_suppress_tokens(self.vocab, ctypes.byref(count))
+        if count.value < 0 or (count.value > 0 and not tokens):
+            raise RuntimeError("Invalid native suppress-token list")
+        return list(tokens[:count.value]) if count.value else []
+
     def token_get_text(self, token: int) -> str:
         return llama_cpp.llama_vocab_get_text(self.vocab, token).decode("utf-8")
 
