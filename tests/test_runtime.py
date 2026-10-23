@@ -19,6 +19,151 @@ from llama_cpp.llama_embedding import LlamaEmbedding, LLAMA_POOLING_TYPE_NONE
 MODEL = "./vendor/llama.cpp/models/ggml-vocab-llama-spm.gguf"
 
 
+def test_model_suppress_tokens_copies_native_storage(monkeypatch):
+    for tokens in ([], [3, 1, 3]):
+        storage = (ctypes.c_int32 * len(tokens))(*tokens)
+        calls = []
+
+        def get_suppressed(vocab, count):
+            calls.append(vocab)
+            ctypes.cast(count, ctypes.POINTER(ctypes.c_int32))[0] = len(tokens)
+            return storage if tokens else None
+
+        monkeypatch.setattr(internals.llama_cpp, "llama_vocab_get_suppress_tokens", get_suppressed)
+        model = SimpleNamespace(vocab=123)
+        result = internals.LlamaModel.suppress_tokens(model)
+        if tokens:
+            storage[0] = 99
+        assert result == tokens
+        model.vocab = None
+        with pytest.raises(RuntimeError, match="vocab is None"):
+            internals.LlamaModel.suppress_tokens(model)
+        assert calls == [123]
+
+
+@pytest.fixture
+def sampling_model(monkeypatch):
+    internals.llama_cpp.llama_backend_init()
+    monkeypatch.setattr(internals.llama_cpp, "llama_model_get_vocab", lambda _: None)
+    return SimpleNamespace(model=None, n_vocab=lambda: 32,
+                           suppress_tokens=Mock(return_value=[31]))
+
+
+@pytest.mark.parametrize("suppressed", [[], [31], [31, 30]])
+@pytest.mark.parametrize("temp", [0.0, 1.0])
+@pytest.mark.parametrize("probability_filters", [False, True], ids=["top-k", "top-p-min-p-temp"])
+def test_sampling_suppression_and_bias_match_native_chain(sampling_model, suppressed, temp, probability_filters):
+    lib = internals.llama_cpp
+    sampling_model.suppress_tokens.return_value = suppressed
+    logits = np.arange(32, dtype=np.float32) * 0.25
+    saved = logits.copy()
+    # Without suppression, doubling this bias incorrectly moves token 29 to first.
+    biases = [lib.llama_logit_bias(29, 0.3)]
+    if suppressed:
+        biases.append(lib.llama_logit_bias(31, 100.0))
+    original_biases = [(item.token, item.bias) for item in biases]
+    samplers = [internals.CommonSamplerType.TOP_K]
+    if probability_filters:
+        samplers.extend([internals.CommonSamplerType.TOP_P, internals.CommonSamplerType.MIN_P,
+                         internals.CommonSamplerType.TEMPERATURE])
+    params = internals.LlamaSamplingParams(
+        temp=temp, top_k=10, top_p=0.8, min_p=0.12, min_keep=1, seed=42,
+        logit_bias=biases, samplers=samplers,
+    )
+    native = internals.LlamaTokenDataArray(n_vocab=32)
+    native.copy_logits(logits)
+    with closing(internals.LlamaSampler()) as reference:
+        reference.add_logit_bias(32, biases + [lib.llama_logit_bias(token, float("-inf")) for token in suppressed])
+        reference.add_top_k(10)
+        if probability_filters:
+            reference.add_top_p(0.8, 1)
+            reference.add_min_p(0.12, 1)
+            reference.add_temp(temp)
+        if temp == 0:
+            reference.add_greedy()
+        else:
+            reference.add_dist(42)
+        lib.llama_sampler_apply(reference.sampler, ctypes.byref(native.candidates))
+    expected = native.candidates_data[:native.candidates.size]
+    token = int(expected["id"][native.candidates.selected])
+    assert token not in suppressed
+    context = SimpleNamespace(
+        get_sampled_token_ith=lambda _: lib.LLAMA_TOKEN_NULL,
+        get_logits_ith=lambda _: logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+    with closing(internals.LlamaSamplingContext(params, sampling_model)) as sampler:
+        for source in (None, logits):  # Context outputs and restored snapshots.
+            sampler.reset()
+            with closing(sampler.cp()) as clone:
+                for current in (sampler, clone):
+                    assert current.sample(context, logits=source) == token
+                    actual = current._cur_p.candidates_data[:current._cur_p.candidates.size]
+                    np.testing.assert_array_equal(actual["id"], expected["id"])
+                    # Greedy selection does not populate probabilities.
+                    for field in (("logit", "p") if temp else ("logit",)):
+                        np.testing.assert_allclose(actual[field], expected[field], rtol=2e-6, atol=1e-8)
+    sampling_model.suppress_tokens.assert_called_once_with()
+    assert [(item.token, item.bias) for item in params.logit_bias] == original_biases
+    np.testing.assert_array_equal(logits, saved)
+
+
+@pytest.mark.parametrize("grammar_first", [False, True])
+def test_sampling_suppression_survives_grammar_resampling(sampling_model, grammar_first):
+    lib = internals.llama_cpp
+    logits = np.arange(32, dtype=np.float32)
+    params = internals.LlamaSamplingParams(temp=0.0, top_k=1,
+                                          samplers=[internals.CommonSamplerType.TOP_K])
+    with closing(internals.LlamaSampler()) as grammar, closing(internals.LlamaSamplingContext(params, sampling_model)) as sampler:
+        # A native mask stands in for a grammar that rejects the first allowed token.
+        grammar.add_logit_bias(32, [lib.llama_logit_bias(30, float("-inf"))])
+        sampler.grammar_sampler = SimpleNamespace(grammar=grammar.sampler, close=lambda: None)
+        assert sampler.sample(SimpleNamespace(), logits=logits, grammar_first=grammar_first) == 29
+    np.testing.assert_array_equal(logits, np.arange(32, dtype=np.float32))
+
+
+def test_sampling_backend_selected_token_skips_cpu_suppression(sampling_model):
+    context = SimpleNamespace(get_sampled_token_ith=lambda _: 31,
+                              get_logits_ith=Mock(side_effect=AssertionError("CPU fallback is not allowed")))
+    params = internals.LlamaSamplingParams(samplers=[internals.CommonSamplerType.TOP_K])
+    with closing(internals.LlamaSamplingContext(params, sampling_model)) as sampler:
+        assert sampler.sample(context) == 31
+        assert sampler._cur_p is None
+    context.get_logits_ith.assert_not_called()
+
+
+@pytest.mark.parametrize("suppressed", [[31], [30], [30, 31]])
+def test_sampling_reasoning_budget_preserves_native_logits_and_suppression(sampling_model, suppressed):
+    lib = internals.llama_cpp
+    sampling_model.suppress_tokens.return_value = suppressed
+    sampling_model.tokenize = lambda *args, **kwargs: [30]
+    params = internals.LlamaSamplingParams(
+        temp=1.0, top_k=32, seed=42, reasoning_budget=0,
+        reasoning_start_in_prompt=True, logit_bias=[lib.llama_logit_bias(30, 0.5)],
+        samplers=[internals.CommonSamplerType.TOP_K],
+    )
+    logits = np.arange(32, dtype=np.float32) * 0.25
+    # common_reasoning_budget_apply masks other tokens and preserves the forced
+    # token's original score; common_sampler_sample then applies the bias chain.
+    expected = np.full(32, -np.inf, dtype=np.float32)
+    expected[30] = logits[30] + 0.5
+    expected[suppressed] = -np.inf
+    candidates = internals.LlamaTokenDataArray(n_vocab=32)
+    candidates.copy_logits(logits)
+    with closing(internals.LlamaSamplingContext(params, sampling_model)) as sampler:
+        chain = sampler.sampler_chain.sampler
+        # Inspect preprocessing before top-k/dist, including the all-masked
+        # conflict case for which no valid sampling distribution exists.
+        for index in range(lib.llama_sampler_chain_n(chain) - 2):
+            lib.llama_sampler_apply(lib.llama_sampler_chain_get(chain, index), ctypes.byref(candidates.candidates))
+        np.testing.assert_array_equal(candidates._logit_view, expected)
+        assert not np.isnan(candidates._logit_view).any()
+        if 30 not in suppressed:
+            assert sampler.sample(SimpleNamespace(), logits=logits) == 30
+            probabilities = [sampler._cur_p.candidates.data[i].p for i in range(32)]
+            assert np.isfinite(probabilities).all() and sum(probabilities) == pytest.approx(1.0)
+    np.testing.assert_array_equal(logits, np.arange(32, dtype=np.float32) * 0.25)
+
+
 def test_multimodal_embedding_requires_initialization():
     model = LlamaEmbedding.__new__(LlamaEmbedding)
     with pytest.raises(RuntimeError, match="not initialized"):
@@ -464,6 +609,37 @@ def test_extended_batch_keeps_input_embedding_and_hidden_state_separate(batch_ru
     assert r.rows[0]["position"] == ((2, 3, 4, 0) if kind == "embedding" else (2,))
     assert r.rows[0]["seq_ids"] == [0, 1]
     assert r.batch.output_indices == (0,)
+
+
+def test_lilicorr_draft_submits_separate_states_through_extended_batch(batch_runtime, monkeypatch):
+    from llama_cpp.llama_speculative import LlamaDFlashDecoding, SpecConfig, SpeculativeType
+
+    r = batch_runtime
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine.config = SpecConfig(spec_type=SpeculativeType.DRAFT_DFLASH,
+                               draft_model_path="lilicorr.gguf", draft_n_max=1)
+    engine.is_lilicorr, engine.is_dflash2, engine.is_dspark = True, False, False
+    engine.block_size, engine.draft_limit, engine.draft_min = 3, 1, 0
+    engine.lilicorr_top_k, engine.n_embd_dec, engine.mask_token_id = 2, 6, 99
+    anchor = np.arange(6, dtype=np.float32)
+    engine._lilicorr_features = {6: anchor}
+    engine.noise_batch, engine.draft_context = r.batch, r.context
+    engine.checkpoint, engine.restore = Mock(return_value={"position": 6}), Mock()
+    lattice = np.array([[0] * 6, [40, 41, 0, 3, 0, 3],
+                        [50, 51, 0, 3, 0, 3]], dtype=np.float32)
+    monkeypatch.setattr(internals.llama_cpp, "llama_get_embeddings_nextn",
+                        lambda _: lattice.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+
+    assert engine.draft([], n_past=7, id_last=42, n_max=1).tolist() == [41]
+    assert [row["token"] for row in r.rows] == [42, 99, 99]
+    assert [row["position"] for row in r.rows] == [(7,), (8,), (9,)]
+    assert r.calls == [(123, internals.llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, 456)]
+    anchor.fill(-1)
+    for row in r.rows:
+        assert "embedding" not in row and not row.get("output", False)
+        np.testing.assert_array_equal(row["state"], np.arange(6))
+    assert r.batch.output_indices == ()
+    engine.restore.assert_called_once_with({"position": 6}, 0)
 
 
 @pytest.mark.parametrize("kind,field", [("tokens", "state"), ("embeddings", "state"), ("embeddings", "embedding")])

@@ -3149,9 +3149,16 @@ class LlamaSamplingContext:
 
         use_adaptive_p = False
 
-        # --- 1. Logit Bias (Always applied first to mask/boost tokens) ---
-        if p.logit_bias and m:
-            s.add_logit_bias(m.n_vocab(), p.logit_bias)
+        # --- 1. Logit Bias and Model Suppression ---
+        # Match common_sampler_init: user biases followed by model suppression.
+        # Keep params unchanged so cloning/rebuilding cannot accumulate entries.
+        logit_bias = list(p.logit_bias)
+        logit_bias.extend(
+            llama_cpp.llama_logit_bias(token, float("-inf"))
+            for token in m.suppress_tokens()
+        )
+        if logit_bias:
+            s.add_logit_bias(m.n_vocab(), logit_bias)
 
         # --- 2. Usage-Specific Samplers (Infill) ---
         # If Infill is required, it often modifies logits based on prefix/suffix
@@ -3364,6 +3371,7 @@ class LlamaSamplingContext:
             if logits.shape != (self.n_vocab,):
                 raise ValueError("Sampling logits must contain the full vocabulary")
             logits_array = logits
+        # 3. Prepare CPU candidates and copy logits.
         # Backend sampling returns before this point. Allocate the full-vocabulary
         # CPU candidate array only when a CPU sampler/grammar fallback actually
         # needs it; this matters for vocabularies with hundreds of thousands of
@@ -3373,12 +3381,6 @@ class LlamaSamplingContext:
         cur_p = self._cur_p
 
         cur_p.copy_logits(logits_array)
-
-        # logit bias
-        if self.params.logit_bias:
-            for item in self.params.logit_bias:
-                cur_p._logit_view[item.token] += item.bias
-
 
         # 4. grammar first
         if self.grammar_sampler and grammar_first:
@@ -4009,9 +4011,9 @@ class ReasoningBudgetSampler(CustomSampler):
         """
         Apply logits forcing before sampling.
 
-        In FORCING state, only forced_tokens[force_pos] is allowed. All other
-        candidate logits are set to -inf. The forced token is set to +inf to make
-        the intent explicit and robust against previous logit modifications.
+        In FORCING state, all other candidate logits are set to -inf. Preserve
+        the forced token's score, including an existing suppression/grammar
+        mask, as common_reasoning_budget_apply does in llama.cpp.
         """
         if self.state != ReasoningBudgetState.FORCING:
             return
@@ -4025,7 +4027,6 @@ class ReasoningBudgetSampler(CustomSampler):
 
         for i in range(cur_p.size):
             if data[i].id == forced:
-                data[i].logit = float("inf")
                 found = True
             else:
                 data[i].logit = float("-inf")
