@@ -217,6 +217,10 @@ class LlamaVocabType(enum.IntEnum):
 #     LLAMA_VOCAB_PRE_TYPE_SPARK2_5          = 58,
 #     LLAMA_VOCAB_PRE_TYPE_UFAKZEKA          = 59,
 #     LLAMA_VOCAB_PRE_TYPE_MMBERT            = 60,
+#     LLAMA_VOCAB_PRE_TYPE_K2_HORIZON        = 61,
+#     LLAMA_VOCAB_PRE_TYPE_FLINT             = 62,
+#     LLAMA_VOCAB_PRE_TYPE_DOMYN_SMALL       = 63,
+#     LLAMA_VOCAB_PRE_TYPE_NEMOTRON_3_5_EMBD = 64,
 # };
 class llama_vocab_pre_type(enum.IntEnum):
     LLAMA_VOCAB_PRE_TYPE_DEFAULT = 0
@@ -280,6 +284,11 @@ class llama_vocab_pre_type(enum.IntEnum):
     LLAMA_VOCAB_PRE_TYPE_SPARK2_5 = 58
     LLAMA_VOCAB_PRE_TYPE_UFAKZEKA = 59
     LLAMA_VOCAB_PRE_TYPE_MMBERT = 60
+    LLAMA_VOCAB_PRE_TYPE_K2_HORIZON = 61
+    LLAMA_VOCAB_PRE_TYPE_FLINT = 62
+    LLAMA_VOCAB_PRE_TYPE_DOMYN_SMALL = 63
+    LLAMA_VOCAB_PRE_TYPE_NEMOTRON_3_5_EMBD = 64
+
 
 
 # // note: these values should be synchronized with ggml_rope
