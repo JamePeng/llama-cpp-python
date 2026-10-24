@@ -3,7 +3,7 @@ from contextlib import closing, contextmanager
 import builtins
 import ctypes
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import numpy as np
 import pytest
@@ -242,6 +242,8 @@ class _FakeCheckpointContext:
 
 def _checkpoint_test_engine(*, native, engine_class=LlamaMTPDecoding):
     engine = object.__new__(engine_class)
+    engine.is_lilicorr = False
+    engine._lilicorr_features = {}
     engine.is_mem_shared = False
     engine.draft_context = _FakeCheckpointContext()
     engine.n_embd = 2
@@ -743,6 +745,7 @@ class _FakeDFlashBatch:
         self.embeddings = None
         self.logits = []
         self.mrope_positions = None
+        self.states = None
 
     def reset(self):
         self.tokens = []
@@ -750,6 +753,11 @@ class _FakeDFlashBatch:
         self.embeddings = None
         self.logits = []
         self.mrope_positions = None
+        self.states = None
+
+    def add_tokens(self, tokens, *, positions, seq_ids, states):
+        self.add_sequence(tokens, positions, seq_ids, [False] * len(tokens))
+        self.states = np.array(states, dtype=np.float32, copy=True)
 
     def add_sequence(
         self, token_array, pos_array, seq_ids, logits_array
@@ -825,7 +833,10 @@ def _draft_test_dflash_engine(*, dspark, sample_from_anchor, p_min=0.0):
     )
     engine.is_dspark = dspark
     engine.is_dflash2 = False
+    engine.is_lilicorr = False
+    engine._lilicorr_features = {}
     engine.selector_top_k = 0
+    engine._suppressed_tokens = ()
     engine.sample_from_anchor = sample_from_anchor
     engine.draft_limit = 3
     engine.draft_min = engine.config.draft_n_min
@@ -837,6 +848,214 @@ def _draft_test_dflash_engine(*, dspark, sample_from_anchor, p_min=0.0):
     engine.checkpoint = lambda seq_id=0: {"position": 5}
     engine.restore = lambda checkpoint, seq_id=0: None
     return engine
+
+
+def _native_draft_candidate(logits, suppressed=()):
+    llama_cpp_lib.llama_backend_init()
+    candidates = internals.LlamaTokenDataArray(n_vocab=len(logits))
+    candidates.copy_logits(logits)
+    with closing(internals.LlamaSampler()) as sampler:
+        sampler.add_logit_bias(len(logits), [
+            llama_cpp_lib.llama_logit_bias(token, float("-inf")) for token in suppressed
+        ])
+        sampler.add_top_k(10)
+        sampler.add_dist(42)
+        llama_cpp_lib.llama_sampler_apply(sampler.sampler, ctypes.byref(candidates.candidates))
+    native = candidates.candidates.data[0]
+    return int(native.id), float(native.p)
+
+
+def _draft_test_candidate_engine(engine_class, *, suppressed=(), backend=False, dense=None,
+                                 ids=None, logits=None, probs=None, counts=None,
+                                 selected=llama_cpp_lib.LLAMA_TOKEN_NULL):
+    """Expose owned buffers through the same accessors as a native context."""
+    engine = object.__new__(engine_class)
+    engine._backend_sampling = backend
+    engine._llama_cpp_lib = llama_cpp_lib
+    engine._suppressed_tokens = suppressed
+    engine.n_vocab = len(dense) if dense is not None else 0
+    counts = counts or {}
+    engine.draft_context = SimpleNamespace(
+        get_sampled_token_ith=lambda _: selected,
+        get_logits_ith=(lambda _: dense.ctypes.data_as(ctypes.POINTER(ctypes.c_float))) if dense is not None else
+            Mock(side_effect=AssertionError("Do not expand a valid compact candidate pool")),
+    )
+    for name, values, scalar in (("candidates", ids, ctypes.c_int32),
+                                 ("logits", logits, ctypes.c_float), ("probs", probs, ctypes.c_float)):
+        setattr(engine.draft_context, f"get_sampled_{name}_count_ith",
+                lambda _, name=name, values=values: counts.get(name, 0 if values is None else len(values)))
+        setattr(engine.draft_context, f"get_sampled_{name}_ith",
+                lambda _, values=values, scalar=scalar: None if values is None else
+                    values.ctypes.data_as(ctypes.POINTER(scalar)))
+    return engine
+
+
+@pytest.mark.parametrize("logits,suppressed", [
+    *[pytest.param(np.random.default_rng(12).standard_normal(n).astype(np.float32), (), id=f"vocab-{n}")
+      for n in (1, 7, 32)],
+    *[pytest.param(np.arange(32, dtype=np.float32) * 0.25, ids, id=f"suppression-{index}")
+      for index, ids in enumerate(((), (31,), (31, 30, 31, -1, 32)))],
+])
+def test_model_draft_cpu_candidates_match_native_distribution(logits, suppressed):
+    original = logits.copy()
+    token, probability = _native_draft_candidate(logits, suppressed)
+    assert token not in suppressed
+    for engine_class in (LlamaMTPDecoding, LlamaDFlashDecoding):
+        engine = _draft_test_candidate_engine(engine_class, suppressed=suppressed, dense=logits)
+        selected, actual_probability = engine._candidate(0)
+        assert selected == token, engine_class.__name__
+        assert actual_probability == pytest.approx(probability, rel=2e-6, abs=1e-8), engine_class.__name__
+        np.testing.assert_array_equal(logits, original, err_msg=engine_class.__name__)
+
+
+@pytest.mark.parametrize("compact", ["logits", "probs", "fallback"])
+def test_model_draft_suppresses_compact_cpu_candidates_and_dense_fallback(compact):
+    ids = np.array([3, 2, 1, 0], dtype=np.int32)
+    logits = np.array([5, 2, 1, 0], dtype=np.float32)
+    probs = np.exp(logits - logits.max())
+    probs /= probs.sum()
+    saved_logits, saved_probs = logits.copy(), probs.copy()
+    dense = np.array([0, 1, 2, 5], dtype=np.float32)
+    for engine_class in (LlamaMTPDecoding, LlamaDFlashDecoding):
+        engine = _draft_test_candidate_engine(
+            engine_class, suppressed=(3,), backend=True, dense=dense, ids=ids, logits=logits, probs=probs,
+            counts={"candidates": 0 if compact == "fallback" else 4,
+                    "logits": 4 if compact == "logits" else 0, "probs": 4 if compact == "probs" else 0},
+        )
+        token, probability = engine._candidate(0)
+        assert token == 2, engine_class.__name__
+        assert probability == pytest.approx(1 / (1 + np.exp(-1) + np.exp(-2)), rel=1e-6), engine_class.__name__
+        np.testing.assert_array_equal(probs, saved_probs)
+        np.testing.assert_array_equal(logits, saved_logits)
+
+
+@pytest.mark.parametrize("logits", [
+    np.array([110, 10, 9, 8], dtype=np.float32),
+    np.arange(16, dtype=np.float32) * 0.25,
+], ids=["underflowed-probabilities", "top-k-after-suppression"])
+def test_model_draft_compact_suppression_recomputes_native_distribution_from_logits(logits):
+    suppressed = int(np.argmax(logits))
+    ids = np.arange(len(logits), dtype=np.int32)
+    probs = np.exp(logits - logits.max())
+    probs /= probs.sum()
+    saved_logits, saved_probs = logits.copy(), probs.copy()
+    expected = _native_draft_candidate(logits, (suppressed,))
+    for engine_class in (LlamaMTPDecoding, LlamaDFlashDecoding):
+        engine = _draft_test_candidate_engine(
+            engine_class, suppressed=(suppressed,), backend=True, ids=ids, logits=logits, probs=probs,
+        )
+        token, probability = engine._candidate(0)
+        assert token == expected[0], engine_class.__name__
+        assert probability == pytest.approx(expected[1], rel=2e-6, abs=1e-8), engine_class.__name__
+        if len(logits) == 4:
+            assert probability > 0.66  # old probability renormalization rejected this draft
+        np.testing.assert_array_equal(logits, saved_logits)
+        np.testing.assert_array_equal(probs, saved_probs)
+
+
+@pytest.mark.parametrize("selected", [False, True])
+def test_model_draft_only_backend_selection_bypasses_cpu_suppression(selected):
+    ids = np.array([3, 2], dtype=np.int32)
+    logits = np.array([5, 2], dtype=np.float32)
+    probs = np.array([0.8, 0.2], dtype=np.float32)
+    for engine_class in (LlamaMTPDecoding, LlamaDFlashDecoding):
+        engine = _draft_test_candidate_engine(
+            engine_class, suppressed=(3,), backend=True, ids=ids, logits=logits, probs=probs,
+            selected=3 if selected else llama_cpp_lib.LLAMA_TOKEN_NULL,
+        )
+        token, probability = engine._candidate(0)
+        assert token == (3 if selected else 2), engine_class.__name__
+        assert probability == pytest.approx(0.8 if selected else 1.0), engine_class.__name__
+
+
+@pytest.mark.parametrize("compact", ["logits", "probs"])
+def test_model_draft_all_suppressed_compact_candidates_do_not_expand_to_dense_logits(compact):
+    ids, logits, probs = np.array([3], dtype=np.int32), np.array([5], dtype=np.float32), np.array([1], dtype=np.float32)
+    for engine_class in (LlamaMTPDecoding, LlamaDFlashDecoding):
+        engine = _draft_test_candidate_engine(
+            engine_class, suppressed=(3,), backend=True, ids=ids, logits=logits, probs=probs,
+            counts={"logits": int(compact == "logits"), "probs": int(compact == "probs")},
+        )
+        with pytest.raises(RuntimeError, match="No finite draft candidates"):
+            engine._candidate(0)
+        engine.draft_context.get_logits_ith.assert_not_called()
+
+
+@pytest.mark.parametrize("p_min,expected", [(0.66, [2]), (0.67, [])])
+def test_mtp_probability_cutoff_uses_suppressed_distribution_and_restores(p_min, expected):
+    engine = _draft_test_candidate_engine(LlamaMTPDecoding)
+    engine.config = SpecConfig(spec_type=SpeculativeType.DRAFT_MTP,
+                               draft_n_max=1, draft_p_min=p_min)
+    engine._suppressed_tokens = (3,)
+    engine.n_vocab, engine.n_embd, engine.chain_heads = 4, 2, False
+    engine.pending_h = np.zeros(2, dtype=np.float32)
+    engine.batch = SimpleNamespace(reset=Mock(), add_token_embedding=Mock())
+    engine.checkpoint, engine.restore = Mock(return_value={"position": 5}), Mock()
+    logits, hidden = np.array([0, 1, 2, 5], dtype=np.float32), np.zeros(2, dtype=np.float32)
+    engine.draft_context = SimpleNamespace(
+        decode=lambda _: 0,
+        get_logits_ith=lambda _: logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        get_embeddings_nextn_ith=lambda _: hidden.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+    )
+    assert engine.draft([], n_past=7, id_last=42, n_max=1).tolist() == expected
+    engine.restore.assert_called_once_with({"position": 5}, 0)
+    assert engine._pending_verification_checkpoint == ({"position": 5} if expected else None)
+
+
+@pytest.mark.parametrize("external", [False, True], ids=["internal-head", "sidecar"])
+def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, external):
+    def model(tokens):
+        return SimpleNamespace(suppress_tokens=Mock(return_value=tokens), n_embd_out=lambda: 2,
+                               n_vocab=lambda: 32, n_layer_nextn=lambda: 1,
+                               is_recurrent=lambda: False, is_hybrid=lambda: False, close=Mock())
+
+    target_model, sidecar = model([30]), model([31])
+    params = llama_cpp_lib.llama_context_default_params()
+    context = SimpleNamespace(n_batch=lambda: 8, get_ctx_other=lambda: None,
+                              set_embeddings_nextn=Mock(), close=Mock())
+    target_context = SimpleNamespace(ctx=ctypes.c_void_p(1), set_embeddings_nextn=Mock())
+    monkeypatch.setattr(LlamaMTPDecoding, "_load_draft_model", lambda *args, **kwargs: sidecar)
+    monkeypatch.setattr(LlamaMTPDecoding, "_build_draft_context_params", lambda *args: params)
+    monkeypatch.setattr(LlamaMTPDecoding, "_enable_backend_sampling", lambda *args: None)
+    monkeypatch.setattr(internals, "LlamaContext", lambda **kwargs: context)
+    monkeypatch.setattr(internals, "LlamaBatch", lambda **kwargs: SimpleNamespace(close=Mock()))
+    with closing(LlamaMTPDecoding(
+        SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_model_path="mtp.gguf" if external else None),
+        target_model=target_model, target_context=target_context,
+        model_params=None, context_params=params, verbose=False,
+    )) as engine:
+        assert engine._suppressed_tokens == ((31,) if external else (30,))
+        (sidecar if external else target_model).suppress_tokens.assert_called_once_with()
+        (target_model if external else sidecar).suppress_tokens.assert_not_called()
+    target_model.close.assert_not_called()
+    assert sidecar.close.call_count == int(external)
+    context.close.assert_called_once_with()
+
+
+@pytest.mark.parametrize("p_min,expected", [(0.7, []), (0.6, [2])])
+def test_dflash_probability_cutoff_uses_suppressed_distribution(p_min, expected):
+    engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True, p_min=p_min)
+    engine._suppressed_tokens = (3,)
+    engine._backend_sampling, engine.n_vocab = False, 4
+    engine._candidate = lambda index: LlamaDFlashDecoding._candidate(engine, index)
+    logits = np.array([0, 1, 2, 5], dtype=np.float32)
+    engine.draft_context = _FakeDFlashDraftContext()
+    engine.draft_context.get_logits_ith = lambda _: logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    assert engine.draft([], n_past=7, id_last=42, n_max=1).tolist() == expected
+
+
+def test_dflash_all_suppressed_candidates_fail_and_restore_draft_branch():
+    engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True)
+    engine._suppressed_tokens = (0, 1)
+    engine._backend_sampling, engine.n_vocab = False, 2
+    engine._candidate = lambda index: LlamaDFlashDecoding._candidate(engine, index)
+    engine.restore = Mock()
+    logits = np.array([0, 1], dtype=np.float32)
+    engine.draft_context = _FakeDFlashDraftContext()
+    engine.draft_context.get_logits_ith = lambda _: logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    with pytest.raises(RuntimeError, match="No finite draft candidates"):
+        engine.draft([], n_past=7, id_last=42, n_max=1)
+    engine.restore.assert_called_once_with({"position": 5}, 0)
 
 
 @pytest.mark.parametrize("dflash2", [False, True], ids=["dflash", "dflash2"])
@@ -909,6 +1128,7 @@ def test_dflash2_selector_lattice_and_probability_cutoff(p_min, selector_rows, e
     engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True, p_min=p_min)
     engine.is_dflash2 = True
     engine.selector_top_k, engine.n_embd_dec = 2, 6
+    engine._suppressed_tokens = (101, 102, 201, 202, 301, 302)
     lattice = np.array([[0] * 6] + selector_rows, dtype=np.float32)
     engine.draft_context = _FakeDFlashDraftContext(confidence=lattice)
     assert engine.draft([], n_past=7, id_last=42, n_max=3).tolist() == expected
@@ -918,49 +1138,26 @@ def test_dflash2_selector_lattice_and_probability_cutoff(p_min, selector_rows, e
 
 
 @pytest.mark.parametrize(
-    ("is_dflash2", "expected_masked", "expected_backend_calls"),
-    [(False, True, 1), (True, False, 0)],
+    ("is_dflash2", "is_lilicorr", "expected_masked", "expected_backend_calls"),
+    [(False, False, True, 1), (True, False, False, 0), (False, True, False, 0)],
 )
 def test_dflash2_configures_unmasked_nextn_without_backend_sampling(
-    is_dflash2, expected_masked, expected_backend_calls
+    is_dflash2, is_lilicorr, expected_masked, expected_backend_calls
 ):
     engine = object.__new__(LlamaDFlashDecoding)
     engine.is_dflash2 = is_dflash2
+    engine.is_lilicorr = is_lilicorr
     engine.causal_attn = True
     engine.target_layer_ids = [2, 5]
-    backend_calls = []
-    engine._enable_backend_sampling = lambda internals: backend_calls.append(
-        internals
-    )
-
-    class _TargetContext:
-        def __init__(self):
-            self.layers = []
-
-        def set_embeddings_layer_inp(self, layer_id, enabled):
-            self.layers.append((layer_id, enabled))
-
-    class _DraftContext:
-        def __init__(self):
-            self.nextn = []
-            self.causal = []
-
-        def set_embeddings_nextn(self, enabled, masked):
-            self.nextn.append((enabled, masked))
-
-        def set_causal_attn(self, enabled):
-            self.causal.append(enabled)
-
-    engine.target_context = _TargetContext()
-    engine.draft_context = _DraftContext()
-    internals = object()
-
-    engine._configure_draft_execution(internals)
-
-    assert len(backend_calls) == expected_backend_calls
-    assert engine.target_context.layers == [(2, True), (5, True)]
-    assert engine.draft_context.nextn == [(True, expected_masked)]
-    assert engine.draft_context.causal == [True]
+    engine._enable_backend_sampling = Mock()
+    engine.target_context = SimpleNamespace(set_embeddings_layer_inp=Mock())
+    engine.draft_context = SimpleNamespace(set_embeddings_nextn=Mock(), set_causal_attn=Mock())
+    marker = object()
+    engine._configure_draft_execution(marker)
+    assert engine._enable_backend_sampling.call_args_list == ([call(marker)] if expected_backend_calls else [])
+    assert engine.target_context.set_embeddings_layer_inp.call_args_list == [call(2, True), call(5, True)]
+    engine.draft_context.set_embeddings_nextn.assert_called_once_with(True, masked=expected_masked)
+    engine.draft_context.set_causal_attn.assert_called_once_with(True)
 
 
 def test_dspark_probability_filter_requires_confidence_head():
@@ -970,6 +1167,225 @@ def test_dspark_probability_filter_requires_confidence_head():
         LlamaDFlashDecoding._validate_dspark_confidence_head(metadata, 0.1)
 
     LlamaDFlashDecoding._validate_dspark_confidence_head(metadata, 0.0)
+
+
+@pytest.mark.parametrize("selector_top_k,top_k", [(0, 0), (2, 0), (0, 2), (0, -1), (0, 3)],
+                         ids=["dflash", "dflash2", "lilicorr", "negative-k", "oversized-k"])
+def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypatch, selector_top_k, top_k):
+    model = SimpleNamespace(
+        dflash_selector_top_k=lambda: selector_top_k, rope_type=lambda: 0,
+        target_layer_ids=lambda: [1], n_embd=lambda: 6, n_vocab=lambda: 128,
+        token_mask=lambda: 99, is_recurrent=lambda: False, is_hybrid=lambda: False,
+        metadata=lambda: {"dflash.block_size": "6", "lilicorr.candidate_topk": str(top_k)},
+        suppress_tokens=Mock(return_value=[127]),
+        close=Mock(),
+    )
+    params = llama_cpp_lib.llama_context_default_params()
+    params.n_batch = params.n_ubatch = 2
+    context = SimpleNamespace(
+        n_ubatch=lambda: 6, n_rs_seq=lambda: 0, close=Mock(),
+        set_embeddings_nextn=Mock(), set_causal_attn=Mock(),
+    )
+    extended = Mock(return_value=_FakeDFlashBatch())
+    legacy = Mock(side_effect=lambda **kwargs: _FakeDFlashBatch())
+    create_context = Mock(return_value=context)
+    backend = Mock()
+    monkeypatch.setattr(LlamaDFlashDecoding, "_load_draft_model", lambda *args, **kwargs: model)
+    monkeypatch.setattr(LlamaDFlashDecoding, "_build_draft_context_params", lambda *args: params)
+    monkeypatch.setattr(LlamaDFlashDecoding, "_enable_backend_sampling", backend)
+    monkeypatch.setattr(internals, "LlamaContext", create_context)
+    monkeypatch.setattr(internals, "LlamaBatchExt", extended)
+    monkeypatch.setattr(internals, "LlamaBatch", legacy)
+    target = SimpleNamespace(ctx=None, set_embeddings_layer_inp=Mock())
+
+    def create():
+        return LlamaDFlashDecoding(
+            SpecConfig(spec_type=SpeculativeType.DRAFT_DFLASH,
+                       draft_model_path="lilicorr.gguf", draft_n_max=1),
+            target_model=SimpleNamespace(n_layer=lambda: 4, n_embd=lambda: 2),
+            target_context=target, model_params=None, context_params=None, verbose=False,
+        )
+
+    if top_k not in {0, 2}:
+        with pytest.raises(ValueError, match="candidate lattice"):
+            create()
+        create_context.assert_not_called()
+        model.close.assert_called_once()
+        return
+
+    engine = create()
+    assert engine.is_lilicorr == (top_k == 2)
+    assert engine.is_dflash2 == (selector_top_k > 0)
+    assert engine.draft_limit == 1
+    assert params.n_batch == params.n_ubatch == params.n_outputs_max == (6 if top_k else 2)
+    if top_k:
+        assert engine.noise_batch is extended.return_value
+        extended.assert_called_once_with(context=context)
+        assert legacy.call_count == 1  # feature injection only
+    else:
+        extended.assert_not_called()
+        assert legacy.call_count == 2
+    if top_k or selector_top_k:
+        backend.assert_not_called()
+        model.suppress_tokens.assert_not_called()
+        assert engine._suppressed_tokens == ()
+    else:
+        backend.assert_called_once()
+        model.suppress_tokens.assert_called_once()
+        assert engine._suppressed_tokens == (127,)
+    context.set_embeddings_nextn.assert_called_once_with(True, masked=not bool(top_k or selector_top_k))
+    engine.noise_batch.close = engine.inject_batch.close = Mock()
+    engine.close()
+    context.close.assert_called_once()
+    model.close.assert_called_once()
+
+
+@pytest.mark.parametrize("n_max,p_min,n_min,expected", [
+    (3, 0.0, 0, [102, 201, 302]),
+    (1, 0.0, 3, [102]),
+    (3, 0.8, 0, [102]),
+    (3, 0.8, 3, []),
+])
+def test_lilicorr_draft_uses_anchor_state_and_full_block(n_max, p_min, n_min, expected):
+    engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True, p_min=p_min)
+    engine.is_lilicorr = True
+    engine._suppressed_tokens = (101, 102, 201, 202, 301, 302)
+    engine.lilicorr_top_k, engine.n_embd_dec, engine.block_size = 2, 6, 6
+    engine.draft_min = n_min
+    anchor = np.arange(6, dtype=np.float32)
+    engine._lilicorr_features = {6: anchor}
+    lattice = np.array([[0] * 6, [101, 102, 0, 3, 0, 3],
+                        [201, 202, 0, 0, 1, 0], [301, 302, 0, 3, 0, 3],
+                        [401, 402, 0, 3, 0, 3], [501, 502, 0, 3, 0, 3]], dtype=np.float32)
+    engine.draft_context = _FakeDFlashDraftContext(confidence=lattice)
+    engine._candidate = Mock(side_effect=AssertionError("LiliCorr must use the lattice"))
+    assert engine.draft([], n_past=7, id_last=42, n_max=n_max).tolist() == expected
+    assert engine.noise_batch.tokens == [42, 99, 99, 99, 99, 99]
+    assert engine.noise_batch.positions == list(range(7, 13))
+    assert engine.noise_batch.logits == [False] * 6
+    np.testing.assert_array_equal(engine.noise_batch.states, np.tile(anchor, (6, 1)))
+    assert engine._pending_verification_checkpoint == ({"position": 5} if expected else None)
+
+
+@pytest.mark.parametrize("pos0", [0, 7])
+def test_lilicorr_missing_anchor_never_reuses_stale_features(pos0):
+    engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True)
+    engine.is_lilicorr = True
+    engine.lilicorr_top_k, engine.n_embd_dec, engine.block_size = 2, 6, 4
+    engine._lilicorr_features = {5: np.ones(6, dtype=np.float32)}
+    engine.draft_context = _FakeDFlashDraftContext(confidence=np.zeros((4, 6), dtype=np.float32))
+    if pos0:
+        with pytest.raises(RuntimeError, match="anchor features are unavailable"):
+            engine.draft([], n_past=pos0, id_last=42, n_max=1)
+        assert not engine.draft_context.decoded
+    else:
+        engine.draft([], n_past=0, id_last=42, n_max=1)
+        np.testing.assert_array_equal(engine.noise_batch.states, np.zeros((4, 6)))
+
+
+def _lilicorr_projection_engine(*, native, n_ubatch):
+    engine = _checkpoint_test_engine(native=native, engine_class=LlamaDFlashDecoding)
+    engine.is_lilicorr, engine.block_size = True, 4
+    engine.inject_batch = _FakeDFlashBatch()
+    context = engine.draft_context
+    context.n_ubatch = lambda: n_ubatch
+    context.memory_clear = lambda data: None
+
+    def decode(batch):
+        context.projected = batch.embeddings.reshape(-1, 2).copy() * 10
+        return 0
+
+    context.decode = decode
+    context.get_embeddings_nextn = lambda: context.projected.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+    return engine
+
+
+@pytest.mark.parametrize("native", [True, False], ids=["native", "device"])
+@pytest.mark.parametrize("operation", ["restore", "rollback", "truncate", "clear"])
+def test_lilicorr_projected_features_follow_checkpoint_recovery(native, operation):
+    engine = _lilicorr_projection_engine(native=native, n_ubatch=1)
+    engine._lilicorr_features = {7: np.array([70, 80], dtype=np.float32)}
+    checkpoint = engine.checkpoint()
+    context = engine.draft_context
+    features = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
+    engine._inject_target_features(features, [8, 9, 10], seq_id=0)
+    context.projected.fill(-1)
+    np.testing.assert_array_equal(engine._lilicorr_features[10], [50, 60])
+    engine.verify_positions, engine.verify_features = [8, 9, 10], features
+    engine._active_verification_checkpoint = checkpoint
+    if operation == "restore":
+        engine.restore(checkpoint)
+        assert set(engine._lilicorr_features) == {7}
+    elif operation == "clear":
+        engine._closed, engine._backend_sampler = False, None
+        engine.clear()
+        assert engine._lilicorr_features == {}
+    else:
+        if operation == "rollback":
+            engine.rollback_verified(checkpoint, n_accepted=1)
+        else:
+            engine.truncate(10)
+        assert set(engine._lilicorr_features) == {7, 8, 9}
+        np.testing.assert_array_equal(engine._lilicorr_features[9], [30, 40])
+    assert set(checkpoint["lilicorr_features"]) == {7}
+    np.testing.assert_array_equal(checkpoint["lilicorr_features"][7], [70, 80])
+
+
+def test_lilicorr_feature_cache_is_bounded_by_native_positions():
+    engine = _lilicorr_projection_engine(native=True, n_ubatch=2)
+    positions = [1, 4, 6, 9, 10, 11, 14]
+    features = np.array([[pos, pos + 1] for pos in positions], dtype=np.float32)
+    engine._inject_target_features(features, positions, seq_id=0)
+    assert set(engine._lilicorr_features) == {10, 11, 14}
+    np.testing.assert_array_equal(engine._lilicorr_features[14], [140, 150])
+
+
+def test_lilicorr_next_round_uses_accepted_anchor_after_rejection():
+    class _Context(_FakeCheckpointContext):
+        def n_ubatch(self):
+            return 8
+
+        def decode(self, batch):
+            self.position = max(batch.positions)
+            if batch.embeddings is not None:
+                self.projected = np.tile(batch.embeddings.reshape(-1, 2), (1, 3)) * 10
+            else:
+                anchor = float(batch.states[0, 0])
+                self.projected = np.zeros((len(batch.tokens), 6), dtype=np.float32)
+                for i in range(1, len(batch.tokens)):
+                    self.projected[i] = [anchor + i, anchor + i + 10, 3, 0, 3, 0]
+            return 0
+
+        def get_embeddings_nextn(self):
+            return self.projected.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+
+        def memory_seq_rm(self, seq_id, p0, p1):
+            self.position = min(self.position, p0 - 1)
+            return super().memory_seq_rm(seq_id, p0, p1)
+
+    engine = _checkpoint_test_engine(native=True, engine_class=LlamaDFlashDecoding)
+    engine.config = SpecConfig(spec_type=SpeculativeType.DRAFT_DFLASH,
+                               draft_model_path="lilicorr.gguf", draft_n_max=3)
+    engine.is_lilicorr, engine.is_dflash2 = True, False
+    engine.block_size, engine.draft_limit, engine.draft_min = 4, 3, 0
+    engine.lilicorr_top_k, engine.n_embd_dec, engine.mask_token_id = 2, 6, 99
+    engine._lilicorr_features = {7: np.tile(np.array([70, 80], dtype=np.float32), 3)}
+    engine.noise_batch, engine.inject_batch = _FakeDFlashBatch(), _FakeDFlashBatch()
+    engine.draft_context = _Context()
+
+    assert engine.draft([], n_past=8, id_last=42, n_max=3).tolist() == [71, 72, 73]
+    assert engine.draft_context.position == 7
+    checkpoint = engine.take_verification_checkpoint()
+    batch = SimpleNamespace(n_tokens=4, token=[42, 71, 72, 73], embd=None,
+                            pos=[8, 9, 10, 11], n_seq_id=[1] * 4, seq_id=[[0]] * 4)
+    features = np.array([[pos, pos + 1] for pos in batch.pos], dtype=np.float32)
+    engine._gather_target_features = lambda **kwargs: features.copy()
+    engine.process(batch)
+    engine.rollback_verified(checkpoint, n_accepted=1)
+    assert engine.draft_context.position == 9
+    assert 10 not in engine._lilicorr_features and 11 not in engine._lilicorr_features
+    assert engine.draft([], n_past=10, id_last=43, n_max=3).tolist() == [91, 92, 93]
+    assert engine.draft_context.position == 9
 
 
 @pytest.mark.parametrize("kind,positions", [
@@ -982,6 +1398,7 @@ def test_dspark_probability_filter_requires_confidence_head():
 ])
 def test_dflash_process_preserves_feature_layout_and_positions(kind, positions):
     engine = object.__new__(LlamaDFlashDecoding)
+    engine.is_lilicorr = False
     engine.target_layer_ids = [1, 3] if kind == "layers" else [1]
     engine.n_embd_tgt = engine.n_embd_dec = 2
     engine.n_embd_enc = 2 * len(engine.target_layer_ids)
@@ -1099,7 +1516,7 @@ def test_ngram_never_proposes_media_ids(kind):
         engine.close()
 
 
-@pytest.fixture(scope="module", params=["DFLASH", "DFLASH2"], ids=["dflash", "dflash2"])
+@pytest.fixture(scope="module", params=["DFLASH", "DFLASH2", "LILICORR"], ids=["dflash", "dflash2", "lilicorr"])
 def dflash_model(request):
     target = os.environ.get(f"LLAMA_TEST_{request.param}_MODEL")
     draft = os.environ.get(f"LLAMA_TEST_{request.param}_DRAFT")
@@ -1115,6 +1532,7 @@ def dflash_model(request):
                                draft_n_gpu_layers=int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0"))),
     )) as llm:
         assert llm.speculative.is_dflash2 == (request.param == "DFLASH2")
+        assert llm.speculative.is_lilicorr == (request.param == "LILICORR")
         yield llm
 
 
@@ -1130,10 +1548,11 @@ def test_real_dflash_block_limits_verification_and_interrupted_retry(dflash_mode
         engine.begin(history)
         pos0 = llm._ctx.memory_seq_pos_max(0) + 1
         full = engine.draft(history, n_past=pos0, id_last=tokens[-1], n_max=3)
-        assert len(full) == 3 and engine.noise_batch.n_tokens() == 4
+        block_tokens = engine.block_size if engine.is_lilicorr else 4
+        assert len(full) == 3 and engine.noise_batch.n_tokens() == block_tokens
         capped = engine.draft(history, n_past=pos0, id_last=tokens[-1], n_max=1)
         np.testing.assert_array_equal(capped, full[:1])
-        assert engine.noise_batch.n_tokens() == 4
+        assert engine.noise_batch.n_tokens() == block_tokens
         assert engine.draft_context.memory_seq_pos_max(0) == pos0 - 1
         assert engine._pending_verification_checkpoint is not None
 
@@ -1153,6 +1572,62 @@ def test_real_dflash_block_limits_verification_and_interrupted_retry(dflash_mode
         assert complete() == reference
         llm.reset()
         assert llm._ctx.memory_seq_pos_max(0) == engine.draft_context.memory_seq_pos_max(0) == -1
+    finally:
+        llm.reset()
+
+
+def test_real_lilicorr_draft_matches_native_state_batch(dflash_model, monkeypatch):
+    llm = dflash_model
+    engine = llm.speculative
+    if not engine.is_lilicorr:
+        pytest.skip("LiliCorr state-batch parity requires a LiliCorr sidecar")
+    llm.reset()
+    try:
+        tokens = llm.tokenize(b"Count from 1 to 20: 1,")
+        llm.eval(tokens[:-1], copy_logits=False)
+        engine.begin(tokens[:-1])
+        pos0 = llm._ctx.memory_seq_pos_max(0) + 1
+        anchor = engine._lilicorr_features[pos0 - 1].copy()
+        captured = []
+        decode = engine.draft_context.decode
+
+        def capture(batch, **kwargs):
+            status = decode(batch, **kwargs)
+            if status == 0 and batch is engine.noise_batch:
+                captured.append(engine._copy_rows(
+                    engine.draft_context.get_embeddings_nextn(), engine.block_size, engine.n_embd_dec
+                ))
+            return status
+
+        monkeypatch.setattr(engine.draft_context, "decode", capture)
+        draft = engine.draft(tokens, n_past=pos0, id_last=tokens[-1], n_max=1)
+        assert len(draft) == 1 and len(captured) == 1
+        checkpoint = engine.take_verification_checkpoint()
+        native = llama_cpp_lib.llama_batch_ext_init(engine.draft_context.ctx)
+        assert native
+        try:
+            state = llama_cpp_lib.llama_embd(
+                anchor.ctypes.data_as(ctypes.POINTER(ctypes.c_float)), 1, len(anchor)
+            )
+            for offset in range(engine.block_size):
+                token = tokens[-1] if offset == 0 else engine.mask_token_id
+                index = llama_cpp_lib.llama_batch_ext_add_token(native, 0, token)
+                assert index == offset
+                position = (llama_cpp_lib.llama_pos * 1)(pos0 + offset)
+                assert llama_cpp_lib.llama_batch_ext_set_pos(native, index, position)
+                assert llama_cpp_lib.llama_batch_ext_set_embd_state(native, index, state)
+            assert llama_cpp_lib.llama_process(
+                engine.draft_context.ctx, llama_cpp_lib.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, native
+            ) == 0
+            raw_lattice = engine._copy_rows(
+                engine.draft_context.get_embeddings_nextn(), engine.block_size, engine.n_embd_dec
+            )
+            np.testing.assert_allclose(captured[0], raw_lattice, rtol=1e-6, atol=1e-6)
+        finally:
+            llama_cpp_lib.llama_batch_ext_free(native)
+            engine.restore(checkpoint)
+        assert engine.draft_context.memory_seq_pos_max(0) == pos0 - 1
+        np.testing.assert_array_equal(engine._lilicorr_features[pos0 - 1], anchor)
     finally:
         llm.reset()
 

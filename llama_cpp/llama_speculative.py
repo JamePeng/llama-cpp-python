@@ -1312,7 +1312,9 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
             rows, width
         ).copy()
 
-    def _candidate(self, output_index: int) -> Tuple[int, float]:
+    def _candidate(
+        self, output_index: int, *, suppress_tokens: Sequence[int] = ()
+    ) -> Tuple[int, float]:
         """Return the most likely token and approximate top-k probability.
 
         Backend sampling is preferred because it avoids transferring or
@@ -1322,9 +1324,15 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         plus logits, or a selected token without probabilities when ``p_min``
         is disabled. If no usable compact output exists, it selects from the
         top ten entries of the full logits row on the CPU.
+        Suppressed IDs are masked before CPU selection and normalization;
+        compact logits take precedence over rounded probabilities when masking.
+        Native logits and probability buffers remain unchanged.
         """
         if self._backend_sampling:
             token = self.draft_context.get_sampled_token_ith(output_index)
+            # common_sampler_sample skips the CPU chain when the backend selected a token.
+            if token != self._llama_cpp_lib.LLAMA_TOKEN_NULL:
+                suppress_tokens = ()
             candidates_count = (
                 self.draft_context.get_sampled_candidates_count_ith(output_index)
             )
@@ -1344,9 +1352,18 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
                 candidates = np.ctypeslib.as_array(
                     candidates_ptr, shape=(candidates_count,)
                 )
-                if probs_count > 0 and probs_ptr:
+                if probs_count > 0 and probs_ptr and not (
+                    len(suppress_tokens) and logits_count > 0 and logits_ptr
+                ):
                     count = min(candidates_count, probs_count)
                     probs = np.ctypeslib.as_array(probs_ptr, shape=(count,))
+                    if len(suppress_tokens):
+                        probs = probs.astype(np.float64)
+                        probs[np.isin(candidates[:count], suppress_tokens)] = 0.0
+                        total = float(probs.sum())
+                        if total <= 0.0:
+                            raise RuntimeError("No finite draft candidates remain after applying suppress tokens")
+                        probs /= total
                     if token == self._llama_cpp_lib.LLAMA_TOKEN_NULL:
                         selected = int(np.argmax(probs))
                         return int(candidates[selected]), float(probs[selected])
@@ -1356,6 +1373,15 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
                 if logits_count > 0 and logits_ptr:
                     count = min(candidates_count, logits_count)
                     logits = np.ctypeslib.as_array(logits_ptr, shape=(count,))
+                    if len(suppress_tokens):
+                        logits = logits.copy()
+                        logits[np.isin(candidates[:count], suppress_tokens)] = -np.inf
+                        if not np.isfinite(logits).any():
+                            raise RuntimeError("No finite draft candidates remain after applying suppress tokens")
+                        if count > 10:
+                            top_indices = np.argpartition(logits, -10)[-10:]
+                            logits = logits[top_indices]
+                            candidates = candidates[top_indices]
                     selected = int(np.argmax(logits))
                     shifted = logits.astype(np.float64) - float(np.max(logits))
                     probs = np.exp(shifted)
@@ -1372,6 +1398,12 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
 
         logits_ptr = self.draft_context.get_logits_ith(output_index)
         logits = np.ctypeslib.as_array(logits_ptr, shape=(self.n_vocab,))
+        if len(suppress_tokens):
+            logits = logits.copy()
+            ids = np.asarray(suppress_tokens, dtype=np.intp)
+            logits[ids[(ids >= 0) & (ids < self.n_vocab)]] = -np.inf
+            if not np.isfinite(logits).any():
+                raise RuntimeError("No finite draft candidates remain after applying suppress tokens")
         k = min(10, self.n_vocab)
         top_indices = np.argpartition(logits, -k)[-k:]
         top_logits = logits[top_indices].astype(np.float64)
@@ -1441,6 +1473,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.draft_model = target_model
 
         try:
+            self._suppressed_tokens = tuple(self.draft_model.suppress_tokens())
             draft_ctx_params = self._build_draft_context_params(
                 context_params, target_context
             )
@@ -1511,6 +1544,9 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 
         if self.verbose:
             self._print_runtime_configuration(context_params)
+
+    def _candidate(self, output_index: int) -> Tuple[int, float]:
+        return super()._candidate(output_index, suppress_tokens=self._suppressed_tokens)
 
     def begin(self, prompt_tokens: Sequence[int], seq_id: int = 0) -> None:
         """Warn when prompt processing did not fully populate the MTP cache."""
@@ -2092,6 +2128,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             verbose=verbose,
         )
         self.is_dspark = config.spec_type == SpeculativeType.DRAFT_DSPARK
+        self._suppressed_tokens: Tuple[int, ...] = ()
+        self.is_lilicorr = False
+        self._lilicorr_features: Dict[int, npt.NDArray[np.float32]] = {}
         self.draft_model = None
         self.draft_context = None
         self.noise_batch = None
@@ -2130,6 +2169,17 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 raise ValueError(
                     f"DFlash block size must be greater than one: {self.block_size}"
                 )
+            self.lilicorr_top_k = self._metadata_int(
+                metadata, "lilicorr.candidate_topk", 0
+            )
+            if self.lilicorr_top_k < 0 or (
+                self.lilicorr_top_k * (self.lilicorr_top_k + 1)
+                > self.n_embd_dec
+            ):
+                raise ValueError("LiliCorr candidate lattice does not fit the draft hidden size")
+            self.is_lilicorr = self.lilicorr_top_k > 0
+            if not self.is_dflash2 and not self.is_lilicorr:
+                self._suppressed_tokens = tuple(self.draft_model.suppress_tokens())
             self.sample_from_anchor = self._metadata_bool(
                 metadata, "dflash.sample_from_anchor", True
             )
@@ -2150,7 +2200,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             if self.draft_limit <= 0:
                 raise ValueError("DFlash resolved draft length must be positive")
 
-            block_capacity = self.draft_limit + 1
+            block_capacity = (
+                self.block_size if self.is_lilicorr else self.draft_limit + 1
+            )
             draft_ctx_params = self._build_draft_context_params(
                 context_params, target_context
             )
@@ -2175,12 +2227,15 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 params=draft_ctx_params,
                 verbose=verbose,
             )
-            self.noise_batch = internals.LlamaBatch(
-                n_tokens=block_capacity,
-                embd=0,
-                n_seq_max=1,
-                verbose=verbose,
-            )
+            if self.is_lilicorr:
+                self.noise_batch = internals.LlamaBatchExt(context=self.draft_context)
+            else:
+                self.noise_batch = internals.LlamaBatch(
+                    n_tokens=block_capacity,
+                    embd=0,
+                    n_seq_max=1,
+                    verbose=verbose,
+                )
             self.inject_batch = internals.LlamaBatch(
                 n_tokens=self.draft_context.n_ubatch(),
                 embd=self.n_embd_enc,
@@ -2219,18 +2274,21 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         value = metadata.get(key)
         return default if value is None else int(value)
 
+    def _candidate(self, output_index: int) -> Tuple[int, float]:
+        return super()._candidate(output_index, suppress_tokens=self._suppressed_tokens)
+
     def _configure_draft_execution(self, internals: Any) -> None:
         """Configure outputs and sampling for the resolved DFlash variant."""
-        # DFlash2 consumes the selector lattice from h_nextn and does not read
+        # Lattice variants consume h_nextn and do not read
         # sampled draft logits. Attaching a backend sampler would do needless
         # vocabulary work and expose outputs belonging to the wrong algorithm.
-        if not self.is_dflash2:
+        if not self.is_dflash2 and not self.is_lilicorr:
             self._enable_backend_sampling(internals)
 
         for layer_id in self.target_layer_ids:
             self.target_context.set_embeddings_layer_inp(layer_id, True)
         self.draft_context.set_embeddings_nextn(
-            True, masked=not self.is_dflash2
+            True, masked=not self.is_dflash2 and not self.is_lilicorr
         )
         self.draft_context.set_causal_attn(self.causal_attn)
 
@@ -2277,6 +2335,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             algorithm = "DSpark"
         elif self.is_dflash2:
             algorithm = "DFlash2"
+        elif self.is_lilicorr:
+            algorithm = "LiliCorr"
         else:
             algorithm = "DFlash"
         devices = ",".join(self.config.draft_devices) or "auto"
@@ -2301,6 +2361,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             f"sample_from_anchor={self.sample_from_anchor}, "
             f"causal_attn={self.causal_attn}, "
             f"selector_top_k={self.selector_top_k}, "
+            f"lilicorr_top_k={self.lilicorr_top_k}, "
             f"mrope={self.is_mrope}, "
             f"target_layers={self.target_layer_ids}, "
             f"feature_width={self.n_embd_enc}",
@@ -2433,6 +2494,21 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     "DFlash KV injection failed with status "
                     f"{status} at feature row offset {offset}"
                 )
+            if self.is_lilicorr:
+                projected = self._copy_rows(
+                    self.draft_context.get_embeddings_nextn(), count, self.n_embd_dec
+                )
+                for position, row in zip(chunk_positions, projected):
+                    self._lilicorr_features[int(position)] = row.copy()
+                self._trim_lilicorr_features(int(chunk_positions[-1]) + 1)
+
+    def _trim_lilicorr_features(self, end: int) -> None:
+        """Keep only the projected rows near the committed draft boundary."""
+        if self.is_lilicorr:
+            self._lilicorr_features = {
+                pos: row for pos, row in self._lilicorr_features.items()
+                if max(0, end - self.block_size - 1) <= pos < end
+            }
 
     def checkpoint(self, seq_id: int = 0) -> Any:
         """Capture the draft position and recurrent state before a noise block."""
@@ -2451,6 +2527,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 "size": 0,
                 "flags": 0,
             }
+            if self.is_lilicorr:
+                # Rows are owned and immutable; snapshots retain them across cache updates.
+                checkpoint["lilicorr_features"] = dict(self._lilicorr_features)
             if self._use_native_draft_rollback:
                 self._checkpoint_stats["native_captures"] += 1
             else:
@@ -2535,6 +2614,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 ):
                     raise RuntimeError("DFlash native draft-context rollback failed")
                 self._checkpoint_stats["native_restores"] += 1
+            if self.is_lilicorr:
+                self._lilicorr_features = dict(checkpoint["lilicorr_features"])
             self.verify_positions.clear()
             self.verify_features = np.empty(
                 (0, self.n_embd_enc), dtype=np.float32
@@ -2600,6 +2681,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         position = self.verify_positions[count - 1] + 1
         if not self.draft_context.memory_seq_rm(seq_id, position, -1):
             raise RuntimeError("DFlash native verification rollback failed")
+        self._trim_lilicorr_features(position)
         self.verify_positions.clear()
         self.verify_features = np.empty(
             (0, self.n_embd_enc), dtype=np.float32
@@ -2616,6 +2698,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         if self._use_native_draft_rollback:
             if not self.draft_context.memory_seq_rm(seq_id, position, -1):
                 raise RuntimeError("DFlash draft-context truncation failed")
+            self._trim_lilicorr_features(position)
         else:
             checkpoint = self._active_verification_checkpoint
             if checkpoint is None:
@@ -2657,17 +2740,33 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
         # Non-causal predictions depend on the full configured noise block.
         # The per-call cap truncates proposals after confidence/minimum filtering.
-        n_block_tokens = self.draft_limit + (
-            0 if self.is_dspark and self.sample_from_anchor else 1
+        n_block_tokens = (
+            self.block_size if self.is_lilicorr else self.draft_limit + (
+                0 if self.is_dspark and self.sample_from_anchor else 1
+            )
         )
         self.noise_batch.reset()
         tokens = [id_last] + [self.mask_token_id] * (n_block_tokens - 1)
-        self.noise_batch.add_sequence(
-            token_array=tokens,
-            pos_array=[n_past + i for i in range(n_block_tokens)],
-            seq_ids=[seq_id],
-            logits_array=[not self.is_dflash2] * n_block_tokens,
-        )
+        positions = [n_past + i for i in range(n_block_tokens)]
+        if self.is_lilicorr:
+            anchor = self._lilicorr_features.get(n_past - 1)
+            if anchor is None:
+                if n_past != 0:
+                    raise RuntimeError(
+                        f"LiliCorr anchor features are unavailable at position {n_past - 1}"
+                    )
+                anchor = np.zeros(self.n_embd_dec, dtype=np.float32)
+            self.noise_batch.add_tokens(
+                tokens, positions=positions, seq_ids=[seq_id],
+                states=np.broadcast_to(anchor, (n_block_tokens, self.n_embd_dec)),
+            )
+        else:
+            self.noise_batch.add_sequence(
+                token_array=tokens,
+                pos_array=positions,
+                seq_ids=[seq_id],
+                logits_array=[not self.is_dflash2] * n_block_tokens,
+            )
 
         self._pending_verification_checkpoint = None
         checkpoint = self.checkpoint(seq_id)
@@ -2683,8 +2782,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     f"{self.draft_context.n_ctx()}"
                 )
 
-            if self.is_dflash2:
-                result.extend(self._select_dflash2_path(n_block_tokens))
+            if self.is_dflash2 or self.is_lilicorr:
+                result.extend(self._select_lattice_path(n_block_tokens))
             else:
                 first_output = (
                     0 if self.is_dspark and self.sample_from_anchor else 1
@@ -2721,13 +2820,13 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             self._pending_verification_checkpoint = checkpoint
         return np.asarray(result, dtype=np.intc)
 
-    def _select_dflash2_path(self, n_block_tokens: int) -> List[int]:
-        """Walk llama.cpp's packed DFlash2 selector lattice greedily."""
-        top_k = int(self.selector_top_k)
+    def _select_lattice_path(self, n_block_tokens: int) -> List[int]:
+        """Walk llama.cpp's packed DFlash2 or LiliCorr lattice greedily."""
+        top_k = int(self.selector_top_k if self.is_dflash2 else self.lilicorr_top_k)
         row_used = top_k + top_k * top_k
         if top_k <= 0 or row_used > self.n_embd_dec:
             raise RuntimeError(
-                "DFlash2 selector lattice does not fit the draft hidden size: "
+                "DFlash candidate lattice does not fit the draft hidden size: "
                 f"top_k={top_k}, row_used={row_used}, n_embd={self.n_embd_dec}"
             )
 
@@ -2738,7 +2837,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         )
         result: List[int] = []
         predecessor = 0
-        for output_index in range(1, n_block_tokens):
+        n_rows = n_block_tokens if self.is_dflash2 else self.draft_limit + 1
+        for output_index in range(1, n_rows):
             row = lattice[output_index]
             score_beg = top_k + predecessor * top_k
             scores = row[score_beg : score_beg + top_k]
@@ -2772,6 +2872,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     def clear(self) -> None:
         """Clear request-local draft cache and verification bookkeeping."""
         self._checkpoint_owner = None
+        self._lilicorr_features.clear()
         if self._closed:
             return
         self._pending_verification_checkpoint = None
@@ -2787,6 +2888,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     def close(self) -> None:
         """Idempotently release all DFlash/DSpark native resources."""
         self._checkpoint_owner = None
+        self._lilicorr_features.clear()
         if self._closed:
             return
         self._closed = True
