@@ -25,6 +25,7 @@ successfully. Optional embedding and DFlash model pairs skip when unset.
 | `LLAMA_TEST_QWEN3VL_EMBEDDING_MODEL` / `LLAMA_TEST_QWEN3VL_EMBEDDING_MMPROJ` | Qwen3-VL-Embedding model and projector |
 | `LLAMA_TEST_DFLASH_MODEL` / `LLAMA_TEST_DFLASH_DRAFT` | DFlash target and draft model |
 | `LLAMA_TEST_DFLASH2_MODEL` / `LLAMA_TEST_DFLASH2_DRAFT` | DFlash2 target and draft model |
+| `LLAMA_TEST_LILICORR_MODEL` / `LLAMA_TEST_LILICORR_DRAFT` | LiliCorr target and draft model |
 
 CI pins [Qwen2.5](https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF)
 and [Qwen3.5-0.8B with its projector](https://huggingface.co/JamePeng2023/Qwen3.5-0.8B-GGUF).
@@ -44,9 +45,31 @@ offload; the default is `0`. Tokenizer tests use the vocabulary-only GGUF in
 | `test_formats.py` | Chat formatting and grammar constraints |
 | `test_rpc.py` | RPC backend, endpoint validation and device ownership |
 
-Share model weights and owned cold references, reset live contexts between cases,
-and isolate patches and disk caches. Aggregate equivalent inputs while preserving
-boundary, failure-recovery and ownership assertions.
+Sampling regressions compare suppression, merged user biases, and candidate
+probabilities against native sampler chains. They cover ordinary sampling,
+restored logits, sampler clones, grammar resampling, reasoning-budget forcing,
+MTP internal/sidecar list ownership, CPU confidence cutoffs, and backend-selected
+token bypasses.
+
+## Test design and efficiency
+
+Development time, maintenance effort, and CI execution time are part of the test
+design budget. Aggregate, compact, and decouple tests as much as practical while
+preserving meaningful coverage and readable failure reports.
+
+- Group equivalent inputs with parametrization or local loops. Reuse reference
+  results across equivalent paths and avoid redundant Cartesian products,
+  repeated model loads, and duplicate native computation.
+- Extract repeated setup and assertions into small, focused fixtures or helpers.
+  Keep behavioral expectations independent of the helper implementation; avoid
+  abstractions or dense expressions that make failures harder to understand.
+- Share model weights and owned cold references, but reset mutable contexts
+  between cases. Isolate patches and disk caches, release owned resources, and
+  keep tests independent of execution order and other tests' side effects.
+- Preserve boundary, failure-recovery, ownership, and probability assertions when
+  consolidating tests. Label aggregated cases so failures identify the affected
+  input and backend; fewer lines or collected cases alone do not justify losing
+  coverage.
 
 ## Quantized model comparisons
 

@@ -34,7 +34,7 @@ contains algorithms that do not yet have Python engines.
 | Type | Python engine | Status | Availability |
 |---|---|---|---|
 | `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP | Since `0.3.48` |
-| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash and selector-based DFlash2 GGUFs | Since `0.3.49` |
+| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash, DFlash2, and LiliCorr GGUFs | DFlash/DFlash2 since `0.3.49`; LiliCorr since `0.4.4-preview` |
 | `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs | Since `0.3.49` |
 | `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
 | `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
@@ -58,6 +58,8 @@ engine.
   through `LlamaDFlashDecoding`. DFlash2 uses `DRAFT_DFLASH` and is detected
   from the sidecar's selector metadata. This functionality was not part of the
   `0.3.48` release.
+- `0.4.4-preview` introduced LiliCorr support through `LlamaDFlashDecoding`,
+  using `DRAFT_DFLASH` and automatic detection of `lilicorr.candidate_topk`.
 
 ## Recommended Entry Point
 
@@ -249,6 +251,17 @@ borrowed from `Llama`; every concrete engine owns its draft context and batches;
 an external draft model is engine-owned, while built-in MTP borrows the target
 model containing its NextN heads.
 
+Ordinary decoding and target verification merge the target vocabulary's
+`tokenizer.ggml.suppress_tokens` with user logit biases in the sampling chain.
+Suppressed IDs receive `-inf` before top-k/top-p filtering, and user biases are
+applied once. Reasoning-budget forcing preserves the forced token's existing
+score and masks other tokens, so it cannot override suppression or grammar masks.
+MTP CPU drafting reads the list from its draft model (the target
+model for internal heads, or the external sidecar) and masks those IDs before
+top-k selection and probability normalization. Backend-selected tokens bypass
+the CPU chain, as in the native sampler. DFlash2 and LiliCorr lattice traversal
+does not add this CPU filter; target verification still uses the target list.
+
 ## MTP Engine
 
 `LlamaMTPDecoding` orchestrates the native NextN/MTP graph while participating in
@@ -394,15 +407,25 @@ DFlash2 does not have a separate `SpeculativeType`. Configure
 `dflash.selector_top_k`. A positive value selects DFlash2. The selector width is
 fixed by the GGUF and is not a runtime tuning parameter.
 
+LiliCorr is supported starting with `0.4.4-preview`. It also uses `DRAFT_DFLASH` and is detected from a positive
+`lilicorr.candidate_topk`. It retains the draft encoder's projected target
+features and passes the preceding position's projection as a separate hidden
+state on every noise token. LiliCorr always decodes the full trained
+`dflash.block_size`, even when `draft_n_max` is smaller, then reads at most
+`draft_n_max` candidate transitions. Its projection cache follows checkpoints,
+accepted-prefix recovery, and request resets. Missing anchor features raise an
+error instead of reusing a projection from another position.
+
 The resolved variant controls the draft output path:
 
 | Variant | NextN output | Candidate selection | `draft_backend_sampling` |
 |---|---|---|---|
 | DFlash v1 | Masked rows | Top token from vocabulary logits | Supported |
 | DFlash2 | Unmasked rows | Packed selector lattice | Not activated |
+| LiliCorr | Unmasked rows | Packed candidate/transition lattice | Not activated |
 | DSpark | Masked rows | Markov/confidence output | Supported where applicable |
 
-For each DFlash2 position, the packed output contains `K` candidate token IDs
+For each DFlash2 or LiliCorr position, the packed output contains `K` candidate token IDs
 and `K x K` transition scores. The engine starts from predecessor index zero,
 selects the strongest transition for that predecessor, emits the corresponding
 candidate ID, and carries the selected index into the next row. When
@@ -461,16 +484,25 @@ ordinary decoder's output tokens, and selector drafting, verification,
 acceptance, and native rollback all completed successfully. Other GGUF pairs
 may work when their vocabulary, target-layer metadata, selector layout, and
 embedding dimensions are compatible, but they have not yet been validated.
+LiliCorr has regression coverage for block layout, lattice selection, projected
+feature ownership, and rollback. End-to-end model tests require
+`LLAMA_TEST_LILICORR_MODEL` and `LLAMA_TEST_LILICORR_DRAFT`.
+The `NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB.gguf` target and matching
+`NVIDIA-Nemotron-3.5-Bolt-74B-A9B-24GB-LiLiCorr.gguf` sidecar passed real-model
+tests on an RTX 5090. These checks cover full eight-token noise blocks,
+per-call draft caps, verification and rollback, interrupted streaming and retry,
+and lattice parity with direct native C API state-batch submission.
 
 The requested minimum and maximum draft lengths are clamped to the GGUF's
 `dflash.block_size`.
-DFlash and DFlash2 can produce at most `block_size - 1` tokens. DSpark can
+DFlash, DFlash2, and LiliCorr can produce at most `block_size - 1` tokens. DSpark can
 produce `block_size` tokens when `dflash.sample_from_anchor=true`; otherwise it
 also uses `block_size - 1`. For DFlash, `draft_p_min` filters the selected
 top-token probability. For DFlash2, it filters the selected transition
 probability within the current predecessor row. For DSpark, it filters the
 model's predicted acceptance confidence.
-The noise block always uses the configured, trained-clamped draft length.
+DFlash, DFlash2, and DSpark use the configured, trained-clamped draft length
+for the noise block; LiliCorr always uses the full trained block.
 A smaller per-call `n_max` caps the returned prefix after probability filtering
 and the resolved `draft_n_min` check; it does not reduce the decoded mask block.
 For example, a complete three-token proposal satisfying `draft_n_min=3` can
@@ -478,6 +510,17 @@ return one token when the call specifies `n_max=1`. This preserves the full
 non-causal block's predictions and matches the native driver's filtering order.
 When a DSpark sidecar declares `dflash.has_confidence_head=false`, probability
 filtering requires `draft_p_min=0`.
+
+DFlash v1 and DSpark read `tokenizer.ggml.suppress_tokens` from the draft
+vocabulary. CPU candidate selection masks these IDs before top-k selection
+and probability normalization; compact backend candidates are also filtered
+when selected on the CPU. Native output buffers are preserved. If suppression
+leaves no finite candidate, drafting raises an error and restores its checkpoint.
+When compact logits are available, probabilities are recomputed from the
+masked logits instead of renormalizing rounded backend probabilities. A token
+already selected by the backend bypasses CPU filtering, matching the native
+sampler's fast path. Suppression never expands a compact candidate pool back
+to the full vocabulary.
 
 The engine keeps verification blocks atomic and checks every draft-memory
 removal. Transformer drafts and recurrent/hybrid drafts with enough native
