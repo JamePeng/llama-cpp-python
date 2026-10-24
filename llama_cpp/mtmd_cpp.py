@@ -1259,6 +1259,29 @@ def mtmd_audio_stream_get_output_embd(stream: mtmd_audio_stream_p) -> _Pointer[c
     ...
 
 
+# MTMD_API int64_t mtmd_audio_stream_get_n_rows(const mtmd_audio_stream * stream);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_get_n_rows", [mtmd_audio_stream_p_ctypes],
+    c_int64, required=False,
+)
+def mtmd_audio_stream_get_n_rows(stream: mtmd_audio_stream_p) -> int:
+    """Return rows produced so far, including prefix rows, for a live stream."""
+    ...
+
+
+# MTMD_API int64_t mtmd_audio_stream_get_n_rows_flushed(const mtmd_audio_stream * stream);
+@ctypes_function_mtmd(
+    "mtmd_audio_stream_get_n_rows_flushed", [mtmd_audio_stream_p_ctypes],
+    c_int64, required=False,
+)
+def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
+    """Return the row target through the last flush for a live stream.
+
+    Once get_n_rows reaches this target, all flushed audio has been produced.
+    """
+    ...
+
+
 # // EXPERIMENTAL API for audio generation, subjected to breaking changes
 
 # // represent the pipeline type
@@ -1266,12 +1289,14 @@ def mtmd_audio_stream_get_output_embd(stream: mtmd_audio_stream_p) -> _Pointer[c
 #     MTMD_GEN_AUDIO_TYPE_NONE, // not supported
 #     MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
 #     MTMD_GEN_AUDIO_TYPE_POCKETTTS,
+#     MTMD_GEN_AUDIO_TYPE_SOPRANO,
 # };
 class mtmd_gen_audio_type(enum.IntEnum):
     """Generated audio pipeline type."""
     MTMD_GEN_AUDIO_TYPE_NONE      = 0
     MTMD_GEN_AUDIO_TYPE_QWEN3TTS  = 1
     MTMD_GEN_AUDIO_TYPE_POCKETTTS = 2
+    MTMD_GEN_AUDIO_TYPE_SOPRANO   = 3
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;

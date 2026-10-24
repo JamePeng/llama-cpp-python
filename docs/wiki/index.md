@@ -52,7 +52,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 |---|---|
 | [Qwen3.5 Image Chat](examples/vision/vision-qwen.md) | Matching model/projector setup, image requests, n-gram speculation, and prefill recovery. |
 | [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md) | Configure a DFlash2 sidecar, validate selector execution, compare ordinary and speculative output, and tune draft length. |
-| [MTMD Speech Synthesis](examples/audio/audio-tts.md) | Generate speech with Qwen3-TTS Base or Pocket TTS; configure reference audio and FA, and explore CLI and Streamlit examples. |
+| [MTMD Speech Synthesis](examples/audio/audio-tts.md) | Generate speech with Qwen3-TTS Base, Pocket TTS or Soprano; learn model options and explore CLI and Streamlit examples. |
 
 ### Development
 
@@ -104,7 +104,7 @@ For RPC model offloading:
 
 For text-to-speech:
 
-1. [MTMD Speech Synthesis](examples/audio/audio-tts.md) — Qwen3-TTS Base and Pocket TTS, reference audio, Flash Attention, output formats, and current cloning limitations.
+1. [MTMD Speech Synthesis](examples/audio/audio-tts.md) — Qwen3-TTS Base, Pocket TTS and Soprano, reference audio, Flash Attention, output formats, and current cloning limitations.
 2. [CLI TTS Example](../../examples/high_level_api/mtmd_tts.py) — single requests, multilingual scenarios, and batch synthesis.
 3. [Streamlit TTS Playground](../../examples/streamlit_tts/README.md) — reference upload/recording, playback, and downloads.
 

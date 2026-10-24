@@ -1,4 +1,4 @@
-"""Non-streaming Qwen3-TTS / Pocket TTS examples.
+"""Non-streaming Qwen3-TTS / Pocket TTS / Soprano examples.
 
 Run from the repository root with matching backbone and mmproj GGUF files:
 
@@ -6,7 +6,7 @@ Run from the repository root with matching backbone and mmproj GGUF files:
 
 Use the same --model and --mmproj arguments with any of these examples:
 
-  --text "Hello world"                         Basic Qwen synthesis
+  --text "Hello world"                         Basic Qwen or Soprano synthesis
   --text "Welcome back" --speaker voice.wav    Reference voice (required for Pocket)
   --text "Hello" --speaker voice.wav --speaker-bytes
   --text "First message" --text "Next message" --output messages.wav
@@ -17,7 +17,8 @@ Use the same --model and --mmproj arguments with any of these examples:
   --text "Hello" --format pcm_f32 --output speech.pcm
 
 Pocket selects its language from the weights; omit --language and use an
-appropriate language pack. Raw PCM output includes a JSON metadata sidecar.
+appropriate language pack. Soprano uses a fixed English voice: omit --language
+and --speaker, and use --max-frames >= 2. Raw PCM includes a JSON metadata sidecar.
 """
 
 import argparse
@@ -60,12 +61,12 @@ def main():
     source.add_argument("--demo", choices=DEMOS, help="Built-in example sentences")
     parser.add_argument("--speaker", help="Reference audio path, URL or data URI; required for Pocket")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
-    parser.add_argument("--language", help="Qwen language code or name; omit for Pocket")
+    parser.add_argument("--language", help="Qwen language code or name; omit for Pocket and Soprano")
     parser.add_argument("--format", choices=("wav", "pcm_f32"), default="wav")
     parser.add_argument("--output", help="Output path; multiple requests add a numbered suffix")
     parser.add_argument("--max-frames", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--temperature", type=float, default=0.8, help="Qwen backbone sampling temperature")
+    parser.add_argument("--temperature", type=float, default=0.8, help="Qwen/Soprano backbone sampling temperature")
     parser.add_argument("--ctx-size", type=int, default=4096)
     parser.add_argument("--gpu-layers", type=int, default=0)
     parser.add_argument("--mmproj-gpu", action="store_true")

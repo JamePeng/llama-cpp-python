@@ -1,7 +1,7 @@
 # Speech synthesis with MTMD
 
 `MTMDAudioGenerator` provides experimental, non-streaming speech synthesis using
-the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS and Pocket TTS
+the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS and Soprano
 backbones with matching audio generation mmproj files. Audio-input models such
 as Qwen3-ASR are not TTS models.
 
@@ -52,12 +52,12 @@ bytes. Raw sample arrays are not accepted. `from_pretrained()` is inherited from
 
 ## Model options
 
-| Option | Qwen3-TTS | Pocket TTS |
-| --- | --- | --- |
-| Reference audio | Optional | Required |
-| Language | `zh`, `en`, `de`, `it`, `pt`, `es`, `ja`, `ko`, `fr`, `ru`, or names accepted by the helper | Selected by weights; omit `language` |
-| Token sampling | Uses temperature, top-k, top-p, min-p and repetition penalty | Skipped |
-| Flow/decoder settings | Managed by vendor | Managed by vendor, including variant settings |
+| Option | Qwen3-TTS | Pocket TTS | Soprano |
+| --- | --- | --- | --- |
+| Reference audio | Optional | Required | Unsupported; fixed voice |
+| Language | `zh`, `en`, `de`, `it`, `pt`, `es`, `ja`, `ko`, `fr`, `ru`, or names accepted by the helper | Selected by weights; omit `language` | English; omit `language` |
+| Token sampling | Uses temperature, top-k, top-p, min-p and repetition penalty | Skipped | Uses the same token sampling options as Qwen |
+| Flow/decoder settings | Managed by vendor | Managed by vendor, including variant settings | Managed by vendor |
 
 Defaults are `temperature=0.8`, `top_k=40`, `top_p=0.95`, `min_p=0.05`, and
 `repeat_penalty=1.05`. The repetition window uses the active context size.
@@ -70,6 +70,24 @@ bitwise identical audio across hardware or backend versions.
 
 Pocket weights must be converted from the appropriate `languages/<name>`
 directory, following the [vendor TTS documentation](../../../../vendor/llama.cpp/tools/tts/README.md).
+
+### Soprano
+
+Soprano-80M and Soprano-1.1-80M require matching backbone and mmproj GGUF files
+converted from the same checkpoint, including its `decoder.pth`. See the
+[vendor conversion instructions](../../../../vendor/llama.cpp/tools/tts/README.md#soprano).
+Use a native build with Soprano support and supply normalized English text;
+the wrapper does not normalize numbers or abbreviations.
+
+```sh
+python -m examples.high_level_api.mtmd_tts --model /path/to/model/soprano.gguf --mmproj /path/to/model/mmproj-soprano.gguf --text "Hello, welcome back." --temperature 0 --output soprano.wav
+```
+
+Omit `speaker_reference` and `language`; the API rejects both for this fixed
+English voice. The helper constructs the prompt and decodes the complete
+utterance into 32 kHz audio. `max_frames` must be at least 2; early termination
+before two frames still raises a native decoding error. Both WAV and float32
+PCM are supported, with no streaming output.
 
 ### Qwen voice cloning limitations
 
@@ -111,7 +129,7 @@ immediate interruption inside the mmproj encoder or vocoder.
 
 The wrapper reuses `MTMDBaseHandler` for media and context management. It drives
 `set_input`, batched `step_prompt`, hidden-state feedback through `step_gen`, and
-one final `get_output`. Qwen uses a request-local `LlamaSamplingContext`; Pocket
+one final `get_output`. Qwen and Soprano use a request-local `LlamaSamplingContext`; Pocket
 passes `LLAMA_TOKEN_NULL`. Prompt construction, codebooks, text segmentation and
 vocoder state remain in the vendor helper. No text completion loop is involved.
 
@@ -132,7 +150,7 @@ suffixes. Use `--speaker-bytes` with a local `--speaker` file to demonstrate enc
 reference bytes, or `--format pcm_f32 --output speech.pcm` for raw audio with a JSON
 metadata sidecar. Run `--help` for usage examples.
 
-For Qwen, optionally add `--language en`. For Pocket, omit it. Compare the output
+For Qwen, optionally add `--language en`. For Pocket and Soprano, omit it. Compare the output
 with `vendor/llama.cpp/tools/tts/tts.cpp` using matching weights, input and sampling
 settings. Check audible content, WAV metadata, repeated requests and truncated
 outputs. Mock pipeline tests cover control flow and ownership, but do not verify

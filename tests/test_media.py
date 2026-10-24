@@ -582,6 +582,21 @@ def test_mtmd_audio_stream_default_params_abi():
     module.mtmd_audio_stream_free(None)
 
 
+@pytest.mark.parametrize("name", [
+    "mtmd_audio_stream_get_n_rows", "mtmd_audio_stream_get_n_rows_flushed",
+])
+def test_mtmd_audio_stream_row_query_abi(name):
+    module = importlib.import_module("llama_cpp.mtmd_cpp")
+    query = getattr(module, name)
+    if getattr(query, "__ctypes_optional__", False):
+        with pytest.raises(RuntimeError, match=name):
+            query(None)
+        return
+    assert query.argtypes == [module.mtmd_audio_stream_p_ctypes]
+    assert query.restype is ctypes.c_int64
+    # Native queries require a live model-backed stream; never pass NULL.
+
+
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
 @pytest.mark.parametrize("name, offsets", [
     ("mtmd_gen_inp", {
@@ -1114,12 +1129,7 @@ def audio_pipeline(tmp_path, monkeypatch):
     hidden = (ctypes.c_float * 2)(1, 2)
     output = ctypes.create_string_buffer(struct.pack("4f", 0.0, 0.1, -0.1, 0.0))
     import io, wave
-    wav_buffer = io.BytesIO()
-    with wave.open(wav_buffer, "wb") as wav:
-        wav.setparams((1, 2, 24000, 4, "NONE", "not compressed"))
-        wav.writeframes(b"\x00\x00\x01\x00\xff\xff\x00\x00")
-    wav_output = ctypes.create_string_buffer(wav_buffer.getvalue())
-    state = SimpleNamespace(kind=1, steps=0, fail=None, prompts=[], tokens=[], stop_at=2)
+    state = SimpleNamespace(kind=1, steps=0, fail=None, prompts=[], tokens=[], stop_at=3)
 
     def set_input(ctx, ptr):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
@@ -1142,8 +1152,14 @@ def audio_pipeline(tmp_path, monkeypatch):
         return 0
 
     def get_output(ctx, rate, data, size, samples):
-        ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = 24000
-        buffer = output if state.out_type == 0 else wav_output
+        sample_rate = 32000 if state.kind == 3 else 24000
+        ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = sample_rate
+        wav_buffer = io.BytesIO()
+        with wave.open(wav_buffer, "wb") as wav:
+            wav.setparams((1, 2, sample_rate, 4, "NONE", "not compressed"))
+            wav.writeframes(b"\x00\x00\x01\x00\xff\xff\x00\x00")
+        state.wav_output = ctypes.create_string_buffer(wav_buffer.getvalue())
+        buffer = output if state.out_type == 0 else state.wav_output
         ctypes.cast(data, ctypes.POINTER(ctypes.c_char_p))[0] = ctypes.cast(buffer, ctypes.c_char_p)
         ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t))[0] = len(buffer) - 1
         ctypes.cast(samples, ctypes.POINTER(ctypes.c_int64))[0] = 4
@@ -1182,20 +1198,25 @@ def audio_pipeline(tmp_path, monkeypatch):
     generator.close()
 
 
-def test_tts_qwen_repeated_requests_copy_binary_output(audio_pipeline):
+@pytest.mark.parametrize("kind", [1, 3], ids=["qwen", "soprano"])
+def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline, kind):
     generator, llama, backend, state, factory, output = audio_pipeline
+    state.kind = kind
+    generator.is_support_audio = kind != 3
+    text = "Hello" if kind == 3 else "你好"
     expected = output.raw[:-1]
     for _ in range(2):
-        result = generator.create_speech(llama=llama, text="你好", seed=7, response_format="pcm_f32")
+        result = generator.create_speech(llama=llama, text=text, seed=7, response_format="pcm_f32")
         assert result.data == expected
         assert result.finish_reason == "stop"
-        assert result.duration == 4 / 24000
+        assert result.sample_rate == (32000 if kind == 3 else 24000)
+        assert result.duration == 4 / result.sample_rate
     output[0] = b"z"
     assert result.data == expected
-    assert state.prompts == [("你好".encode(), 7)] * 2
-    assert state.tokens == [42] * 4
+    assert state.prompts == [(text.encode(), 7)] * 2
+    assert state.tokens == [42] * 6
     assert llama.reset.call_count == 4
-    assert factory.return_value.accept.call_count == 4
+    assert factory.return_value.accept.call_count == 6
     assert factory.return_value.close.call_count == 2
     assert backend.mtmd_helper_gen_audio_reset.call_count == 2
     backend.mtmd_helper_gen_audio_init.assert_called_once()
@@ -1218,8 +1239,10 @@ def test_tts_pocket_skips_sampler_and_limits_steps(audio_pipeline):
 @pytest.mark.parametrize("stage", [
     "set_input", "step_prompt", "step_gen", "get_output", "missing_hidden", "abort", "invalid_output",
 ])
-def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, stage):
+@pytest.mark.parametrize("kind", [1, 3], ids=["qwen", "soprano"])
+def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, stage, kind):
     generator, llama, backend, state, _, output = audio_pipeline
+    state.kind = kind
     valid = output.raw
     response_format = "pcm_f32" if stage == "invalid_output" else "wav"
     with monkeypatch.context() as patch:
@@ -1239,6 +1262,24 @@ def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, sta
     ctypes.memmove(output, valid, len(valid))
     state.fail = None
     assert generator.create_speech(llama=llama, text="hello", response_format=response_format).finish_reason == "stop"
+
+
+def test_tts_soprano_constraints_and_frame_limit(audio_pipeline):
+    generator, llama, backend, state, factory, _ = audio_pipeline
+    state.kind = 3
+    for options, message in [
+        ({"speaker_reference": "missing.wav"}, "speaker_reference"),
+        ({"language": "en"}, "omit language"),
+        ({"max_frames": 1}, "max_frames >= 2"),
+    ]:
+        with pytest.raises(ValueError, match=message):
+            generator.create_speech(llama=llama, text="hello", **options)
+    backend.mtmd_helper_gen_audio_init.assert_not_called()
+    llama.reset.assert_not_called()
+    factory.assert_not_called()
+    audio = generator.create_speech(llama=llama, text="hello", max_frames=2)
+    assert audio.finish_reason == "length" and audio.sample_rate == 32000
+    assert state.tokens == [42, 42]
 
 
 def test_tts_validates_model_and_request_before_decode(audio_pipeline):

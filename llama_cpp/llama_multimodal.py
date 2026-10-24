@@ -1119,6 +1119,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         predictor (top_k <= 0 selects the helper default for that stage).
         Pocket TTS requires speaker_reference, ignores sampling options except
         seed, and selects language and flow settings from its weights.
+        Soprano uses token sampling and a fixed English voice; omit language
+        and speaker_reference, and allow at least two generated frames.
         References accept encoded audio bytes, local paths, URLs or data URIs.
         max_frames limits helper generation steps, not text tokens or seconds.
         Llama.abort() interrupts synthesis with InterruptedError.
@@ -1160,12 +1162,20 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             types = mtmd.mtmd_gen_audio_type
             is_qwen = info.type == types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS
             is_pocket = info.type == types.MTMD_GEN_AUDIO_TYPE_POCKETTTS
-            if not (is_qwen or is_pocket):
+            is_soprano = info.type == types.MTMD_GEN_AUDIO_TYPE_SOPRANO
+            if not (is_qwen or is_pocket or is_soprano):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
             if is_pocket and speaker_reference is None:
                 raise ValueError("Pocket TTS requires speaker_reference")
             if is_pocket and language is not None:
                 raise ValueError("Pocket TTS language is determined by its weights")
+            if is_soprano:
+                if speaker_reference is not None:
+                    raise ValueError("Soprano uses a fixed voice and does not support speaker_reference")
+                if language is not None:
+                    raise ValueError("Soprano uses English text; omit language")
+                if max_frames < 2:
+                    raise ValueError("Soprano requires max_frames >= 2 for audio decoding")
 
             with ExitStack() as cleanup:
                 speaker = None
@@ -1188,7 +1198,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
                 actual_seed = llama_cpp_lib.LLAMA_DEFAULT_SEED if seed is None else seed
                 sampler = None
-                if is_qwen:
+                if is_qwen or is_soprano:
                     sampler = self._create_audio_sampler(
                         llama, seed=actual_seed, temperature=temperature, top_k=top_k,
                         top_p=top_p, min_p=min_p, repeat_penalty=repeat_penalty,

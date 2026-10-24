@@ -1360,7 +1360,7 @@ For Qwen3.5 image chat with speculative decoding, see
 ordinary-decoding comparison.
 
 For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
-with Qwen3-TTS Base and Pocket TTS. See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
+with Qwen3-TTS Base, Pocket TTS and Soprano. See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
 for supported models, downloadable weights, and examples.
 
 Below are the supported multi-modal models and their respective chat handlers (Python API) and chat formats (Server API).
@@ -1963,6 +1963,7 @@ or server `chat_format`.
 |:--- |:--- |:--- |:--- |
 | [Qwen3-TTS-12Hz-Base-GGUF](https://huggingface.co/JamePeng2023/Qwen3-TTS-12Hz-Base-GGUF) | `MTMDAudioGenerator` | Optional speaker reference | Selectable, including Chinese, English and Japanese |
 | Pocket TTS | `MTMDAudioGenerator` | Required | Determined by the language-pack weights |
+| Soprano-80M / Soprano-1.1-80M | `MTMDAudioGenerator` | Unsupported; fixed voice | English; omit `language` |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
 in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
@@ -2002,6 +2003,10 @@ encoded audio bytes, URLs and data URIs are also accepted. For Pocket, provide
 a reference and omit `language`. Qwen currently uses only the reference speaker
 embedding: `ref_text`-conditioned full cloning, CustomVoice and preset speaker
 IDs are not supported. The FA option controls mmproj independently of the backbone.
+
+For Soprano, use matching backbone and mmproj files, supply English text, and
+omit both `speaker_reference` and `language`. See the
+[Soprano guide](docs/wiki/examples/audio/audio-tts.md#soprano) for conversion and usage.
 
 The result contains complete WAV or raw float32 PCM audio. Invalid audio raises
 an error; `finish_reason="length"` means the generation-step limit was reached
