@@ -7,6 +7,215 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.5] LiliCorr Speculative Decoding, Soprano TTS & Multimodal Cache Optimization
+
+- feat(mtmd): add audio stream queries and Soprano TTS support
+    - Bind audio stream row-count and flush-progress queries as optional int64 APIs.
+    - Support non-streaming Soprano WAV/PCM synthesis with model-specific validation.
+    - Update documentation, CLI examples, and regression tests.
+
+    Validation:
+    - Soprano-1.1-80M BF16 + F16 mmproj: verified 32 kHz GPU output,
+    repeated requests, frame limits, error recovery, and CLI synthesis.
+    - Qwen3-TTS and Pocket TTS: WAV/PCM outputs remain byte-identical
+    before and after the changes with fixed seeds on the same GPU setup.
+
+- feat(speculative): support LiliCorr and align draft token suppression
+    - Add LiliCorr block decoding, projected anchor handling, and checkpoint
+    recovery. Align MTP/DFlash CPU suppression and candidate probabilities
+    with vendor behavior while preserving backend and lattice paths.
+
+    Tested models:
+    - Nemotron-3.5-Bolt-74B-A9B-24GB with LiLiCorr
+    - Verify native parity, confidence cutoffs, rollback, and interrupted retry.
+    Consolidate shared test setup and equivalent input cases.
+
+    Nemotron benchmark on RTX 5090, full GPU offload:
+    Greedy, seed=42, ctx=2048, batch/ubatch=256, threads=8;
+    LiliCorr draft=7, p_min=0, backend sampling disabled.
+    Three prompts, 64-token warmup, 3 x 256-token runs per prompt.
+
+    Ordinary -> LiliCorr:
+    - 132.6 -> 198.0 tok/s decoding (1.49x),
+    - 129.5 -> 180.1 tok/s including first-token latency (1.39x).
+    - Draft acceptance: 33.4–59.1%.
+    - Outputs differed between modes.
+
+- docs: document LiliCorr support and efficient test design
+    - Document LiliCorr availability since 0.4.4-preview, automatic detection,
+    full-block decoding, projected anchor ownership, and checkpoint recovery.
+    - Describe target and draft token suppression, probability normalization,
+    backend bypasses, and lattice-specific behavior. Add LiliCorr model-test
+    configuration and the scope of real-model validation.
+    - Establish test-design guidance that accounts for development, maintenance,
+    and CI execution time. Prefer aggregated cases, compact shared setup, and
+    decoupled tests while preserving meaningful coverage and clear failures.
+
+- perf(mtmd): optimize media checkpoints and stabilize CI regressions
+    - Use device-side media checkpoints when no speculative engine or other
+    device cache owns the sequence slot.
+    - Retain host snapshots for slot conflicts; fall back after a failed device
+    export and avoid retrying device storage on the same context.
+    - Invalidate stale snapshots when the context or storage mode changes.
+    - Replace cross-mode MTP text equality with same-mode cold references,
+    hidden-state checks, and target/draft position checks.
+    - Add concise comments explaining checkpoint ownership and fallback.
+
+    Performance (before -> after, median of 5 runs, MTP disabled):
+                            First-token latency    Full response time
+    Qwen3.5, first turn:    141.8 -> 131.3 ms       203.9 -> 192.1 ms
+    Gemma4E, first turn:     72.2 ->  70.9 ms      1186.8 -> 1186.4 ms
+
+    - Reduce Qwen3.5 first-token latency by 7.4%.
+    - Preserve 100% image-cache hits on turns 2 and 3 for both models.
+    - Keep paired outputs identical; Gemma4E retains its existing path.
+    - Measure 60 requests with identical models, DLLs, settings, and histories,
+    excluding warmups and model loading. TTFT includes reasoning output.
+
+- refactor(mtmd): unify media cache bookkeeping and prompt normalization
+    - Use collision-checked negative media IDs and native position counts.
+    - Preserve reusable history and media checkpoints across chat turns.
+    - Normalize BOS/EOS and Qwen vision boundaries to prevent duplication.
+    - Consolidate media regression tests and TTS recovery coverage.
+
+    Performance by turn (T1 / T2 / T3; before -> after):
+
+    Qwen3.5:
+    - First-token latency (ms): 127 / 138 / 133 -> 150 / 56 / 57
+    - Full response time (ms): 188 / 178 / 239 -> 212 / 148 / 200
+    - Decode speed (tok/s):    127 / 103 / 134 -> 126 / 133 / 140
+    - Media cache hit rate:    0% / 0% / 0%   -> 0% / 100% / 100%
+
+    Gemma4E:
+    - First-token latency (ms): 71 / 72 / 29       -> 77 / 29 / 29
+    - Full response time (ms): 1180 / 1365 / 1749 -> 1202 / 1161 / 1085
+    - Decode speed (tok/s):    186 / 183 / 185    -> 184 / 185 / 186
+    - Media cache hit rate:    0% / 0% / 100%     -> 0% / 100% / 100%
+
+    Avoid repeated image evaluation from turn 2 onward, reducing first-token
+    latency by about 60% on Qwen3.5 turns 2-3 and Gemma4E turn 2.
+
+    First-turn latency increases slightly in this run. Output lengths differ,
+    so total-time reductions are not solely cache gains. Decode speed excludes
+    prefill; first-token latency includes reasoning output. Cache hit rates
+    measure media reuse, not overall text/KV cache reuse.
+
+- fix(sampling): honor model suppression and preserve token masks
+    - Merge model-specific suppressed token IDs with user logit biases before
+    candidate filtering, without modifying the caller's sampling parameters.
+    - Remove duplicate application of user biases and preserve the forced
+    token's existing score during reasoning-budget forcing, matching vendor
+    behavior without overriding suppression or grammar masks.
+    - Add native sampler parity checks for candidate IDs, logits, probabilities,
+    restored snapshots, cloned samplers, grammar resampling, and backend
+    shortcuts. Aggregate equivalent inputs and shared assertions to reduce
+    duplicate setup and execution.
+
+- feat(internals): expose model-specific suppressed token IDs
+    - Add LlamaModel.suppress_tokens() to copy the native vocabulary's
+    suppressed token IDs into a Python list.
+    - Validate vocabulary initialization and native list integrity,
+    and return an empty list when no tokens are suppressed.
+
+## [0.4.4] Speculative Decoding Optimization, Hybrid State Reliability & Cache Performance
+
+- perf(speculative): skip unused final target checkpoints
+    - Skip automatic target-only checkpoints when speculative requests finish,
+    since subsequent requests rebuild both target and draft contexts.
+    - Preserve ordinary final-prefix checkpoints and verification fallback captures.
+    - Add regression tests distinguishing required captures from unused exports.
+    - **Qwen3.5-9B-MTP Q8_0 benchmarks on RTX 5090 eliminated about 50 MiB of
+    exported state per request and reduced cleanup from 27-28 ms to about
+    0.1 ms. End-to-end throughput increased by approximately 8-12% across
+    two tested 64-token workloads.**
+
+- fix(speculative): align MTP verification hooks and native rollback
+    - Pass the current sampling row and accepted input prefix to callbacks instead
+    of exposing the final verification row or future draft tokens.
+    - Cap zero-checkpoint verification by the target's native rollback capacity.
+    - Reject unsupported rollback configurations before consuming prefill handoffs.
+    - Validate checkpoint ownership before native rollback and invalidate captures
+    after rollback failures.
+    - Avoid copying accepted feature blocks when native suffix truncation suffices.
+    - Add regression tests for interrupted continuation, callback alignment,
+    checkpoint validity, and rollback failures.
+
+- fix(state): preserve valid prefix reuse with checkpoints disabled
+    - Reuse complete hybrid prefixes only when their final sampling output is valid.
+    - Refresh callback scores when prefix reuse skips evaluation.
+    - Compute the live common prefix once and skip disabled checkpoint searches
+    and periodic history preparation.
+    - Load only snapshots that improve the live prefix and can be safely restored.
+    - Key completion snapshots by decoded token history and bypass automatic
+    snapshot caching for active speculative engines.
+    - Avoid logits copies for stopping criteria that do not inspect scores.
+    - Add regression coverage for exact reuse, append, branch, shorter histories,
+    snapshot integration, and zero-checkpoint generation.
+
+- fix(state): restore valid hybrid checkpoints without redundant copies
+    - Stop rejecting saved checkpoints solely because the live export size changed.
+    - Validate saved payload lengths and borrow immutable bytes during native restore.
+    - Replace checkpoints at the same sequence cursor only after capture succeeds.
+    - Add regression tests for changed live sizes, malformed payloads, duplicate
+    captures, and preservation of checkpoints after capture failures.
+
+- fix(cache): unify prefix matching and reduce trie maintenance overhead
+    - Match the longest nonempty common prefix across RAM, disk, and trie caches,
+    including divergent histories and requests shorter than cached keys.
+    - Preserve first-insertion tie ordering independently of LRU access.
+    - Reject unhelpful candidates before loading snapshots and preserve existing
+    entries when oversized states are rejected.
+    - Use compressed trie edges, bounded candidate heaps, and append shortcuts
+    to reduce insertion, eviction, and metadata overhead.
+    - Add regression coverage for matching parity, capacity handling, and trie churn.
+
+- docs(wiki): align cache and speculative decoding guides with runtime
+    - Fix RAM, disk and trie examples to attach caches with set_cache() and close
+    owned resources. Explain that optional snapshot caches are disabled by
+    default and work independently of native prefix reuse.
+    - Clarify Hybrid reuse and rebuild behavior with ctx_checkpoints=0, MTP native
+    rollback requirements, draft fallback checkpoints and verification limits.
+    Update Qwen3.5 MTP image support and its projector and context-fit limits
+    while retaining the text-only Gemma4 assistant restriction.
+    - Explain how quantized weights, backend kernels and batch shapes can change
+    greedy output, and describe comparisons that distinguish numerical changes
+    from incorrect cache restoration. Link the shared explanation from the
+    speculative decoding and troubleshooting guides.
+    - Correct the server's AUTO loading default, model-specific vision chat formats
+    and JSON examples. Refresh reviewed page dates and related API references.
+
+- docs(benchmarks): document and measure cache reuse and MTP rollback
+    - Add trie maintenance and default cache=None throughput benchmarks.
+    - Compare baseline and current implementations using alternating requests
+    and validate generated tokens against cold references.
+    - Report request throughput, decode throughput, first-token latency,
+    checkpoint exports, and speculative phase timings.
+    - Document matching semantics, hybrid restoration requirements,
+    zero-checkpoint behavior, and cross-request speculative reuse limitations.
+    - Update regression coverage and local GPU testing instructions.
+
+- test: validate MTP score hooks against matching native batches
+
+- test: consolidate regression coverage and simplify test documentation
+    - Aggregate cache queries, prefix boundaries and completion scenarios while
+    preserving backend, streaming, failure-recovery and ownership coverage.
+    - Share vocabulary/model fixtures, cold references and read-only Hybrid
+    snapshots to reduce model loading, repeated inference and score copies.
+    - Group zero-checkpoint MTP cases to avoid unnecessary model reloads, retain
+    token and embedding rollback checks, and reuse continuation references.
+    - Honor GPU offload settings in runtime fixtures and verify successful decode
+    retries after failures.
+    - Simplify the test README around running tests, model configuration, module
+    coverage and benchmark entry points.
+
+- ci(test): pin Python 3.9 jobs to Ubuntu 24.04
+    - ubuntu-latest was upgraded to Ubuntu 26.04, where Python 3.9 is no
+    longer available. Keep Python 3.9 test jobs on Ubuntu 24.04.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20261024
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/ce261d12b5810fb4c6e695efc85d5e8cf23f0630...b7cc3e17cec3385cdfd8789697985b8c8f4eccfa
+
 ## [0.4.3] Multimodal Embeddings, MTP Image Speculation & Extended Batch / Audio Stream APIs
 
 - fix: support causal multimodal embeddings and stable normalization
