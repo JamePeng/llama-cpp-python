@@ -215,6 +215,8 @@ class MTMDBaseHandler:
         self.is_support_vision = False
         self.is_support_audio = False
         self.is_support_video = False
+        # Shared capability snapshot, populated when the projector is initialized.
+        self.capabilities: Optional[mtmd_cpp.mtmd_helper_cap] = None
 
         self._exit_stack = ExitStack()
         self._mtmd_lock = threading.RLock()
@@ -270,9 +272,10 @@ class MTMDBaseHandler:
             raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Failed to load mtmd context from: {self.mmproj_path}")
         self._bound_model = llama_model
         self.media_marker = self._mtmd_cpp.mtmd_get_marker(self.mtmd_ctx).decode("utf-8")
+        self.capabilities = self._query_capabilities(llama_model)
 
         # Check if vision is supported
-        self.is_support_vision = self._mtmd_cpp.mtmd_support_vision(self.mtmd_ctx)
+        self.is_support_vision = self.capabilities.vision
         if self.is_support_vision:
             if self.verbose:
                 print(f"{self.log_prefix}(_init_mtmd_context): Vision support detected.", file=sys.stderr)
@@ -281,7 +284,7 @@ class MTMDBaseHandler:
                 print(f"{self.log_prefix}(_init_mtmd_context): Vision is NOT supported by this mmproj model backend.", file=sys.stderr)
 
         # Check if audio is supported
-        self.is_support_audio = self._mtmd_cpp.mtmd_support_audio(self.mtmd_ctx)
+        self.is_support_audio = self.capabilities.audio
         if self.is_support_audio:
             if self.verbose:
                 print(f"{self.log_prefix}(_init_mtmd_context): Audio support detected.", file=sys.stderr)
@@ -290,13 +293,40 @@ class MTMDBaseHandler:
                 print(f"{self.log_prefix}(_init_mtmd_context): Audio is NOT supported by this mmproj model backend.", file=sys.stderr)
 
         # Check if video is supported
-        self.is_support_video = self._mtmd_cpp.mtmd_helper_support_video(self.mtmd_ctx)
+        self.is_support_video = self.capabilities.video
         if self.is_support_video:
             if self.verbose:
                 print(f"{self.log_prefix}(_init_mtmd_context): Video support detected.", file=sys.stderr)
         else:
             if self.verbose:
                 print(f"{self.log_prefix}(_init_mtmd_context): Video support is NOT available in this build.", file=sys.stderr)
+
+    def _query_capabilities(self, llama_model: llama_core.Llama):
+        mtmd = self._mtmd_cpp
+        query = getattr(mtmd, "mtmd_helper_get_capabilities", None)
+        if query is not None and not getattr(query, "__ctypes_optional__", False):
+            return query(llama_model.model, self.mtmd_ctx)
+
+        # Older DLLs expose separate queries; match the unified helper's semantics.
+        audio_type = mtmd.mtmd_gen_audio_get_info(self.mtmd_ctx).type
+        types = mtmd.mtmd_gen_audio_type
+        stream_query = getattr(mtmd, "mtmd_support_audio_stream", None)
+        audio_stream = (
+            bool(stream_query(self.mtmd_ctx))
+            if stream_query is not None and not getattr(stream_query, "__ctypes_optional__", False)
+            else False
+        )
+        return mtmd.mtmd_helper_cap(
+            chat=mtmd.mtmd_helper_model_can_chat(llama_model._ctx.ctx, self.mtmd_ctx),
+            vision=mtmd.mtmd_support_vision(self.mtmd_ctx),
+            audio=mtmd.mtmd_support_audio(self.mtmd_ctx),
+            video=mtmd.mtmd_helper_support_video(self.mtmd_ctx),
+            audio_stream=audio_stream, text_gen=True,
+            audio_gen=audio_type != types.MTMD_GEN_AUDIO_TYPE_NONE,
+            audio_gen_spk_ref=audio_type in (
+                types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS, types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,
+            ),
+        )
 
     def close(self) -> None:
         """Explicitly free the shared mtmd resources."""
@@ -311,6 +341,7 @@ class MTMDBaseHandler:
         self._closed = True
         self._bound_model = None
         self.mctx_params = None
+        self.capabilities = None
         try:
             # Dependent resources must be freed before the mtmd context.
             if cleanup is not None:
@@ -1180,7 +1211,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             with ExitStack() as cleanup:
                 speaker = None
                 if speaker_reference is not None:
-                    if not self.is_support_audio:
+                    # Voice-reference support is distinct from general audio input.
+                    supports_reference = (
+                        self.capabilities.audio_gen_spk_ref
+                        if self.capabilities is not None else self.is_support_audio
+                    )
+                    if not supports_reference:
                         raise ValueError("mmproj does not support reference audio input")
                     payload = speaker_reference if isinstance(speaker_reference, bytes) else self.load_media(os.fspath(speaker_reference), "audio")
                     self.detect_audio_format(payload)

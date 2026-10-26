@@ -1608,14 +1608,12 @@ def mtmd_helper_log_set(log_callback: ggml_log_callback, user_data: c_void_p): #
     ...
 
 
-# // Returns true if this build includes video support (MTMD_VIDEO was ON at compile time).
+# // Deprecated: requires both vision support and an MTMD_VIDEO build.
 # MTMD_API bool mtmd_helper_support_video(mtmd_context * ctx);
 @ctypes_function_mtmd(
     "mtmd_helper_support_video", [mtmd_context_p_ctypes], c_bool)
 def mtmd_helper_support_video(ctx: mtmd_context_p) -> c_bool:
-    """
-    Returns true if this build includes video support (MTMD_VIDEO was ON at compile time).
-    """
+    """Deprecated: use mtmd_helper_get_capabilities().video instead."""
     ...
 
 
@@ -2062,7 +2060,45 @@ def mtmd_helper_video_read_next(
     """
     ...
 
-# // return true if model can be used for chat
+class mtmd_helper_cap(Structure):
+    """Model/projector capabilities; audio_stream describes realtime input."""
+
+    _fields_ = [
+        ("chat", c_bool),
+        ("vision", c_bool),
+        ("audio", c_bool),
+        ("video", c_bool),
+        ("audio_stream", c_bool),
+        ("text_gen", c_bool),
+        ("audio_gen", c_bool),
+        ("audio_gen_spk_ref", c_bool),
+    ]
+
+    if TYPE_CHECKING:
+        chat: bool
+        vision: bool
+        audio: bool
+        video: bool
+        audio_stream: bool
+        text_gen: bool
+        audio_gen: bool
+        audio_gen_spk_ref: bool
+
+
+# MTMD_API struct mtmd_helper_cap mtmd_helper_get_capabilities(const struct llama_model * model, const struct mtmd_context * mctx);
+@ctypes_function_mtmd(
+    "mtmd_helper_get_capabilities",
+    [llama_cpp_lib.llama_model_p_ctypes, mtmd_context_p_ctypes],
+    mtmd_helper_cap, required=False,
+)
+def mtmd_helper_get_capabilities(
+    model: llama_cpp_lib.llama_model_p, mctx: mtmd_context_p, /,
+) -> mtmd_helper_cap:
+    """Return capabilities by value; mctx may be NULL for a text-only model."""
+    ...
+
+
+# // return true if model can be used for chat (deprecated)
 # MTMD_API bool mtmd_helper_model_can_chat(struct llama_context * lctx, struct mtmd_context * mctx);
 @ctypes_function_mtmd(
     "mtmd_helper_model_can_chat", [
@@ -2077,7 +2113,7 @@ def mtmd_helper_model_can_chat(
     /,
 ) -> bool:
     """
-    return true if model can be used for chat
+    Deprecated: use mtmd_helper_get_capabilities().chat instead.
     """
     ...
 
