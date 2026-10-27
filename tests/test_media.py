@@ -589,20 +589,23 @@ def test_mtmd_boolean_capabilities_abi(mtmd, name, fields):
     assert [getattr(struct_type, field).offset for field in fields] == list(range(len(fields)))
 
 
-@pytest.mark.parametrize("name, field, value, free", [
-    ("mtmd_audio_stream_params", "step_ms", 320, "mtmd_audio_stream_free"),
-    ("mtmd_gen_state_params", "seed", 0xFFFFFFFF, "mtmd_gen_state_free"),
+@pytest.mark.parametrize("name, expected, free", [
+    ("mtmd_audio_stream_params", dict(step_ms=320, prompt=None, n_prompt=0), "mtmd_audio_stream_free"),
+    ("mtmd_gen_state_params", dict(seed=0xFFFFFFFF), "mtmd_gen_state_free"),
+    ("mtmd_helper_gen_audio_inp", dict(stream=False, seq_id=0, prompt=None, prompt_len=0,
+                                     n_past=0, out_mode=0, speaker_ref=None, lang=None, voice=None,
+                                     top_k=50, top_p=1.0, seed=0xFFFFFFFF, out_type=1), None),
 ])
-def test_mtmd_audio_state_defaults(mtmd, name, field, value, free):
+def test_mtmd_audio_defaults(mtmd, name, expected, free):
     default = getattr(mtmd, name + "_default")
     if getattr(default, "__ctypes_optional__", False):
         pytest.skip(f"This libmtmd does not provide {name}")
     params = default()
-    assert ctypes.sizeof(params) == ctypes.sizeof(ctypes.c_uint32)
-    assert ctypes.alignment(params) == ctypes.alignment(ctypes.c_uint32)
-    assert getattr(type(params), field).offset == 0
-    assert getattr(params, field) == value
-    getattr(mtmd, free)(None)
+    for field, expected_value in expected.items():
+        actual = getattr(params, field)
+        assert (not actual if expected_value is None else actual == expected_value), field
+    if free:
+        getattr(mtmd, free)(None)
 
 
 def test_mtmd_helper_function_signatures(mtmd):
@@ -612,6 +615,12 @@ def test_mtmd_helper_function_signatures(mtmd):
         ("mtmd_helper_get_capabilities", [native.llama_model_p_ctypes, mtmd.mtmd_context_p_ctypes], mtmd.mtmd_helper_cap),
         ("mtmd_audio_stream_get_n_rows", [mtmd.mtmd_audio_stream_p_ctypes], ctypes.c_int64),
         ("mtmd_audio_stream_get_n_rows_flushed", [mtmd.mtmd_audio_stream_p_ctypes], ctypes.c_int64),
+        ("mtmd_audio_stream_is_seq_start", [mtmd.mtmd_audio_stream_p_ctypes], ctypes.c_bool),
+        ("mtmd_helper_gen_audio_next_is_text", [mtmd.mtmd_helper_gen_audio_p_ctypes], ctypes.c_bool),
+        ("mtmd_helper_gen_audio_get_logit_bias", [mtmd.mtmd_helper_gen_audio_p_ctypes,
+                                                ptr(ctypes.c_size_t)], ptr(native.llama_logit_bias)),
+        ("mtmd_helper_audio_stream_get_logit_bias", [mtmd.mtmd_context_p_ctypes, native.llama_model_p_ctypes,
+                                                   ptr(native.llama_logit_bias), ctypes.c_int32], ctypes.c_int32),
         ("mtmd_gen_state_init", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_params], mtmd.mtmd_gen_state_p_ctypes),
         ("mtmd_gen_state_reset", [mtmd.mtmd_gen_state_p_ctypes], None),
         ("mtmd_gen_state_free", [mtmd.mtmd_gen_state_p_ctypes], None),
@@ -639,58 +648,44 @@ def test_mtmd_helper_function_signatures(mtmd):
 
 
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
-@pytest.mark.parametrize("name, offsets", [
-    ("mtmd_gen_inp", {
+@pytest.mark.parametrize("name, size, offsets", [
+    ("mtmd_gen_inp", 72, {
         "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20,
-        "temp": 24, "codes": 32, "n_codes": 40, "feats": 48, "n_feats": 56,
+        "temp": 24, "penalty_repeat": 28, "penalty_last_n": 32,
+        "codes": 40, "n_codes": 48, "feats": 56, "n_feats": 64,
     }),
-    ("mtmd_gen_out", {
+    ("mtmd_gen_out", 64, {
         "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24,
         "embd": 32, "is_eos": 40, "audio": 48, "n_samples": 56,
     }),
+    ("mtmd_audio_stream_params", 24, {"step_ms": 0, "prompt": 8, "n_prompt": 16}),
+    ("mtmd_gen_state_params", 4, {"seed": 0}),
+    ("mtmd_helper_gen_audio_inp", 72, {
+        "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16,
+        "n_past": 24, "out_mode": 28, "speaker_ref": 32, "lang": 40, "voice": 48,
+        "top_k": 56, "top_p": 60, "seed": 64, "out_type": 68,
+    }),
 ])
-def test_mtmd_gen_struct_abi(mtmd, name, offsets):
+def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
     struct_type = getattr(mtmd, name)
-    # seed moved into state params; serialized decoder state is no longer public.
-    assert ctypes.sizeof(struct_type) == 64
-    assert ctypes.alignment(struct_type) == 8
+    assert ctypes.sizeof(struct_type) == size
+    assert ctypes.alignment(struct_type) == (4 if size == 4 else 8)
     assert {field: getattr(struct_type, field).offset for field, _ in struct_type._fields_} == offsets
+    if name == "mtmd_helper_gen_audio_inp":
+        value = struct_type(stream=False, seq_id=7)
+        assert bytes(value)[0] == 0 and ctypes.c_int32.from_buffer_copy(bytes(value)[4:8]).value == 7
+        value.stream = True
+        assert value.seq_id == 7
 
 
 
-def test_mtmd_helper_gen_audio_input_abi(mtmd):
-    inp = mtmd.mtmd_helper_gen_audio_inp
-    assert inp.stream.offset == 0
-    assert inp.seq_id.offset == 4
-    assert inp.prompt.offset == 8
-    pointer_size = ctypes.sizeof(ctypes.c_void_p)
-    assert ctypes.sizeof(inp) == 24 + 4 * pointer_size
-    assert {field: getattr(inp, field).offset for field in
-            ("prompt_len", "speaker_ref", "lang", "top_k", "top_p", "seed", "out_type")} == {
-        "prompt_len": 8 + pointer_size, "speaker_ref": 8 + 2 * pointer_size,
-        "lang": 8 + 3 * pointer_size, "top_k": 8 + 4 * pointer_size,
-        "top_p": 12 + 4 * pointer_size, "seed": 16 + 4 * pointer_size,
-        "out_type": 20 + 4 * pointer_size,
-    }
-    value = inp(stream=False, seq_id=7)
-    raw = bytes(value)
-    assert raw[0] == 0
-    assert ctypes.c_int32.from_buffer_copy(raw[4:8]).value == 7
-    value.stream = True
-    assert value.seq_id == 7
-
-
-
-def test_mtmd_helper_gen_audio_defaults(mtmd):
-    default = mtmd.mtmd_helper_gen_audio_inp_default
-    inp = default()
-    assert not inp.stream and inp.seq_id == 0
-    assert inp.prompt is None and inp.prompt_len == 0
-    assert inp.speaker_ref is None and inp.lang is None
-    assert inp.top_k == 50 and inp.top_p == 1.0
-    assert inp.seed == 0xFFFFFFFF
-    assert inp.out_type == mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
-
+@pytest.mark.parametrize("name, values", [
+    ("mtmd_gen_audio_type", [0, 1, 2, 3, 4]),
+    ("mtmd_helper_gen_audio_out_mode", [0, 1, 2, 3]),
+    ("mtmd_helper_gen_audio_outtype", [0, 1]),
+])
+def test_mtmd_audio_enums(mtmd, name, values):
+    assert list(map(int, getattr(mtmd, name))) == values
 
 
 def test_mtmd_decoder_pos_abi(mtmd):
@@ -813,8 +808,9 @@ def test_mtmd_chat_handler_rejects_invalid_ffmpeg_bin_dir(tmp_path, make_handler
 @pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
 @pytest.mark.parametrize("flash_attn, expected_flash", [(None, -1), (False, 0), (True, 1)])
 @pytest.mark.parametrize("api", ["native", "legacy", "legacy-no-stream"])
-def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_attn, expected_flash, api):
+def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_attn, expected_flash, api, monkeypatch):
     multimodal = importlib.import_module("llama_cpp.llama_multimodal")
+    monkeypatch.setattr(multimodal.llama_cpp_lib, "llama_model_n_tokens_delay", lambda model: 0)
     handler = getattr(multimodal, handler_name)(
         clip_model_path=str(tmp_path), verbose=False, use_gpu=False,
         image_min_tokens=32, image_max_tokens=128, batch_max_tokens=256,
@@ -909,6 +905,33 @@ def test_mtmd_base_close_releases_context_after_callback_failure(tmp_path):
     handler.close()
     assert events == ["child", "context"]
     assert handler.mtmd_ctx is None
+
+
+@pytest.mark.parametrize("kind, template, delay, expected", [
+    (1, None, 0, (False, False)), (2, b"", 0, (True, True)),
+    (0, None, 2, (True, False)), (4, b"chat", 0, (True, True)),
+    (0, None, None, (True, True)),
+])
+def test_mtmd_legacy_capabilities_match_text_and_delay_semantics(make_handler, monkeypatch, mtmd, kind, template, delay, expected):
+    from llama_cpp import llama_cpp as native
+
+    handler = make_handler("MTMDBaseHandler")
+    handler._mtmd_cpp = SimpleNamespace(
+        mtmd_helper_cap=mtmd.mtmd_helper_cap, mtmd_gen_audio_type=mtmd.mtmd_gen_audio_type,
+        mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=kind),
+        mtmd_helper_model_can_chat=lambda *args: True,
+        mtmd_support_vision=lambda ctx: False, mtmd_support_audio=lambda ctx: True,
+        mtmd_helper_support_video=lambda ctx: False,
+    )
+    monkeypatch.setattr(native, "llama_model_chat_template", lambda *args: template)
+    query = Mock(return_value=delay)
+    if delay is None:
+        query.__ctypes_optional__ = True
+        query.side_effect = RuntimeError("unavailable")
+    monkeypatch.setattr(native, "llama_model_n_tokens_delay", query)
+    cap = handler._query_capabilities(SimpleNamespace(model=456, _ctx=SimpleNamespace(ctx=789)))
+    assert (cap.text_gen, cap.chat) == expected
+    assert cap.audio_gen == (kind != 0) and cap.audio_gen_spk_ref == (kind in (1, 2))
 
 
 def test_mtmd_chat_constructor_preserves_template_options(tmp_path):

@@ -310,6 +310,12 @@ class MTMDBaseHandler:
         # Older DLLs expose separate queries; match the unified helper's semantics.
         audio_type = mtmd.mtmd_gen_audio_get_info(self.mtmd_ctx).type
         types = mtmd.mtmd_gen_audio_type
+        audio_gen = audio_type != types.MTMD_GEN_AUDIO_TYPE_NONE
+        text_gen = not audio_gen or llama_cpp_lib.llama_model_chat_template(llama_model.model, None) is not None
+        chat = text_gen and mtmd.mtmd_helper_model_can_chat(llama_model._ctx.ctx, self.mtmd_ctx)
+        delay_query = llama_cpp_lib.llama_model_n_tokens_delay
+        if chat and not getattr(delay_query, "__ctypes_optional__", False):
+            chat = delay_query(llama_model.model) == 0
         stream_query = getattr(mtmd, "mtmd_support_audio_stream", None)
         audio_stream = (
             bool(stream_query(self.mtmd_ctx))
@@ -317,12 +323,12 @@ class MTMDBaseHandler:
             else False
         )
         return mtmd.mtmd_helper_cap(
-            chat=mtmd.mtmd_helper_model_can_chat(llama_model._ctx.ctx, self.mtmd_ctx),
+            chat=chat,
             vision=mtmd.mtmd_support_vision(self.mtmd_ctx),
             audio=mtmd.mtmd_support_audio(self.mtmd_ctx),
             video=mtmd.mtmd_helper_support_video(self.mtmd_ctx),
-            audio_stream=audio_stream, text_gen=True,
-            audio_gen=audio_type != types.MTMD_GEN_AUDIO_TYPE_NONE,
+            audio_stream=audio_stream, text_gen=text_gen,
+            audio_gen=audio_gen,
             audio_gen_spk_ref=audio_type in (
                 types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS, types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,
             ),
