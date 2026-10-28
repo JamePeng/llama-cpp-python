@@ -122,13 +122,17 @@ Resource guidance:
         "--fps",
         type=float,
         default=1.0,
-        help="Frames sampled per second. Start low to control memory and tokens.",
+        help="Sampled FPS; model recommendations (e.g. LFM3) take precedence.",
     )
     parser.add_argument(
         "--timestamp-interval-ms",
         type=int,
         default=5000,
-        help="Interval for inserting timestamp text; <= 0 disables timestamps.",
+        help="Default-layout timestamp interval; <= 0 disables it. LFM3 uses frame-group timestamps.",
+    )
+    parser.add_argument(
+        "--no-soundtrack", action="store_true",
+        help="Skip video audio for models that support it, such as LFM3-Omni.",
     )
     parser.add_argument(
         "--n-ctx",
@@ -191,6 +195,7 @@ def main() -> int:
     chat_handler_kwargs = {
         "video_fps_target": args.fps,
         "video_timestamp_interval_ms": args.timestamp_interval_ms,
+        "video_no_soundtrack": args.no_soundtrack,
         "batch_max_tokens": args.batch_max_tokens,
     }
     if args.ffmpeg_bin_dir is not None:

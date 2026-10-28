@@ -1662,9 +1662,10 @@ Video preprocessing options are passed through `chat_handler_kwargs`:
 
 | Option | MTMD default | Description |
 |:--- |:--- |:--- |
-| `video_fps_target` | `4.0` | Desired sampled FPS. Values `<= 0` use the video's native FPS and can be very expensive. |
+| `video_fps_target` | `4.0` | Sampled FPS when the model provides no recommendation. Values `<= 0` use native FPS in that case. |
 | `video_ffmpeg_bin_dir` | `None` | Directory containing both `ffmpeg` and `ffprobe`. `None` searches `PATH`. |
-| `video_timestamp_interval_ms` | `5000` | Interval between timestamp text chunks. Values `<= 0` disable timestamps. |
+| `video_timestamp_interval_ms` | `5000` | Timestamp interval for the default video layout; values `<= 0` disable these timestamps. LFM3 uses a timestamp before each frame pair. |
+| `video_no_soundtrack` | `False` | Skip the audio track for models that support video audio, such as LFM3-Omni. |
 | `batch_max_tokens` | `1024` | Maximum number of MTMD media tokens processed in one decode batch. |
 
 Advanced callers can instead pass a complete `mtmd_helper_init_opt` ctypes
@@ -1676,16 +1677,17 @@ Gemma 4's default template expects `{"type": "video", "video": ...}`; using
 `video_url` with that template produces no media marker and fails marker-count
 validation.
 
-The helper samples visual frames only. A video's audio track is ignored, so a
-vision-only model does not need audio-input support. Video understanding is
-therefore based on sampled frames, timestamps, and model-specific temporal frame
-merging rather than native audio/video stream modeling.
+The native helper selects the model's video layout and preprocessing. LFM3-VL
+and LFM3-Omni use model-recommended frame sampling and sizing, overriding generic
+FPS settings. LFM3-Omni also includes soundtrack segments after frame groups;
+set `video_no_soundtrack=True` for visual-only input. Other vision-only models
+continue to use sampled frames without the audio track.
 
 > **Resource note:** The current helper reads the input video into memory and
 > expands all sampled frames during MTMD tokenization. There is no automatic
-> duration, frame-count, or total-video-token budget. Begin with short videos
-> and a low FPS; long or high-resolution videos can consume substantial RAM and
-> exceed the model context window.
+> total-video-token budget. Model-specific frame limits may apply. Begin with short
+> videos and a low FPS where configurable; long or high-resolution videos can
+> consume substantial RAM and exceed the model context window.
 
 For a configurable command-line version, including `-h` setup guidance, see
 [`examples/high_level_api/mtmd_video_chat.py`](examples/high_level_api/mtmd_video_chat.py).

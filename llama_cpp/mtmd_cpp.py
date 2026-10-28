@@ -80,6 +80,14 @@ class mtmd_input_chunk_type(enum.IntEnum):
     MTMD_INPUT_CHUNK_TYPE_AUDIO = 2
     MTMD_INPUT_CHUNK_TYPE_COUNT = 3
 
+
+class mtmd_video_template(enum.IntEnum):
+    """Native video frame/timestamp layout, including optional Omni soundtrack."""
+
+    MTMD_VIDEO_TEMPLATE_DEFAULT = 0
+    MTMD_VIDEO_TEMPLATE_LFM3 = 1
+    MTMD_VIDEO_TEMPLATE_LFM3_OMNI = 2
+
 # // position indexing for decoder model
 # enum mtmd_pos_type {
 #     MTMD_POS_TYPE_NORMAL,    // number of positions equals to number of tokens
@@ -384,6 +392,38 @@ def mtmd_get_audio_sample_rate(ctx: mtmd_context_p) -> c_int:
     """
     ...
 
+class mtmd_video_config(Structure):
+    """Model-recommended video sampling; zero fields leave caller defaults."""
+
+    _fields_ = [
+        ("tmpl", c_int),
+        ("fps", c_float),
+        ("n_frames", c_int32),
+        ("frame_width", c_int32),
+        ("frame_height", c_int32),
+    ]
+
+    if TYPE_CHECKING:
+        tmpl: int
+        fps: float
+        n_frames: int
+        frame_width: int
+        frame_height: int
+
+
+# MTMD_API struct mtmd_video_config mtmd_get_video_config(const mtmd_context * ctx, int32_t src_width, int32_t src_height, int32_t src_n_frames, float src_fps);
+@ctypes_function_mtmd(
+    "mtmd_get_video_config", [mtmd_context_p_ctypes, c_int32, c_int32, c_int32, c_float],
+    mtmd_video_config,
+)
+def mtmd_get_video_config(
+    ctx: mtmd_context_p, src_width: int, src_height: int,
+    src_n_frames: int, src_fps: float,
+) -> mtmd_video_config:
+    """Return recommended sampling/layout; source count and FPS may be unknown (<=0)."""
+    ...
+
+
 # // get the current marker string
 # MTMD_API const char * mtmd_get_marker(const mtmd_context * ctx);
 @ctypes_function_mtmd(
@@ -401,7 +441,7 @@ def mtmd_get_marker(ctx: mtmd_context_p) -> c_char_p:
 # //     the data is in RGBRGBRGB... format
 # //     note: some video-capable models (i.e. qwen-vl) can merge consecutive bitmaps
 # //           into one chunk; mtmd_tokenize() handles this, but remember to set
-# //           mtmd_bitmap_set_mergeable(true) for every frame
+# //           mtmd_bitmap_set_mergeable(true) and mtmd_bitmap_set_is_video(true) for every frame
 # // if bitmap is audio:
 # //     length of data must be n_samples * sizeof(float)
 # //     the data is in float format (PCM F32)
@@ -514,6 +554,17 @@ def mtmd_bitmap_set_mergeable(
 ):
     """
     if true, this bitmap can be merged (temporal merge) with an adjacent mergeable bitmap by certain video input models
+    """
+    ...
+
+
+# MTMD_API void mtmd_bitmap_set_is_video(mtmd_bitmap * bitmap, bool is_video);
+@ctypes_function_mtmd("mtmd_bitmap_set_is_video", [mtmd_bitmap_p_ctypes, c_bool], None)
+def mtmd_bitmap_set_is_video(bitmap: mtmd_bitmap_p, is_video: bool, /) -> None:
+    """Mark a frame or lazy video; manual frames also need mergeable=True.
+
+    Lazy videos receive model-specific begin/end tokens and group their
+    expanded audio chunks into one soundtrack for LFM3-Omni.
     """
     ...
 
@@ -1583,6 +1634,7 @@ mtmd_helper_video_p_ctypes = c_void_p
 #     float fps_target;            // desired output fps; <= 0 means use the video's native fps, defaulted to 4.0f
 #     const char * ffmpeg_bin_dir; // directory containing ffmpeg/ffprobe binaries; NULL means search PATH
 #     int64_t timestamp_interval_ms; // interval for adding timestamp as text chunk (example: "[10m50.5s]"); <= 0 means no timestamp, defaulted to 5000ms
+#     bool no_soundtrack; // suppress video audio for models that support it
 #     // TODO @ngxson : allow "placeholder" bitmap output for counting tokens
 # };
 class mtmd_helper_video_init_params(Structure):
@@ -1590,6 +1642,7 @@ class mtmd_helper_video_init_params(Structure):
         ("fps_target", c_float),
         ("ffmpeg_bin_dir", c_char_p),
         ("timestamp_interval_ms", c_int64),
+        ("no_soundtrack", c_bool),
     ]
 mtmd_helper_video_init_params_p_ctypes = POINTER(mtmd_helper_video_init_params)
 

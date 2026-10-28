@@ -628,6 +628,9 @@ def test_mtmd_helper_function_signatures(mtmd):
                                     ptr(mtmd.mtmd_gen_inp), ptr(mtmd.mtmd_gen_out)], ctypes.c_int32),
         ("mtmd_helper_gen_audio_inp_default", [], mtmd.mtmd_helper_gen_audio_inp),
         ("mtmd_helper_gen_audio_flush", [mtmd.mtmd_helper_gen_audio_p_ctypes], ctypes.c_int32),
+        ("mtmd_get_video_config", [mtmd.mtmd_context_p_ctypes, ctypes.c_int32, ctypes.c_int32,
+                                   ctypes.c_int32, ctypes.c_float], mtmd.mtmd_video_config),
+        ("mtmd_bitmap_set_is_video", [mtmd.mtmd_bitmap_p_ctypes, ctypes.c_bool], None),
         ("mtmd_helper_bitmap_init_from_file", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p,
                                               ctypes.c_bool, mtmd.mtmd_helper_init_opt], mtmd.mtmd_helper_bitmap_wrapper),
         ("mtmd_helper_bitmap_init_from_buf", [mtmd.mtmd_context_p_ctypes, ptr(ctypes.c_uint8),
@@ -660,6 +663,10 @@ def test_mtmd_helper_function_signatures(mtmd):
     }),
     ("mtmd_audio_stream_params", 24, {"step_ms": 0, "prompt": 8, "n_prompt": 16}),
     ("mtmd_gen_state_params", 4, {"seed": 0}),
+    ("mtmd_video_config", 20, {"tmpl": 0, "fps": 4, "n_frames": 8, "frame_width": 12, "frame_height": 16}),
+    ("mtmd_helper_video_init_params", 32, {"fps_target": 0, "ffmpeg_bin_dir": 8,
+                                         "timestamp_interval_ms": 16, "no_soundtrack": 24}),
+    ("mtmd_helper_init_opt", 32, {"video_params": 0}),
     ("mtmd_helper_gen_audio_inp", 72, {
         "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16,
         "n_past": 24, "out_mode": 28, "speaker_ref": 32, "lang": 40, "voice": 48,
@@ -669,7 +676,7 @@ def test_mtmd_helper_function_signatures(mtmd):
 def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
     struct_type = getattr(mtmd, name)
     assert ctypes.sizeof(struct_type) == size
-    assert ctypes.alignment(struct_type) == (4 if size == 4 else 8)
+    assert ctypes.alignment(struct_type) == (4 if size in (4, 20) else 8)
     assert {field: getattr(struct_type, field).offset for field, _ in struct_type._fields_} == offsets
     if name == "mtmd_helper_gen_audio_inp":
         value = struct_type(stream=False, seq_id=7)
@@ -683,8 +690,9 @@ def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
     ("mtmd_gen_audio_type", [0, 1, 2, 3, 4]),
     ("mtmd_helper_gen_audio_out_mode", [0, 1, 2, 3]),
     ("mtmd_helper_gen_audio_outtype", [0, 1]),
+    ("mtmd_video_template", [0, 1, 2]),
 ])
-def test_mtmd_audio_enums(mtmd, name, values):
+def test_mtmd_enums(mtmd, name, values):
     assert list(map(int, getattr(mtmd, name))) == values
 
 
@@ -752,6 +760,7 @@ def test_mtmd_helper_init_opt_abi(mtmd):
         ("fps_target", ctypes.c_float),
         ("ffmpeg_bin_dir", ctypes.c_char_p),
         ("timestamp_interval_ms", ctypes.c_int64),
+        ("no_soundtrack", ctypes.c_bool),
     ]
     assert mtmd.mtmd_helper_init_opt._fields_ == [
         ("video_params", mtmd.mtmd_helper_video_init_params),
@@ -760,11 +769,14 @@ def test_mtmd_helper_init_opt_abi(mtmd):
     assert opt.video_params.fps_target == 4.0
     assert opt.video_params.ffmpeg_bin_dir is None
     assert opt.video_params.timestamp_interval_ms == 5000
+    assert not opt.video_params.no_soundtrack
+    assert not mtmd.mtmd_helper_video_init_params_default().no_soundtrack
 
 
 
 @pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
-def test_mtmd_chat_handler_video_options(tmp_path, make_handler, handler_name):
+@pytest.mark.parametrize("no_soundtrack", [None, False, True])
+def test_mtmd_chat_handler_video_options(tmp_path, make_handler, handler_name, no_soundtrack):
     module = importlib.import_module("llama_cpp.mtmd_cpp")
 
     executable_suffix = ".exe" if os.name == "nt" else ""
@@ -778,22 +790,23 @@ def test_mtmd_chat_handler_video_options(tmp_path, make_handler, handler_name):
         video_fps_target=2.5,
         video_ffmpeg_bin_dir=tmp_path,
         video_timestamp_interval_ms=10000,
+        video_no_soundtrack=no_soundtrack,
     )
     video_params = handler._mtmd_helper_init_opt.video_params
     assert video_params.fps_target == 2.5
     assert video_params.ffmpeg_bin_dir == os.fsencode(os.path.abspath(tmp_path))
     assert video_params.timestamp_interval_ms == 10000
+    assert video_params.no_soundtrack is bool(no_soundtrack)
 
     opt = module.mtmd_helper_init_opt_default()
     handler = make_handler(handler_name, mtmd_helper_init_opt=opt)
     assert handler._mtmd_helper_init_opt is opt
 
-    with pytest.raises(ValueError, match="cannot be combined"):
-        make_handler(
-            handler_name,
-            mtmd_helper_init_opt=opt,
-            video_fps_target=1.0,
-        )
+    for options in ({"video_fps_target": 1.0}, {"video_no_soundtrack": False}):
+        with pytest.raises(ValueError, match="cannot be combined"):
+            make_handler(handler_name, mtmd_helper_init_opt=opt, **options)
+    with pytest.raises(TypeError, match="video_no_soundtrack"):
+        make_handler(handler_name, video_no_soundtrack="false")
 
 
 
@@ -1023,8 +1036,8 @@ def test_qwen_templates_inject_media_marker(make_handler, kind, handler_name, pa
             )
 
 
-@pytest.mark.parametrize("placeholder", ["<|image_pad|>", "<|video_pad|>", "/path/to/media"])
-@pytest.mark.parametrize("architecture", ["qwen35", "qwen3vl", "gemma4", ""])
+@pytest.mark.parametrize("placeholder", ["<|image_pad|>", "<|video_pad|>", "<|video|>", "/path/to/media"])
+@pytest.mark.parametrize("architecture", ["qwen35", "qwen3vl", "lfm3", "gemma4", ""])
 def test_generic_media_normalization_preserves_template_boundaries(make_handler, placeholder, architecture):
     template = "literal <|vision_start|>text<|vision_end|> <|vision_start|>\n" + placeholder + " <|vision_end|>"
     handler = make_handler(
@@ -1035,8 +1048,9 @@ def test_generic_media_normalization_preserves_template_boundaries(make_handler,
     prompt = handler._replace_media_placeholders(
         handler.chat_template.render(), [{"url": "/path/to/media", "type": "image"}],
     )
-    expected = "<__media__>" if architecture.startswith("qwen") else "<|vision_start|>\n<__media__> <|vision_end|>"
+    expected = "<__media__>" if architecture.startswith("qwen") or architecture == "lfm3" else "<|vision_start|>\n<__media__> <|vision_end|>"
     assert prompt == "literal <|vision_start|>text<|vision_end|> " + expected
+    assert handler._qwen_vision_template == architecture.startswith("qwen")
 
 
 @pytest.fixture
@@ -1073,18 +1087,20 @@ def chunk_ledger(tmp_path, make_handler, monkeypatch):
 
 
 
-@pytest.mark.parametrize("source", ["video", "audio"])
-def test_media_chunk_identity_survives_expansion_before_image(chunk_ledger, source):
+@pytest.mark.parametrize("source, soundtrack", [("video", False), ("video", True), ("audio", False)])
+def test_media_chunk_identity_survives_expansion_before_image(chunk_ledger, source, soundtrack):
     _, ledger = chunk_ledger
     kind = 1 if source == "video" else 2
     media = [{"type": source, source: "first.media"}, {"type": "image_url", "image_url": "last.png"}]
     identities = [(kind, b"first+0"), (kind, b"first+2"), (1, b"last-image")]
+    if soundtrack:
+        identities.insert(1, (2, b"first+audio0"))
     first = ledger(identities, media)
-    assert len(set(first)) == 3
+    assert len(set(first)) == len(identities)
     assert ledger(identities, media) == first
-    changed = ledger([(kind, b"changed+0"), (kind, b"changed+2"), (1, b"last-image")], media)
-    assert changed[:2] != first[:2]
-    assert changed[2] == first[2]
+    changed = ledger([(k, identity.replace(b"first", b"changed")) for k, identity in identities], media)
+    assert changed[:-1] != first[:-1]
+    assert changed[-1] == first[-1]
 
 
 def test_media_chunk_identity_uses_content_and_subchunk_not_url(chunk_ledger):
@@ -1099,11 +1115,12 @@ def test_media_chunk_identity_uses_content_and_subchunk_not_url(chunk_ledger):
     assert ledger([(1, b"")], media) != ledger([(1, b"")], media)
 
 
-def test_media_chunk_identity_includes_video_sampling(chunk_ledger):
+@pytest.mark.parametrize("field, value", [("fps_target", 0.5), ("timestamp_interval_ms", 1000), ("no_soundtrack", True)])
+def test_media_chunk_identity_includes_video_sampling(chunk_ledger, field, value):
     handler, ledger = chunk_ledger
     media = [{"type": "video", "video": "same.mp4"}]
     first = ledger([(1, b"video+0")], media)
-    handler._mtmd_helper_init_opt.video_params.fps_target = 0.5
+    setattr(handler._mtmd_helper_init_opt.video_params, field, value)
     assert ledger([(1, b"video+0")], media) != first
 
 

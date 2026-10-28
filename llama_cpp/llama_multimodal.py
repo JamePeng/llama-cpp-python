@@ -95,6 +95,7 @@ class MTMDBaseHandler:
         video_ffmpeg_bin_dir: Optional[Union[str, os.PathLike[str]]] = None,
         video_timestamp_interval_ms: Optional[int] = None,
         flash_attn: Optional[bool] = None,
+        video_no_soundtrack: Optional[bool] = None,
         **kwargs
     ):
 
@@ -140,6 +141,8 @@ class MTMDBaseHandler:
         if flash_attn is not None and not isinstance(flash_attn, bool):
             raise TypeError("flash_attn must be bool or None")
         self.flash_attn = flash_attn
+        if video_no_soundtrack is not None and not isinstance(video_no_soundtrack, bool):
+            raise TypeError("video_no_soundtrack must be bool or None")
 
         import llama_cpp.mtmd_cpp as mtmd_cpp
         self._mtmd_cpp = mtmd_cpp
@@ -149,6 +152,7 @@ class MTMDBaseHandler:
             video_fps_target,
             video_ffmpeg_bin_dir,
             video_timestamp_interval_ms,
+            video_no_soundtrack,
         )
         if mtmd_helper_init_opt is not None and any(
             value is not None for value in video_overrides
@@ -169,6 +173,8 @@ class MTMDBaseHandler:
         else:
             self._mtmd_helper_init_opt = mtmd_cpp.mtmd_helper_init_opt_default()
             self._video_ffmpeg_bin_dir_bytes = None
+            if video_no_soundtrack is not None:
+                self._mtmd_helper_init_opt.video_params.no_soundtrack = video_no_soundtrack
             if video_fps_target is not None:
                 self._mtmd_helper_init_opt.video_params.fps_target = video_fps_target
             if video_ffmpeg_bin_dir is not None:
@@ -1335,6 +1341,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         video_fps_target: Optional[float] = None,
         video_ffmpeg_bin_dir: Optional[Union[str, os.PathLike[str]]] = None,
         video_timestamp_interval_ms: Optional[int] = None,
+        video_no_soundtrack: Optional[bool] = None,
         **kwargs
     ):
 
@@ -1349,6 +1356,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             video_fps_target=video_fps_target,
             video_ffmpeg_bin_dir=video_ffmpeg_bin_dir,
             video_timestamp_interval_ms=video_timestamp_interval_ms,
+            video_no_soundtrack=video_no_soundtrack,
             **kwargs,
         )
 
@@ -2027,6 +2035,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                 os.path.realpath(self.mmproj_path), projector_stat.st_size, projector_stat.st_mtime_ns,
                 self.image_min_tokens, self.image_max_tokens,
                 float(video_params.fps_target), int(video_params.timestamp_interval_ms),
+                bool(video_params.no_soundtrack),
             )
 
             for i in range(n_chunks):
@@ -2569,6 +2578,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         **kwargs
     ) -> None:
         self._qwen_vision_template = False
+        self._normalize_vision_wrappers = False
         # One native prefix snapshot, separate from the negative media ID mappings.
         self._media_checkpoint_cache = None
         # Stick to host storage after a failed device export on the current context.
@@ -2683,11 +2693,14 @@ class GenericMTMDChatHandler(MTMDChatHandler):
 
         architecture = getattr(llama, "metadata", {}).get("general.architecture", "")
         self._qwen_vision_template = architecture.startswith("qwen") and "<|vision_start|>" in self.chat_format
+        self._normalize_vision_wrappers = (
+            self._qwen_vision_template or architecture == "lfm3"
+        ) and "<|vision_start|>" in self.chat_format
 
     def _replace_media_placeholders(self, text, media_items):
         text = super()._replace_media_placeholders(text, media_items)
-        if self._qwen_vision_template:
-            # Qwen's stored template wraps placeholders; MTMD wraps each expanded frame.
+        if self._normalize_vision_wrappers:
+            # MTMD owns Qwen/LFM3 image boundaries and LFM3's outer video boundary.
             pattern = r"<\|vision_start\|>\s*" + re.escape(self.media_marker) + r"\s*<\|vision_end\|>"
             text = re.sub(pattern, lambda _: self.media_marker, text)
         return text
