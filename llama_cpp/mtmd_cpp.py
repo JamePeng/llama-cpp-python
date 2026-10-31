@@ -236,18 +236,30 @@ class clip_flash_attn_type (enum.IntEnum):
 
 # struct clip_context_params {
 #     bool use_gpu;
+#     ggml_backend_dev_t device;
 #     enum clip_flash_attn_type flash_attn_type;
 #     int image_min_tokens;
 #     int image_max_tokens;
 #     bool warmup;
+#     ggml_backend_sched_eval_callback cb_eval;
+#     void * cb_eval_user_data;
+#     bool no_alloc;
+#     mtmd_progress_callback progress_callback;
+#     void * progress_callback_user_data;
 # };
 class clip_context_params(Structure):
     _fields_ = [
         ("use_gpu", c_bool),
+        ("device", c_void_p),
         ("flash_attn_type", c_int),
         ("image_min_tokens", c_int),
         ("image_max_tokens", c_int),
         ("warmup", c_bool),
+        ("cb_eval", ggml_backend_sched_eval_callback),
+        ("cb_eval_user_data", c_void_p),
+        ("no_alloc", c_bool),
+        ("progress_callback", mtmd_progress_callback),
+        ("progress_callback_user_data", c_void_p),
     ]
 
 # struct mtmd_context_params {
@@ -752,7 +764,7 @@ def mtmd_input_chunk_get_placeholder(chunk: mtmd_input_chunk_p) -> mtmd_input_ch
 @ctypes_function_mtmd("mtmd_input_chunk_save",
     [
         mtmd_input_chunk_p_ctypes,
-        c_char_p,
+        POINTER(c_uint8),  # Writable byte storage; reject immutable Python bytes.
         c_size_t,
         POINTER(c_size_t),
     ],
@@ -760,7 +772,7 @@ def mtmd_input_chunk_get_placeholder(chunk: mtmd_input_chunk_p) -> mtmd_input_ch
 )
 def mtmd_input_chunk_save(
     chunk: mtmd_input_chunk_p,
-    out_buf: bytes,
+    out_buf: Optional[CtypesArray[c_uint8]],
     out_len: c_size_t,
     expected_out_len: POINTER(c_size_t),  # type: ignore
 ) -> int:
@@ -769,6 +781,7 @@ def mtmd_input_chunk_save(
     important: only chunk's metadata will be saved, the actual image/audio data will not be saved
     the loaded chunk will always be a placeholder, cannot be used for mtmd_encode() or mtmd_batch_encode()
     out_buf can be nullptr (to query expected_out_len)
+    Otherwise pass a c_uint8 array/pointer with at least out_len writable bytes.
     returns 0 on success, non-zero on failure
     """
     ...

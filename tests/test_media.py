@@ -652,6 +652,11 @@ def test_mtmd_helper_function_signatures(mtmd):
 
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
 @pytest.mark.parametrize("name, size, offsets", [
+    ("clip_context_params", 72, {
+        "use_gpu": 0, "device": 8, "flash_attn_type": 16, "image_min_tokens": 20,
+        "image_max_tokens": 24, "warmup": 28, "cb_eval": 32, "cb_eval_user_data": 40,
+        "no_alloc": 48, "progress_callback": 56, "progress_callback_user_data": 64,
+    }),
     ("mtmd_gen_inp", 72, {
         "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20,
         "temp": 24, "penalty_repeat": 28, "penalty_last_n": 32,
@@ -718,6 +723,36 @@ def test_mtmd_decoder_pos_abi(mtmd):
             expected = (7 + index,) * 4
             assert (actual.t, actual.x, actual.y, actual.z) == expected
             assert (returned.t, returned.x, returned.y, returned.z) == expected
+    finally:
+        mtmd.mtmd_input_chunks_free(chunks)
+
+
+def test_mtmd_chunk_serialization_writable_buffer(mtmd):
+    chunks = mtmd.mtmd_test_create_input_chunks()
+    assert chunks
+    try:
+        for index in range(mtmd.mtmd_input_chunks_size(chunks)):
+            chunk = mtmd.mtmd_input_chunks_get(chunks, index)
+            size = ctypes.c_size_t()
+            assert mtmd.mtmd_input_chunk_save(chunk, None, 0, ctypes.byref(size)) == 0
+            assert size.value > 0
+            # A sentinel also verifies that native serialization respects out_len.
+            output = (ctypes.c_uint8 * (size.value + 1))()
+            output[-1] = 0xA5
+            assert mtmd.mtmd_input_chunk_save(chunk, output, size.value - 1, ctypes.byref(size)) != 0
+            assert not any(output[:-1])
+            with pytest.raises(ctypes.ArgumentError):
+                mtmd.mtmd_input_chunk_save(chunk, b"\0" * size.value, size.value, ctypes.byref(size))
+            assert mtmd.mtmd_input_chunk_save(chunk, output, size.value, ctypes.byref(size)) == 0
+            assert output[-1] == 0xA5
+            restored = mtmd.mtmd_input_chunk_load(bytes(output[:-1]), size.value)
+            assert restored
+            try:
+                for name in ("type", "n_tokens", "n_pos", "id"):
+                    query = getattr(mtmd, "mtmd_input_chunk_get_" + name)
+                    assert query(restored) == query(chunk)
+            finally:
+                mtmd.mtmd_input_chunk_free(restored)
     finally:
         mtmd.mtmd_input_chunks_free(chunks)
 

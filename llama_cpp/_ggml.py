@@ -2120,6 +2120,8 @@ def ggml_backend_cpu_buffer_from_ptr(
     """
     Wrap caller-owned host memory in a CPU backend buffer.
     The host allocation must remain valid until the buffer is freed.
+    Its address must satisfy ggml_backend_buft_get_alignment() for the CPU
+    buffer type; ordinary ctypes arrays do not guarantee this alignment.
     """
     ...
 

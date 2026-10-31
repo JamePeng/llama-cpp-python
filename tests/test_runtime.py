@@ -134,30 +134,51 @@ def test_ggml_batch_transfer_signatures():
             function(*([None] * (len(args) - 1)), 0)
 
 
-def test_ggml_batch_transfer_roundtrip():
+@pytest.mark.parametrize("batched", [False, True], ids=["single", "batched"])
+def test_ggml_tensor_transfer_roundtrip(batched):
     g = llama_cpp._ggml
-    if any(getattr(getattr(g, "ggml_backend_tensor_" + op + "_n"), "__ctypes_optional__", False)
-           for op in ("set", "get", "copy")):
+    if batched and any(getattr(getattr(g, "ggml_backend_tensor_" + op + "_n"), "__ctypes_optional__", False)
+                       for op in ("set", "get", "copy")):
         pytest.skip("Native ggml lacks batched tensor transfers")
-    storage = [(ctypes.c_float * 4)() for _ in range(4)]
-    tensors, buffers = [], []
+    buft = g.ggml_backend_cpu_buffer_type()
+    alignment = g.ggml_backend_buft_get_alignment(buft)
+    storage, tensors, buffers = [], [], []
     try:
-        for data in storage:
-            buffer = g.ggml_backend_cpu_buffer_from_ptr(data, ctypes.sizeof(data))
+        for _ in range(4):
+            tensor = g.ggml_tensor(type=g.GGMLType.GGML_TYPE_F32, ne=(4, 1, 1, 1), nb=(4, 16, 16, 16))
+            # ctypes arrays do not guarantee the backend's required alignment.
+            size = g.ggml_backend_buft_get_alloc_size(buft, ctypes.byref(tensor))
+            buffer = g.ggml_backend_buft_alloc_buffer(buft, size)
             assert buffer
             buffers.append(buffer)
-            tensors.append(g.ggml_tensor(type=0, buffer=buffer, ne=(4, 1, 1, 1),
-                                         nb=(4, 16, 16, 16), data=ctypes.addressof(data)))
+            address = g.ggml_backend_buffer_get_base(buffer)
+            assert address and address % alignment == 0
+            assert g.ggml_backend_tensor_alloc(buffer, ctypes.byref(tensor), address) == 0
+            g.ggml_backend_buffer_clear(buffer, 0)
+            tensors.append(tensor)
+            storage.append((ctypes.c_float * 4).from_address(address))
         sources = (g.ggml_tensor_p * 2)(*(ctypes.pointer(t) for t in tensors[:2]))
         targets = (g.ggml_tensor_p * 2)(*(ctypes.pointer(t) for t in tensors[2:]))
         pair = ctypes.c_size_t * 2
         data = (ctypes.c_float * 4)(10, 11, 12, 13)
-        g.ggml_backend_tensor_set_n(sources, data, pair(4, 8), pair(8, 4), pair(0, 12), 2)
+        if batched:
+            g.ggml_backend_tensor_set_n(sources, data, pair(4, 8), pair(8, 4), pair(0, 12), 2)
+        else:
+            g.ggml_backend_tensor_set(sources[0], data, 4, 8)
+            g.ggml_backend_tensor_set(sources[1], ctypes.byref(data, 12), 8, 4)
         assert list(storage[0]) == [0, 10, 11, 0]
         assert list(storage[1]) == [0, 0, 13, 0]
-        g.ggml_backend_tensor_copy_n(sources, targets, 2)
+        if batched:
+            g.ggml_backend_tensor_copy_n(sources, targets, 2)
+        else:
+            for source, target in zip(sources, targets):
+                g.ggml_backend_tensor_copy(source, target)
         result = (ctypes.c_float * 14)(*([-99] * 14))
-        g.ggml_backend_tensor_get_n(targets, result, pair(0, 0), pair(16, 16), pair(8, 32), 2)
+        if batched:
+            g.ggml_backend_tensor_get_n(targets, result, pair(0, 0), pair(16, 16), pair(8, 32), 2)
+        else:
+            for target, offset in zip(targets, (8, 32)):
+                g.ggml_backend_tensor_get(target, ctypes.byref(result, offset), 0, 16)
         assert list(result) == [-99, -99, 0, 10, 11, 0, -99, -99, 0, 0, 13, 0, -99, -99]
     finally:
         for buffer in reversed(buffers):
