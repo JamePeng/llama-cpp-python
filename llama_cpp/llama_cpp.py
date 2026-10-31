@@ -399,6 +399,7 @@ LLAMA_TOKEN_ATTR_SINGLE_WORD = 1 << 9
 #     LLAMA_FTYPE_MOSTLY_NVFP4         = 39, // except 1d tensors
 #     LLAMA_FTYPE_MOSTLY_Q1_0          = 40, // except 1d tensors
 #     LLAMA_FTYPE_MOSTLY_Q2_0          = 41, // except 1d tensors
+#     LLAMA_FTYPE_MOSTLY_F8_E4M3       = 42, // except 1d tensors
 #
 #     LLAMA_FTYPE_GUESSED = 1024, // not specified in the model file
 # };
@@ -445,6 +446,7 @@ class llama_ftype(enum.IntEnum):
     LLAMA_FTYPE_MOSTLY_NVFP4 = 39
     LLAMA_FTYPE_MOSTLY_Q1_0 = 40
     LLAMA_FTYPE_MOSTLY_Q2_0 = 41
+    LLAMA_FTYPE_MOSTLY_F8_E4M3 = 42
     LLAMA_FTYPE_GUESSED = 1024
 
 # // Get the model file type (quantization) as a string, e.g. "Q8_0" or "Q4_K - Medium"
