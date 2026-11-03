@@ -102,6 +102,50 @@ def test_ggml_graph_and_fp8_layout():
         free(ctx)
 
 
+def test_ggml_flash_attn_rows_and_comm_callbacks():
+    g = llama_cpp._ggml
+    bootstrap_type = g.ggml_backend_comm_bootstrap_callback
+    init_type = g.ggml_backend_comm_init_rank_t
+
+    @bootstrap_type
+    def bootstrap(user_data, send, recv, size):
+        assert user_data == 42
+        ctypes.memmove(recv, send, size)
+        return True
+
+    @init_type
+    def init_rank(backend, rank, world_size, callback, user_data):
+        assert (backend, rank, world_size) == (123, 0, 1)
+        source, target = ctypes.c_int(17), ctypes.c_int()
+        assert callback(user_data, ctypes.byref(source), ctypes.byref(target), ctypes.sizeof(source))
+        assert target.value == 17
+        return 456
+
+    assert init_rank(123, 0, 1, bootstrap, 42) == 456
+    rows = g.ggml_flash_attn_ext_rows
+    if getattr(rows, "__ctypes_optional__", False):
+        pytest.skip("Native ggml lacks flash attention with KV rows")
+    assert rows.argtypes == [g.ggml_context_p] + [g.ggml_tensor_p] * 5 + [ctypes.c_float] * 3
+    assert rows.restype is g.ggml_tensor_p
+    init = ctypes.CFUNCTYPE(g.ggml_context_p, g.ggml_init_params)(("ggml_init", g.libggml_base))
+    free = ctypes.CFUNCTYPE(None, g.ggml_context_p)(("ggml_free", g.libggml_base))
+    new = ctypes.CFUNCTYPE(g.ggml_tensor_p, g.ggml_context_p, ctypes.c_int,
+                           *([ctypes.c_int64] * 4))(("ggml_new_tensor_4d", g.libggml_base))
+    ctx = init(g.ggml_init_params(65536, None, True))
+    assert ctx
+    try:
+        q, k, v = (new(ctx, 0, *shape) for shape in ((4, 1, 1, 1), (4, 4, 1, 1), (4, 4, 1, 1)))
+        mask = new(ctx, 1, 2, 1, 1, 1)
+        indices = new(ctx, 26, 2, 1, 1, 1)
+        result = rows(ctx, q, k, v, mask, indices, 0.5, 0.0, 0.0)
+        assert result.contents.op == g.GGML_OP.GGML_OP_FLASH_ATTN_EXT
+        assert list(result.contents.ne) == [4, 1, 1, 1]
+        assert ctypes.addressof(result.contents.src[5].contents) == ctypes.addressof(indices.contents)
+        assert ctypes.cast(result.contents.op_params, ctypes.POINTER(ctypes.c_float))[0] == 0.5
+    finally:
+        free(ctx)
+
+
 def test_ggml_batch_transfer_signatures():
     g = llama_cpp._ggml
     ptr = ctypes.POINTER

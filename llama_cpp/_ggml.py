@@ -815,6 +815,22 @@ ggml_tensor._fields_ = [
         ("padding", ctypes.c_char * 8),
 ]
 
+
+@ggml_base_function(
+    "ggml_flash_attn_ext_rows",
+    [ggml_context_p, ggml_tensor_p, ggml_tensor_p, ggml_tensor_p,
+     ggml_tensor_p, ggml_tensor_p, ctypes.c_float, ctypes.c_float, ctypes.c_float],
+    ggml_tensor_p,
+    required=False,
+)
+def ggml_flash_attn_ext_rows(ctx, q, k, v, mask, kv_rows, scale, max_bias, logit_softcap):
+    """Build flash attention with per-slice I32 KV row indices.
+
+    Negative row indices are padding and must have -inf mask entries.
+    The caller owns the context and must supply compatible tensor shapes.
+    """
+    ...
+
 # // Abort callback
 # // If not NULL, called before ggml computation
 # // If it returns true, the computation is aborted
@@ -1761,6 +1777,19 @@ def ggml_backend_reg_dev_get(reg: ggml_backend_reg_t, index: int) -> ggml_backen
 def ggml_backend_reg_get_proc_address(reg: ggml_backend_reg_t, name: bytes) -> Optional[int]:
     """Get a backend-specific function pointer, or None if unavailable."""
     ...
+
+
+# Cast the address returned by ggml_backend_reg_get_proc_address to this type.
+# Keep the bootstrap callback and its user data alive for the native call.
+# typedef bool (*ggml_backend_comm_bootstrap_callback)(void * user_data, const void * send_buf, void * recv_buf, size_t size);
+ggml_backend_comm_bootstrap_callback = ctypes.CFUNCTYPE(
+    ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t,
+)
+# typedef void * (*ggml_backend_comm_init_rank_t)(ggml_backend_t backend, int rank, int world_size, ggml_backend_comm_bootstrap_callback bootstrap_callback, void * bootstrap_callback_data);
+ggml_backend_comm_init_rank_t = ctypes.CFUNCTYPE(
+    ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int,
+    ggml_backend_comm_bootstrap_callback, ctypes.c_void_p,
+)
 
 
 # //
