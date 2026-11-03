@@ -291,10 +291,9 @@ if (LLAMA_BUILD)
             set(GGML_F16C "OFF" CACHE BOOL "ggml: enable F16C" FORCE)
         endif()
 
-        # Metal settings (enable for both architectures)
-        set(GGML_METAL "ON" CACHE BOOL "ggml: enable Metal" FORCE)
-        set(GGML_METAL_USE_BF16 "ON" CACHE BOOL "ggml: use bfloat if available" FORCE)
-        set(GGML_METAL_EMBED_LIBRARY "ON" CACHE BOOL "ggml: embed metal library" FORCE)
+        # Keep wheel defaults while allowing CI and callers to override them.
+        set(GGML_METAL "ON" CACHE BOOL "ggml: enable Metal")
+        set(GGML_METAL_EMBED_LIBRARY "ON" CACHE BOOL "ggml: embed metal library")
     endif()
 
     add_subdirectory(vendor/llama.cpp)

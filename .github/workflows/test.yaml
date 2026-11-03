@@ -63,8 +63,10 @@ jobs:
 
   # Combined job for Linux, Windows, and Apple Silicon macOS
   build-and-test:
+    name: Test ${{ matrix.os }} / Python ${{ matrix.python-version }} ${{ matrix.metal_status }}
     needs: prepare-models
     env:
+      CMAKE_ARGS: -DGGML_RPC=ON ${{ matrix.cmake_args }}
       LLAMA_TEST_REQUIRE_RPC: "1"
       LLAMA_TEST_TRANSFORMER_MODEL: ${{ github.workspace }}/test-models/qwen2.5-0.5b-instruct-q4_k_m.gguf
       LLAMA_TEST_HYBRID_MODEL: ${{ github.workspace }}/test-models/Qwen3.5-0.8B-Q4_K_M.gguf
@@ -78,14 +80,14 @@ jobs:
         python-version: ["3.9", "3.14"]
         include:
           # Apple Silicon macOS with Metal
-          - os: macos-26
+          - os: macos-latest
             python-version: "3.9"
-            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=off"
-            metal_status: "(Metal)"
-          - os: macos-26
+            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=OFF -DGGML_METAL_SHADER_DEBUG=OFF"
+            metal_status: "(Metal release, external resources)"
+          - os: macos-latest
             python-version: "3.14"
-            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=off"
-            metal_status: "(Metal)"
+            cmake_args: "-DGGML_METAL_EMBED_LIBRARY=ON -DGGML_METAL_SHADER_DEBUG=OFF"
+            metal_status: "(Metal release, embedded resources)"
 
     steps:
       - name: Checkout repository
@@ -109,9 +111,18 @@ jobs:
           name: test-models
           path: test-models
 
+      - name: Configure macOS build
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "MACOSX_DEPLOYMENT_TARGET=13.3" >> "$GITHUB_ENV"
+          echo "CMAKE_BUILD_PARALLEL_LEVEL=$(sysctl -n hw.logicalcpu)" >> "$GITHUB_ENV"
+          echo 'CMAKE_ARGS=-DGGML_RPC=ON -DGGML_METAL=ON -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=13.3 -DCMAKE_BUILD_RPATH=@loader_path -DLLAMA_FATAL_WARNINGS=ON -DLLAMA_BUILD_BORINGSSL=ON ${{ matrix.cmake_args }}' >> "$GITHUB_ENV"
+          echo "GGML_METAL_PATH_RESOURCES=$GITHUB_WORKSPACE/vendor/llama.cpp/ggml/src/ggml-metal" >> "$GITHUB_ENV"
+          xcodebuild -version
+          xcrun --sdk macosx --show-sdk-version
+
       - name: Install dependencies and Build
-        env:
-          CMAKE_ARGS: -DGGML_RPC=ON ${{ matrix.cmake_args }}
         run: |
           echo "Building with CMAKE_ARGS: $CMAKE_ARGS"
           uv pip install --system -e .[all] --verbose
