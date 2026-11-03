@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-10-18
+last_updated: 2026-11-04
 version_target: "latest"
 ---
 
@@ -128,7 +128,7 @@ additional Python-engine settings.
 | `draft_p_split` | `0.1` | Reserved split probability matching `llama.cpp`. |
 | `draft_p_min` | `0.0` | MTP/DFlash token-probability threshold, DFlash2 selector-transition threshold, or DSpark predicted acceptance-confidence threshold. |
 | `draft_model_path` | `None` | External draft GGUF. Omit it for built-in target MTP heads. |
-| `draft_backend_sampling` | `True` | Let supported model-backed engines select compact candidates on the backend instead of copying full logits rows to Python. DFlash2 uses its selector lattice instead, so this request remains inactive for DFlash2. |
+| `draft_backend_sampling` | `True` | Use compact backend candidates instead of full vocabulary rows for MTP, DFlash v1, and DSpark where supported. DFlash2 and LiliCorr use their selector lattices and leave this request inactive. |
 
 ### External draft runtime settings
 
@@ -143,6 +143,16 @@ additional Python-engine settings.
 | `draft_tensor_buft_overrides` | `None` | Native tensor buffer-type overrides retained for the lifetime of the external draft model. |
 | `draft_type_k`, `draft_type_v` | `None` | Optional draft KV-cache data types. |
 | `draft_model_kwargs` | `{}` | Additional native draft model parameters. |
+
+The draft context inherits the target context's batch parameters; engines may
+increase capacity to fit their noise block. `SpecConfig` does not currently
+expose the upstream `--spec-draft-n-ubatch` override. `draft_model_kwargs`
+configures model loading, so it cannot override the draft context's `n_ubatch`.
+
+Draft proposals use greedy candidate selection. `draft_backend_sampling`
+controls where candidates are processed; it does not enable upstream
+probabilistic drafting or rejection sampling with a proposal distribution.
+Target verification still uses the application's configured sampling settings.
 
 ### N-gram settings
 
@@ -439,9 +449,10 @@ scores and drafting stops before a transition below the threshold.
    enable selected target input taps, and configure the resolved variant's
    output mode.
 2. **Process prompt and begin:** each synchronized target decode calls
-   `process()`, which gathers the configured target-layer rows and passes them
-   to the fused encoder/KV-injection draft decode. After prompt evaluation,
-   `begin()` verifies that this processing populated the complete draft prompt;
+   `process()`, which passes the configured target-layer rows through device
+   references or host copies to the fused encoder/KV-injection draft decode.
+   After prompt evaluation, `begin()` verifies that this processing populated
+   the complete draft prompt;
    later target decodes continue through the same `process()` path.
 3. **Draft:** `draft()` captures a native or partial on-device checkpoint,
    decodes one anchor-plus-mask block, applies DFlash token probability,
@@ -454,7 +465,7 @@ scores and drafting stops before a transition below the threshold.
    token plus accepted target features.
 5. **Reset or close:** `clear()` empties request-local cache and sampler state;
    `close()` releases both batches, the draft context, sampler, and
-   external sidecar model.
+   external sidecar model, then disables device feature capture on the target.
 
 All variants currently require an external draft GGUF:
 
@@ -537,9 +548,43 @@ configuration instead of inferring it from the target architecture.
 Target layer IDs come from the sidecar GGUF. Values from `0` through
 `target_model.n_layer()` are valid: the inclusive final value denotes the final
 head-input tap required by architectures such as Nemotron DFlash. Target rows
-are copied into draft-`n_ubatch` chunks. The draft graph fuses its encoder with
-KV injection in one decode, avoiding the previous device-to-host-to-device
-round trip and the separate encoder graph build.
+are submitted in draft-`n_ubatch` chunks, preserving their original target batch
+indices across chunks. The draft graph fuses encoding and KV injection in one
+decode; the feature transfer path determines whether host copies are needed.
+
+### Device feature transfer
+
+The current source can keep captured target-layer features in a native device
+buffer and submit row references to the draft context. This avoids downloading,
+concatenating, and uploading the target features in Python. Applications using
+`Llama(speculative=...)` do not need to construct those references themselves.
+
+The engine selects this path during construction when all of the following hold:
+
+- The loaded native library provides `llama_set_embeddings_layer_inp_dev`,
+  `llama_supports_embd_row`, and `llama_batch_ext_add_embd_row`.
+- Target layer IDs are strictly increasing, matching the buffer's layer order.
+- The draft backend can read the target feature buffer. Device placement alone
+  does not guarantee this; unsupported placements fall back to host copies.
+- The draft uses native suffix rollback without accepted-feature replay.
+- The sidecar is DFlash, DFlash2, or DSpark. LiliCorr retains its host projection
+  path because it needs projected anchor features.
+
+`LLAMA_DFLASH_DEV` defaults to `1`. Set it to `0` before constructing `Llama`
+to force host copies; set it to `1` or leave it unset to allow device transfer.
+Changing the environment after construction does not switch an existing engine.
+With `verbose=True`, startup output includes `target_features=device` or
+`target_features=host`.
+
+Missing optional symbols, an unreadable device buffer, unordered taps, or a
+draft rollback path requiring replay select host copies. Host mode still uses
+the configured model devices and fused draft graph. Feature transfer is separate
+from whether checkpoints store recurrent tensors on the device.
+
+Device rows borrow the target's latest captured batch. They are consumed before
+another target decode replaces that buffer, and the draft is closed before the
+buffer is released. For manual submission and ownership rules, see
+[device feature rows](LlamaBatch.md#device-feature-rows).
 
 ## N-gram Map Engines
 
@@ -716,6 +761,14 @@ DSpark, and other vocabulary-sampling engines, keep backend sampling enabled
 unless profiling shows otherwise. DFlash2 always selects from its compact
 selector lattice and therefore reports backend sampling as inactive.
 
+Compare host and device feature transfer with the same prompt, draft length,
+sampling settings, and output token count. Warm each path before measuring and
+repeat or interleave measurements to reduce ordering effects. A lower
+`process_seconds` does not guarantee higher total throughput: draft computation,
+target verification, and acceptance also contribute. Raising DSpark's
+`draft_p_min` can improve the acceptance fraction while discarding useful draft
+work and slowing generation. See the [runnable comparison guide](../examples/speculative-decoding.md#compare-host-and-device-feature-transfer).
+
 ## Limitations and Lifecycle Notes
 
 ### Native draft positions and image batches
@@ -758,11 +811,16 @@ MTP's native `rollback_verified()` also validates the capture before mutating
 state. Native rollback failures invalidate it. This path keeps the accepted
 hidden row directly; accepted feature blocks are copied only when restoration
 and replay are necessary, including media rows that share a native position.
+MTP's transient checkpoint copies its boundary `pending_h` row and restores it
+with the draft context; verification rows are rebuilt on the replay path.
 
 These transient checkpoints are separate from `HybridCheckpointCache` prompt
 history and from `LlamaState`. A complete target snapshot does not include draft
 hidden states, pending features, or sampler progression. See
 [state restoration](../core/Llama.md#save_state-and-load_statestate).
+After `load_state()`, speculative generation requires a fresh request with
+`reset=True` and the complete text prompt; `reset=False` raises `RuntimeError`
+because the public snapshot did not restore draft state.
 
 ### Prefix-cache reuse and `reset`
 

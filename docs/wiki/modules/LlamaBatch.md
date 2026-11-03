@@ -2,7 +2,7 @@
 title: Llama Batch
 module_name: llama_cpp._internals
 source_file: llama_cpp/_internals.py
-last_updated: 2026-10-13
+last_updated: 2026-11-04
 version_target: "latest"
 ---
 
@@ -18,7 +18,7 @@ ordinary applications should use [Llama](../core/Llama.md),
 | Builder | Representation | Use |
 |---|---|---|
 | `LlamaBatch` | Fixed-capacity parallel arrays in a native `llama_batch`. | Existing token, embedding, and specialized mixed-input paths. |
-| `LlamaBatchExt` | Logical entries rendered into a context-bound native `llama_batch_ext`. | Explicit per-entry tokens, external features, positions, sequence membership, and outputs. |
+| `LlamaBatchExt` | Logical entries rendered into a context-bound native `llama_batch_ext`. | Explicit per-entry tokens, external features, hidden states, device feature rows, positions, sequence membership, and outputs. |
 
 The extended builder separates input construction from submission. Each entry
 can carry a token ID, an embedding, or both. This makes heterogeneous prompts
@@ -92,6 +92,7 @@ embedding and mixed inputs require the corresponding specialized methods.
 ```text
 add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0, state=None)
 add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None, states=None)
+add_embd_row(row, position, seq_ids=(0,), output=False)
 add_embedding(embedding, position, seq_ids=(0,), output=False, *, state=None)
 add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None, states=None)
 add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, state=None)
@@ -102,8 +103,9 @@ add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, s
 | `token` / `tokens` | Vocabulary integer ID / sequence of IDs, resolved through the model's embedding table. |
 | `embedding` | Array-like vector or matrix forming one entry's feature payload. |
 | `embeddings` | Matrix `[entries, width]`; each row becomes one entry. |
+| `row` | Nonnegative int32 index in the peer context's latest captured target batch. Refers to borrowed device features, independently of the entry's model position. |
 | `state` / `states` | Separate hidden state: vector or matrix for one entry, or matrix `[entries, state_width]` for bulk insertion. Copied into owned storage; currently accepted by native MTP contexts. |
-| `position` / `positions` | Nonnegative int32 model position / one position per entry. Token and paired entries use scalars; embedding-only entries use four coordinates for M-RoPE/IM-RoPE, otherwise scalars. Bulk coordinates are entry-major: `[entries, 4]`. |
+| `position` / `positions` | Nonnegative int32 model position / one position per entry. Token and paired entries use scalars; embedding-only and device-row entries use four coordinates for M-RoPE/IM-RoPE, otherwise scalars. Bulk coordinates are entry-major: `[entries, 4]`. |
 | `seq_ids` | Nonempty sequence of integer IDs in `[0, context.n_seq_max())`. Multiple IDs share the same input and position; bulk calls apply the same IDs to every entry. |
 | `output` / `outputs` | Boolean flag / one flag per entry. Defaults request no outputs. |
 | `decision_order` | Native decision-head metadata for `add_token()`; `0` is ordinary text. Use a defined `llama_decision_order` value when the model requires it. |
@@ -209,6 +211,34 @@ with closing(Llama(model_path="./model.gguf", n_ctx=128, n_batch=32)) as llm:
 Direct context submissions do not update `Llama`'s Python token ledger. Keep a
 manual inference workflow consistent, or reset the high-level model before
 returning to its completion APIs.
+
+## Device feature rows
+
+`add_embd_row()` references captured layer inputs from the draft context's
+`ctx_other`. It is intended for compatible DFlash/DSpark contexts, with capture
+enabled on the peer before target decoding. `row` identifies the original
+target batch row, even when submitting a slice of that batch; `position` is the
+independent model position. Use only source rows captured by the latest decode.
+While device capture is enabled, consume features through device-row batches
+rather than host layer-input accessors.
+
+The managed context wrappers provide `set_embeddings_layer_inp_dev(enabled)`
+on the target and `supports_embd_row()` on the draft. The latter checks whether
+the decoder and its backends can read the peer's buffer. These wrappers require
+the corresponding optional native extensions. Automatic selection and host
+fallback are handled by [LlamaDFlashDecoding](LlamaSpeculative.md#device-feature-transfer),
+not by the generic batch builder.
+
+Every entry in a submitted device-row range must be a device row, without
+token IDs or host embeddings. Mixing those input types raises `ValueError`
+before native rendering. Device rows use the normal sequence, position, output,
+capacity, and range rules. Unsupported native processing raises `RuntimeError`.
+
+The builder stores row indices, not owned feature payloads. Consume them before
+the target decodes again, changes capture settings, or closes. Keep the peer
+alive and let the draft finish reading before releasing its feature buffer.
+`entries` exposes each reference as `LlamaBatchEntry.embd_row`; the corresponding
+`token` and `embedding` fields are `None`.
 
 ## Ownership and reuse
 

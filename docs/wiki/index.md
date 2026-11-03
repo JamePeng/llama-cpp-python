@@ -51,6 +51,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | Page | Description |
 |---|---|
 | [Qwen3.5 Image Chat](examples/vision/vision-qwen.md) | Matching model/projector setup, image requests, n-gram speculation, and prefill recovery. |
+| [Stateful Speculative Decoding](examples/speculative-decoding.md) | Choose a draft source, run a DSpark sidecar, compare host/device feature transfer, and understand state reuse. |
 | [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md) | Configure a DFlash2 sidecar, validate selector execution, compare ordinary and speculative output, and tune draft length. |
 | [MTMD Speech Synthesis](examples/audio/audio-tts.md) | Generate speech with Qwen3-TTS Base, Pocket TTS or Soprano; learn model options and explore CLI and Streamlit examples. |
 
@@ -92,9 +93,10 @@ For grammar-constrained generation:
 
 For speculative decoding:
 
-1. [Llama](core/Llama.md)
-2. [Llama Speculative Decoding](modules/LlamaSpeculative.md)
-3. [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md)
+1. [Stateful Speculative Decoding](examples/speculative-decoding.md)
+2. [Llama](core/Llama.md)
+3. [Llama Speculative Decoding](modules/LlamaSpeculative.md)
+4. [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md)
 
 For RPC model offloading:
 
@@ -136,6 +138,7 @@ Completed pages currently linked from this index:
 - `features/caching.md`
 - `examples/vision/vision-qwen.md`
 - `troubleshooting.md`
+- `examples/speculative-decoding.md`
 - `examples/dflash2-speculative-decoding.md`
 - `examples/audio/audio-tts.md`
 - `development/git-commit-generation-agent.md`

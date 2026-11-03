@@ -1,8 +1,8 @@
 ---
 title: DFlash2 Speculative Decoding
 source_file: examples/high_level_api/high_level_api_dflash_dspark_speculative.py
-last_updated: 2026-09-02
-version_target: "0.3.49"
+last_updated: 2026-11-04
+version_target: "latest"
 ---
 
 # DFlash2 Speculative Decoding
@@ -95,13 +95,15 @@ its metadata. For the validated sidecar, the important fields include:
 
 ```text
 LlamaDFlashDecoding: DFlash2 speculative decoding enabled
-LlamaDFlashDecoding: ... selector_top_k=16, mrope=False, ...
+LlamaDFlashDecoding: ... selector_top_k=16, mrope=False, ... target_features=device
 LlamaDFlashDecoding: backend_sampling=requested:False/active:False, ...
 ```
 
 The generated text and exact statistics depend on the prompt, sampling
 settings, hardware, quantization, and accepted draft prefixes. A successful run
 should have non-zero `drafted`, `verified`, and `verification_steps` values.
+`target_features=host` is also a supported result; device transfer depends on
+the loaded native library, sidecar metadata, backend access, and rollback path.
 
 ## Compare With Ordinary Decoding
 
@@ -154,14 +156,30 @@ Read these output fields together:
   backend vocabulary sampler. `draft_backend_sampling=True` is harmless but
   remains inactive for this variant.
 - `selector_top_k` is trained into the sidecar and cannot be tuned from Python.
-- The engine currently supports text and `seq_id=0` only.
+- In the current source, DFlash-family engines can transfer target features
+  directly between supported backends when the device-feature extensions are
+  available. The startup log reports
+  `target_features=device` or `host`. Set `LLAMA_DFLASH_DEV=0` before creating
+  the model to force host copies. Host copies are also used for unordered
+  layer taps, LiliCorr, and draft rollback paths that need feature replay.
+- Device transfer is independent of `draft_backend_sampling`; DFlash2 can use
+  device features while leaving vocabulary sampling inactive. This Python
+  engine still walks its selector greedily; the flag does not enable upstream
+  probabilistic DFlash2 drafting.
+- The high-level workflow currently supports text and `seq_id=0` only.
 - Text-token M-RoPE positions are supported when the draft sidecar declares
-  M-RoPE. Direct MTMD image/video embedding batches are not supported. The
-  validated Qwen3.8 DFlash2 sidecar reports `mrope=False`; this is expected from
+  M-RoPE. High-level MTMD image/video chat is not connected to this engine;
+  lower-level `process()` can consume already-decoded target embedding batches.
+  See [MTMD boundaries](../modules/LlamaSpeculative.md#native-draft-positions-and-image-batches).
+  The validated Qwen3.8 DFlash2 sidecar reports `mrope=False`; this is expected from
   its current metadata and does not prevent its tested text workflow.
 
 ## Tips
 
+- To compare host copies with device transfer, follow the
+  [feature-transfer comparison](speculative-decoding.md#compare-host-and-device-feature-transfer).
+  Compare the speculative throughput across runs; the benchmark's `speedup`
+  field compares with ordinary decoding.
 - Measure at least a few hundred generated tokens after warmup; two- or
   eight-token smoke tests validate execution but do not establish speedup.
 - Use `--ignore-eos` for fixed-length throughput comparisons.
