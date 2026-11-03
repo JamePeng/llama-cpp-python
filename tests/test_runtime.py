@@ -146,6 +146,31 @@ def test_ggml_flash_attn_rows_and_comm_callbacks():
         free(ctx)
 
 
+def test_device_feature_extension_signatures():
+    lib = internals.llama_cpp
+    signatures = {
+        "llama_set_embeddings_layer_inp_dev": ([lib.llama_context_p_ctypes, ctypes.c_bool], None),
+        "llama_supports_embd_row": ([lib.llama_context_p_ctypes], ctypes.c_bool),
+        "llama_batch_ext_add_embd_row": ([lib.llama_batch_ext_p_ctypes, lib.llama_seq_id, ctypes.c_int32], ctypes.c_int32),
+    }
+    tree = ast.parse(Path(lib.__file__).read_text(encoding="utf-8"))
+    declarations = ast.Module(body=[node for node in tree.body
+                                   if isinstance(node, ast.FunctionDef) and node.name in signatures], type_ignores=[])
+    recorded = {}
+
+    def bind(names, args, result, **kwargs):
+        recorded[names[0]] = (args, result)
+        assert len(names) == 4 and kwargs == {"required": False}
+        return lambda function: function
+
+    exec(compile(declarations, lib.__file__, "exec"), dict(vars(lib), ctypes_function_llama_ext=bind))
+    assert recorded == signatures
+    for name, (args, result) in signatures.items():
+        function = getattr(lib, name)
+        if not getattr(function, "__ctypes_optional__", False):
+            assert function.argtypes == args and function.restype is result
+
+
 def test_ggml_batch_transfer_signatures():
     g = llama_cpp._ggml
     ptr = ctypes.POINTER
@@ -504,6 +529,11 @@ def batch_runtime(runtime_context, monkeypatch):
         idx = add(p, sid, None)
         return idx if payload(p, idx, embd, "embedding") else -2
 
+    def add_embd_row(p, sid, row):
+        idx = add(p, sid, None)
+        rows[idx]["embd_row"] = row
+        return -2 if state.fail == "embd_row" else idx
+
     def sequence(_, idx, sid):
         rows[idx]["seq_ids"].append(sid)
         return True
@@ -523,6 +553,7 @@ def batch_runtime(runtime_context, monkeypatch):
 
     monkeypatch.setattr(lib, "llama_batch_ext_add_token", add)
     monkeypatch.setattr(lib, "llama_batch_ext_add_embd", add_embd)
+    monkeypatch.setattr(lib, "llama_batch_ext_add_embd_row", add_embd_row)
     monkeypatch.setattr(lib, "llama_batch_ext_set_embd_token", lambda *args: payload(*args, "embedding"))
     monkeypatch.setattr(lib, "llama_batch_ext_set_embd_state", lambda *args: payload(*args, "state"))
     monkeypatch.setattr(lib, "llama_batch_ext_add_seq", sequence)
@@ -728,6 +759,65 @@ def test_context_close_attempts_all_resources_and_frees_once(runtime_context, mo
     context._batch_ext_refs = []
     context.close()
     assert events.count("native") == 1
+
+
+def test_device_row_ranges_reject_mixed_inputs_and_recover_after_native_failure(batch_runtime):
+    r = batch_runtime
+    r.batch.add_token(1, 0)
+    r.batch.add_embd_row(7, (1, 2, 3, 0), seq_ids=(0, 1), output=True)
+    r.batch.add_embd_row(9, (4, 5, 6, 0))
+    for row in (-1, 2**31, True, 1.5):
+        with pytest.raises((ValueError, TypeError), match="embd_row"):
+            r.batch.add_embd_row(row, (7, 7, 7, 0))
+    assert len(r.batch) == 3
+    with pytest.raises(ValueError, match="Device rows cannot mix"):
+        r.context.decode(r.batch)
+    assert r.calls == r.rows == []
+    r.state.fail = "embd_row"
+    with pytest.raises(RuntimeError, match="Native batch add failed"):
+        r.context.decode(r.batch, start=1, count=2)
+    assert r.calls == r.rows == []
+    r.state.fail = False
+    assert r.context.decode(r.batch, start=1, count=2) == 0
+    assert r.rows == [
+        dict(token=None, seq_ids=[0, 1], embd_row=7, position=(1, 2, 3, 0), output=True),
+        dict(token=None, seq_ids=[0], embd_row=9, position=(4, 5, 6, 0)),
+    ]
+    assert r.batch.submitted_indices == (1, 2) and r.batch.output_indices == (1,)
+
+
+@pytest.mark.parametrize("status", [0, 1, -1])
+def test_dflash_device_injection_uses_original_rows_across_chunks(batch_runtime, monkeypatch, status):
+    from llama_cpp.llama_speculative import LlamaDFlashDecoding
+
+    r = batch_runtime
+    monkeypatch.setattr(internals.llama_cpp, "llama_n_ubatch", lambda _: 2)
+    snapshots = []
+
+    def process(*args):
+        snapshots.append([dict(row) for row in r.rows])
+        return status if len(snapshots) == 2 else 0
+
+    monkeypatch.setattr(internals.llama_cpp, "llama_process", process)
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine._use_dev_features, engine.is_mrope, engine.is_lilicorr = True, True, False
+    engine.n_embd_enc = 6
+    engine.draft_context, engine.inject_batch = r.context, r.batch
+    engine._gather_target_features = Mock(side_effect=AssertionError("Unexpected host copy"))
+    batch = SimpleNamespace(n_tokens=5, token=[1] * 5, embd=None, pos=list(range(11, 16)),
+                            n_seq_id=[1] * 5, seq_id=[[0]] * 5)
+    if status:
+        message = "code -1" if status < 0 else "status 1 at feature row offset 2"
+        with pytest.raises(RuntimeError, match=message):
+            engine.process(batch)
+    else:
+        engine.process(batch)
+        assert engine.verify_positions == batch.pos and engine.verify_features.shape == (0, 6)
+    rows = [row for chunk in snapshots for row in chunk]
+    count = 4 if status else 5
+    assert [row["embd_row"] for row in rows] == list(range(count))
+    assert [row["position"] for row in rows] == [(p, p, p, 0) for p in range(11, 11 + count)]
+    assert all(row["token"] is None and "embedding" not in row and not row.get("output") for row in rows)
 
 
 def test_interleaved_range_preserves_positions_and_output_mapping(batch_runtime):
@@ -1515,6 +1605,30 @@ def test_extended_batch_native_gc_and_context_cleanup(completion_model, monkeypa
         assert len(released) == 4
     finally:
         context.close()
+
+
+def test_device_capture_rejects_row_decode_on_regular_context(completion_model):
+    model = completion_model
+    ctx = model._ctx
+    names = ("llama_set_embeddings_layer_inp_dev", "llama_supports_embd_row", "llama_batch_ext_add_embd_row")
+    if any(getattr(getattr(internals.llama_cpp, name), "__ctypes_optional__", False) for name in names):
+        pytest.skip("Native llama.cpp lacks device feature extensions")
+    model.reset()
+    try:
+        ctx.set_embeddings_layer_inp(0, True)
+        ctx.set_embeddings_layer_inp_dev(True)
+        assert not ctx.supports_embd_row()
+        with _native_batch(ctx.ctx) as batch:
+            assert llama_cpp.llama_batch_ext_add_embd_row(batch, 0, -1) == -2
+            llama_cpp.llama_batch_ext_clear(batch)
+            assert llama_cpp.llama_batch_ext_add_embd_row(batch, 0, 0) == 0
+            positions = (llama_cpp.llama_pos * 4)(0, 0, 0, 0)
+            assert llama_cpp.llama_batch_ext_set_pos(batch, 0, positions)
+            assert llama_cpp.llama_process(ctx.ctx, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, batch) == -1
+    finally:
+        ctx.set_embeddings_layer_inp_dev(False)
+        ctx.set_embeddings_layer_inp(0, False)
+        model.reset()
 
 
 def test_extended_batch_matches_legacy_decode(completion_model, completion_logits_reference, tmp_path):

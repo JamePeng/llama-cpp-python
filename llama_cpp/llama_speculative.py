@@ -2,6 +2,7 @@ import abc
 import collections
 import ctypes
 import enum
+import os
 import sys
 import time
 
@@ -2128,6 +2129,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             verbose=verbose,
         )
         self.is_dspark = config.spec_type == SpeculativeType.DRAFT_DSPARK
+        self._use_dev_features = False
         self._suppressed_tokens: Tuple[int, ...] = ()
         self.is_lilicorr = False
         self._lilicorr_features: Dict[int, npt.NDArray[np.float32]] = {}
@@ -2236,15 +2238,6 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     n_seq_max=1,
                     verbose=verbose,
                 )
-            self.inject_batch = internals.LlamaBatch(
-                n_tokens=self.draft_context.n_ubatch(),
-                embd=self.n_embd_enc,
-                n_seq_max=1,
-                verbose=verbose,
-            )
-            if self.is_mrope:
-                self.inject_batch.enable_mrope_positions()
-
             self._configure_draft_execution(internals)
 
             self._use_native_draft_rollback = (
@@ -2254,6 +2247,18 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 )
                 or self.draft_context.n_rs_seq() >= self.draft_limit
             )
+            self._configure_device_features()
+            if self._use_dev_features:
+                self.inject_batch = internals.LlamaBatchExt(context=self.draft_context)
+            else:
+                self.inject_batch = internals.LlamaBatch(
+                    n_tokens=self.draft_context.n_ubatch(),
+                    embd=self.n_embd_enc,
+                    n_seq_max=1,
+                    verbose=verbose,
+                )
+                if self.is_mrope:
+                    self.inject_batch.enable_mrope_positions()
             self._pending_verification_checkpoint = None
             self._active_verification_checkpoint = None
             self.verify_positions: List[int] = []
@@ -2291,6 +2296,31 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             True, masked=not self.is_dflash2 and not self.is_lilicorr
         )
         self.draft_context.set_causal_attn(self.causal_attn)
+
+    def _configure_device_features(self) -> None:
+        """Use device features when the decoder can roll back without replay."""
+        try:
+            enabled = int(os.environ.get("LLAMA_DFLASH_DEV", "1")) != 0
+        except ValueError:
+            enabled = False
+        # Replay needs host features after the target reuses its device buffer.
+        if (
+            not enabled or self.is_lilicorr or not self._use_native_draft_rollback
+            or any(a >= b for a, b in zip(self.target_layer_ids, self.target_layer_ids[1:]))
+        ):
+            return
+        symbols = (
+            self._llama_cpp_lib.llama_set_embeddings_layer_inp_dev,
+            self._llama_cpp_lib.llama_supports_embd_row,
+            self._llama_cpp_lib.llama_batch_ext_add_embd_row,
+        )
+        if any(getattr(func, "__ctypes_symbol_name__", None) is None for func in symbols):
+            return
+        self.target_context.set_embeddings_layer_inp_dev(True)
+        self._use_dev_features = True
+        if not self.draft_context.supports_embd_row():
+            self.target_context.set_embeddings_layer_inp_dev(False)
+            self._use_dev_features = False
 
     @staticmethod
     def _validate_target_layer_ids(
@@ -2364,7 +2394,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             f"lilicorr_top_k={self.lilicorr_top_k}, "
             f"mrope={self.is_mrope}, "
             f"target_layers={self.target_layer_ids}, "
-            f"feature_width={self.n_embd_enc}",
+            f"feature_width={self.n_embd_enc}, "
+            f"target_features={'device' if self._use_dev_features else 'host'}",
             file=sys.stderr,
         )
         print(
@@ -2444,6 +2475,18 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         for offset in range(0, n_tokens, chunk_size):
             count = min(chunk_size, n_tokens - offset)
             positions = [int(batch.pos[offset + i]) for i in range(count)]
+            if getattr(self, "_use_dev_features", False):
+                self.inject_batch.reset()
+                for i, position in enumerate(positions):
+                    coordinates = (position, position, position, 0) if self.is_mrope else position
+                    self.inject_batch.add_embd_row(offset + i, coordinates, seq_ids=[seq_id])
+                status = self.draft_context.decode(self.inject_batch)
+                if status != 0:
+                    raise RuntimeError(
+                        f"DFlash device KV injection failed with status {status} "
+                        f"at feature row offset {offset}"
+                    )
+                continue
             features = self._gather_target_features(
                 batch_rows=n_tokens, offset=offset, count=count
             )
@@ -2451,7 +2494,10 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             self._inject_target_features(features, positions, seq_id=seq_id)
 
         self.verify_positions = [int(batch.pos[i]) for i in range(n_tokens)]
-        self.verify_features = np.concatenate(feature_chunks, axis=0)
+        self.verify_features = (
+            np.concatenate(feature_chunks, axis=0) if feature_chunks
+            else np.empty((0, self.n_embd_enc), dtype=np.float32)
+        )
 
     def _inject_target_features(
         self,
@@ -2899,6 +2945,14 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             batch_names=("noise_batch", "inject_batch"),
             close_model=True,
         )
+
+        # Close the draft before releasing features it may still be reading.
+        if getattr(self, "_use_dev_features", False):
+            try:
+                self.target_context.set_embeddings_layer_inp_dev(False)
+            except Exception as exc:
+                errors.append(exc)
+            self._use_dev_features = False
 
         if errors:
             raise errors[0]

@@ -6058,6 +6058,72 @@ def llama_get_embeddings_layer_inp(
     """
     ...
 
+# LLAMA_API void llama_set_embeddings_layer_inp_dev(struct llama_context * ctx, bool value);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_embeddings_layer_inp_dev",
+        "?llama_set_embeddings_layer_inp_dev@@YAXPEAUllama_context@@_N@Z",
+        "__Z34llama_set_embeddings_layer_inp_devP13llama_contextb",
+        "_Z34llama_set_embeddings_layer_inp_devP13llama_contextb",
+    ],
+    [llama_context_p_ctypes, ctypes.c_bool],
+    None,
+    required=False,
+)
+def llama_set_embeddings_layer_inp_dev(ctx: llama_context_p, value: bool) -> None:
+    """Capture enabled layer inputs on the device instead of in host buffers.
+
+    Rows follow the original input batch order, with layers concatenated in
+    ascending layer-ID order. Configure before decoding. The context owns the
+    buffer, which is reused by subsequent evaluations.
+    """
+    ...
+
+
+# LLAMA_API bool llama_supports_embd_row(const struct llama_context * ctx);
+@ctypes_function_llama_ext(
+    [
+        "llama_supports_embd_row",
+        "?llama_supports_embd_row@@YA_NPEBUllama_context@@@Z",
+        "__Z23llama_supports_embd_rowPK13llama_context",
+        "_Z23llama_supports_embd_rowPK13llama_context",
+    ],
+    [llama_context_p_ctypes],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_supports_embd_row(ctx: llama_context_p) -> bool:
+    """Whether this DFlash/DSpark context can read ctx_other's device features.
+
+    Enable device layer-input capture on ctx_other before querying. A backend
+    must support reading that buffer for this to return True.
+    """
+    ...
+
+
+# LLAMA_API int32_t llama_batch_ext_add_embd_row(struct llama_batch_ext * batch, llama_seq_id seq_id, int32_t row);
+@ctypes_function_llama_ext(
+    [
+        "llama_batch_ext_add_embd_row",
+        "?llama_batch_ext_add_embd_row@@YAHPEAUllama_batch_ext@@HH@Z",
+        "__Z28llama_batch_ext_add_embd_rowP15llama_batch_extii",
+        "_Z28llama_batch_ext_add_embd_rowP15llama_batch_extii",
+    ],
+    [llama_batch_ext_p_ctypes, llama_seq_id, ctypes.c_int32],
+    ctypes.c_int32,
+    required=False,
+)
+def llama_batch_ext_add_embd_row(batch: llama_batch_ext_p, seq_id: int, row: int) -> int:
+    """Append a reference to a row of ctx_other's layer-input device buffer.
+
+    Set positions with llama_batch_ext_set_pos(). All submitted entries must
+    reference device rows, without token IDs or host embeddings. Returns the
+    batch index, or a negative add error code. Consume before ctx_other reuses
+    its buffer; this call does not copy or own the source features.
+    """
+    ...
+
+
 # LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
 @ctypes_function_llama_ext(
     [

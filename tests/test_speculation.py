@@ -1160,6 +1160,48 @@ def test_dflash2_configures_unmasked_nextn_without_backend_sampling(
     engine.draft_context.set_causal_attn.assert_called_once_with(True)
 
 
+@pytest.mark.parametrize("mode", [
+    "enabled", "disabled", "unordered", "lilicorr", "replay", "unsupported",
+    "missing-set", "missing-query", "missing-add", "probe-error",
+])
+def test_dflash_device_feature_selection_and_fallback(monkeypatch, mode):
+    engine = object.__new__(LlamaDFlashDecoding)
+    engine._use_dev_features = False
+    engine.is_lilicorr = mode == "lilicorr"
+    engine._use_native_draft_rollback = mode != "replay"
+    engine.target_layer_ids = [3, 1] if mode == "unordered" else [1, 3]
+    engine._llama_cpp_lib = SimpleNamespace(**{
+        "llama_set_embeddings_layer_inp_dev": SimpleNamespace(__ctypes_symbol_name__=None if mode == "missing-set" else "set"),
+        "llama_supports_embd_row": SimpleNamespace(__ctypes_symbol_name__=None if mode == "missing-query" else "query"),
+        "llama_batch_ext_add_embd_row": SimpleNamespace(__ctypes_symbol_name__=None if mode == "missing-add" else "add"),
+    })
+    engine.target_context = SimpleNamespace(set_embeddings_layer_inp_dev=Mock())
+    engine.draft_context = SimpleNamespace(supports_embd_row=Mock(return_value=mode != "unsupported"))
+    monkeypatch.setenv("LLAMA_DFLASH_DEV", "0" if mode == "disabled" else "1")
+    if mode == "probe-error":
+        engine.draft_context.supports_embd_row.side_effect = RuntimeError("probe failed")
+        with pytest.raises(RuntimeError, match="probe failed"):
+            engine._configure_device_features()
+    else:
+        engine._configure_device_features()
+        assert engine._use_dev_features is (mode == "enabled")
+    assert engine.target_context.set_embeddings_layer_inp_dev.call_args_list == (
+        [call(True)] if mode in {"enabled", "probe-error"}
+        else [call(True), call(False)] if mode == "unsupported" else []
+    )
+    if mode in {"enabled", "probe-error"}:
+        engine._closed, engine._lilicorr_features = False, {}
+        events = []
+        engine._close_draft_resources = Mock(side_effect=lambda *args, **kwargs: events.append("close-draft"))
+        engine.target_context.set_embeddings_layer_inp_dev.side_effect = lambda flag: events.append(("capture", flag))
+        engine.close()
+        engine.close()
+        assert events == ["close-draft", ("capture", False)]
+        engine.target_context.set_embeddings_layer_inp_dev.assert_called_with(False)
+        assert engine.target_context.set_embeddings_layer_inp_dev.call_count == 2
+        engine._close_draft_resources.assert_called_once()
+
+
 def test_dspark_probability_filter_requires_confidence_head():
     metadata = {"dflash.has_confidence_head": "false"}
 
@@ -1169,9 +1211,14 @@ def test_dspark_probability_filter_requires_confidence_head():
     LlamaDFlashDecoding._validate_dspark_confidence_head(metadata, 0.0)
 
 
-@pytest.mark.parametrize("selector_top_k,top_k", [(0, 0), (2, 0), (0, 2), (0, -1), (0, 3)],
-                         ids=["dflash", "dflash2", "lilicorr", "negative-k", "oversized-k"])
-def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypatch, selector_top_k, top_k):
+@pytest.mark.parametrize("selector_top_k,top_k,device", [
+    (0, 0, False), (2, 0, False), (0, 2, False), (0, -1, False), (0, 3, False),
+    (0, 0, True), (2, 0, True),
+], ids=["dflash", "dflash2", "lilicorr", "negative-k", "oversized-k", "dflash-device", "dflash2-device"])
+def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypatch, selector_top_k, top_k, device):
+    monkeypatch.delenv("LLAMA_DFLASH_DEV", raising=False)
+    for name in ("llama_set_embeddings_layer_inp_dev", "llama_supports_embd_row", "llama_batch_ext_add_embd_row"):
+        monkeypatch.setattr(llama_cpp_lib, name, Mock(__ctypes_symbol_name__=name))
     model = SimpleNamespace(
         dflash_selector_top_k=lambda: selector_top_k, rope_type=lambda: 0,
         target_layer_ids=lambda: [1], n_embd=lambda: 6, n_vocab=lambda: 128,
@@ -1185,6 +1232,7 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
     context = SimpleNamespace(
         n_ubatch=lambda: 6, n_rs_seq=lambda: 0, close=Mock(),
         set_embeddings_nextn=Mock(), set_causal_attn=Mock(),
+        supports_embd_row=Mock(return_value=device),
     )
     extended = Mock(return_value=_FakeDFlashBatch())
     legacy = Mock(side_effect=lambda **kwargs: _FakeDFlashBatch())
@@ -1196,7 +1244,7 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
     monkeypatch.setattr(internals, "LlamaContext", create_context)
     monkeypatch.setattr(internals, "LlamaBatchExt", extended)
     monkeypatch.setattr(internals, "LlamaBatch", legacy)
-    target = SimpleNamespace(ctx=None, set_embeddings_layer_inp=Mock())
+    target = SimpleNamespace(ctx=None, set_embeddings_layer_inp=Mock(), set_embeddings_layer_inp_dev=Mock())
 
     def create():
         return LlamaDFlashDecoding(
@@ -1218,10 +1266,15 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
     assert engine.is_dflash2 == (selector_top_k > 0)
     assert engine.draft_limit == 1
     assert params.n_batch == params.n_ubatch == params.n_outputs_max == (6 if top_k else 2)
+    assert engine._use_dev_features is device
     if top_k:
         assert engine.noise_batch is extended.return_value
         extended.assert_called_once_with(context=context)
         assert legacy.call_count == 1  # feature injection only
+    elif device:
+        assert engine.inject_batch is extended.return_value
+        extended.assert_called_once_with(context=context)
+        assert legacy.call_count == 1
     else:
         extended.assert_not_called()
         assert legacy.call_count == 2
@@ -1236,6 +1289,10 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
     context.set_embeddings_nextn.assert_called_once_with(True, masked=not bool(top_k or selector_top_k))
     engine.noise_batch.close = engine.inject_batch.close = Mock()
     engine.close()
+    assert engine._use_dev_features is False
+    assert target.set_embeddings_layer_inp_dev.call_args_list == (
+        [] if top_k else [call(True), call(False)]
+    )
     context.close.assert_called_once()
     model.close.assert_called_once()
 
