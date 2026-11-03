@@ -54,7 +54,7 @@ bytes. Raw sample arrays are not accepted. `from_pretrained()` is inherited from
 
 | Option | Qwen3-TTS | Pocket TTS | Soprano |
 | --- | --- | --- | --- |
-| Reference audio | Optional | Required | Unsupported; fixed voice |
+| Reference audio | Optional | Required unless using a predefined voice | Unsupported; fixed voice |
 | Language | `zh`, `en`, `de`, `it`, `pt`, `es`, `ja`, `ko`, `fr`, `ru`, or names accepted by the helper | Selected by weights; omit `language` | English; omit `language` |
 | Token sampling | Uses temperature, top-k, top-p, min-p and repetition penalty | Skipped | Uses the same token sampling options as Qwen |
 | Flow/decoder settings | Managed by vendor | Managed by vendor, including variant settings | Managed by vendor |
@@ -70,6 +70,9 @@ bitwise identical audio across hardware or backend versions.
 
 Pocket weights must be converted from the appropriate `languages/<name>`
 directory, following the [vendor TTS documentation](../../../../vendor/llama.cpp/tools/tts/README.md).
+For weights containing predefined voices, pass `voice="alba"` instead of
+`speaker_reference`; the two options cannot be combined. Available names depend
+on the weights. The low-level `mtmd_gen_audio_voice_name` API enumerates them.
 
 ### Soprano
 

@@ -1964,7 +1964,7 @@ or server `chat_format`.
 | Model | Python API | Reference audio | Language |
 |:--- |:--- |:--- |:--- |
 | [Qwen3-TTS-12Hz-Base-GGUF](https://huggingface.co/JamePeng2023/Qwen3-TTS-12Hz-Base-GGUF) | `MTMDAudioGenerator` | Optional speaker reference | Selectable, including Chinese, English and Japanese |
-| Pocket TTS | `MTMDAudioGenerator` | Required | Determined by the language-pack weights |
+| Pocket TTS | `MTMDAudioGenerator` | Reference audio or predefined voice | Determined by the language-pack weights |
 | Soprano-80M / Soprano-1.1-80M | `MTMDAudioGenerator` | Unsupported; fixed voice | English; omit `language` |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
@@ -2002,7 +2002,9 @@ with closing(Llama(
 Use `speaker_reference="/path/to/reference.wav"` for a reference voice, or omit
 it for Qwen without a reference;
 encoded audio bytes, URLs and data URIs are also accepted. For Pocket, provide
-a reference and omit `language`. Qwen currently uses only the reference speaker
+a reference or `voice="alba"` (when included in the weights), and omit `language`.
+Use the low-level `mtmd_gen_audio_voice_name` API to enumerate available voices.
+Qwen currently uses only the reference speaker
 embedding: `ref_text`-conditioned full cloning, CustomVoice and preset speaker
 IDs are not supported. The FA option controls mmproj independently of the backbone.
 

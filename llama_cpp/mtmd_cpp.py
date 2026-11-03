@@ -1390,6 +1390,7 @@ class mtmd_gen_audio_type(enum.IntEnum):
 #     enum mtmd_gen_audio_type type;
 #     int32_t sample_rate; // in Hz, for example 24000 for qwen3tts
 #     const char * model_variant; // name of the weight variant, can be nullptr if not applicable
+#     int32_t n_voices; // predefined voices
 # };
 class mtmd_gen_audio_info(Structure):
     """Audio generation pipeline information."""
@@ -1398,12 +1399,14 @@ class mtmd_gen_audio_info(Structure):
         ("type", c_int),
         ("sample_rate", c_int32),
         ("model_variant", c_char_p),
+        ("n_voices", c_int32),
     ]
 
     if TYPE_CHECKING:
         type: int
         sample_rate: int
         model_variant: Optional[bytes]
+        n_voices: int
 
 # MTMD_API struct mtmd_gen_audio_info mtmd_gen_audio_get_info(const mtmd_context * ctx);
 @ctypes_function_mtmd(
@@ -1416,6 +1419,23 @@ class mtmd_gen_audio_info(Structure):
 def mtmd_gen_audio_get_info(
     ctx: mtmd_context_p,
 ) -> mtmd_gen_audio_info:
+    ...
+
+
+@ctypes_function_mtmd("mtmd_gen_audio_voice_name", [mtmd_context_p_ctypes, c_int32], c_char_p)
+def mtmd_gen_audio_voice_name(ctx: mtmd_context_p, index: int) -> Optional[bytes]:
+    """Return the borrowed name of a predefined voice, or None."""
+    ...
+
+
+@ctypes_function_mtmd("mtmd_gen_audio_get_voice", [mtmd_context_p_ctypes, c_char_p], mtmd_bitmap_p_ctypes)
+def mtmd_gen_audio_get_voice(ctx: mtmd_context_p, name: bytes) -> mtmd_bitmap_p:
+    """Return a voice bitmap owned by the caller, or NULL."""
+    ...
+
+
+@ctypes_function_mtmd("mtmd_bitmap_is_voice", [mtmd_bitmap_p_ctypes], c_bool)
+def mtmd_bitmap_is_voice(bitmap: mtmd_bitmap_p) -> bool:
     ...
 
 # enum mtmd_gen_process_type {
@@ -2258,7 +2278,6 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     enum mtmd_helper_gen_audio_out_mode out_mode;
 #     mtmd_bitmap * speaker_ref; // optional, can be NULL
 #     const char * lang; // optional, can be NULL
-#     const char * voice; // optional, model-dependent
 #     int32_t  top_k;
 #     float    top_p;
 #     uint32_t seed; // UINT32_MAX for random (default: random)
@@ -2274,7 +2293,6 @@ class mtmd_helper_gen_audio_inp(Structure):
         ("out_mode", c_int),
         ("speaker_ref", mtmd_bitmap_p_ctypes),
         ("lang", c_char_p),
-        ("voice", c_char_p),
         ("top_k", c_int32),
         ("top_p", c_float),
         ("seed", c_uint32),
@@ -2290,7 +2308,6 @@ class mtmd_helper_gen_audio_inp(Structure):
         out_mode: int
         speaker_ref: mtmd_bitmap_p
         lang: Optional[bytes]
-        voice: Optional[bytes]
         top_k: int
         top_p: float
         seed: int

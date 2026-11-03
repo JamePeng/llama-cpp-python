@@ -7,7 +7,8 @@ Run from the repository root with matching backbone and mmproj GGUF files:
 Use the same --model and --mmproj arguments with any of these examples:
 
   --text "Hello world"                         Basic Qwen or Soprano synthesis
-  --text "Welcome back" --speaker voice.wav    Reference voice (required for Pocket)
+  --text "Welcome back" --speaker /path/to/reference.wav    Reference voice
+  --text "Welcome back" --voice alba           Pocket weights with predefined voices
   --text "Hello" --speaker voice.wav --speaker-bytes
   --text "First message" --text "Next message" --output messages.wav
   --demo daily --speaker voice.wav             Reuse one generator for several lines
@@ -59,7 +60,9 @@ def main():
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--text", action="append", help="Repeat for multiple sequential requests")
     source.add_argument("--demo", choices=DEMOS, help="Built-in example sentences")
-    parser.add_argument("--speaker", help="Reference audio path, URL or data URI; required for Pocket")
+    voices = parser.add_mutually_exclusive_group()
+    voices.add_argument("--speaker", help="Reference audio path, URL or data URI")
+    voices.add_argument("--voice", help="Predefined Pocket TTS voice name")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
     parser.add_argument("--language", help="Qwen language code or name; omit for Pocket and Soprano")
     parser.add_argument("--format", choices=("wav", "pcm_f32"), default="wav")
@@ -99,7 +102,7 @@ def main():
             for index, (text, language) in enumerate(requests, 1):
                 audio = generator.create_speech(
                     llama=llama, text=text, language=language or args.language,
-                    speaker_reference=speaker, max_frames=args.max_frames,
+                    speaker_reference=speaker, voice=args.voice, max_frames=args.max_frames,
                     seed=args.seed, temperature=args.temperature, response_format=args.format,
                 )
                 path = output if len(requests) == 1 else output.with_name(f"{output.stem}-{index:02d}{output.suffix}")

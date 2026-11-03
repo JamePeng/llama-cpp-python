@@ -593,7 +593,7 @@ def test_mtmd_boolean_capabilities_abi(mtmd, name, fields):
     ("mtmd_audio_stream_params", dict(step_ms=320, prompt=None, n_prompt=0), "mtmd_audio_stream_free"),
     ("mtmd_gen_state_params", dict(seed=0xFFFFFFFF), "mtmd_gen_state_free"),
     ("mtmd_helper_gen_audio_inp", dict(stream=False, seq_id=0, prompt=None, prompt_len=0,
-                                     n_past=0, out_mode=0, speaker_ref=None, lang=None, voice=None,
+                                     n_past=0, out_mode=0, speaker_ref=None, lang=None,
                                      top_k=50, top_p=1.0, seed=0xFFFFFFFF, out_type=1), None),
 ])
 def test_mtmd_audio_defaults(mtmd, name, expected, free):
@@ -631,6 +631,9 @@ def test_mtmd_helper_function_signatures(mtmd):
         ("mtmd_get_video_config", [mtmd.mtmd_context_p_ctypes, ctypes.c_int32, ctypes.c_int32,
                                    ctypes.c_int32, ctypes.c_float], mtmd.mtmd_video_config),
         ("mtmd_bitmap_set_is_video", [mtmd.mtmd_bitmap_p_ctypes, ctypes.c_bool], None),
+        ("mtmd_bitmap_is_voice", [mtmd.mtmd_bitmap_p_ctypes], ctypes.c_bool),
+        ("mtmd_gen_audio_voice_name", [mtmd.mtmd_context_p_ctypes, ctypes.c_int32], ctypes.c_char_p),
+        ("mtmd_gen_audio_get_voice", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p], mtmd.mtmd_bitmap_p_ctypes),
         ("mtmd_helper_bitmap_init_from_file", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p,
                                               ctypes.c_bool, mtmd.mtmd_helper_init_opt], mtmd.mtmd_helper_bitmap_wrapper),
         ("mtmd_helper_bitmap_init_from_buf", [mtmd.mtmd_context_p_ctypes, ptr(ctypes.c_uint8),
@@ -672,10 +675,11 @@ def test_mtmd_helper_function_signatures(mtmd):
     ("mtmd_helper_video_init_params", 32, {"fps_target": 0, "ffmpeg_bin_dir": 8,
                                          "timestamp_interval_ms": 16, "no_soundtrack": 24}),
     ("mtmd_helper_init_opt", 32, {"video_params": 0}),
-    ("mtmd_helper_gen_audio_inp", 72, {
+    ("mtmd_gen_audio_info", 24, {"type": 0, "sample_rate": 4, "model_variant": 8, "n_voices": 16}),
+    ("mtmd_helper_gen_audio_inp", 64, {
         "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16,
-        "n_past": 24, "out_mode": 28, "speaker_ref": 32, "lang": 40, "voice": 48,
-        "top_k": 56, "top_p": 60, "seed": 64, "out_type": 68,
+        "n_past": 24, "out_mode": 28, "speaker_ref": 32, "lang": 40,
+        "top_k": 48, "top_p": 52, "seed": 56, "out_type": 60,
     }),
 ])
 def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
@@ -1229,6 +1233,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
         assert inp.stream is False and inp.seq_id == 0
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
+        state.speaker = inp.speaker_ref
         state.steps = 0
         state.out_type = inp.out_type
         return 1 if state.fail == "set_input" else 0
@@ -1271,6 +1276,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         mtmd_helper_gen_audio_step_gen=step_gen,
         mtmd_helper_gen_audio_get_output=get_output,
         mtmd_bitmap_is_audio=lambda bitmap: True,
+        mtmd_gen_audio_get_voice=Mock(side_effect=lambda ctx, name: 987 if name == b"alba" else None),
         mtmd_bitmap_free=Mock(), mtmd_helper_video_free=Mock(), mtmd_free=Mock(),
     )
     generator._mtmd_cpp = backend
@@ -1382,6 +1388,23 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
 
     state.kind = 3
     assert generator.create_speech(llama=llama, text="hello").finish_reason == "stop"
+
+
+def test_tts_pocket_predefined_voice(audio_pipeline):
+    generator, llama, backend, state, _, _ = audio_pipeline
+    state.kind = 2
+    assert generator.create_speech(llama=llama, text="hello", voice="alba").finish_reason == "stop"
+    assert state.speaker == 987
+    backend.mtmd_gen_audio_get_voice.assert_called_once_with(123, b"alba")
+    backend.mtmd_bitmap_free.assert_called_once_with(987)
+    with pytest.raises(ValueError, match="Unknown predefined voice"):
+        generator.create_speech(llama=llama, text="hello", voice="missing")
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        generator.create_speech(llama=llama, text="hello", voice="alba", speaker_reference=b"audio")
+    state.fail = "set_input"
+    with pytest.raises(RuntimeError):
+        generator.create_speech(llama=llama, text="hello", voice="alba")
+    assert backend.mtmd_bitmap_free.call_count == 2
 
 
 @pytest.mark.parametrize("supports_reference", [False, True])

@@ -1147,6 +1147,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         text: str,
         language: Optional[str] = None,
         speaker_reference: Optional[Union[str, os.PathLike[str], bytes]] = None,
+        voice: Optional[str] = None,
         response_format: Literal["wav", "pcm_f32"] = "wav",
         max_frames: int = 512,
         seed: Optional[int] = None,
@@ -1160,7 +1161,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
         Qwen3-TTS uses the sampling options; top_k/top_p also reach its code
         predictor (top_k <= 0 selects the helper default for that stage).
-        Pocket TTS requires speaker_reference, ignores sampling options except
+        Pocket TTS requires speaker_reference or a predefined voice, ignores sampling options except
         seed, and selects language and flow settings from its weights.
         Soprano uses token sampling and a fixed English voice; omit language
         and speaker_reference, and allow at least two generated frames.
@@ -1179,6 +1180,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 not isinstance(language, str) or not language.strip() or "\x00" in language
             ):
                 raise ValueError("language must be a non-empty string without NUL characters")
+            if voice is not None and (not isinstance(voice, str) or not voice.strip() or "\x00" in voice):
+                raise ValueError("voice must be a non-empty string without NUL characters")
+            if voice is not None and speaker_reference is not None:
+                raise ValueError("voice and speaker_reference are mutually exclusive")
             if response_format not in ("wav", "pcm_f32"):
                 raise ValueError("response_format must be 'wav' or 'pcm_f32'")
             if isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0:
@@ -1208,8 +1213,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             is_soprano = info.type == types.MTMD_GEN_AUDIO_TYPE_SOPRANO
             if not (is_qwen or is_pocket or is_soprano):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
-            if is_pocket and speaker_reference is None:
-                raise ValueError("Pocket TTS requires speaker_reference")
+            if voice is not None and not is_pocket:
+                raise ValueError("voice is currently supported only for Pocket TTS")
+            if is_pocket and speaker_reference is None and voice is None:
+                raise ValueError("Pocket TTS requires speaker_reference or voice")
             if is_pocket and language is not None:
                 raise ValueError("Pocket TTS language is determined by its weights")
             if is_soprano:
@@ -1222,6 +1229,11 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
             with ExitStack() as cleanup:
                 speaker = None
+                if voice is not None:
+                    speaker = mtmd.mtmd_gen_audio_get_voice(self.mtmd_ctx, voice.encode("utf-8"))
+                    if not speaker:
+                        raise ValueError(f"Unknown predefined voice: {voice}")
+                    cleanup.callback(mtmd.mtmd_bitmap_free, speaker)
                 if speaker_reference is not None:
                     # Voice-reference support is distinct from general audio input.
                     supports_reference = (
