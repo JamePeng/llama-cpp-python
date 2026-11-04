@@ -52,6 +52,19 @@ bytes. Raw sample arrays are not accepted. `from_pretrained()` is inherited from
 
 ## Model options
 
+Drama 3 uses 44.1 kHz output and native helper sampling. Pass raw text, optionally
+with `<|speaker:0|>` through `<|speaker:15|>` tags; the helper adds speaker 0 when
+needed. Omit `language`, `voice` and `speaker_reference`. Only `seed` affects its
+sampling. Each frame contains 2048 samples; `max_frames` is also bounded by the
+native tower's combined prompt/frame limit of 4096 positions.
+
+Chatterbox Turbo (English) and Multilingual V3 also use `MTMDAudioGenerator`.
+Pass `speaker_reference` or `voice="default"`; omitting both selects the first
+voice included in the weights. Multilingual V3 requires
+`Llama(n_seq_max=2, kv_unified=True)` and accepts language tags such as `fr`.
+The helper manages both CFG branches and decodes the complete audio at the end.
+See the [conversion guide](../../../../vendor/llama.cpp/tools/tts/README.md#chatterbox).
+
 | Option | Qwen3-TTS | Pocket TTS | Soprano |
 | --- | --- | --- | --- |
 | Reference audio | Optional | Required unless using a predefined voice | Unsupported; fixed voice |

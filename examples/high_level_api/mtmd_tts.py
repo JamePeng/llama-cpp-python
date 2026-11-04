@@ -1,4 +1,4 @@
-"""Non-streaming Qwen3-TTS / Pocket TTS / Soprano examples.
+"""Non-streaming Qwen3-TTS / Pocket TTS / Soprano / Chatterbox / Drama 3 examples.
 
 Run from the repository root with matching backbone and mmproj GGUF files:
 
@@ -9,6 +9,7 @@ Use the same --model and --mmproj arguments with any of these examples:
   --text "Hello world"                         Basic Qwen or Soprano synthesis
   --text "Welcome back" --speaker /path/to/reference.wav    Reference voice
   --text "Welcome back" --voice alba           Pocket weights with predefined voices
+  --text "<|speaker:0|> Hello. <|speaker:1|> Welcome back."    Drama 3 speakers
   --text "Hello" --speaker voice.wav --speaker-bytes
   --text "First message" --text "Next message" --output messages.wav
   --demo daily --speaker voice.wav             Reuse one generator for several lines
@@ -62,9 +63,10 @@ def main():
     source.add_argument("--demo", choices=DEMOS, help="Built-in example sentences")
     voices = parser.add_mutually_exclusive_group()
     voices.add_argument("--speaker", help="Reference audio path, URL or data URI")
-    voices.add_argument("--voice", help="Predefined Pocket TTS voice name")
+    voices.add_argument("--voice", help="Predefined Pocket TTS or Chatterbox voice name")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
-    parser.add_argument("--language", help="Qwen language code or name; omit for Pocket and Soprano")
+    parser.add_argument("--language", help="Qwen language or Chatterbox Multilingual tag; omit for Pocket and Soprano")
+    parser.add_argument("--cfg", action="store_true", help="Enable paired sequences for Chatterbox Multilingual")
     parser.add_argument("--format", choices=("wav", "pcm_f32"), default="wav")
     parser.add_argument("--output", help="Output path; multiple requests add a numbered suffix")
     parser.add_argument("--max-frames", type=int, default=512)
@@ -93,6 +95,8 @@ def main():
         embeddings=True,
         pooling_type=LLAMA_POOLING_TYPE_NONE,
         n_ctx=args.ctx_size,
+        n_seq_max=2 if args.cfg else 1,
+        kv_unified=args.cfg,
         n_gpu_layers=args.gpu_layers,
     )) as llama:
         with MTMDAudioGenerator(

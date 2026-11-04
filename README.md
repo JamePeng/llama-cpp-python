@@ -1966,6 +1966,8 @@ or server `chat_format`.
 | [Qwen3-TTS-12Hz-Base-GGUF](https://huggingface.co/JamePeng2023/Qwen3-TTS-12Hz-Base-GGUF) | `MTMDAudioGenerator` | Optional speaker reference | Selectable, including Chinese, English and Japanese |
 | Pocket TTS | `MTMDAudioGenerator` | Reference audio or predefined voice | Determined by the language-pack weights |
 | Soprano-80M / Soprano-1.1-80M | `MTMDAudioGenerator` | Unsupported; fixed voice | English; omit `language` |
+| Chatterbox Turbo / Multilingual V3 | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Turbo: English; Multilingual V3: selectable |
+| Drama 3 | `MTMDAudioGenerator` | Unsupported; speaker tags in text | Determined by text; omit `language` |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
 in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
@@ -2007,6 +2009,16 @@ Use the low-level `mtmd_gen_audio_voice_name` API to enumerate available voices.
 Qwen currently uses only the reference speaker
 embedding: `ref_text`-conditioned full cloning, CustomVoice and preset speaker
 IDs are not supported. The FA option controls mmproj independently of the backbone.
+
+For Chatterbox, supply a reference or use a voice included in the weights.
+Omitting both selects the first predefined voice. Multilingual V3 requires
+`Llama(n_seq_max=2, kv_unified=True)` for CFG and accepts `language="fr"`, for example.
+See the [vendor conversion guide](vendor/llama.cpp/tools/tts/README.md#chatterbox).
+
+Drama 3 uses helper-managed sampling and 44.1 kHz audio. Put `<|speaker:0|>`
+through `<|speaker:15|>` in the text for different speakers; omit `language`,
+`voice` and `speaker_reference`. Only `seed` affects its sampling; generation
+is also bounded by the native codebook tower's 4096-position limit.
 
 For Soprano, use matching backbone and mmproj files, supply English text, and
 omit both `speaker_reference` and `language`. See the
