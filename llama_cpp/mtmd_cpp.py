@@ -87,6 +87,7 @@ class mtmd_video_template(enum.IntEnum):
     MTMD_VIDEO_TEMPLATE_DEFAULT = 0
     MTMD_VIDEO_TEMPLATE_LFM3 = 1
     MTMD_VIDEO_TEMPLATE_LFM3_OMNI = 2
+    MTMD_VIDEO_TEMPLATE_QWEN3VL = 3
 
 # // position indexing for decoder model
 # enum mtmd_pos_type {
@@ -1377,6 +1378,8 @@ def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
 #     MTMD_GEN_AUDIO_TYPE_POCKETTTS,
 #     MTMD_GEN_AUDIO_TYPE_SOPRANO,
 #     MTMD_GEN_AUDIO_TYPE_LFM3A,
+#     MTMD_GEN_AUDIO_TYPE_CHATTERBOX,
+#     MTMD_GEN_AUDIO_TYPE_DRAMA3,
 # };
 class mtmd_gen_audio_type(enum.IntEnum):
     """Generated audio pipeline type."""
@@ -1385,6 +1388,8 @@ class mtmd_gen_audio_type(enum.IntEnum):
     MTMD_GEN_AUDIO_TYPE_POCKETTTS = 2
     MTMD_GEN_AUDIO_TYPE_SOPRANO   = 3
     MTMD_GEN_AUDIO_TYPE_LFM3A     = 4
+    MTMD_GEN_AUDIO_TYPE_CHATTERBOX = 5
+    MTMD_GEN_AUDIO_TYPE_DRAMA3    = 6
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;
@@ -1419,6 +1424,14 @@ class mtmd_gen_audio_info(Structure):
 def mtmd_gen_audio_get_info(
     ctx: mtmd_context_p,
 ) -> mtmd_gen_audio_info:
+    ...
+
+
+# MTMD_API size_t mtmd_gen_audio_read_tensor(mtmd_context * ctx, const char * name, float * out, size_t n_max);
+@ctypes_function_mtmd("mtmd_gen_audio_read_tensor",
+    [mtmd_context_p_ctypes, c_char_p, POINTER(c_float), c_size_t], c_size_t)
+def mtmd_gen_audio_read_tensor(ctx: mtmd_context_p, name: bytes, out, n_max: int) -> int:
+    """Read F32 elements; NULL queries the count. Missing/undersized returns zero."""
     ...
 
 
@@ -1593,6 +1606,13 @@ def mtmd_gen_state_free(state: Optional[mtmd_gen_state_p]):
 @ctypes_function_mtmd("mtmd_gen_state_reset", [mtmd_gen_state_p_ctypes], None)
 def mtmd_gen_state_reset(state: mtmd_gen_state_p):
     """Clear decoder state for a cold start, keeping the RNG stream."""
+    ...
+
+
+# MTMD_API int32_t mtmd_gen_state_set_ref(mtmd_context * ctx, mtmd_gen_state * state);
+@ctypes_function_mtmd("mtmd_gen_state_set_ref", [mtmd_context_p_ctypes, mtmd_gen_state_p_ctypes], c_int32)
+def mtmd_gen_state_set_ref(ctx: mtmd_context_p, state: mtmd_gen_state_p) -> int:
+    """Copy the last encoded reference to this model's state; nonzero means failure."""
     ...
 
 # // defaults tuned for the loaded pipeline, callers override only what they care about

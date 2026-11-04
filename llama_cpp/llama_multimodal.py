@@ -1165,6 +1165,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         seed, and selects language and flow settings from its weights.
         Soprano uses token sampling and a fixed English voice; omit language
         and speaker_reference, and allow at least two generated frames.
+        Chatterbox uses token sampling and a reference or predefined voice.
+        Its multilingual variant requires n_seq_max >= 2 and kv_unified=True.
+        Drama 3 samples inside the helper; only seed affects sampling. Put
+        speaker tags in text and omit language, voice and speaker_reference.
         References accept encoded audio bytes, local paths, URLs or data URIs.
         max_frames limits helper generation steps, not text tokens or seconds.
         Llama.abort() interrupts synthesis with InterruptedError.
@@ -1211,12 +1215,39 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             is_qwen = info.type == types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS
             is_pocket = info.type == types.MTMD_GEN_AUDIO_TYPE_POCKETTTS
             is_soprano = info.type == types.MTMD_GEN_AUDIO_TYPE_SOPRANO
-            if not (is_qwen or is_pocket or is_soprano):
+            is_chatterbox = info.type == types.MTMD_GEN_AUDIO_TYPE_CHATTERBOX
+            is_drama = info.type == types.MTMD_GEN_AUDIO_TYPE_DRAMA3
+            if info.type not in (
+                types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
+                types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,
+                types.MTMD_GEN_AUDIO_TYPE_SOPRANO,
+                types.MTMD_GEN_AUDIO_TYPE_CHATTERBOX,
+                types.MTMD_GEN_AUDIO_TYPE_DRAMA3,
+            ):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
-            if voice is not None and not is_pocket:
-                raise ValueError("voice is currently supported only for Pocket TTS")
+            if is_drama:
+                if speaker_reference is not None:
+                    raise ValueError("Drama 3 does not support speaker_reference")
+                if language is not None:
+                    raise ValueError("Drama 3 determines language from text; omit language")
+                if voice is not None:
+                    raise ValueError("Drama 3 uses speaker tags in text; omit voice")
+            if voice is not None and not (is_pocket or is_chatterbox):
+                raise ValueError("voice is supported only for Pocket TTS and Chatterbox")
+            if (is_pocket or is_chatterbox) and voice is None and speaker_reference is None and info.n_voices > 0:
+                name = mtmd.mtmd_gen_audio_voice_name(self.mtmd_ctx, 0)
+                if not name:
+                    raise RuntimeError("TTS reports predefined voices but returned no default voice")
+                voice = name.decode("utf-8")
             if is_pocket and speaker_reference is None and voice is None:
                 raise ValueError("Pocket TTS requires speaker_reference or voice")
+            if is_chatterbox:
+                if voice is None and speaker_reference is None:
+                    raise ValueError("Chatterbox requires speaker_reference or a predefined voice")
+                # The multilingual helper pairs conditioned/unconditioned CFG sequences.
+                multilingual = mtmd.mtmd_gen_audio_read_tensor(self.mtmd_ctx, b"a.gen.t3.text_pos_emb", None, 0) > 0
+                if multilingual and (llama._ctx.n_seq_max() < 2 or not llama.context_params.kv_unified):
+                    raise ValueError("Chatterbox multilingual requires Llama(n_seq_max=2, kv_unified=True)")
             if is_pocket and language is not None:
                 raise ValueError("Pocket TTS language is determined by its weights")
             if is_soprano:
@@ -1240,6 +1271,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                         self.capabilities.audio_gen_spk_ref
                         if self.capabilities is not None else self.is_support_audio
                     )
+                    # The vendor capability helper currently omits Chatterbox.
+                    supports_reference = supports_reference or is_chatterbox
                     if not supports_reference:
                         raise ValueError("mmproj does not support reference audio input")
                     payload = speaker_reference if isinstance(speaker_reference, bytes) else self.load_media(os.fspath(speaker_reference), "audio")
@@ -1258,7 +1291,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
                 actual_seed = llama_cpp_lib.LLAMA_DEFAULT_SEED if seed is None else seed
                 sampler = None
-                if is_qwen or is_soprano:
+                if is_qwen or is_soprano or is_chatterbox:
                     sampler = self._create_audio_sampler(
                         llama, seed=actual_seed, temperature=temperature, top_k=top_k,
                         top_p=top_p, min_p=min_p, repeat_penalty=repeat_penalty,

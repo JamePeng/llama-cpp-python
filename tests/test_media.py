@@ -623,6 +623,9 @@ def test_mtmd_helper_function_signatures(mtmd):
                                                    ptr(native.llama_logit_bias), ctypes.c_int32], ctypes.c_int32),
         ("mtmd_gen_state_init", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_params], mtmd.mtmd_gen_state_p_ctypes),
         ("mtmd_gen_state_reset", [mtmd.mtmd_gen_state_p_ctypes], None),
+        ("mtmd_gen_state_set_ref", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_p_ctypes], ctypes.c_int32),
+        ("mtmd_gen_audio_read_tensor", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p,
+                                        ptr(ctypes.c_float), ctypes.c_size_t], ctypes.c_size_t),
         ("mtmd_gen_state_free", [mtmd.mtmd_gen_state_p_ctypes], None),
         ("mtmd_gen_audio_process", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_p_ctypes,
                                     ptr(mtmd.mtmd_gen_inp), ptr(mtmd.mtmd_gen_out)], ctypes.c_int32),
@@ -696,10 +699,10 @@ def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
 
 
 @pytest.mark.parametrize("name, values", [
-    ("mtmd_gen_audio_type", [0, 1, 2, 3, 4]),
+    ("mtmd_gen_audio_type", [0, 1, 2, 3, 4, 5, 6]),
     ("mtmd_helper_gen_audio_out_mode", [0, 1, 2, 3]),
     ("mtmd_helper_gen_audio_outtype", [0, 1]),
-    ("mtmd_video_template", [0, 1, 2]),
+    ("mtmd_video_template", [0, 1, 2, 3]),
 ])
 def test_mtmd_enums(mtmd, name, values):
     assert list(map(int, getattr(mtmd, name))) == values
@@ -1227,7 +1230,8 @@ def audio_pipeline(tmp_path, monkeypatch):
     hidden = (ctypes.c_float * 2)(1, 2)
     output = ctypes.create_string_buffer(struct.pack("4f", 0.0, 0.1, -0.1, 0.0))
     import io, wave
-    state = SimpleNamespace(kind=1, steps=0, fail=None, prompts=[], tokens=[], stop_at=3)
+    state = SimpleNamespace(kind=1, steps=0, fail=None, prompts=[], tokens=[], stop_at=3,
+                            voices=0, multilingual=False)
 
     def set_input(ctx, ptr):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
@@ -1251,7 +1255,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         return 0
 
     def get_output(ctx, rate, data, size, samples):
-        sample_rate = 32000 if state.kind == 3 else 24000
+        sample_rate = {3: 32000, 6: 44100}.get(state.kind, 24000)
         ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = sample_rate
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav:
@@ -1268,7 +1272,9 @@ def audio_pipeline(tmp_path, monkeypatch):
         mtmd_gen_audio_type=native.mtmd_gen_audio_type,
         mtmd_helper_gen_audio_outtype=native.mtmd_helper_gen_audio_outtype,
         mtmd_helper_gen_audio_inp=native.mtmd_helper_gen_audio_inp,
-        mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=state.kind),
+        mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=state.kind, n_voices=state.voices),
+        mtmd_gen_audio_voice_name=Mock(return_value=b"default"),
+        mtmd_gen_audio_read_tensor=lambda *args: int(state.multilingual),
         mtmd_helper_gen_audio_init=Mock(return_value=456),
         mtmd_helper_gen_audio_free=Mock(), mtmd_helper_gen_audio_reset=Mock(),
         mtmd_helper_gen_audio_set_input=set_input,
@@ -1276,7 +1282,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         mtmd_helper_gen_audio_step_gen=step_gen,
         mtmd_helper_gen_audio_get_output=get_output,
         mtmd_bitmap_is_audio=lambda bitmap: True,
-        mtmd_gen_audio_get_voice=Mock(side_effect=lambda ctx, name: 987 if name == b"alba" else None),
+        mtmd_gen_audio_get_voice=Mock(side_effect=lambda ctx, name: 987 if name in (b"alba", b"default") else None),
         mtmd_bitmap_free=Mock(), mtmd_helper_video_free=Mock(), mtmd_free=Mock(),
     )
     generator._mtmd_cpp = backend
@@ -1289,8 +1295,8 @@ def audio_pipeline(tmp_path, monkeypatch):
     sampler_factory = Mock(return_value=sampler)
     monkeypatch.setattr(generator, "_create_audio_sampler", sampler_factory)
     llama = SimpleNamespace(
-        _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64),
-        context_params=SimpleNamespace(embeddings=True),
+        _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64, n_seq_max=lambda: 2),
+        context_params=SimpleNamespace(embeddings=True, kv_unified=True),
         _abort_event=threading.Event(), _native_abort_flag=ctypes.c_bool(False),
         reset=Mock(),
     )
@@ -1298,10 +1304,11 @@ def audio_pipeline(tmp_path, monkeypatch):
     generator.close()
 
 
-@pytest.mark.parametrize("kind", [1, 3], ids=["qwen", "soprano"])
+@pytest.mark.parametrize("kind", [1, 3, 5], ids=["qwen", "soprano", "chatterbox"])
 def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline, kind):
     generator, llama, backend, state, factory, output = audio_pipeline
     state.kind = kind
+    state.voices = int(kind == 5)
     generator.is_support_audio = kind != 3
     text = "Hello" if kind == 3 else "你好"
     expected = output.raw[:-1]
@@ -1324,18 +1331,19 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
     backend.mtmd_helper_gen_audio_free.assert_called_once_with(456)
 
 
-@pytest.mark.parametrize("kind, frames", [(2, 1), (3, 2)], ids=["pocket", "soprano"])
+@pytest.mark.parametrize("kind, frames", [(2, 1), (3, 2), (6, 1)], ids=["pocket", "soprano", "drama3"])
 def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames):
     generator, llama, backend, state, factory, _ = audio_pipeline
     state.kind = kind
     options = {"speaker_reference": b"RIFF0000WAVE"} if kind == 2 else {}
     result = generator.create_speech(llama=llama, text="hello", max_frames=frames, **options)
     assert result.finish_reason == "length"
-    assert result.sample_rate == (24000 if kind == 2 else 32000)
-    assert state.tokens == ([-1] if kind == 2 else [42, 42])
-    if kind == 2:
+    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100}[kind]
+    assert state.tokens == ([42, 42] if kind == 3 else [-1])
+    if kind != 3:
         factory.assert_not_called()
-        backend.mtmd_bitmap_free.assert_called_once_with(789)
+        if kind == 2:
+            backend.mtmd_bitmap_free.assert_called_once_with(789)
     else:
         factory.assert_called_once()
 
@@ -1377,6 +1385,9 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
         (3, {"speaker_reference": "missing.wav"}, "speaker_reference"),
         (3, {"language": "en"}, "omit language"),
         (3, {"max_frames": 1}, "max_frames >= 2"),
+        (6, {"speaker_reference": "missing.wav"}, "speaker_reference"),
+        (6, {"language": "en"}, "omit language"),
+        (6, {"voice": "default"}, "speaker tags"),
     ]
     for kind, options, message in cases:
         state.kind = kind
@@ -1405,6 +1416,27 @@ def test_tts_pocket_predefined_voice(audio_pipeline):
     with pytest.raises(RuntimeError):
         generator.create_speech(llama=llama, text="hello", voice="alba")
     assert backend.mtmd_bitmap_free.call_count == 2
+
+
+@pytest.mark.parametrize("multilingual,sequences,unified,valid", [
+    (False, 1, False, True), (True, 1, True, False),
+    (True, 2, False, False), (True, 2, True, True),
+])
+def test_tts_chatterbox_cfg_and_reference(audio_pipeline, multilingual, sequences, unified, valid):
+    generator, llama, backend, state, _, _ = audio_pipeline
+    native = importlib.import_module("llama_cpp.mtmd_cpp")
+    state.kind, state.multilingual = 5, multilingual
+    llama._ctx.n_seq_max = lambda: sequences
+    llama.context_params.kv_unified = unified
+    generator.capabilities = native.mtmd_helper_cap(audio_gen=True, audio_gen_spk_ref=False)
+    if valid:
+        assert generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE").finish_reason == "stop"
+        assert state.speaker == 789
+        backend.mtmd_bitmap_free.assert_called_once_with(789)
+    else:
+        with pytest.raises(ValueError, match="n_seq_max=2, kv_unified=True"):
+            generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE")
+        backend.mtmd_helper_gen_audio_init.assert_not_called()
 
 
 @pytest.mark.parametrize("supports_reference", [False, True])
