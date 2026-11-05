@@ -1233,28 +1233,6 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         if self._backend_sampler is not None:
             self._backend_sampler.reset()
 
-    def _close_backend_sampler(self, errors: List[Exception]) -> None:
-        """Detach and close the sampler while preserving cleanup failures.
-
-        Cleanup remains non-short-circuiting: detach and close exceptions are
-        appended to ``errors`` so callers can release every remaining resource
-        and raise the first failure afterward.
-        """
-        backend_sampler = self._backend_sampler
-        self._backend_sampler = None
-        self._backend_sampling = False
-        if backend_sampler is None:
-            return
-        if getattr(self, "draft_context", None) is not None:
-            try:
-                self.draft_context.set_sampler(0, None)
-            except Exception as exc:
-                errors.append(exc)
-        try:
-            backend_sampler.close()
-        except Exception as exc:
-            errors.append(exc)
-
     def _close_draft_resources(
         self,
         errors: List[Exception],
@@ -1262,7 +1240,7 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         batch_names: Sequence[str],
         close_model: bool,
     ) -> None:
-        """Release draft resources in sampler, batch, context, model order.
+        """Detach sampling, then release batches, context, sampler, and model.
 
         ``batch_names`` lets each algorithm declare its owned batch attributes.
         ``close_model`` must be true only for an external engine-owned model.
@@ -1270,7 +1248,15 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         cleanup idempotent. All exceptions are collected in ``errors`` rather
         than preventing later native resources from being released.
         """
-        self._close_backend_sampler(errors)
+        backend_sampler = self._backend_sampler
+        self._backend_sampler = None
+        self._backend_sampling = False
+        if backend_sampler is not None and getattr(self, "draft_context", None) is not None:
+            try:
+                if not self.draft_context.set_sampler(0, None):
+                    raise RuntimeError("Failed to detach draft backend sampler")
+            except Exception as exc:
+                errors.append(exc)
         for name in batch_names:
             batch = getattr(self, name, None)
             setattr(self, name, None)
@@ -1285,6 +1271,14 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         if draft_context is not None:
             try:
                 draft_context.close()
+            except Exception as exc:
+                errors.append(exc)
+
+        # Even after a failed detach, keep the sampler alive through the native
+        # context's synchronization and destruction.
+        if backend_sampler is not None:
+            try:
+                backend_sampler.close()
             except Exception as exc:
                 errors.append(exc)
 

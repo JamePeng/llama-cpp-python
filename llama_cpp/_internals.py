@@ -1277,6 +1277,7 @@ class LlamaContext:
         The context borrows the native sampler pointer, so this wrapper retains
         a strong reference while it is attached. Passing ``None`` detaches the
         sampler. Changing an attached sampler can force graph reallocation.
+        Pending backend work is synchronized before changing borrowed pointers.
 
         Returns:
             Whether llama.cpp accepted the sampler change.
@@ -1288,6 +1289,7 @@ class LlamaContext:
             if not sampler_ptr:
                 raise RuntimeError("Cannot attach a closed or invalid sampler")
 
+        self.synchronize()
         changed = bool(llama_cpp.llama_set_sampler(self.ctx, seq_id, sampler_ptr))
         if changed:
             if sampler is None:

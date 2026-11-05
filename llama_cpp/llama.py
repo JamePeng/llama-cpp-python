@@ -266,7 +266,9 @@ class Llama:
             no_alloc: only load metadata and simulate memory allocations
             load_mtp: whether to load MTP layers
             seed: RNG seed, -1 for random
-            n_ctx: Text context, 0 = from model
+            n_ctx: Total native text context capacity, 0 = from model. With
+                kv_unified=False it is partitioned across n_seq_max slots;
+                n_ctx_seq() reports the effective single-sequence window.
             n_keep: Number of tokens to keep from initial prompt
             n_batch: Prompt processing maximum batch size
             n_ubatch: Physical batch size
@@ -904,7 +906,8 @@ class Llama:
             self.speculative_config = None
 
         self._n_vocab = self.n_vocab()
-        self._n_ctx = self.n_ctx()
+        # Python history and generation use sequence 0, not the total KV capacity.
+        self._n_ctx = self.n_ctx_seq()
 
         # Candidate storage is owned by LlamaSamplingContext. Keeping a second,
         # unused full-vocabulary array here wastes several MiB on large-vocab
@@ -1677,7 +1680,7 @@ class Llama:
                 raise RuntimeError(
                     f"Llama.eval: Context Shift is explicitly disabled by the C++ backend "
                     f"(n_pos_per_embd > 1 or incompatible M-RoPE). "
-                    f"You MUST increase n_ctx (currently {self._n_ctx}) to fit the dialogue."
+                    f"You MUST increase n_ctx (current n_ctx_seq={self._n_ctx}) to fit the dialogue."
                 )
             # 1. Calculate the absolute minimum number of tokens we must discard to fit the new chunk.
             required_discard = (self.n_tokens + n_eval) - self._n_ctx
@@ -3495,7 +3498,7 @@ class Llama:
 
         if len(prompt_tokens) >= self._n_ctx:
             raise ValueError(
-                f"Requested tokens ({len(prompt_tokens)}) exceed context window of {llama_cpp_lib.llama_n_ctx(self.ctx)}"
+                f"Requested tokens ({len(prompt_tokens)}) exceed context window of {self._n_ctx}"
             )
 
         if max_tokens is None or max_tokens <= 0:
@@ -4848,8 +4851,16 @@ prompt: The prompt to generate text from.
         self._state_needs_speculative_reset = self.speculative is not None
 
     def n_ctx(self) -> int:
-        """Return the context window size."""
+        """Return the native context's total capacity, matching llama_n_ctx()."""
         return self._ctx.n_ctx()
+
+    def n_ctx_seq(self) -> int:
+        """Return the native single-sequence limit, matching llama_n_ctx_seq().
+
+        Non-unified KV partitions total capacity among n_seq_max slots.
+        Unified KV lets each sequence use the total capacity, shared with peers.
+        """
+        return self._ctx.n_ctx_seq()
 
     def n_ctx_train(self) -> int:
         """Return the training context window size."""

@@ -29,6 +29,7 @@ def test_llama_context_wraps_backend_sampling_and_perf(monkeypatch):
     context._sampler_refs = {}
     sampler = type("Sampler", (), {"sampler": "native-sampler"})()
     calls = []
+    monkeypatch.setattr(internals.llama_cpp, "llama_synchronize", lambda ctx: calls.append(("sync", ctx)))
 
     monkeypatch.setattr(
         internals.llama_cpp,
@@ -39,6 +40,8 @@ def test_llama_context_wraps_backend_sampling_and_perf(monkeypatch):
     assert context._sampler_refs[2] is sampler
     assert context.set_sampler(2, None)
     assert 2 not in context._sampler_refs
+    assert calls == [("sync", "native-context"), ("set", "native-context", 2, "native-sampler"),
+                     ("sync", "native-context"), ("set", "native-context", 2, None)]
 
     results = {
         "llama_get_sampled_probs_ith": object(),
@@ -65,6 +68,57 @@ def test_llama_context_wraps_backend_sampling_and_perf(monkeypatch):
         getattr(context, method)()
         assert calls[-1] == (f"perf-{action}", "native-context")
     context.ctx = None
+
+
+@pytest.mark.parametrize("failure", ["sync", "native", "rejected"])
+def test_sampler_change_failure_preserves_owner(monkeypatch, failure):
+    context = object.__new__(internals.LlamaContext)
+    context.ctx = 123
+    owner = SimpleNamespace(sampler=456)
+    context._sampler_refs = {0: owner}
+    sync = Mock(side_effect=RuntimeError("sync") if failure == "sync" else None)
+    change = Mock(side_effect=RuntimeError("native") if failure == "native" else None, return_value=False)
+    monkeypatch.setattr(internals.llama_cpp, "llama_synchronize", sync)
+    monkeypatch.setattr(internals.llama_cpp, "llama_set_sampler", change)
+    try:
+        if failure == "rejected":
+            assert context.set_sampler(0, None) is False
+        else:
+            with pytest.raises(RuntimeError, match=failure):
+                context.set_sampler(0, None)
+        assert context._sampler_refs[0] is owner
+        if failure == "sync":
+            change.assert_not_called()
+    finally:
+        context.ctx = None
+
+
+@pytest.mark.parametrize("failure", [None, "detach", "rejected", "batch", "context", "sampler"])
+def test_draft_cleanup_keeps_sampler_until_context_close(failure):
+    events = []
+    engine = object.__new__(LlamaMTPDecoding)
+
+    def close(name):
+        events.append(name)
+        if name == failure:
+            raise RuntimeError(name)
+
+    def detach(*args):
+        close("detach")
+        return failure != "rejected"
+
+    engine._backend_sampler = SimpleNamespace(close=lambda: close("sampler"))
+    engine._backend_sampling = True
+    engine.batch = SimpleNamespace(close=lambda: close("batch"))
+    engine.draft_context = SimpleNamespace(set_sampler=detach, close=lambda: close("context"))
+    engine.draft_model = SimpleNamespace(close=lambda: close("model"))
+    errors = []
+    engine._close_draft_resources(errors, batch_names=("batch",), close_model=True)
+    assert events == ["detach", "batch", "context", "sampler", "model"]
+    assert len(errors) == int(failure is not None)
+    assert engine._backend_sampler is engine.batch is engine.draft_context is engine.draft_model is None
+    engine._close_draft_resources(errors, batch_names=("batch",), close_model=True)
+    assert len(events) == 5
 
 
 def test_ngram_map_lifecycle_and_acceptance_feedback():

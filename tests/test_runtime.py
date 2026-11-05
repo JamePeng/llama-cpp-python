@@ -599,7 +599,7 @@ def test_multimodal_pooling_attention_and_failure_contract(batch_runtime, tmp_pa
     monkeypatch.setattr(r.context, "set_embeddings", Mock())
     monkeypatch.setattr(r.context, "get_embeddings_seq", lambda seq: raw.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
     model = SimpleNamespace(_ctx=r.context, context_params=SimpleNamespace(embeddings=True),
-                            n_ctx=lambda: 3, n_embd_out=lambda: 2, reset=Mock())
+                            n_ctx=lambda: 6, n_ctx_seq=lambda: 3, n_embd_out=lambda: 2, reset=Mock())
     chunks = (
         MTMDEncodedChunk(0, (1,), None, (0,), 1, False),
         MTMDEncodedChunk(1, (), np.ones((1, 2), dtype=np.float32), ((1, 2, 3, 0),), 1, media_non_causal),
@@ -631,6 +631,12 @@ def test_multimodal_pooling_attention_and_failure_contract(batch_runtime, tmp_pa
         assert model.reset.call_count == len(released) * 2
         r.context.set_causal_attn.assert_not_called()
         assert r.context.get_causal_attn() is causal
+        # Fits total capacity (6), but exceeds this sequence's positional budget (3).
+        resets = model.reset.call_count
+        request.n_pos = 4
+        with pytest.raises(ValueError, match="must fit one microbatch"):
+            handler.embed(model, "prompt")
+        assert model.reset.call_count == resets
 
 
 class MockLoraAdapter:
@@ -1385,6 +1391,28 @@ def completion_logits_reference(shared_completion_model):
         return tokens, logits
     finally:
         model.reset()
+
+
+@pytest.mark.parametrize("unified", [False, True], ids=["partitioned", "unified"])
+def test_single_sequence_budget_matches_native_capacity(llama_cpp_model_path, unified):
+    with closing(llama_cpp.Llama(model_path=llama_cpp_model_path, n_ctx=512, n_batch=512,
+                                n_ubatch=512, n_seq_max=2, kv_unified=unified,
+                                n_gpu_layers=int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0")),
+                                verbose=False)) as model:
+        capacity = model._ctx.n_ctx_seq()
+        assert model.n_ctx() == model._ctx.n_ctx() == 512
+        assert capacity == (512 if unified else 256)
+        assert model._n_ctx == model.n_ctx_seq() == len(model.input_ids) == capacity
+        token = model.tokenize(b" hello", add_bos=False)[0]
+        # Reject oversized prompts before decoding, then fill and shift a valid sequence.
+        with pytest.raises(ValueError, match=f"exceed context window of {capacity}"):
+            model.create_completion([token] * capacity, max_tokens=1)
+        with pytest.raises(RuntimeError, match="larger than the entire context window"):
+            model.eval([token] * (capacity + 1))
+        model.eval([token] * capacity)
+        model.eval([token])
+        assert model.n_tokens <= capacity
+        assert model.create_completion([token] * 8, max_tokens=1, temperature=0)["choices"]
 
 
 def test_backend_sampling_with_varying_extended_batch_outputs(completion_model):

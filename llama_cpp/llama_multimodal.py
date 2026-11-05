@@ -922,8 +922,8 @@ class MTMDEmbeddingHandler(MTMDBaseHandler):
             if not (self.is_support_vision or self.is_support_audio):
                 raise ValueError("MTMD projector does not support image or audio embeddings")
             with self.tokenize(model, prompt, media, parts=parts) as request:
-                limit = min(model.n_ctx(), model._ctx.n_batch(), model._ctx.n_ubatch())
-                if not 0 < request.n_tokens <= limit or request.n_pos > model.n_ctx():
+                limit = min(model.n_ctx_seq(), model._ctx.n_batch(), model._ctx.n_ubatch())
+                if not 0 < request.n_tokens <= limit or request.n_pos > model.n_ctx_seq():
                     raise ValueError(f"Full multimodal input ({request.n_tokens} tokens) must fit one microbatch ({limit})")
                 model.reset()
                 try:
@@ -1041,7 +1041,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             params=LlamaSamplingParams(
                 seed=seed, temp=temperature, top_k=top_k, top_p=top_p,
                 min_p=min_p, penalty_repeat=repeat_penalty,
-                penalty_last_n=llama.n_ctx(),
+                penalty_last_n=llama.n_ctx_seq(),
             ),
             model=llama._model,
         )
@@ -2220,8 +2220,8 @@ class MTMDChatHandler(MTMDBaseHandler):
                 # Public prompt checkpoints contain only target state. MTP also
                 # needs its draft context and pending NextN row reconstructed.
                 llama.reset()
-                if len(full_prompt_ids) > llama.n_ctx():
-                    raise ValueError("MTMD speculative prompt exceeds n_ctx; increase n_ctx")
+                if len(full_prompt_ids) > llama.n_ctx_seq():
+                    raise ValueError("MTMD speculative prompt exceeds n_ctx_seq; increase n_ctx")
             llama._last_eval_output_start = 0
             llama._last_eval_output_count = 0
             llama._prefilled_prompt = None
@@ -2327,26 +2327,26 @@ class MTMDChatHandler(MTMDBaseHandler):
                         print(f"{self.log_prefix}(__call__): Evaluating {media_str} chunk ({chunk_n_tokens} tokens) at pos {llama.n_tokens}...", file=sys.stderr)
 
                     # Conservatively check capacity using embedding rows, not M-RoPE positions.
-                    if n_past + chunk_n_tokens > llama.n_ctx():
+                    if n_past + chunk_n_tokens > llama.n_ctx_seq():
                         if media_callback is not None:
-                            raise ValueError("MTMD speculative media exceeds n_ctx; increase n_ctx")
+                            raise ValueError("MTMD speculative media exceeds n_ctx_seq; increase n_ctx")
                         if not llama._ctx.memory_can_shift():
                             raise RuntimeError(
                                 f"{self.log_prefix}(__call__): Context Shift is explicitly disabled by the C++ backend "
                                 f"(n_pos_per_embd > 1 or incompatible M-RoPE). "
-                                f"Multimodal chunk exceeded context limit(currently n_ctx={llama._n_ctx}), "
+                                f"Multimodal chunk exceeded context limit(currently n_ctx_seq={llama._n_ctx}), "
                                 f"You MUST increase n_ctx to fit the dialogue."
                             )
                         else:
                             # Discard old positions while retaining the n_keep prefix.
-                            n_discard = (n_past + chunk_n_tokens) - llama.n_ctx() + llama.n_batch
+                            n_discard = (n_past + chunk_n_tokens) - llama.n_ctx_seq() + llama.n_batch
                             n_keep = min(llama.n_keep, n_past)
                             n_discard = min(n_discard, n_past - n_keep)
 
                             if n_discard <= 0:
                                 raise RuntimeError(f"{self.log_prefix}(__call__): Critical Overflow. Not enough unpinned tokens to discard for Context Shift.")
 
-                            if n_past - n_discard + chunk_n_tokens > llama.n_ctx():
+                            if n_past - n_discard + chunk_n_tokens > llama.n_ctx_seq():
                                 raise RuntimeError(f"{self.log_prefix}(__call__): Media chunk cannot fit alongside the retained context.")
 
                             if self.verbose:
@@ -2405,7 +2405,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                             f"{self.log_prefix}(media prefill): "
                             f"Media evaluation failed with error code {result} "
                             f"(start_pos={n_past}, media_tokens={chunk_n_tokens}, "
-                            f"n_ctx={llama.n_ctx()}, n_batch={llama.n_batch})."
+                            f"n_ctx_seq={llama.n_ctx_seq()}, n_batch={llama.n_batch})."
                         )
                         if self._has_video_input(messages):
                             message += (
@@ -2421,7 +2421,7 @@ class MTMDChatHandler(MTMDBaseHandler):
 
                     # Native evaluation must advance by n_pos, even when n_tokens differs.
                     expected_pos = n_past + chunk_n_pos
-                    if new_n_past.value != expected_pos or not n_past <= new_n_past.value <= llama.n_ctx():
+                    if new_n_past.value != expected_pos or not n_past <= new_n_past.value <= llama.n_ctx_seq():
                         raise ValueError(
                             f"{self.log_prefix}(media prefill): Invalid output position {new_n_past.value}; "
                             f"expected {expected_pos} (start_pos={n_past}, media_positions={chunk_n_pos})."

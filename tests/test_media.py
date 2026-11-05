@@ -45,7 +45,7 @@ def chat_prefill(make_handler, monkeypatch):
     )
     llm = SimpleNamespace(
         n_tokens=3, input_ids=np.array([1, 2, 3, 0, 0, 0]),
-        _n_ctx=6, n_ctx=lambda: 6, n_batch=1, n_keep=0,
+        _n_ctx=6, n_ctx=lambda: 12, n_ctx_seq=lambda: 6, n_batch=1, n_keep=0,
         _ctx=ctx, is_hybrid=False, _hybrid_cache_mgr=None,
         speculative=None, verbose=False,
         context_params=SimpleNamespace(no_perf=True),
@@ -209,7 +209,7 @@ def test_mtmd_media_eval_error_explains_video_context_usage(chat_prefill, video)
     error = str(exc_info.value)
     assert "error code 1" in error
     assert "media_tokens=2" in error
-    assert "n_ctx=6" in error
+    assert "n_ctx_seq=6" in error
     assert ("video_fps_target" in error) is video
     assert ("chat_handler_kwargs" in error) is video
 
