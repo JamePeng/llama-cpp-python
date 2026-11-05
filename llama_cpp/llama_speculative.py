@@ -1432,8 +1432,10 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         ) else 1
         if batch.n_embd != self.target_model.n_embd_inp() or batch.n_pos != expected_n_pos:
             raise ValueError("MTMD embedding width or position axes do not match the MTP target")
+        # MTMD's media helper requests no output rows; its borrowed view omits flags.
+        outputs = (ctypes.c_int8 * int(batch.n_tokens))()
         self.process(self._llama_cpp_lib.llama_batch(
-            n_tokens=batch.n_tokens, embd=batch.embd, pos=batch.pos,
+            n_tokens=batch.n_tokens, embd=batch.embd, pos=batch.pos, logits=outputs,
         ), seq_id=int(batch.seq_id))
 
     def __init__(
@@ -1519,7 +1521,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.embedding_batch = None
 
             self._enable_backend_sampling(internals)
-            self.target_context.set_embeddings_nextn(True, masked=False)
+            self.target_context.set_embeddings_nextn(True, masked=self.is_mem_shared)
             self.draft_context.set_embeddings_nextn(True, masked=True)
             self.pending_h = np.zeros(self.n_embd, dtype=np.float32)
             self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
@@ -1813,10 +1815,12 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             raise errors[0]
 
     def process(self, batch: Any, seq_id: int = 0) -> None:
-        """Consume target text or embedding rows and their dense NextN states.
+        """Consume target inputs and the NextN rows needed by the draft.
 
         Embedding batches use the target input width and section-major native
         positions. Input features and hidden states are copied before returning.
+        Shared-KV drafts retain only the final selected prefill row, or all
+        rows when the complete verification batch requests output.
         Call immediately after each successful target decode.
         """
         if seq_id != 0:
@@ -1835,11 +1839,25 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             ):
                 raise NotImplementedError("MTP speculative decoding currently supports one sequence")
 
+        row_start = 0
+        if self.is_mem_shared:
+            if bool(batch.logits) and not batch.logits[n_tokens - 1]:
+                self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+                self.verify_tokens.clear()
+                self.verify_positions.clear()
+                self.verify_embeddings = None
+                self.verify_media_positions = None
+                return
+            # Legacy batches without output flags select only their final row.
+            if not bool(batch.logits) or not all(batch.logits[i] for i in range(n_tokens)):
+                row_start = n_tokens - 1
+        n_rows = n_tokens - row_start
+
         embeddings = None
         media_positions = None
         if has_tokens:
-            positions = [int(batch.pos[i]) for i in range(n_tokens)]
-            tokens = [int(batch.token[i]) for i in range(n_tokens)]
+            positions = [int(batch.pos[i]) for i in range(row_start, n_tokens)]
+            tokens = [int(batch.token[i]) for i in range(row_start, n_tokens)]
         else:
             n_pos = 4 if self.target_model.rope_type() in (
                 self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
@@ -1847,19 +1865,21 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             ) else 1
             pos_rows = np.ctypeslib.as_array(
                 batch.pos, shape=(n_tokens * n_pos,)
-            ).reshape(n_pos, n_tokens).T
+            ).reshape(n_pos, n_tokens).T[row_start:]
             positions = pos_rows[:, 0].tolist()
             media_positions = pos_rows.tolist() if n_pos > 1 else positions
             tokens = []
             embeddings = self._copy_rows(
                 batch.embd, n_tokens, self.target_model.n_embd_inp()
-            )
-        # MTP currently supports one sequence and target nextn embeddings are
-        # unmasked, so output rows are contiguous in physical batch order. Fetch
-        # the dense block once instead of crossing ctypes once per row. This also
-        # matches the catch-up input path in common/speculative.cpp.
+            )[row_start:]
+        # Only non-shared drafts need every row for catch-up. Sparse shared-KV
+        # output uses the original batch index, not a compact output index.
+        pointer = (
+            self.target_context.get_embeddings_nextn_ith(row_start)
+            if row_start else self.target_context.get_embeddings_nextn()
+        )
         target_h = self._copy_rows(
-            self.target_context.get_embeddings_nextn(), n_tokens, self.n_embd
+            pointer, n_rows, self.n_embd
         )
 
         self._process_target_rows(

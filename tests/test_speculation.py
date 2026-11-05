@@ -345,28 +345,79 @@ def test_mtp_process_media_positions_and_cross_batch_hidden_shift(mtp_process_en
     assert engine.verify_embeddings is None and engine.verify_media_positions is None
 
 
-@pytest.mark.parametrize("mode", ["shared", "chain", "failure"])
-def test_mtp_media_catchup_modes_preserve_committed_hidden_state(mtp_process_engine, mode):
+@pytest.mark.parametrize("fail", [False, True], ids=["success", "failure"])
+def test_mtp_media_chained_catchup_preserves_committed_hidden_state(mtp_process_engine, fail):
     engine, target_h, decoded, offsets, allocations = mtp_process_engine
-    engine.is_mem_shared = mode == "shared"
-    engine.chain_heads = mode in {"chain", "failure"}
-    engine.n_mtp_layers = 2 if engine.chain_heads else 1
-    if mode == "failure":
+    engine.chain_heads, engine.n_mtp_layers = True, 2
+    if fail:
         engine.draft_context.decode = lambda batch: 1
     with _target_batch([8, 9], embeddings=np.arange(6, dtype=np.float32).reshape(2, 3)) as source:
-        if mode == "failure":
-            with pytest.raises(RuntimeError, match="catch-up decode failed"):
-                engine.process(source.batch)
-            np.testing.assert_array_equal(engine.pending_h, [1, 2])
-            assert engine.verify_positions == [] and offsets == [0, 0]
-        else:
+        with pytest.raises(RuntimeError, match="catch-up decode failed") if fail else nullcontext():
             engine.process(source.batch)
-            np.testing.assert_array_equal(engine.pending_h, target_h[-1])
-            assert len(decoded) == (0 if mode == "shared" else 2)
-            assert allocations == ([] if mode == "shared" else [True])
-            if mode == "chain":
-                assert offsets == [0, 1, 0]
-                assert engine.draft_context.removals == [(0, 8, -1)] * 2
+    np.testing.assert_array_equal(engine.pending_h, [1, 2] if fail else target_h[-1])
+    if fail:
+        assert engine.verify_positions == [] and offsets == [0, 0]
+    else:
+        assert len(decoded) == 2 and allocations == [True]
+        assert offsets == [0, 1, 0]
+        assert engine.draft_context.removals == [(0, 8, -1)] * 2
+
+
+@pytest.mark.parametrize("kind,outputs,indices", [
+    pytest.param("tokens", [False, False], [], id="no-output"),
+    pytest.param("tokens", [True, False], [], id="no-final-output"),
+    pytest.param("tokens", None, [1], id="legacy-default"),
+    pytest.param("tokens", [False, True], [1], id="text-prefill"),
+    pytest.param("tokens", [True, True], [0, 1], id="text-verification"),
+    pytest.param("embeddings", [False, True], [1], id="media-prefill"),
+    pytest.param("embeddings", [True, True], [0, 1], id="media-verification"),
+    pytest.param("callback", [False, False], [], id="media-callback"),
+])
+def test_shared_mtp_process_selects_only_available_hidden_rows(mtp_process_engine, kind, outputs, indices):
+    engine, target_h, decoded, _, allocations = mtp_process_engine
+    engine.is_mem_shared = True
+    dense = Mock(return_value=target_h.ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    sparse = Mock(side_effect=lambda index: target_h[index].ctypes.data_as(ctypes.POINTER(ctypes.c_float)))
+    engine.target_context.get_embeddings_nextn = dense
+    engine.target_context.get_embeddings_nextn_ith = sparse
+    engine.verify_h = target_h.copy()
+    engine.verify_tokens, engine.verify_positions = [3], [7]
+    engine.verify_embeddings = np.ones((1, 3), dtype=np.float32)
+    engine.verify_media_positions = [7]
+    kwargs = dict(tokens=[1, 2]) if kind == "tokens" else dict(embeddings=np.arange(6, dtype=np.float32).reshape(2, 3))
+    with _target_batch([8, 9], outputs=outputs, **kwargs) as source:
+        if kind == "callback":
+            from llama_cpp.mtmd_cpp import mtmd_helper_embd_batch
+            engine.process_media(mtmd_helper_embd_batch(2, source.batch.embd, 3, source.batch.pos, 1, 0))
+        else:
+            batch = llama_cpp_lib.llama_batch.from_buffer_copy(source.batch)
+            if outputs is None:
+                batch.logits = ctypes.POINTER(ctypes.c_int8)()
+            engine.process(batch)
+    assert decoded == allocations == []
+    if not indices:
+        dense.assert_not_called()
+        sparse.assert_not_called()
+        np.testing.assert_array_equal(engine.pending_h, [1, 2])
+        assert engine.verify_h.shape == (0, 2)
+        assert engine.verify_tokens == engine.verify_positions == []
+        assert engine.verify_embeddings is engine.verify_media_positions is None
+        return
+    if len(indices) == 2:
+        dense.assert_called_once_with()
+        sparse.assert_not_called()
+    else:
+        dense.assert_not_called()
+        sparse.assert_called_once_with(1)
+    np.testing.assert_array_equal(engine.verify_h, target_h[indices])
+    np.testing.assert_array_equal(engine.pending_h, target_h[-1])
+    assert engine.verify_positions == [8 + i for i in indices]
+    if kind == "tokens":
+        assert engine.verify_tokens == [1 + i for i in indices]
+        assert engine.verify_embeddings is engine.verify_media_positions is None
+    else:
+        np.testing.assert_array_equal(engine.verify_embeddings, kwargs["embeddings"][indices])
+        assert engine.verify_tokens == [] and engine.verify_media_positions == engine.verify_positions
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -998,9 +1049,10 @@ def test_mtp_probability_cutoff_uses_suppressed_distribution_and_restores(p_min,
     assert engine._pending_verification_checkpoint == ({"position": 5} if expected else None)
 
 
-@pytest.mark.parametrize("external", [False, True], ids=["internal-head", "sidecar"])
+@pytest.mark.parametrize("external,shared", [(False, False), (True, False), (True, True)],
+                         ids=["internal-head", "sidecar", "shared-sidecar"])
 @pytest.mark.parametrize("fail", [False, True], ids=["ready", "late-failure"])
-def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, external, fail):
+def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, external, shared, fail):
     def model(tokens):
         return SimpleNamespace(suppress_tokens=Mock(return_value=tokens), n_embd_out=lambda: 2,
                                n_vocab=lambda: 32, n_layer_nextn=lambda: 1,
@@ -1008,7 +1060,7 @@ def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, exte
 
     target_model, sidecar = model([30]), model([31])
     params = llama_cpp_lib.llama_context_default_params()
-    context = SimpleNamespace(n_batch=lambda: 8, get_ctx_other=lambda: None,
+    context = SimpleNamespace(n_batch=lambda: 8, get_ctx_other=lambda: ctypes.c_void_p(1) if shared else None,
                               set_embeddings_nextn=Mock(), close=Mock())
     target_context = SimpleNamespace(ctx=ctypes.c_void_p(1), set_embeddings_nextn=Mock())
     if fail:
@@ -1032,6 +1084,7 @@ def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, exte
     target_model.close.assert_not_called()
     assert sidecar.close.call_count == int(external)
     context.close.assert_called_once_with()
+    target_context.set_embeddings_nextn.assert_called_once_with(True, masked=shared)
 
 
 @pytest.mark.parametrize("p_min,expected", [(0.7, []), (0.6, [2])])
@@ -1689,6 +1742,50 @@ def test_real_lilicorr_draft_matches_native_state_batch(dflash_model, monkeypatc
         np.testing.assert_array_equal(engine._lilicorr_features[pos0 - 1], anchor)
     finally:
         llm.reset()
+
+
+def test_real_shared_mtp_masked_prefill_and_interrupted_retry(monkeypatch):
+    target = os.environ.get("LLAMA_TEST_GEMMA4_MODEL")
+    assistant = os.environ.get("LLAMA_TEST_GEMMA4_ASSISTANT")
+    if not target or not assistant:
+        pytest.skip("Set LLAMA_TEST_GEMMA4_MODEL and LLAMA_TEST_GEMMA4_ASSISTANT")
+    assert os.path.isfile(target) and os.path.isfile(assistant)
+    gpu_layers = int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0"))
+    with closing(llama_cpp.Llama(
+        model_path=target, n_ctx=512, n_batch=32, n_ubatch=32,
+        n_gpu_layers=gpu_layers,
+        n_threads=8, n_threads_batch=8, ctx_checkpoints=0, verbose=False,
+        speculative=SpecConfig(spec_type=SpeculativeType.DRAFT_MTP,
+                               draft_model_path=assistant, draft_n_max=2,
+                               draft_n_gpu_layers=gpu_layers),
+    )) as llm:
+        engine = llm.speculative
+        assert engine.is_mem_shared
+        tokens = llm.tokenize(("Explain speculative decoding and its verification process. " * 8).encode())
+        assert 32 < len(tokens) < 256
+        raw_row = llm._ctx.get_embeddings_nextn_ith
+        dense = Mock(wraps=llm._ctx.get_embeddings_nextn)
+        sparse = Mock(wraps=raw_row)
+        monkeypatch.setattr(llm._ctx, "get_embeddings_nextn", dense)
+        monkeypatch.setattr(llm._ctx, "get_embeddings_nextn_ith", sparse)
+        llm.eval(tokens, copy_logits=False)
+        dense.assert_not_called()
+        sparse.assert_called_once_with((len(tokens) - 1) % 32)
+        assert engine.verify_positions == [len(tokens) - 1]
+        np.testing.assert_array_equal(engine.pending_h, engine._copy_rows(
+            raw_row((len(tokens) - 1) % 32), 1, engine.n_embd,
+        )[0])
+
+        def generate(count):
+            with closing(llm.generate(tokens, temp=0, repeat_penalty=1, seed=42, ignore_eos=True)) as stream:
+                return [next(stream) for _ in range(count)]
+
+        reference = generate(64)
+        stats = llm.last_speculative_stats
+        assert stats["drafted"] > 0 and stats["accepted_draft_tokens"] > 0
+        assert dense.call_count > 0
+        assert generate(3) == reference[:3]
+        assert generate(64) == reference
 
 
 _MTP_WITHOUT_CHECKPOINTS = (False, 0)

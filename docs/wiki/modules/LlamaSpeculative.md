@@ -304,8 +304,8 @@ important for large vocabularies.
 
 1. **Initialize:** borrow the target model for built-in heads or load an
    external MTP sidecar, create an MTP context linked through `ctx_other`, and
-   enable target/draft NextN hidden outputs. `begin()` is currently the base
-   no-op because MTP state is initialized from decoded target rows.
+   enable target/draft NextN hidden outputs. `begin()` warns about incomplete
+   non-shared draft prompt coverage; shared-KV assistants use target memory.
 2. **Process:** after each synchronized target decode, `process()` copies the
    target NextN rows and advances the draft context. Shared-memory assistants
    such as `gemma4-assistant` skip the ordinary catch-up decode.
@@ -321,13 +321,22 @@ important for large vocabularies.
    `close()` additionally releases the draft batch/context, sampler, and an
    engine-owned external sidecar model.
 
+Shared-KV assistants enable masked target NextN output so Gemma4 can prune
+unselected prompt rows before its shared layers. Output-free prompt batches
+leave the pending hidden row unchanged and clear temporary verification rows.
+Sparse prefill retains the selected final row using its original batch index;
+verification batches that select every token retain all rows for acceptance and
+rollback. Non-shared MTP contexts continue to request dense hidden output for
+catch-up on every target row.
+
 ### Lower-level embedding processing
 
 `process()` accepts a decoded legacy `llama_batch` containing token IDs or
 external input embeddings. Embedding rows use the target's `n_embd_inp()`;
-the separate NextN states use `n_embd_out()`. The first row carries the pending
-state from the preceding batch, and subsequent rows carry the preceding target
-row's state. This handoff continues across text and embedding batches.
+the separate NextN states use `n_embd_out()`. For non-shared contexts, the first
+row carries the pending state from the preceding batch, and subsequent rows
+carry the preceding target row's state. This handoff continues across text and
+embedding batches.
 
 Scalar positions are retained. For M-RoPE and IM-RoPE, all four position planes
 are converted from native section-major storage to entry-major coordinates for
@@ -337,8 +346,8 @@ Empty batches and batches with both or neither legacy input pointers are ignored
 
 The embedding catch-up builder is created on first use and reused. Input
 features and hidden states are submitted separately through `add_embeddings(...,
-states=...)`. Dense NextN rows are fetched once per target batch, and verification
-records own the media features and coordinates needed for checkpoint replay.
+states=...)`. Non-shared contexts fetch dense NextN rows once per target batch.
+Verification records own the media features and coordinates needed for replay.
 If accepted and rejected image rows share a cache position, rollback restores
 the checkpoint and replays the retained prefix instead of truncating by position.
 Temporary builder rows are released after catch-up; `clear()` and `close()`

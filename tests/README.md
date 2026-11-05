@@ -20,6 +20,7 @@ successfully. Optional embedding and DFlash model pairs skip when unset.
 | --- | --- |
 | `LLAMA_TEST_TRANSFORMER_MODEL` | Qwen2.5-0.5B-Instruct Q4_K_M; Transformer runtime, KV state and grammar |
 | `LLAMA_TEST_HYBRID_MODEL` | Qwen3.5 with MTP weights; Hybrid checkpoints and speculative decoding |
+| `LLAMA_TEST_GEMMA4_MODEL` / `LLAMA_TEST_GEMMA4_ASSISTANT` | Gemma4 target and assistant; shared-KV masked prefill, verification, and interrupted retry |
 | `LLAMA_TEST_MMPROJ` | Matching Qwen3.5 projector; vision and MTP image tests |
 | `LLAMA_TEST_MULTIMODAL_EMBEDDING_MODEL` / `LLAMA_TEST_MULTIMODAL_EMBEDDING_MMPROJ` | EmbeddingGemma 2 model and projector |
 | `LLAMA_TEST_QWEN3VL_EMBEDDING_MODEL` / `LLAMA_TEST_QWEN3VL_EMBEDDING_MMPROJ` | Qwen3-VL-Embedding model and projector |
