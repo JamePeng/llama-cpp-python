@@ -644,6 +644,71 @@ class MockLoraAdapter:
         self.adapter = ctypes.cast(ctypes.c_void_p(address), internals.llama_cpp.llama_adapter_lora_p_ctypes)
 
 
+def test_llama_context_wraps_backend_sampling_and_perf(runtime_context, monkeypatch):
+    context = runtime_context
+    context._sampler_refs = {}
+    sampler = type("Sampler", (), {"sampler": "native-sampler"})()
+    calls = []
+    monkeypatch.setattr(internals.llama_cpp, "llama_synchronize", lambda ctx: calls.append(("sync", ctx)))
+
+    monkeypatch.setattr(
+        internals.llama_cpp,
+        "llama_set_sampler",
+        lambda ctx, seq_id, ptr: calls.append(("set", ctx, seq_id, ptr)) or True,
+    )
+    assert context.set_sampler(2, sampler)
+    assert context._sampler_refs[2] is sampler
+    assert context.set_sampler(2, None)
+    assert 2 not in context._sampler_refs
+    assert calls == [("sync", 123), ("set", 123, 2, "native-sampler"),
+                     ("sync", 123), ("set", 123, 2, None)]
+
+    results = {
+        "llama_get_sampled_probs_ith": object(),
+        "llama_get_sampled_logits_ith": object(),
+        "llama_get_sampled_candidates_ith": object(),
+        "llama_get_sampled_token_ith": 17,
+        "llama_get_sampled_probs_count_ith": 3,
+        "llama_get_sampled_logits_count_ith": 4,
+        "llama_get_sampled_candidates_count_ith": 5,
+    }
+    for name, result in results.items():
+        monkeypatch.setattr(internals.llama_cpp, name,
+                            lambda ctx, index, result=result, name=name: calls.append((name, ctx, index)) or result)
+        assert getattr(context, name.removeprefix("llama_"))(-1) == result
+        assert calls[-1] == (name, 123, -1)
+
+    perf = llama_cpp.llama_perf_context_data()
+    perf.n_eval = 9
+    monkeypatch.setattr(internals.llama_cpp, "llama_perf_context", lambda ctx: perf)
+    assert context.perf_context().n_eval == 9
+    for action, method in (("print", "print_timings"), ("reset", "reset_timings")):
+        monkeypatch.setattr(internals.llama_cpp, f"llama_perf_context_{action}",
+                            lambda ctx, action=action: calls.append((f"perf-{action}", ctx)))
+        getattr(context, method)()
+        assert calls[-1] == (f"perf-{action}", 123)
+
+
+@pytest.mark.parametrize("failure", ["sync", "native", "rejected"])
+def test_sampler_change_failure_tracks_native_ownership(runtime_context, monkeypatch, failure):
+    context = runtime_context
+    owner = SimpleNamespace(sampler=456)
+    context._sampler_refs = {0: owner}
+    sync = Mock(side_effect=RuntimeError("sync") if failure == "sync" else None)
+    change = Mock(side_effect=RuntimeError("native") if failure == "native" else None, return_value=False)
+    monkeypatch.setattr(internals.llama_cpp, "llama_synchronize", sync)
+    monkeypatch.setattr(internals.llama_cpp, "llama_set_sampler", change)
+    if failure == "rejected":
+        assert context.set_sampler(0, SimpleNamespace(sampler=789)) is False
+        assert not context._sampler_refs
+    else:
+        with pytest.raises(RuntimeError, match=failure):
+            context.set_sampler(0, None)
+        assert context._sampler_refs[0] is owner
+    if failure == "sync":
+        change.assert_not_called()
+
+
 def test_closed_context_rejected_before_native_call(runtime_context, monkeypatch):
     runtime_context.close()
     for method, args, native in (
@@ -1394,9 +1459,10 @@ def completion_logits_reference(shared_completion_model):
 
 
 @pytest.mark.parametrize("unified", [False, True], ids=["partitioned", "unified"])
-def test_single_sequence_budget_matches_native_capacity(llama_cpp_model_path, unified):
+def test_single_sequence_budget_matches_native_capacity(llama_cpp_model_path, unified, monkeypatch):
     with closing(llama_cpp.Llama(model_path=llama_cpp_model_path, n_ctx=512, n_batch=512,
                                 n_ubatch=512, n_seq_max=2, kv_unified=unified,
+                                embeddings=True, pooling_type=llama_cpp.LLAMA_POOLING_TYPE_NONE,
                                 n_gpu_layers=int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0")),
                                 verbose=False)) as model:
         capacity = model._ctx.n_ctx_seq()
@@ -1413,6 +1479,16 @@ def test_single_sequence_budget_matches_native_capacity(llama_cpp_model_path, un
         model.eval([token])
         assert model.n_tokens <= capacity
         assert model.create_completion([token] * 8, max_tokens=1, temperature=0)["choices"]
+        decode = Mock(wraps=model._ctx.decode)
+        monkeypatch.setattr(model._ctx, "decode", decode)
+        with pytest.raises(ValueError, match="exceed"):
+            model.embed([[token] * (capacity + 1)], truncate=False)
+        decode.assert_not_called()
+        length = capacity * 3 // 5
+        rows, count = model.embed([[token] * length] * 2, truncate=False, return_count=True)
+        assert count == 2 * length and [len(row) for row in rows] == [length, length]
+        assert decode.call_count == (2 if unified else 1)
+        assert all(np.isfinite(row).all() for row in rows)
 
 
 def test_backend_sampling_with_varying_extended_batch_outputs(completion_model):

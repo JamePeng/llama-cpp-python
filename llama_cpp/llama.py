@@ -1321,6 +1321,10 @@ class Llama:
 
     def reset(self):
         """Reset all Python and native model state."""
+        # A draft can still read shared target KV after target decode completes.
+        self._ctx.synchronize()
+        if self.speculative is not None:
+            self.speculative.clear()
         # Use a full memory clear rather than sequence removal: recurrent state
         # cannot always be partially truncated, and hybrid memory must clear
         # both its attention KV cache and recurrent state.
@@ -1334,9 +1338,6 @@ class Llama:
         self._restored_logits = None
         self._prefilled_prompt = None
         self._state_needs_speculative_reset = False
-
-        if self.speculative is not None:
-            self.speculative.clear()
 
     def _mark_prefilled_prompt(self) -> None:
         """Hand off a freshly decoded MTMD prompt to exactly one generation."""
@@ -3171,7 +3172,8 @@ class Llama:
             )
 
         ctx = self._ctx.ctx
-        n_batch = self.n_batch
+        # Multiple inputs also share the context's total KV capacity.
+        n_batch = min(self.n_batch, self.n_ctx())
         # Bidirectional attention must see the entire input in one microbatch.
         if not self._ctx.get_causal_attn():
             n_batch = min(n_batch, self._ctx.n_ubatch())
@@ -3293,6 +3295,10 @@ class Llama:
                 if n_tokens > n_batch:
                     raise ValueError(
                         f"Requested tokens ({n_tokens}) exceed batch size of {n_batch}"
+                    )
+                if n_tokens > n_ctx:
+                    raise ValueError(
+                        f"Requested tokens ({n_tokens}) exceed single-sequence context window of {n_ctx}"
                     )
 
                 if n_tokens == 0:

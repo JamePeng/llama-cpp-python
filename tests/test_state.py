@@ -68,7 +68,7 @@ def _state_model(monkeypatch):
     llm._state_compatibility = lambda: {"model": "same"}
     native_logits = np.array([0, 4, 1], dtype=np.single)
     llm._ctx = SimpleNamespace(
-        ctx=object(), memory_clear=Mock(),
+        ctx=object(), memory_clear=Mock(), synchronize=Mock(), n_ctx=lambda: 8,
         set_state_data=lambda buf, size: lib.llama_state_set_data(llm._ctx.ctx, buf, size),
         get_logits_ith=lambda idx: native_logits.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
     )
@@ -409,6 +409,11 @@ def test_generation_request_boundary_preserves_prefill_and_clears_once(
     llm, _ = model
     llm._model = object()
     llm.speculative = Mock() if speculative else None
+    events = []
+    llm._ctx.synchronize.side_effect = lambda: events.append("sync")
+    llm._ctx.memory_clear.side_effect = lambda _: events.append("clear")
+    if speculative:
+        llm.speculative.clear.side_effect = lambda: events.append("draft-clear")
     tokens = [2, 1]  # No prefix match against the existing [1, 2].
     if request_kind == "media_prefill":
         tokens = [1, -9]
@@ -428,6 +433,8 @@ def test_generation_request_boundary_preserves_prefill_and_clears_once(
         next(llm.generate(tokens, reset=request_kind != "continue"))
     expected_clears = int(request_kind == "new")
     assert llm._ctx.memory_clear.call_count == expected_clears
+    expected_order = ["sync"] + (["draft-clear"] if speculative else []) + ["clear"]
+    assert events == (expected_order if expected_clears else [])
     assert llm.n_tokens == (0 if expected_clears else 2)
     if speculative:
         assert llm.speculative.clear.call_count == expected_clears
@@ -437,23 +444,29 @@ def test_generation_request_boundary_preserves_prefill_and_clears_once(
         assert llm._prefilled_prompt is None  # Handoff is consumed exactly once.
 
 
-@pytest.mark.parametrize("cls", [Llama, LlamaEmbedding])
-@pytest.mark.parametrize("failure", [None, "decode", "output"])
-def test_embedding_request_cleans_generation_state_and_preserves_result_order(model, monkeypatch, cls, failure):
+@pytest.fixture
+def embedding_model(model, monkeypatch):
     llm, _ = model
-    llm.__class__ = cls
     llm.context_params = SimpleNamespace(embeddings=True, n_seq_max=2, no_perf=True)
-    llm.n_batch = 8
+    llm.n_batch = 16
     llm.pooling_type = lambda: lib.LLAMA_POOLING_TYPE_MEAN
     llm.n_embd_out = lambda: 2
     llm._ctx.get_causal_attn = lambda: True
-    llm._model = SimpleNamespace(model=object())
-    llm._batch = SimpleNamespace(reset=Mock(), n_tokens=lambda: 0, add_sequence=Mock())
-    llm._ctx.decode = Mock(return_value=1 if failure == "decode" else 0)
+    llm._ctx.decode = Mock(return_value=0)
     output = Mock(return_value=[3.0, 4.0])
+    monkeypatch.setattr(lib, "llama_get_embeddings_seq", output)
+    with closing(LlamaBatch(n_tokens=16, embd=0, n_seq_max=2)) as llm._batch:
+        yield llm, output
+
+
+@pytest.mark.parametrize("cls", [Llama, LlamaEmbedding])
+@pytest.mark.parametrize("failure", [None, "decode", "output"])
+def test_embedding_request_cleans_generation_state_and_preserves_result_order(embedding_model, cls, failure):
+    llm, output = embedding_model
+    llm.__class__ = cls
+    llm._ctx.decode.return_value = int(failure == "decode")
     if failure == "output":
         output.side_effect = RuntimeError("output unavailable")
-    monkeypatch.setattr(lib, "llama_get_embeddings_seq", output)
     if failure:
         with pytest.raises(RuntimeError):
             llm.embed([[1], [], [2]], normalize=2, return_count=True)
@@ -473,6 +486,27 @@ def test_embedding_request_cleans_generation_state_and_preserves_result_order(mo
     assert count == 2 and values[1] == []
     np.testing.assert_allclose([values[0], values[2]], [[0.6, 0.8]] * 2)
     assert llm.n_tokens == 0 and llm._restored_logits is None
+
+
+@pytest.mark.parametrize("total,truncate,lengths,expected", [
+    (16, False, [9], None), (16, True, [9], [8]),
+    (8, False, [6, 6], [6, 6]), (16, False, [6, 6], [12]),
+])
+def test_embedding_capacity_limits(embedding_model, total, truncate, lengths, expected):
+    llm, _ = embedding_model
+    llm._ctx.n_ctx = lambda: total
+    batches = []
+    llm._ctx.decode.side_effect = lambda batch: batches.append(batch.n_tokens()) or 0
+    inputs = [[1] * length for length in lengths]
+    if expected is None:
+        with pytest.raises(ValueError, match="single-sequence context window of 8"):
+            llm.embed(inputs, truncate=truncate)
+        assert batches == []
+    else:
+        values, count = llm.embed(inputs, truncate=truncate, return_count=True)
+        assert len(values) == len(inputs) and count == sum(expected)
+        assert batches == expected
+    assert llm.n_tokens == 0
 
 
 @pytest.mark.parametrize("entry", ["batch", "generate"])
@@ -718,7 +752,7 @@ def tracked_cache(monkeypatch):
     native = {}
     for name in (
         "get_memory", "memory_clear", "memory_seq_rm", "memory_seq_cp",
-        "memory_seq_keep", "memory_seq_add", "memory_seq_div", "free", "decode",
+        "memory_seq_keep", "memory_seq_add", "memory_seq_div", "free", "decode", "synchronize",
         "state_set_data", "state_load_file", "state_seq_set_data",
         "state_seq_load_file", "state_seq_set_data_ext", "state_seq_get_data_ext",
     ):

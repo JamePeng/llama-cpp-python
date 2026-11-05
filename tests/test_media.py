@@ -41,7 +41,7 @@ def chat_prefill(make_handler, monkeypatch):
     ctx = SimpleNamespace(
         ctx=object(), memory_seq_rm=Mock(return_value=True),
         memory_seq_add=Mock(), memory_can_shift=lambda: True,
-        memory_clear=Mock(),
+        memory_clear=Mock(), synchronize=Mock(),
     )
     llm = SimpleNamespace(
         n_tokens=3, input_ids=np.array([1, 2, 3, 0, 0, 0]),
@@ -152,7 +152,7 @@ def test_builtin_templates_do_not_duplicate_auto_boundaries(chat_tokenizer, hand
     assert normalized == text.removeprefix("<bos>").removesuffix("<eos>")
 
 
-@pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "position-in-context", "interrupt"])
+@pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "position-in-context", "interrupt", "slots", "video-slots"])
 def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, failure):
     handler, llm, backend = chat_prefill
     evaluate = backend.mtmd_helper_eval_chunk_single.side_effect
@@ -166,6 +166,8 @@ def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, fail
         )
     elif failure == "helper":
         backend.mtmd_helper_eval_chunk_single.side_effect = lambda *args: -1
+    elif failure in ("slots", "video-slots"):
+        backend.mtmd_helper_eval_chunk_single.side_effect = lambda *args: 1
     elif failure in ("position", "position-in-context"):
         def invalid_position(*args):
             args[-1]._obj.value = 7 if failure == "position" else 3
@@ -175,9 +177,17 @@ def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, fail
         backend.mtmd_helper_eval_chunk_single.side_effect = KeyboardInterrupt
 
     match = "expected 4" if failure == "position-in-context" else None
-    with pytest.raises((RuntimeError, ValueError, KeyboardInterrupt), match=match):
-        handler(llama=llm, messages=[])
+    video = failure == "video-slots"
+    messages = [{"role": "user", "content": [{"type": "video", "video": "clip.mp4"}]}] if video else []
+    with pytest.raises((RuntimeError, ValueError, KeyboardInterrupt), match=match) as exc_info:
+        handler(llama=llm, messages=messages)
+    if failure in ("slots", "video-slots"):
+        error = str(exc_info.value)
+        assert all(part in error for part in ("Media evaluation failed", "error code 1", "media_tokens=2", "n_ctx_seq=6"))
+        assert ("video_fps_target" in error) is video
+        assert ("chat_handler_kwargs" in error) is video
     llm.reset.assert_called_once()
+    llm._ctx.synchronize.assert_called_once()
     assert llm.n_tokens == 0 and llm._last_eval_output_count == 0
     assert llm._prefilled_prompt is None and llm._restored_logits is None
     llm._ctx.memory_seq_add.assert_not_called()
@@ -195,23 +205,6 @@ def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, fail
     assert llm.create_completion.call_args.kwargs["prompt"] == [-9, -9]
     llm._mark_prefilled_prompt.assert_called_once()
     assert handler._free_mtmd_resources.call_count == 2
-
-
-@pytest.mark.parametrize("video", [False, True])
-def test_mtmd_media_eval_error_explains_video_context_usage(chat_prefill, video):
-    handler, llm, backend = chat_prefill
-    backend.mtmd_helper_eval_chunk_single.side_effect = lambda *args: 1
-    messages = [{"role": "user", "content": [{"type": "video", "video": "clip.mp4"}]}] if video else []
-
-    with pytest.raises(ValueError, match="Media evaluation failed") as exc_info:
-        handler(llama=llm, messages=messages)
-
-    error = str(exc_info.value)
-    assert "error code 1" in error
-    assert "media_tokens=2" in error
-    assert "n_ctx_seq=6" in error
-    assert ("video_fps_target" in error) is video
-    assert ("chat_handler_kwargs" in error) is video
 
 
 @pytest.mark.parametrize("handler_name", [

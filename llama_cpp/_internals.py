@@ -1291,11 +1291,12 @@ class LlamaContext:
 
         self.synchronize()
         changed = bool(llama_cpp.llama_set_sampler(self.ctx, seq_id, sampler_ptr))
-        if changed:
-            if sampler is None:
-                self._sampler_refs.pop(seq_id, None)
-            else:
-                self._sampler_refs[seq_id] = sampler
+        if changed and sampler is not None:
+            self._sampler_refs[seq_id] = sampler
+        else:
+            # Native rejection also detaches the previous sampler. Exceptions
+            # above leave ownership unchanged because completion is unknown.
+            self._sampler_refs.pop(seq_id, None)
         return changed
 
     def get_sampled_token_ith(self, i: int) -> int:

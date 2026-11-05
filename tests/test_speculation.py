@@ -1,5 +1,5 @@
 import os
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 import builtins
 import ctypes
 from types import SimpleNamespace
@@ -23,102 +23,39 @@ from llama_cpp.llama_speculative import (
 )
 
 
-def test_llama_context_wraps_backend_sampling_and_perf(monkeypatch):
-    context = object.__new__(internals.LlamaContext)
-    context.ctx = "native-context"
-    context._sampler_refs = {}
-    sampler = type("Sampler", (), {"sampler": "native-sampler"})()
-    calls = []
-    monkeypatch.setattr(internals.llama_cpp, "llama_synchronize", lambda ctx: calls.append(("sync", ctx)))
-
-    monkeypatch.setattr(
-        internals.llama_cpp,
-        "llama_set_sampler",
-        lambda ctx, seq_id, ptr: calls.append(("set", ctx, seq_id, ptr)) or True,
-    )
-    assert context.set_sampler(2, sampler)
-    assert context._sampler_refs[2] is sampler
-    assert context.set_sampler(2, None)
-    assert 2 not in context._sampler_refs
-    assert calls == [("sync", "native-context"), ("set", "native-context", 2, "native-sampler"),
-                     ("sync", "native-context"), ("set", "native-context", 2, None)]
-
-    results = {
-        "llama_get_sampled_probs_ith": object(),
-        "llama_get_sampled_logits_ith": object(),
-        "llama_get_sampled_candidates_ith": object(),
-        "llama_get_sampled_token_ith": 17,
-        "llama_get_sampled_probs_count_ith": 3,
-        "llama_get_sampled_logits_count_ith": 4,
-        "llama_get_sampled_candidates_count_ith": 5,
-    }
-    for name, result in results.items():
-        monkeypatch.setattr(internals.llama_cpp, name,
-                            lambda ctx, index, result=result, name=name: calls.append((name, ctx, index)) or result)
-        assert getattr(context, name.removeprefix("llama_"))(-1) == result
-        assert calls[-1] == (name, "native-context", -1)
-
-    perf = llama_cpp_lib.llama_perf_context_data()
-    perf.n_eval = 9
-    monkeypatch.setattr(internals.llama_cpp, "llama_perf_context", lambda ctx: perf)
-    assert context.perf_context().n_eval == 9
-    for action, method in (("print", "print_timings"), ("reset", "reset_timings")):
-        monkeypatch.setattr(internals.llama_cpp, f"llama_perf_context_{action}",
-                            lambda ctx, action=action: calls.append((f"perf-{action}", ctx)))
-        getattr(context, method)()
-        assert calls[-1] == (f"perf-{action}", "native-context")
-    context.ctx = None
-
-
-@pytest.mark.parametrize("failure", ["sync", "native", "rejected"])
-def test_sampler_change_failure_preserves_owner(monkeypatch, failure):
-    context = object.__new__(internals.LlamaContext)
-    context.ctx = 123
-    owner = SimpleNamespace(sampler=456)
-    context._sampler_refs = {0: owner}
-    sync = Mock(side_effect=RuntimeError("sync") if failure == "sync" else None)
-    change = Mock(side_effect=RuntimeError("native") if failure == "native" else None, return_value=False)
-    monkeypatch.setattr(internals.llama_cpp, "llama_synchronize", sync)
-    monkeypatch.setattr(internals.llama_cpp, "llama_set_sampler", change)
-    try:
-        if failure == "rejected":
-            assert context.set_sampler(0, None) is False
-        else:
-            with pytest.raises(RuntimeError, match=failure):
-                context.set_sampler(0, None)
-        assert context._sampler_refs[0] is owner
-        if failure == "sync":
-            change.assert_not_called()
-    finally:
-        context.ctx = None
-
-
-@pytest.mark.parametrize("failure", [None, "detach", "rejected", "batch", "context", "sampler"])
-def test_draft_cleanup_keeps_sampler_until_context_close(failure):
+@pytest.mark.parametrize("failure", [None, "build", "attach", "rejected", "detach", "detach-rejected", "batch", "context", "sampler"])
+def test_backend_sampler_lifecycle_releases_resources_in_order(failure):
     events = []
     engine = object.__new__(LlamaMTPDecoding)
+    engine.config = SimpleNamespace(draft_backend_sampling=True)
+    engine._backend_sampler, engine._backend_sampling = None, False
 
-    def close(name):
+    def action(name):
         events.append(name)
         if name == failure:
             raise RuntimeError(name)
+        return failure != name + "-rejected"
 
-    def detach(*args):
-        close("detach")
-        return failure != "rejected"
-
-    engine._backend_sampler = SimpleNamespace(close=lambda: close("sampler"))
-    engine._backend_sampling = True
-    engine.batch = SimpleNamespace(close=lambda: close("batch"))
-    engine.draft_context = SimpleNamespace(set_sampler=detach, close=lambda: close("context"))
-    engine.draft_model = SimpleNamespace(close=lambda: close("model"))
+    sampler = SimpleNamespace(add_top_k=lambda _: action("build"), close=lambda: action("sampler"))
+    engine.batch = SimpleNamespace(close=lambda: action("batch"))
+    engine.draft_model = SimpleNamespace(close=lambda: action("model"))
+    engine.draft_context = SimpleNamespace(
+        set_sampler=lambda seq, value: action("detach" if value is None else "attach") and failure != "rejected",
+        close=lambda: action("context"),
+    )
+    with pytest.raises(RuntimeError, match=failure) if failure in ("build", "attach") else nullcontext():
+        engine._enable_backend_sampling(SimpleNamespace(LlamaSampler=lambda: sampler))
+    assert engine._backend_sampling == (failure not in ("build", "attach", "rejected"))
+    setup = ["build"] + ([] if failure == "build" else ["attach"])
+    expected = (setup + ["sampler", "batch", "context", "model"] if failure == "rejected"
+                else setup + ["detach", "batch", "context", "sampler", "model"])
     errors = []
     engine._close_draft_resources(errors, batch_names=("batch",), close_model=True)
-    assert events == ["detach", "batch", "context", "sampler", "model"]
-    assert len(errors) == int(failure is not None)
+    assert events == expected
+    assert len(errors) == int(failure in ("detach", "detach-rejected", "batch", "context", "sampler"))
     assert engine._backend_sampler is engine.batch is engine.draft_context is engine.draft_model is None
     engine._close_draft_resources(errors, batch_names=("batch",), close_model=True)
-    assert len(events) == 5
+    assert events == expected  # Repeated cleanup must not free anything twice.
 
 
 def test_ngram_map_lifecycle_and_acceptance_feedback():
@@ -266,6 +203,7 @@ class _FakeCheckpointContext:
         self.removals = []
         self.get_flags = []
         self.set_flags = []
+        self.synchronize = Mock()
 
     def memory_seq_pos_max(self, seq_id):
         assert seq_id == 0
@@ -525,8 +463,12 @@ def test_draft_checkpoint_rejects_invalidated_objects(engine_class, invalidate):
     if invalidate == "capture":
         engine.checkpoint()
     elif invalidate == "clear":
-        engine.draft_context.memory_clear = lambda data: None
+        events = []
+        engine.draft_context.synchronize.side_effect = lambda: events.append("sync")
+        engine.draft_context.memory_clear = lambda data: events.append("clear")
+        engine._backend_sampler = SimpleNamespace(reset=lambda: events.append("sampler-reset"))
         engine.clear()
+        assert events == ["sync", "clear", "sampler-reset"]
     else:
         engine.draft_context.memory_seq_rm = lambda *args: False
         with pytest.raises(RuntimeError, match="rollback failed"):
@@ -1057,7 +999,8 @@ def test_mtp_probability_cutoff_uses_suppressed_distribution_and_restores(p_min,
 
 
 @pytest.mark.parametrize("external", [False, True], ids=["internal-head", "sidecar"])
-def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, external):
+@pytest.mark.parametrize("fail", [False, True], ids=["ready", "late-failure"])
+def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, external, fail):
     def model(tokens):
         return SimpleNamespace(suppress_tokens=Mock(return_value=tokens), n_embd_out=lambda: 2,
                                n_vocab=lambda: 32, n_layer_nextn=lambda: 1,
@@ -1068,19 +1011,24 @@ def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, exte
     context = SimpleNamespace(n_batch=lambda: 8, get_ctx_other=lambda: None,
                               set_embeddings_nextn=Mock(), close=Mock())
     target_context = SimpleNamespace(ctx=ctypes.c_void_p(1), set_embeddings_nextn=Mock())
+    if fail:
+        context.set_embeddings_nextn.side_effect = RuntimeError("nextn setup")
     monkeypatch.setattr(LlamaMTPDecoding, "_load_draft_model", lambda *args, **kwargs: sidecar)
     monkeypatch.setattr(LlamaMTPDecoding, "_build_draft_context_params", lambda *args: params)
     monkeypatch.setattr(LlamaMTPDecoding, "_enable_backend_sampling", lambda *args: None)
     monkeypatch.setattr(internals, "LlamaContext", lambda **kwargs: context)
-    monkeypatch.setattr(internals, "LlamaBatch", lambda **kwargs: SimpleNamespace(close=Mock()))
-    with closing(LlamaMTPDecoding(
-        SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_model_path="mtp.gguf" if external else None),
-        target_model=target_model, target_context=target_context,
-        model_params=None, context_params=params, verbose=False,
-    )) as engine:
-        assert engine._suppressed_tokens == ((31,) if external else (30,))
-        (sidecar if external else target_model).suppress_tokens.assert_called_once_with()
-        (target_model if external else sidecar).suppress_tokens.assert_not_called()
+    batch = SimpleNamespace(close=Mock())
+    monkeypatch.setattr(internals, "LlamaBatch", lambda **kwargs: batch)
+    with pytest.raises(RuntimeError, match="nextn setup") if fail else nullcontext():
+        with closing(LlamaMTPDecoding(
+            SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_model_path="mtp.gguf" if external else None),
+            target_model=target_model, target_context=target_context,
+            model_params=None, context_params=params, verbose=False,
+        )) as engine:
+            assert engine._suppressed_tokens == ((31,) if external else (30,))
+    (sidecar if external else target_model).suppress_tokens.assert_called_once_with()
+    (target_model if external else sidecar).suppress_tokens.assert_not_called()
+    batch.close.assert_called_once_with()
     target_model.close.assert_not_called()
     assert sidecar.close.call_count == int(external)
     context.close.assert_called_once_with()

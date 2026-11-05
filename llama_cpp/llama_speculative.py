@@ -1221,11 +1221,14 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         if not self.config.draft_backend_sampling:
             return
         backend_sampler = internals.LlamaSampler()
+        # Register ownership before setup so constructor failure cleanup handles
+        # both partially built chains and a failed native attachment.
+        self._backend_sampler = backend_sampler
         backend_sampler.add_top_k(10)
         if self.draft_context.set_sampler(0, backend_sampler):
-            self._backend_sampler = backend_sampler
             self._backend_sampling = True
         else:
+            self._backend_sampler = None
             backend_sampler.close()
 
     def _reset_backend_sampler(self) -> None:
@@ -1516,29 +1519,28 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             self.embedding_batch = None
 
             self._enable_backend_sampling(internals)
+            self.target_context.set_embeddings_nextn(True, masked=False)
+            self.draft_context.set_embeddings_nextn(True, masked=True)
+            self.pending_h = np.zeros(self.n_embd, dtype=np.float32)
+            self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+            self.verify_tokens: List[int] = []
+            self.verify_positions: List[int] = []
+            self.verify_embeddings: Optional[npt.NDArray[np.float32]] = None
+            self.verify_media_positions: Optional[Sequence[Any]] = None
+            self._use_native_draft_rollback = (
+                not (self.draft_model.is_recurrent() or self.draft_model.is_hybrid())
+                or self.draft_context.n_rs_seq() >= config.draft_n_max
+            )
+            self._pending_verification_checkpoint = None
+            self.reset_checkpoint_stats()
+
+            if self.verbose:
+                self._print_runtime_configuration(context_params)
         except BaseException:
             self._close_draft_resources(
                 [], batch_names=("batch",), close_model=self._owns_model
             )
             raise
-
-        self.target_context.set_embeddings_nextn(True, masked=False)
-        self.draft_context.set_embeddings_nextn(True, masked=True)
-        self.pending_h = np.zeros(self.n_embd, dtype=np.float32)
-        self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
-        self.verify_tokens: List[int] = []
-        self.verify_positions: List[int] = []
-        self.verify_embeddings: Optional[npt.NDArray[np.float32]] = None
-        self.verify_media_positions: Optional[Sequence[Any]] = None
-        self._use_native_draft_rollback = (
-            not (self.draft_model.is_recurrent() or self.draft_model.is_hybrid())
-            or self.draft_context.n_rs_seq() >= config.draft_n_max
-        )
-        self._pending_verification_checkpoint = None
-        self.reset_checkpoint_stats()
-
-        if self.verbose:
-            self._print_runtime_configuration(context_params)
 
     def _candidate(self, output_index: int) -> Tuple[int, float]:
         return super()._candidate(output_index, suppress_tokens=self._suppressed_tokens)
@@ -1780,6 +1782,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         if self._closed:
             return
         self._pending_verification_checkpoint = None
+        self.draft_context.synchronize()
         self.draft_context.memory_clear(True)
         self.pending_h.fill(0.0)
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
@@ -2922,6 +2925,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             (0, self.n_embd_enc), dtype=np.float32
         )
         if self.draft_context is not None:
+            self.draft_context.synchronize()
             self.draft_context.memory_clear(True)
         self._reset_backend_sampler()
 
