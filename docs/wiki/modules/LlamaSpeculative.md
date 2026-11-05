@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-11-04
+last_updated: 2026-11-06
 version_target: "latest"
 ---
 
@@ -246,7 +246,7 @@ Its shared responsibilities are:
 | Context parameters | Copy target defaults while forcing `embeddings=False` and unspecified pooling, then apply draft threads and KV types. |
 | Candidate selection | Prefer backend top-k candidate buffers; fall back to selecting from the top ten entries of the full CPU logits row. |
 | Native buffers | Copy transient ctypes embedding rows into owned NumPy arrays before another graph execution invalidates their pointers. |
-| Lifecycle | Retain ctypes arrays, detach samplers, and close batches, draft context, and an engine-owned model in a shutdown-safe, idempotent order. |
+| Lifecycle | Retain ctypes arrays, detach sampling, then close batches, draft context, sampler, and an engine-owned model in a shutdown-safe, idempotent order. |
 
 To add another model-backed algorithm, subclass `_LlamaModelDraftEngine`, call
 `_init_model_draft_engine()` before allocating native resources, load and
@@ -255,6 +255,12 @@ context from `_build_draft_context_params()`, and enable backend sampling only
 after `draft_context` exists. The subclass must still implement the
 `LlamaSpecEngine` request hooks and call `_close_draft_resources()` from an
 idempotent `close()`.
+
+`clear()` synchronizes draft work before clearing KV and resetting the backend
+sampler. If sampler detachment fails during close, its owner remains alive
+through native context destruction, which synchronizes pending work. Cleanup
+attempts every remaining resource before reporting an error. Sampler setup and
+MTP initialization failures also release partially initialized resources.
 
 Ownership is intentionally asymmetric: the target model and context are always
 borrowed from `Llama`; every concrete engine owns its draft context and batches;
@@ -312,8 +318,8 @@ important for large vocabularies.
    `rollback_verified()` or `restore()` to discard the rejected suffix while
    retaining the sampled token and accepted prefix.
 5. **Reset or close:** `clear()` removes request-local memory and sampler state;
-   `close()` additionally releases the draft batch/context and an externally
-   owned sidecar model.
+   `close()` additionally releases the draft batch/context, sampler, and an
+   engine-owned external sidecar model.
 
 ### Lower-level embedding processing
 

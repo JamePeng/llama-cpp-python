@@ -3,7 +3,7 @@ title: Llama Embedding
 module_name: llama_cpp.llama_embedding
 source_file: llama_cpp/llama_embedding.py
 class_name: LlamaEmbedding
-last_updated: 2026-10-14
+last_updated: 2026-11-06
 version_target: "latest"
 ---
 
@@ -40,7 +40,7 @@ or a generation prompt.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `model_path` | str | Required | Path to the GGUF model file. |
-| `n_ctx` | int | 0 | Text context window size (0 = model default). |
+| `n_ctx` | int | 0 | Requested total context capacity shared by active sequences (0 = model default). Query `n_ctx()` for the resolved size. |
 | `n_batch` | int | 512 | Maximum prompt processing batch size. |
 | `n_ubatch` | int | 512 | Physical batch size. |
 | `n_seq_max` | int | 1 (inherited) | Maximum number of independent sequence IDs available in a decode batch. Increase this for parallel embedding batches. |
@@ -62,8 +62,11 @@ or a generation prompt.
 
 ### Parallel Batch Capacity
 
-`n_batch`, `n_ubatch`, and `n_seq_max` control different limits:
+`n_ctx`, `n_batch`, `n_ubatch`, and `n_seq_max` control different limits:
 
+- `n_ctx()`: total token capacity shared by active sequences. The subclass
+  forces unified KV, so `n_ctx_seq()` equals this total, rather than dividing it
+  by `n_seq_max`.
 - `n_batch`: maximum number of input tokens in a logical decode batch.
 - `n_ubatch`: physical token batch size used by llama.cpp.
 - `n_seq_max`: number of independent sequence IDs that may coexist in a decode
@@ -81,8 +84,9 @@ model = LlamaEmbedding(
 )
 ```
 
-If the configuration is too small, the error includes the current capacity,
-valid ID range, and required minimum:
+`embed()` assigns sequence IDs and flushes batches automatically. In custom
+low-level batch code, an out-of-range sequence ID raises an error showing the
+configured capacity, valid ID range, and required minimum:
 
 ```text
 LlamaBatch.add_sequence: seq_id=1 exceeds the configured sequence capacity
@@ -92,10 +96,15 @@ Llama or LlamaEmbedding with n_seq_max>=2 ...
 
 `n_seq_max` is not the total number of documents passed to `embed()`; it is the
 number that can be active in one decode batch. Increase it carefully because
-larger values may require more context resources.
+larger values may require more context resources. With unified KV, increasing
+`n_seq_max` does not multiply the token capacity: `n_ctx=4096, n_seq_max=8`
+shares 4096 token slots among up to eight active inputs. The batcher may decode
+fewer inputs together when their token lengths reach the batch or context limit.
 For non-causal models, each text input must also fit `n_ubatch`: attention needs
 the whole sequence in one physical batch. `embed()` applies truncation against
-`min(n_batch, n_ubatch)` for these models; `truncate=False` rejects oversized inputs.
+`min(n_ctx_seq(), n_batch, n_ubatch)` for these models; `truncate=False` rejects
+oversized inputs before decoding them. Combined batch tokens are also bounded
+by `n_ctx()`. See [context capacity](../core/Llama.md#n_ctx-and-n_ctx_seq).
 
 ## Core Methods
 
@@ -161,7 +170,7 @@ Closed or uninitialized objects, unsupported pooling and unsupported
 media raise before encoding or decoding. Images and audio are detected from
 their encoded bytes. Video bytes are currently rejected by this embedding path.
 
-The complete input must fit `n_ctx`, `n_batch` and `n_ubatch`, including media
+The complete input must fit `n_ctx_seq()`, `n_batch` and `n_ubatch`, including media
 feature tokens. There is no automatic truncation or splitting of a multimodal
 embedding request. MTMD may batch compatible media chunks separately during
 encoding; this does not relax the decoder microbatch limit.

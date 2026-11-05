@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-10-18
+last_updated: 2026-11-06
 version_target: "latest"
 ---
 
@@ -117,11 +117,11 @@ mapping:
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `seed` | `int` | `LLAMA_DEFAULT_SEED` | RNG seed used by the model. `LLAMA_DEFAULT_SEED` requests a random seed. |
-| `n_ctx` | `int` | `512` | Text context size. Set to `0` to load from model metadata. |
+| `n_ctx` | `int` | `512` | Requested total native context capacity. Set to `0` to load from model metadata. Use `n_ctx_seq()` for the resolved single-sequence window. |
 | `n_keep` | `int` | `256` | Preferred number of leading tokens to preserve during automatic context shifting. |
 | `n_batch` | `int` | `2048` | Maximum number of tokens in a logical prompt-processing batch. The effective value cannot exceed `n_ctx`. |
 | `n_ubatch` | `int` | `512` | Maximum number of tokens in a physical micro-batch processed by llama.cpp. |
-| `n_seq_max` | `int` | `1` | Maximum independent sequence states in one decode batch. Embedding calls split automatically at this limit; larger values enable more parallel sequences. |
+| `n_seq_max` | `int` | `1` | Capacity for independent sequence states. Non-unified KV partitions total context among these slots. Ordinary generation uses sequence 0; embedding calls split automatically at this limit. |
 | `n_rs_seq` | `int` | `0` | Experimental recurrent-state snapshots retained per sequence for rollback. `0` disables rollback snapshots. |
 | `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` uses the effective `n_batch`; encoder models also use `n_batch` regardless of this override. |
 | `n_outputs_max_per_seq` | `int` | `1` | Maximum outputs per sequence with an attached backend sampler. `0` uses the effective `n_outputs_max`; larger values are capped at that limit. |
@@ -151,7 +151,7 @@ mapping:
 | `no_perf` | `bool` | `False` | Disable native performance timing collection when `True`. |
 | `op_offload` | `Optional[bool]` | `None` | Whether supported host tensor operations may be offloaded to a device. `None` keeps llama.cpp's default. |
 | `swa_full` | `Optional[bool]` | `None` | Use a full-size sliding-window-attention cache. `None` keeps llama.cpp's default. |
-| `kv_unified` | `Optional[bool]` | `None` | Use a unified KV buffer for all sequences. `LlamaEmbedding` enables this automatically. |
+| `kv_unified` | `Optional[bool]` | `None` | Use a shared KV buffer for all sequences; otherwise total capacity is partitioned across `n_seq_max` slots. `None` preserves the native default. `LlamaEmbedding` forces `True`. |
 | `type_k` / `type_v` | `Optional[int]` | `None` | KV cache data types for keys and values. `None` uses llama.cpp defaults. |
 
 ### Advanced, Chat & Sampling Parameters
@@ -325,10 +325,46 @@ for token in model.generate(tokens, top_k=40, top_p=0.95, temp=0.2):
     print(model.detokenize([token]).decode('utf-8'), end="", flush=True)
 ```
 
+### `n_ctx()` and `n_ctx_seq()`
+
+`n_ctx()` returns the resolved total capacity, matching native `llama_n_ctx()`.
+`n_ctx_seq()` returns the single-sequence limit, matching `llama_n_ctx_seq()`.
+Generation budgets, context shifting, and multimodal capacity checks use
+`n_ctx_seq()`.
+
+With `kv_unified=False`, capacity is partitioned among `n_seq_max` slots. For
+example, `n_ctx=512, n_seq_max=2` resolves to 512 total and 256 per sequence;
+a 300-token completion prompt is rejected before decoding. With
+`kv_unified=True`, each sequence can use the total window, shared with other
+active sequences. Native padding can adjust both sizes, so query the initialized
+instance rather than assuming `n_ctx / n_seq_max` is the final limit.
+
+`n_seq_max` reserves sequence-state capacity, including distinct states for
+recurrent models. Ordinary `create_completion()` and `create_chat_completion()`
+use sequence 0: user/assistant turns in one conversation do not each require
+another sequence slot. Increasing this setting does not enable concurrent
+requests on the same instance. Keep `n_seq_max=1` for ordinary single-conversation
+generation unless another feature needs additional sequences.
+
+For an aligned `n_ctx=4096`, the KV modes resolve as follows:
+
+| `n_seq_max` | `kv_unified` | `n_ctx()` total | `n_ctx_seq()` per sequence |
+|---|---|---|---|
+| 1 | `False` | 4096 | 4096 |
+| 2 | `False` | 4096 | 2048 |
+| 4 | `False` | 4096 | 1024 |
+| 4 | `True` | 4096 | 4096, shared among active sequences |
+
+Unused slots do not enlarge sequence 0's window with non-unified KV. With unified
+KV, four sequences share 4096 token slots; they do not receive 4096 exclusive
+slots each. In this checkout, `kv_unified=None` keeps the native default of
+`False`; `LlamaEmbedding` forces `True`. Raising `n_seq_max` can increase sequence
+state and output-buffer costs, and does not by itself guarantee faster inference.
+
 ### `eval`
 
 Low-level method to ingest and evaluate a sequence of tokens. Used internally
-to update context memory and logits. When the token count exceeds `n_ctx`, it
+to update context memory and logits. When the token count exceeds `n_ctx_seq()`, it
 attempts **Context Shifting** by discarding older tokens while preserving up to
 `n_keep` leading tokens. It raises `RuntimeError` if the backend memory cannot
 be shifted or the incoming chunk cannot fit.
@@ -356,6 +392,10 @@ native KV/recurrent memory, the Python token cursor, cached output boundaries,
 hybrid checkpoints, and speculative-engine state. It does not unload model
 weights, reset sampling configuration, or clear a separately configured
 prompt-cache object.
+
+Reset synchronizes target work, clears the speculative engine (which waits for
+draft work before clearing its memory and resetting its sampler), then clears
+target memory. This prevents clearing shared KV while a draft still reads it.
 
 ### `save_state()` and `load_state(state)`
 
@@ -897,7 +937,7 @@ Generate raw embedding values for strings or pre-tokenized inputs.
 |---|---|---|---|
 | `input` | `Union[str, List[str], List[List[int]]]` | Required | A single string, a list of strings, or a list containing pre-tokenized token-ID lists. |
 | `normalize` | `Union[bool, int]` | `False` | `False` returns raw values, while `True` applies L2 normalization. Integer modes are listed below. Rank outputs are not normalized. |
-| `truncate` | `bool` | `True` | Truncate each input to the context/logical-batch limit, also bounded by `n_ubatch` for non-causal attention. If disabled, an input exceeding the effective batch limit raises `ValueError`. |
+| `truncate` | `bool` | `True` | Truncate each input to `min(n_ctx_seq(), n_ctx(), n_batch)`, also bounded by `n_ubatch` for non-causal attention. If disabled, exceeding any applicable limit raises `ValueError` before decoding that input. |
 | `separator` | `Optional[str]` | `None` | Split a single string into multiple independent inputs. When set, the result uses the batch return shape. |
 | `return_count` | `bool` | `False` | Return `(result, total_token_count)` instead of only the embedding result. |
 
@@ -971,13 +1011,17 @@ inputs sequentially. Increasing it allows more inputs to be decoded in
 parallel; for example, `n_seq_max=8` permits IDs `0` through `7` in one batch.
 `n_batch` limits logical input tokens, `n_ubatch` controls the physical token
 batch, and `n_seq_max` limits independent sequences.
+The batcher also limits combined input tokens to `n_ctx()` and each individual
+input to `n_ctx_seq()`; unified KV shares total capacity across inputs.
 
 `LlamaEmbedding` remains available as the specialized convenience class. It
 automatically enables embedding-oriented context options, defaults to L2
 normalization, provides additional output formats, and adds the `rank()` helper
 for formatting query/document pairs. Its
 [multimodal embedding API](../modules/LlamaEmbedding.md) accepts text/image/audio
-inputs with a matching MTMD projector and non-causal sequence pooling.
+inputs with a matching MTMD projector and MEAN, CLS, or LAST pooling. Causal
+models are supported when their media does not require chunk-local
+bidirectional attention.
 
 > **OpenAI compatibility:** use sequence pooling when calling
 > `create_embedding()` through an OpenAI-compatible client. Token-level pooling

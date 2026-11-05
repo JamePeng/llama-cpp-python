@@ -695,6 +695,20 @@ for the available hardware. Use `verbose=False` for
 quiet error-only native logging, or set `verbosity` from `0` to `5` for finer
 control; `verbosity` takes precedence when both are provided.
 
+`llm.n_ctx()` reports total native context capacity; `llm.n_ctx_seq()` reports
+the usable single-sequence window used by generation and multimodal checks.
+With `kv_unified=False`, total capacity is partitioned among `n_seq_max` slots.
+For example, `n_ctx=512, n_seq_max=2` gives each sequence 256 tokens.
+With `kv_unified=True`, sequences share the total capacity. Native alignment can
+adjust requested sizes; query these methods for the actual limits. See the
+[context API](docs/wiki/core/Llama.md#n_ctx-and-n_ctx_seq).
+
+`n_seq_max` sets the capacity for independent sequence states. Ordinary
+completion and chat use sequence 0, including all turns in one conversation;
+keep the default `n_seq_max=1` unless a workflow requires additional sequences.
+Increasing it with non-unified KV can reduce the window available to that
+conversation. It does not enable concurrent chat requests on one `Llama` instance.
+
 ### Loading a Local GGUF
 
 Pass `model_path` when the model is already available locally:
@@ -1182,7 +1196,7 @@ Keep the image, prompt, output budget and hardware settings identical when
 comparing modes.
 
 Each MTP image request rebuilds target and draft state together. The complete
-prompt must fit `n_ctx`, and media must fit without context shifting. Increase
+prompt must fit `llm.n_ctx_seq()`, and media must fit without context shifting. Increase
 `--n-ctx` or reduce `--image-max-tokens` if needed. See the
 [Qwen3.5 image-chat guide](docs/wiki/examples/vision/vision-qwen.md#mtp-image-chat)
 for PowerShell commands and recovery behavior.
@@ -2290,6 +2304,11 @@ print(f"Generated {len(embeddings)} vectors.")
 > the desired number of short documents per batch. The batcher flushes when
 > token or sequence capacity is reached; `n_seq_max=1` processes inputs
 > sequentially. Larger values can use more context resources.
+> `LlamaEmbedding` enables unified KV, so inputs in a batch share `llm.n_ctx()`.
+> Increasing `n_seq_max` permits more inputs per batch without multiplying
+> that token capacity; token and microbatch limits still apply.
+> Each input must also fit `llm.n_ctx_seq()` and the effective batch limit;
+> `truncate=False` raises `ValueError` for oversized inputs before decoding them.
 > `LLAMA_POOLING_TYPE_NONE` returns one vector per token, adding a token
 > dimension to each input's output; it does not return one pooled document vector.
 
@@ -2424,7 +2443,7 @@ with closing(LlamaEmbedding(
 ```
 
 Media is supplied as encoded file bytes; `parts` manages native markers.
-The full input, including media tokens, must fit `n_ctx`, `n_batch`, and
+The full input, including media tokens, must fit `llm.n_ctx_seq()`, `n_batch`, and
 `n_ubatch`. This API does not truncate or split oversized requests, and rejects
 video and NONE/RANK pooling. Each call resets generation state once execution
 starts. `create_embedding()` remains a text API.

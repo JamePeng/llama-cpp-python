@@ -2,7 +2,7 @@
 title: Llama Batch
 module_name: llama_cpp._internals
 source_file: llama_cpp/_internals.py
-last_updated: 2026-11-04
+last_updated: 2026-11-06
 version_target: "latest"
 ---
 
@@ -180,6 +180,13 @@ as `get_logits_ith()` synchronize; call `synchronize()` explicitly when measurin
 completed device execution. With backend sampling, `set_sampler()` success means
 attachment succeeded, and `get_sampled_token_ith()` may still return
 `LLAMA_TOKEN_NULL` when the backend did not select a token.
+
+`LlamaContext.set_sampler()` synchronizes before attaching, replacing, or
+detaching a sampler. The context retains the Python sampler while attached;
+do not explicitly close it until detached or the context is closed. Native
+rejection (`False`) also removes any previously attached sampler, and Python
+drops that reference. If synchronization or the native call raises, Python
+retains the old reference because completion is unknown.
 
 This standalone example requires a decoder GGUF model at `./model.gguf`:
 

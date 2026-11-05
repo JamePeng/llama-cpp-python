@@ -6,7 +6,7 @@ source_files:
   - llama_cpp/llama_embedding.py
   - llama_cpp/llama_multimodal.py
   - llama_cpp/_internals.py
-last_updated: 2026-10-14
+last_updated: 2026-11-06
 version_target: "latest"
 ---
 
@@ -449,7 +449,8 @@ implementation does not change the base class's raw-output default.
 
 | Parameter | Controls |
 |---|---|
-| `n_ctx` | Maximum context length available to an input sequence |
+| `n_ctx` | Requested total native context capacity; query `n_ctx()` for its resolved value |
+| `n_ctx_seq()` | Resolved capacity of one sequence; partitioned with non-unified KV, shared with unified KV |
 | `n_batch` | Maximum tokens in one logical decode batch |
 | `n_ubatch` | Physical token micro-batch size used by llama.cpp |
 | `n_seq_max` | Maximum independent sequences decoded together |
@@ -459,9 +460,22 @@ default `n_seq_max=1` is valid and processes inputs sequentially. Increasing it
 allows more independent sequences to be decoded together, but may use more
 context resources.
 
-Each individual tokenized sequence must fit the configured logical batch
-capacity. Choose `n_batch` large enough for the longest intended input and use
-`truncate=True` when truncation is acceptable.
+`n_seq_max` limits simultaneous sequence states, not the total document count
+or tokens per document. With `Llama(embeddings=True, kv_unified=False)`, raising
+it partitions the same total context into more, smaller sequence windows.
+`LlamaEmbedding` uses unified KV: more sequences share the same total token
+capacity. For example, `n_ctx=4096, n_seq_max=8` does not provide eight exclusive
+4096-token windows. Actual batching also depends on document lengths, `n_batch`,
+and `n_ubatch`; increasing sequence capacity alone does not guarantee a speedup.
+
+Each individual tokenized sequence must fit both `n_ctx_seq()` and the logical
+batch limit. Combined inputs in a batch must also fit `n_ctx()`; the batcher
+flushes when token or sequence capacity is reached. `LlamaEmbedding` forces
+unified KV, while `Llama(embeddings=True)` follows its configured KV mode.
+With `truncate=True`, inputs are shortened to the effective limit;
+`truncate=False` raises `ValueError` before decoding an oversized input.
+See [context capacity](../core/Llama.md#n_ctx-and-n_ctx_seq) for partitioning and
+native alignment.
 For non-causal models, each sequence must also fit `n_ubatch` so bidirectional
 attention sees the whole input. Text `embed()` can truncate to this limit;
 `embed_multimodal()` rejects oversized inputs without truncation.
