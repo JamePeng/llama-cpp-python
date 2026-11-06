@@ -1,0 +1,206 @@
+name: Build Wheels (CU132) for Linux
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_native:
+    name: Build native libraries cu132 linux
+    runs-on: ubuntu-22.04
+    container: nvidia/cuda:13.2.1-cudnn-devel-ubuntu22.04
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      backend_version: ${{ steps.version.outputs.backend_version }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["ubuntu-22.04"]
+        cuda: ["13.2.1"]
+        cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real;121-real"]
+
+    defaults:
+      run:
+        shell: bash
+
+    env:
+      CUDAVER: ${{ matrix.cuda }}
+      CUDAARCHVER: ${{ matrix.cudaarch }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 12
+
+    steps:
+      - name: Install dependencies
+        run: |
+          apt update
+          apt install -y \
+            build-essential \
+            ccache \
+            cmake \
+            curl \
+            git \
+            libgomp1 \
+            libjpeg-dev \
+            libssl-dev \
+            ninja-build
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install uv and Python 3.10
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.10"
+          activate-environment: true
+          enable-cache: true
+
+      - name: Show CUDA version
+        run: nvcc -V
+
+      - name: Build native libraries and carrier wheel
+        env:
+          LD_LIBRARY_PATH: "/usr/local/cuda/lib64:/usr/local/cuda/compat:/usr/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}"
+          VERBOSE: "1"
+          CUDA_HOME: "/usr/local/cuda"
+          CUDA_PATH: "/usr/local/cuda"
+          CUDA_TOOLKIT_ROOT_DIR: "/usr/local/cuda"
+        run: |
+          set -euo pipefail
+
+          echo "LD_LIBRARY_PATH=${LD_LIBRARY_PATH}"
+          find /usr/ -name 'libcuda.so.*' || true
+          find /usr/ -name 'libcudart.so.*' || true
+
+          # Build one CUDA wheel with dynamic GGML backends:
+          # - GGML_BACKEND_DL enables runtime-loadable backend shared libraries.
+          # - GGML_CPU_ALL_VARIANTS builds CPU variant backends when supported.
+          # - GGML_NATIVE=OFF avoids binding the wheel to the CI runner CPU.
+          CMAKE_ARGS_ARRAY=(
+            "-G Ninja"
+
+            # Disable non-wheel targets.
+            "-DLLAMA_BUILD_EXAMPLES=OFF"
+            "-DLLAMA_BUILD_TESTS=OFF"
+            "-DLLAMA_BUILD_TOOLS=OFF"
+            "-DLLAMA_BUILD_SERVER=OFF"
+            "-DLLAMA_BUILD_UI=OFF"
+            "-DLLAMA_USE_PREBUILT_UI=OFF"
+            "-DLLAMA_CURL=OFF"
+            "-DLLAMA_OPENSSL=ON"
+
+            # GGML dynamic backend layout.
+            "-DGGML_CPU=ON"
+            "-DGGML_CUDA=ON"
+            "-DGGML_RPC=ON"
+            "-DGGML_NATIVE=OFF"
+            "-DGGML_BACKEND_DL=ON"
+            "-DGGML_CPU_ALL_VARIANTS=ON"
+            "-DGGML_OPENMP=ON"
+
+            # CUDA backend.
+            "-DCMAKE_CUDA_ARCHITECTURES=${CUDAARCHVER}"
+            "-DCMAKE_CUDA_FLAGS=--diag-suppress=177,221,550"
+
+            # Build behavior.
+            "-DGGML_CCACHE=ON"
+          )
+
+          CMAKE_ARGS="${CMAKE_ARGS_ARRAY[*]}"
+          echo "CMAKE_ARGS=${CMAKE_ARGS}"
+
+          uv pip install --upgrade build setuptools wheel packaging
+          CMAKE_ARGS="${CMAKE_ARGS}" uv build --wheel
+
+      - name: Read package version
+        id: version
+        run: |
+          python .github/scripts/package_backend_wheel.py --version >> "$GITHUB_OUTPUT"
+          echo "backend_version=${{ matrix.cuda }}" >> "$GITHUB_OUTPUT"
+
+      - name: Record native build configuration
+        run: python .github/scripts/package_backend_wheel.py --write-manifest --seed-dir dist --backend cuda --backend-version ${{ matrix.cuda }}
+
+      - name: Share native build
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-cu132-linux
+          path: |
+            dist/*.whl
+            dist/native-build.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  package_wheels:
+    name: Package cu132 linux Python ${{ matrix.pyver }}
+    needs: build_native
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv and Python ${{ matrix.pyver }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
+
+      - name: Download native build
+        uses: actions/download-artifact@v7
+        with:
+          name: native-cu132-linux
+          path: native-wheel
+
+      - name: Package wheel without native compilation
+        run: |
+          uv pip install build
+          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version ${{ needs.build_native.outputs.backend_version }}
+
+      - name: Install wheel and print version information
+        run: python .github/scripts/package_backend_wheel.py --verify
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-cu132-linux-py${{ matrix.pyver }}
+          path: dist/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish cu132 linux wheels
+    needs: [build_native, package_wheels]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download packaged wheels
+        uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-cu132-linux-py*
+          merge-multiple: true
+          path: dist
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.whl
+          fail_on_unmatched_files: true
+          tag_name: v${{ needs.build_native.outputs.version }}-cu132-linux-${{ steps.date.outputs.date }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

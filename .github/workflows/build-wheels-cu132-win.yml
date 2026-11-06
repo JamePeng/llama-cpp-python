@@ -1,0 +1,232 @@
+name: Build Wheels (CU132) for Windows
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build_native:
+    name: Build native libraries cu132 win
+    runs-on: ${{ matrix.os }}
+
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      backend_version: ${{ steps.version.outputs.backend_version }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: ["windows-2022"]
+        cuda: ["13.2.1"]
+        cudaarch: ["75-real;80-real;86-real;87-real;89-real;90-real;100-real;120-real;121-real"]
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      CUDAVER: ${{ matrix.cuda }}
+      CUDAARCHVER: ${{ matrix.cudaarch }}
+      CMAKE_BUILD_PARALLEL_LEVEL: 12
+
+    steps:
+      - name: Add MSBuild to PATH
+        uses: microsoft/setup-msbuild@v3
+        with:
+          msbuild-architecture: x64
+
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          submodules: recursive
+
+      - name: Install CUDA ${{ matrix.cuda }}
+        uses: Jimver/cuda-toolkit@v0.2.36
+        id: cuda-toolkit
+        with:
+          cuda: ${{ matrix.cuda }}
+          use-github-cache: false
+
+      - name: Install uv and Python 3.10
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.10"
+          activate-environment: true
+          enable-cache: true
+
+      - name: Install dependencies
+        run: |
+          git config --system core.longpaths true
+          uv pip install --upgrade build setuptools wheel packaging
+
+      - name: Setup MSVC environment for nvcc
+        shell: cmd
+        run: |
+          call "C:\Program Files\Microsoft Visual Studio\2022\Enterprise\VC\Auxiliary\Build\vcvarsall.bat" x64
+          echo PATH=%PATH%>>%GITHUB_ENV%
+          echo INCLUDE=%INCLUDE%>>%GITHUB_ENV%
+          echo LIB=%LIB%>>%GITHUB_ENV%
+          echo LIBPATH=%LIBPATH%>>%GITHUB_ENV%
+
+      - name: Build native libraries and carrier wheel
+        run: |
+          $env:CUDA_HOME = $env:CUDA_PATH
+          $env:CUDA_TOOLKIT_ROOT_DIR = $env:CUDA_PATH
+          $env:VERBOSE = '1'
+
+          # Force CMake to use Ninja + LLVM/Clang instead of the default
+          # Visual Studio generator. MSVC skips several GGML CPU all-variant
+          # backends, such as ivybridge, piledriver, cooperlake, zen4, and
+          # sapphirerapids.
+          $env:CMAKE_GENERATOR = 'Ninja Multi-Config'
+
+          $toolchainCandidates = @(
+            (Join-Path $env:GITHUB_WORKSPACE "vendor\llama.cpp\cmake\x64-windows-llvm.cmake"),
+            (Join-Path $env:GITHUB_WORKSPACE "cmake\x64-windows-llvm.cmake")
+          )
+
+          $toolchainFile = $toolchainCandidates |
+            Where-Object { Test-Path $_ } |
+            Select-Object -First 1
+
+          if (!$toolchainFile) {
+            Write-Error "Toolchain file not found. Checked: $($toolchainCandidates -join ', ')"
+            exit 1
+          }
+
+          $toolchainFile = $toolchainFile.Replace('\', '/')
+          Write-Output "Using toolchain file: $toolchainFile"
+
+          # Build one CUDA wheel with dynamic GGML backends:
+          # - GGML_BACKEND_DL enables runtime-loadable backend DLLs.
+          # - GGML_CPU_ALL_VARIANTS builds CPU variant DLLs such as ggml-cpu-x64,
+          #   ggml-cpu-haswell, ggml-cpu-alderlake, etc.
+          # - GGML_NATIVE=OFF avoids binding the wheel to the runner CPU.
+
+          # Suppress CUDA compiler warnings
+          $cudaDiagSuppress = '--diag-suppress=177,221,550'
+
+          $cmakeArgs = @(
+            # Windows toolchain / common runtime
+            '-DCMAKE_TOOLCHAIN_FILE=vendor/llama.cpp/cmake/x64-windows-llvm.cmake'
+            '-DLLAMA_BUILD_BORINGSSL=ON'
+
+            # Disable non-wheel targets
+            '-DLLAMA_BUILD_EXAMPLES=OFF'
+            '-DLLAMA_BUILD_TESTS=OFF'
+            '-DLLAMA_BUILD_TOOLS=OFF'
+            '-DLLAMA_BUILD_SERVER=OFF'
+            '-DLLAMA_BUILD_UI=OFF'
+            '-DLLAMA_USE_PREBUILT_UI=OFF'
+            '-DLLAMA_CURL=OFF'
+
+            # GGML dynamic backend layout
+            '-DGGML_CPU=ON'
+            '-DGGML_CUDA=ON'
+            '-DGGML_RPC=ON'
+            '-DGGML_NATIVE=OFF'
+            '-DGGML_BACKEND_DL=ON'
+            '-DGGML_CPU_ALL_VARIANTS=ON'
+            '-DGGML_OPENMP=ON'
+
+            # CUDA backend
+            "-DCMAKE_CUDA_ARCHITECTURES=$env:CUDAARCHVER"
+            "-DCMAKE_CUDA_FLAGS=$cudaDiagSuppress"
+
+          )
+
+          $env:CMAKE_ARGS = $cmakeArgs -join ' '
+          Write-Output "CMAKE_ARGS=$env:CMAKE_ARGS"
+
+          python -m build --wheel
+
+      - name: Read package version
+        id: version
+        run: |
+          python .github/scripts/package_backend_wheel.py --version >> $env:GITHUB_OUTPUT
+          echo "backend_version=${{ matrix.cuda }}" >> $env:GITHUB_OUTPUT
+
+      - name: Record native build configuration
+        run: python .github/scripts/package_backend_wheel.py --write-manifest --seed-dir dist --backend cuda --backend-version ${{ matrix.cuda }}
+
+      - name: Share native build
+        uses: actions/upload-artifact@v6
+        with:
+          name: native-cu132-win
+          path: |
+            dist/*.whl
+            dist/native-build.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  package_wheels:
+    name: Package cu132 win Python ${{ matrix.pyver }}
+    needs: build_native
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        pyver: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv and Python ${{ matrix.pyver }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: ${{ matrix.pyver }}
+          activate-environment: true
+          enable-cache: true
+
+      - name: Download native build
+        uses: actions/download-artifact@v7
+        with:
+          name: native-cu132-win
+          path: native-wheel
+
+      - name: Package wheel without native compilation
+        run: |
+          uv pip install build
+          python .github/scripts/package_backend_wheel.py --backend cuda --backend-version ${{ needs.build_native.outputs.backend_version }}
+
+      - name: Install wheel and print version information
+        run: python .github/scripts/package_backend_wheel.py --verify
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v6
+        with:
+          name: wheels-cu132-win-py${{ matrix.pyver }}
+          path: dist/*.whl
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    name: Publish cu132 win wheels
+    needs: [build_native, package_wheels]
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Download packaged wheels
+        uses: actions/download-artifact@v7
+        with:
+          pattern: wheels-cu132-win-py*
+          merge-multiple: true
+          path: dist
+
+      - name: Get current date
+        id: date
+        run: echo "date=$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Create release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: dist/*.whl
+          fail_on_unmatched_files: true
+          tag_name: v${{ needs.build_native.outputs.version }}-cu132-win-${{ steps.date.outputs.date }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
