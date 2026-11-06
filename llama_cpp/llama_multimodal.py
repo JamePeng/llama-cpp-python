@@ -1166,7 +1166,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         Soprano uses token sampling and a fixed English voice; omit language
         and speaker_reference, and allow at least two generated frames.
         Chatterbox uses token sampling and a reference or predefined voice.
-        Its multilingual variant requires n_seq_max >= 2 and kv_unified=True.
+        Its multilingual variant requires a CFG-enabled backbone,
+        n_seq_max >= 2 and kv_unified=True; sequence capacity is not changed.
         Drama 3 samples inside the helper; only seed affects sampling. Put
         speaker tags in text and omit language, voice and speaker_reference.
         References accept encoded audio bytes, local paths, URLs or data URIs.
@@ -1246,8 +1247,17 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     raise ValueError("Chatterbox requires speaker_reference or a predefined voice")
                 # The multilingual helper pairs conditioned/unconditioned CFG sequences.
                 multilingual = mtmd.mtmd_gen_audio_read_tensor(self.mtmd_ctx, b"a.gen.t3.text_pos_emb", None, 0) > 0
-                if multilingual and (llama._ctx.n_seq_max() < 2 or not llama.context_params.kv_unified):
-                    raise ValueError("Chatterbox multilingual requires Llama(n_seq_max=2, kv_unified=True)")
+                if multilingual:
+                    if not llama._model.classifier_free_guidance():
+                        raise ValueError(
+                            "Chatterbox multilingual requires a backbone GGUF with "
+                            "<architecture>.classifier_free_guidance=true. Reconvert the "
+                            "backbone with the current vendor Chatterbox converter and "
+                            "use matching multilingual projector weights."
+                        )
+                    # Capacity is already physical: seq_id=0 pairs with n_seq_max // 2.
+                    if llama._ctx.n_seq_max() < 2 or not llama.context_params.kv_unified:
+                        raise ValueError("Chatterbox multilingual requires Llama(n_seq_max=2, kv_unified=True)")
             if is_pocket and language is not None:
                 raise ValueError("Pocket TTS language is determined by its weights")
             if is_soprano:

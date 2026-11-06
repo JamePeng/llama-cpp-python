@@ -2027,6 +2027,11 @@ IDs are not supported. The FA option controls mmproj independently of the backbo
 For Chatterbox, supply a reference or use a voice included in the weights.
 Omitting both selects the first predefined voice. Multilingual V3 requires
 `Llama(n_seq_max=2, kv_unified=True)` for CFG and accepts `language="fr"`, for example.
+The backbone GGUF must declare `<architecture>.classifier_free_guidance=true`;
+reconvert older backbones with the current vendor converter if this flag is
+missing. Python validates the metadata and paired capacity without changing
+`n_seq_max`: the value `2` already includes both CFG branches. Turbo does not
+require this flag or paired sequences.
 See the [vendor conversion guide](vendor/llama.cpp/tools/tts/README.md#chatterbox).
 
 Drama 3 uses helper-managed sampling and 44.1 kHz audio. Put `<|speaker:0|>`

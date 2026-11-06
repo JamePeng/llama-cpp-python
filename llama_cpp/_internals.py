@@ -126,6 +126,12 @@ class LlamaModel:
     def n_ctx_train(self) -> int:
         return llama_cpp.llama_model_n_ctx_train(self.model)
 
+    def classifier_free_guidance(self) -> bool:
+        """Return the native model's CFG metadata flag without changing capacity."""
+        if self.model is None:
+            raise RuntimeError("Cannot query classifier-free guidance on a closed model")
+        return llama_cpp.llama_model_classifier_free_guidance(self.model)
+
     def n_cls_out(self) -> int:
         return llama_cpp.llama_model_n_cls_out(self.model)
 

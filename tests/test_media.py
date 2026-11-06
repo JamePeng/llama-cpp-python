@@ -1288,6 +1288,7 @@ def audio_pipeline(tmp_path, monkeypatch):
     sampler_factory = Mock(return_value=sampler)
     monkeypatch.setattr(generator, "_create_audio_sampler", sampler_factory)
     llama = SimpleNamespace(
+        _model=SimpleNamespace(classifier_free_guidance=Mock(return_value=True)),
         _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64, n_seq_max=lambda: 2),
         context_params=SimpleNamespace(embeddings=True, kv_unified=True),
         _abort_event=threading.Event(), _native_abort_flag=ctypes.c_bool(False),
@@ -1319,6 +1320,7 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
     assert factory.return_value.accept.call_count == 6
     assert factory.return_value.close.call_count == 2
     assert backend.mtmd_helper_gen_audio_reset.call_count == 2
+    llama._model.classifier_free_guidance.assert_not_called()
     backend.mtmd_helper_gen_audio_init.assert_called_once()
     generator.close()
     backend.mtmd_helper_gen_audio_free.assert_called_once_with(456)
@@ -1331,6 +1333,7 @@ def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames):
     options = {"speaker_reference": b"RIFF0000WAVE"} if kind == 2 else {}
     result = generator.create_speech(llama=llama, text="hello", max_frames=frames, **options)
     assert result.finish_reason == "length"
+    llama._model.classifier_free_guidance.assert_not_called()
     assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100}[kind]
     assert state.tokens == ([42, 42] if kind == 3 else [-1])
     if kind != 3:
@@ -1411,25 +1414,38 @@ def test_tts_pocket_predefined_voice(audio_pipeline):
     assert backend.mtmd_bitmap_free.call_count == 2
 
 
-@pytest.mark.parametrize("multilingual,sequences,unified,valid", [
-    (False, 1, False, True), (True, 1, True, False),
-    (True, 2, False, False), (True, 2, True, True),
+@pytest.mark.parametrize("multilingual,cfg,sequences,unified,error", [
+    (False, False, 1, False, None),
+    (True, False, 2, True, "classifier_free_guidance=true"),
+    (True, None, 2, True, "missing CFG query"),
+    (True, True, 1, True, "n_seq_max=2, kv_unified=True"),
+    (True, True, 2, False, "n_seq_max=2, kv_unified=True"),
+    (True, True, 2, True, None), (True, True, 4, True, None),
 ])
-def test_tts_chatterbox_cfg_and_reference(audio_pipeline, multilingual, sequences, unified, valid):
+def test_tts_chatterbox_cfg_and_reference(audio_pipeline, multilingual, cfg, sequences, unified, error):
     generator, llama, backend, state, _, _ = audio_pipeline
     native = importlib.import_module("llama_cpp.mtmd_cpp")
     state.kind, state.multilingual = 5, multilingual
     llama._ctx.n_seq_max = lambda: sequences
+    llama.context_params.n_seq_max = sequences
     llama.context_params.kv_unified = unified
+    query = llama._model.classifier_free_guidance
+    query.return_value = cfg
+    if cfg is None:
+        query.side_effect = RuntimeError("missing CFG query")
     generator.capabilities = native.mtmd_helper_cap(audio_gen=True, audio_gen_spk_ref=False)
-    if valid:
-        assert generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE").finish_reason == "stop"
+    if error is None:
+        for _ in range(2):
+            assert generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE").finish_reason == "stop"
         assert state.speaker == 789
-        backend.mtmd_bitmap_free.assert_called_once_with(789)
+        assert backend.mtmd_bitmap_free.call_count == 2
     else:
-        with pytest.raises(ValueError, match="n_seq_max=2, kv_unified=True"):
+        with pytest.raises((ValueError, RuntimeError), match=error):
             generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE")
         backend.mtmd_helper_gen_audio_init.assert_not_called()
+    assert query.call_count == (0 if not multilingual else 2 if error is None else 1)
+    assert llama._ctx.n_seq_max() == llama.context_params.n_seq_max == sequences
+    assert llama.context_params.kv_unified is unified
 
 
 @pytest.mark.parametrize("supports_reference", [False, True])

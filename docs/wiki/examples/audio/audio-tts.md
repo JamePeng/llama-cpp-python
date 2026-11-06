@@ -1,7 +1,8 @@
 # Speech synthesis with MTMD
 
 `MTMDAudioGenerator` provides experimental, non-streaming speech synthesis using
-the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS and Soprano
+the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS,
+Soprano, Chatterbox and Drama 3
 backbones with matching audio generation mmproj files. Audio-input models such
 as Qwen3-ASR are not TTS models.
 
@@ -62,6 +63,18 @@ Chatterbox Turbo (English) and Multilingual V3 also use `MTMDAudioGenerator`.
 Pass `speaker_reference` or `voice="default"`; omitting both selects the first
 voice included in the weights. Multilingual V3 requires
 `Llama(n_seq_max=2, kv_unified=True)` and accepts language tags such as `fr`.
+The backbone GGUF must also contain `<architecture>.classifier_free_guidance=true`.
+Python queries this flag before initializing the helper; a missing or false
+flag raises `ValueError` with conversion guidance. Reconvert older backbones
+using the current vendor Chatterbox converter and use matching projector weights.
+The loaded llama library must expose `llama_model_classifier_free_guidance`;
+rebuild the native library if this optional extension is unavailable.
+
+`n_seq_max` is the physical sequence capacity: `2` already reserves the
+conditioned and unconditional branches. The helper pairs sequence 0 with
+`n_seq_max // 2`; Python validates the capacity and unified KV setting without
+doubling or otherwise modifying them. Turbo does not require the metadata
+flag or paired sequences. These checks do not apply to other TTS pipelines.
 The helper manages both CFG branches and decodes the complete audio at the end.
 See the [conversion guide](../../../../vendor/llama.cpp/tools/tts/README.md#chatterbox).
 

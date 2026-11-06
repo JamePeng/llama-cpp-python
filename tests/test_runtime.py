@@ -146,12 +146,13 @@ def test_ggml_flash_attn_rows_and_comm_callbacks():
         free(ctx)
 
 
-def test_device_feature_extension_signatures():
+def test_optional_model_and_device_extension_signatures():
     lib = internals.llama_cpp
     signatures = {
         "llama_set_embeddings_layer_inp_dev": ([lib.llama_context_p_ctypes, ctypes.c_bool], None),
         "llama_supports_embd_row": ([lib.llama_context_p_ctypes], ctypes.c_bool),
         "llama_batch_ext_add_embd_row": ([lib.llama_batch_ext_p_ctypes, lib.llama_seq_id, ctypes.c_int32], ctypes.c_int32),
+        "llama_model_classifier_free_guidance": ([lib.llama_model_p_ctypes], ctypes.c_bool),
     }
     tree = ast.parse(Path(lib.__file__).read_text(encoding="utf-8"))
     declarations = ast.Module(body=[node for node in tree.body
@@ -1365,6 +1366,8 @@ def vocabulary_model():
 def test_model_extensions_with_vocabulary_only_model(vocabulary_model):
     model = vocabulary_model._model.model
     assert llama_cpp.llama_model_n_tokens_delay(model) == 0
+    if not getattr(llama_cpp.llama_model_classifier_free_guidance, "__ctypes_optional__", False):
+        assert vocabulary_model._model.classifier_free_guidance() is False
     llama_cpp.llama_model_set_attn_rot(model, False)
     llama_cpp.llama_model_set_attn_rot(model, True)
     llama_cpp.llama_model_set_attn_rot(model, False)

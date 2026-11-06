@@ -6288,3 +6288,21 @@ def llama_model_get_tok_embd_rows(
 def llama_model_n_tokens_delay(model: llama_model_p) -> int:
     """Return realtime audio output delay in tokens, or 0 when not applicable."""
     ...
+
+
+# // each sequence is paired with an unconditional one at n_seq_max / 2 + seq_id, in a unified KV cache
+# LLAMA_API bool llama_model_classifier_free_guidance(const struct llama_model * model);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_classifier_free_guidance",
+        "?llama_model_classifier_free_guidance@@YA_NPEBUllama_model@@@Z",
+        "__Z36llama_model_classifier_free_guidancePK11llama_model",
+        "_Z36llama_model_classifier_free_guidancePK11llama_model",
+    ],
+    [llama_model_p_ctypes],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_model_classifier_free_guidance(model: llama_model_p) -> bool:
+    """Return whether model metadata requires classifier-free guidance."""
+    ...

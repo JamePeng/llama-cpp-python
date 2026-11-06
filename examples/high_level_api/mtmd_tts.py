@@ -66,7 +66,7 @@ def main():
     voices.add_argument("--voice", help="Predefined Pocket TTS or Chatterbox voice name")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
     parser.add_argument("--language", help="Qwen language or Chatterbox Multilingual tag; omit for Pocket and Soprano")
-    parser.add_argument("--cfg", action="store_true", help="Enable paired sequences for Chatterbox Multilingual")
+    parser.add_argument("--cfg", action="store_true", help="Reserve two total sequences with unified KV for a CFG-enabled Chatterbox Multilingual backbone")
     parser.add_argument("--format", choices=("wav", "pcm_f32"), default="wav")
     parser.add_argument("--output", help="Output path; multiple requests add a numbered suffix")
     parser.add_argument("--max-frames", type=int, default=512)
