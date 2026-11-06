@@ -7,6 +7,111 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] Chatterbox & Drama 3 TTS, Faster Speculative Decoding, and Native API Alignment & Fixes
+
+- perf(speculative): reduce Gemma4 shared-KV MTP prefill overhead
+    - Use masked target NextN output, skip hidden-state reads for output-free
+      batches, and access sparse prefill output by its original batch index.
+    - Preserve dense catch-up for non-shared MTP and complete verification rows;
+      handle output-free media callbacks without retaining stale buffers.
+
+    Gemma4 E4B BF16 + BF16 Assistant on RTX 5090, full GPU offload:
+    `n_ctx=2048`, batch/ubatch=256, draft=2, greedy sampling. Same native DLL,
+    four warmed runs per mode in alternating order, 256 generated tokens.
+
+    | 1076-token prompt | Before | After | Change |
+    |---|---|---|---|
+    | Prefill latency | 142.5 ms | 98.9 ms | -30.6% |
+    | Time to first token | 164.2 ms | 120.9 ms | -26.4% |
+    | End-to-end throughput | 140.4 tok/s | 145.4 tok/s | +3.6% |
+
+    Both the 1076-token and 44-token prompts retained identical 256-token outputs
+    and unchanged draft acceptance. Gains primarily affect prefill; sustained
+    generation remained similar, and short-prompt throughput changed by -0.2%.
+
+- feat(speculative): enable DFlash device feature transfer
+    - Bind optional device-feature extensions across Windows, Linux, and macOS,
+      and add context-bound device row references to `LlamaBatchExt`.
+    - Transfer target features through native device buffers on compatible
+      DFlash, DFlash2, and DSpark paths while preserving source row indices.
+    - Retain host transfer for unsupported configurations, LiliCorr, and replay
+      paths. Close draft resources before releasing target feature buffers.
+
+    Host vs. device feature transfer on RTX 5090, full GPU offload:
+    `n_ctx=1024`, batch/ubatch=128/64, draft=7, `draft_p_min=0`.
+    Each path measured 3 x 256 generated tokens after warmup; DSpark used
+    alternating measurement order. Device transfer was confirmed active.
+
+    | Model combination | Host | Device transfer | Gain |
+    |---|---|---|---|
+    | Qwen3.6-27B + DFlash | 137.6 tok/s | 147.3 tok/s | +7.0% |
+    | Qwen3.8-27B + DSpark | 68.9 tok/s | 71.8 tok/s | +4.3% |
+
+    Both combinations produced identical 256-token outputs between host and
+    device paths. The target logits for the final row of a fixed input had zero
+    difference. Rollback, repeated runs, and retry after interruption passed.
+
+- feat(tts): add Chatterbox and Drama 3 synthesis and predefined Pocket voices
+    - Support non-streaming Chatterbox Turbo / Multilingual V3 with reference
+      audio or predefined voices, token sampling, and default voice selection.
+    - Validate multilingual Chatterbox backbone CFG metadata, paired sequences,
+      and unified KV before generation. Preserve explicit `n_seq_max` without
+      doubling it, including across repeated requests.
+    - Support Drama 3 with helper-managed sampling, speaker tags, and
+      model-specific option validation.
+    - Allow Pocket TTS voices embedded in compatible weights as an alternative
+      to reference audio; reject conflicting reference and voice options.
+
+- fix(mtmd): align audio/video ABI, queries, and capability detection
+    - Update audio stream, generation input/info, video, and clip parameter
+      layouts; remove obsolete audio layout detection.
+    - Add missing audio queries, generation output modes, voice queries, tensor
+      reads, reference-state setup, and video configuration/template bindings.
+      Synchronize stream progress semantics with the native implementation.
+    - Centralize capability detection and reference-audio checks, retaining
+      a fallback when the optional capability query is unavailable.
+    - Add `video_no_soundtrack`, include it in media cache identity, and align
+      Qwen3-VL video formatting and LFM3 visual-boundary normalization.
+    - Require writable buffers for chunk serialization to prevent writes into
+      immutable Python bytes.
+    - These low-level audio stream updates do not add high-level streaming TTS.
+
+- fix(ggml): correct enum and graph ABI and extend tensor APIs
+    - Correct shifted operation IDs, add the graph UID field, and separate
+      optimizer and graph-build enum classes.
+    - Add FP8 E4M3 definitions, precision enums, and batched tensor copy/set/get
+      bindings, plus indexed flash attention and rank communication callbacks.
+    - Use backend-aligned buffers in native tensor-transfer regressions to
+      avoid alignment-related crashes.
+
+- fix(context): enforce single-sequence budgets and safe sampler cleanup
+    - Preserve `n_ctx()` as total native capacity and add `n_ctx_seq()` for
+      generation, context shifting, and multimodal capacity checks.
+    - Reject oversized embedding inputs with `truncate=False` and bound combined
+      embedding batches by total KV capacity.
+    - For example, `n_ctx=512, n_seq_max=2, kv_unified=False` provides 256 tokens
+      per sequence. A 300-token input now fails early instead of reaching
+      repeated native KV-slot failures.
+    - Synchronize sampler changes and target/draft resets before clearing shared
+      KV. Align sampler ownership after native rejection and retain samplers
+      through context destruction if detachment fails.
+    - Release partially initialized sampler and MTP resources on failure.
+
+- build/docs/tests: update native builds and consolidate regression coverage
+    - Update vendored llama.cpp from `74bca3950` to `18ab62a8e`; use matching
+      rebuilt native libraries for the updated ABI.
+    - Add Windows/Linux CUDA 13.2 wheel build workflows using CUDA 13.2.1 for
+      Python 3.10-3.14. Improve macOS arm64 Metal builds and installed-wheel
+      checks for Metal and RPC backends.
+    - Update README, wiki, and CLI examples for TTS, video soundtrack control,
+      device feature transfer, state reuse, and context/sequence capacity.
+    - Aggregate ABI, media, runtime, state, and speculative regressions in the
+      existing test files, including failure cleanup and interrupted retry.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20261106
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/3fc39b2ebcfbee10a6f64754b333eae2fe1ccc82...486afe5216ea3a4164d6a1d1de8d3675f9a5c93c
+
 ## [0.4.5] LiliCorr Speculative Decoding, Soprano TTS & Multimodal Cache Optimization
 
 - feat(mtmd): add audio stream queries and Soprano TTS support
