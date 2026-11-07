@@ -51,12 +51,16 @@ jobs:
           CIBW_REPAIR_WHEEL_COMMAND: ""
           CIBW_ARCHS: "arm64"
           CIBW_BUILD: "cp310-* cp311-* cp312-* cp313-* cp314-*"
+          # Metal registers as "MTL" (GGML_METAL_NAME), not "Metal".
+          # See vendor/llama.cpp/ggml/src/ggml-metal/ggml-metal.cpp:
+          # GGML_METAL_NAME and ggml_backend_metal_reg_get_name().
           CIBW_TEST_COMMAND: >-
             python -I -c "from pathlib import Path; import llama_cpp; from llama_cpp import _ggml;
             lib = Path(llama_cpp.__file__).resolve().parent / 'lib';
             assert (lib / 'libllama.dylib').is_file(), lib;
             _ggml.ggml_backend_load_all_from_path(str(lib).encode());
-            assert _ggml.ggml_backend_reg_by_name(b'Metal'), 'Metal backend is missing';
+            print('Registered backends:', [_ggml.ggml_backend_reg_name(_ggml.ggml_backend_reg_get(i)).decode() for i in range(_ggml.ggml_backend_reg_count())]);
+            assert _ggml.ggml_backend_reg_by_name(b'MTL'), 'Metal (MTL) backend is missing';
             assert _ggml.ggml_backend_reg_by_name(b'RPC'), 'RPC backend is missing';
             print(llama_cpp.llama_print_system_info().decode())"
           CIBW_ENVIRONMENT: >
