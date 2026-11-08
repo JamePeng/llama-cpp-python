@@ -247,6 +247,7 @@ class clip_flash_attn_type (enum.IntEnum):
 #     bool no_alloc;
 #     mtmd_progress_callback progress_callback;
 #     void * progress_callback_user_data;
+#     int n_threads;
 # };
 class clip_context_params(Structure):
     _fields_ = [
@@ -261,6 +262,7 @@ class clip_context_params(Structure):
         ("no_alloc", c_bool),
         ("progress_callback", mtmd_progress_callback),
         ("progress_callback_user_data", c_void_p),
+        ("n_threads", c_int),
     ]
 
 # struct mtmd_context_params {

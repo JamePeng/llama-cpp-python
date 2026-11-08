@@ -78,6 +78,79 @@ def test_runtime_enums_match_vendor(header, enum_name, module, class_name):
     assert {name: int(value) for name, value in enum_type.__members__.items()} == expected
 
 
+@pytest.mark.parametrize("header,name", [
+    ("include/llama.h", "llama_context_params"),
+    ("tools/mtmd/clip.h", "clip_context_params"),
+])
+def test_context_parameter_layout_matches_vendor(header, name):
+    from llama_cpp import mtmd_cpp
+
+    source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp" / header).read_text(encoding="utf-8")
+    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
+    body = re.search(r"\bstruct\s+" + name + r"\s*\{(.*?)\};", source, re.S)[1]
+    scalars = {"uint32_t": ctypes.c_uint32, "int32_t": ctypes.c_int32,
+               "int": ctypes.c_int, "float": ctypes.c_float, "bool": ctypes.c_bool,
+               "size_t": ctypes.c_size_t}
+    pointers = {"ggml_backend_sched_eval_callback", "ggml_abort_callback",
+                "mtmd_progress_callback", "ggml_backend_dev_t"}
+    fields = []
+    for declaration in body.split(";"):
+        if not declaration.strip():
+            continue
+        match = re.fullmatch(r"\s*(.*?)\s+(\w+)\s*", declaration)
+        assert match, f"Unsupported vendor declaration: {declaration}"
+        c_type, field = " ".join(match[1].split()), match[2]
+        if "*" in c_type or c_type in pointers:
+            field_type = ctypes.c_void_p
+        elif c_type.startswith("enum "):
+            field_type = ctypes.c_int
+        else:
+            assert c_type in scalars, f"Unsupported vendor field type: {c_type}"
+            field_type = scalars[c_type]
+        fields.append((field, field_type))
+    expected = type("VendorParams", (ctypes.Structure,), {"_fields_": fields})
+    actual = getattr(llama_cpp if name.startswith("llama_") else mtmd_cpp, name)
+    assert [field for field, _ in actual._fields_] == [field for field, _ in fields]
+    assert (ctypes.sizeof(actual), ctypes.alignment(actual)) == (ctypes.sizeof(expected), ctypes.alignment(expected))
+    for (field, actual_type), (_, expected_type) in zip(actual._fields_, fields):
+        assert getattr(actual, field).offset == getattr(expected, field).offset, field
+        assert (ctypes.sizeof(actual_type), ctypes.alignment(actual_type)) == (ctypes.sizeof(expected_type), ctypes.alignment(expected_type)), field
+
+
+@pytest.mark.parametrize("share", [-0.1, 1.1, float("nan"), float("inf"), float("-inf"), 0.0, 0.5, 1.0])
+def test_moe_cache_cpu_share_validation_and_restore(monkeypatch, share):
+    lib, cls = internals.llama_cpp, llama_cpp.Llama
+    monkeypatch.setattr(cls, "_Llama__backend_initialized", True)
+    defaults = Mock(side_effect=lib.llama_context_params)
+    monkeypatch.setattr(lib, "llama_context_default_params", defaults)
+    monkeypatch.setattr(lib, "llama_model_default_params", lib.llama_model_params)
+    load = Mock(side_effect=RuntimeError("model load boundary"))
+    monkeypatch.setattr(internals, "LlamaModel", load)
+    with closing(object.__new__(cls)) as model:
+        if not 0 <= share <= 1:
+            with pytest.raises(ValueError, match="moe_cache_cpu_share"):
+                model.__init__(MODEL, moe_cache_cpu_share=share, verbose=False)
+            defaults.assert_not_called()
+            load.assert_not_called()
+            return
+        with pytest.raises(RuntimeError, match="model load boundary"):
+            model.__init__(MODEL, moe_cache_size=1024, moe_cache_cpu_share=share, verbose=False)
+        assert model.context_params.moe_cache_cpu_share == pytest.approx(share)
+        # Finish only Python metadata needed to export constructor settings.
+        model.chat_format = model.chat_handler = model.draft_model = model.speculative_config = None
+        state = model.__getstate__()
+        assert state["moe_cache_cpu_share"] == pytest.approx(share)
+        with closing(object.__new__(cls)) as restored:
+            with pytest.raises(RuntimeError, match="model load boundary"):
+                restored.__setstate__(state)
+            assert restored.context_params.moe_cache_cpu_share == pytest.approx(share)
+            assert restored.context_params.moe_cache_size == 1024
+            state.pop("moe_cache_cpu_share")  # Older serialized constructor settings.
+            with pytest.raises(RuntimeError, match="model load boundary"):
+                restored.__setstate__(state)
+            assert restored.context_params.moe_cache_cpu_share == 0.0
+
+
 def test_ggml_graph_and_fp8_layout():
     g = llama_cpp._ggml
     assert ctypes.sizeof(g.ggml_fp8_e4m3_t) == ctypes.alignment(g.ggml_fp8_e4m3_t) == 1

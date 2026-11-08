@@ -1045,6 +1045,7 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         params.pooling_type = pooling_type_unspecified
         # llama.cpp reserves the host-expert device cache for the target context.
         params.moe_cache_size = 0
+        params.moe_cache_cpu_share = 0.0
         return params
 
     def _init_model_draft_engine(

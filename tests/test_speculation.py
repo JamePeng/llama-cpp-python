@@ -130,6 +130,7 @@ def test_draft_context_does_not_inherit_target_embedding_mode_or_moe_cache():
     target.embeddings = True
     target.pooling_type = llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN
     target.moe_cache_size = 64 * 1024 * 1024
+    target.moe_cache_cpu_share = 0.5
 
     draft = LlamaMTPDecoding._copy_draft_context_params(
         target, llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
@@ -138,9 +139,11 @@ def test_draft_context_does_not_inherit_target_embedding_mode_or_moe_cache():
     assert target.embeddings is True
     assert target.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_MEAN
     assert target.moe_cache_size == 64 * 1024 * 1024
+    assert target.moe_cache_cpu_share == 0.5
     assert draft.embeddings is False
     assert draft.pooling_type == llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
     assert draft.moe_cache_size == 0
+    assert draft.moe_cache_cpu_share == 0.0
 
 
 def test_spec_config_validates_draft_runtime_arguments():

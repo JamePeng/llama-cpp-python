@@ -651,10 +651,11 @@ def test_mtmd_helper_function_signatures(mtmd):
 
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
 @pytest.mark.parametrize("name, size, offsets", [
-    ("clip_context_params", 72, {
+    ("clip_context_params", 80, {
         "use_gpu": 0, "device": 8, "flash_attn_type": 16, "image_min_tokens": 20,
         "image_max_tokens": 24, "warmup": 28, "cb_eval": 32, "cb_eval_user_data": 40,
         "no_alloc": 48, "progress_callback": 56, "progress_callback_user_data": 64,
+        "n_threads": 72,
     }),
     ("mtmd_gen_inp", 72, {
         "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20,

@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-11-06
+last_updated: 2026-11-08
 version_target: "latest"
 ---
 
@@ -126,6 +126,7 @@ mapping:
 | `n_outputs_max` | `int` | `0` | Maximum outputs in a physical batch. `0` uses the effective `n_batch`; encoder models also use `n_batch` regardless of this override. |
 | `n_outputs_max_per_seq` | `int` | `1` | Maximum outputs per sequence with an attached backend sampler. `0` uses the effective `n_outputs_max`; larger values are capped at that limit. |
 | `moe_cache_size` | `int` | `0` | Experimental device cache budget in bytes for MoE experts kept in host memory, distributed among devices like layers. `0` disables it. Requires a GPU and MoE model; tensor parallelism is unsupported. |
+| `moe_cache_cpu_share` | `float` | `0.0` | Experimental share of MoE cache misses computed on CPU instead of uploaded to GPU when caching is enabled. Must be finite and in `[0, 1]`; `0` uploads all misses. Preserved when serializing and restoring constructor settings. |
 | `n_threads` | `Optional[int]` | `None` | Number of threads for generation (defaults to CPU count // 2). |
 | `n_threads_batch` | `Optional[int]` | `None` | Number of threads for batch processing (defaults to CPU count). |
 | `ctx_type` | `int` | `LLAMA_CONTEXT_TYPE_DEFAULT` | Context implementation selected by llama.cpp. Keep the default unless a model or backend requires another context type. |

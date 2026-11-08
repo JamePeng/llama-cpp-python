@@ -973,6 +973,7 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     enum ggml_type type_v; // data type for V cache [EXPERIMENTAL]
 
 #     size_t moe_cache_size; // device cache bytes for host-memory MoE experts, 0 = disabled [EXPERIMENTAL]
+#     float moe_cache_cpu_share; // share of cache misses computed on CPU instead of uploaded [EXPERIMENTAL]
 
 #     // Abort callback
 #     // if it returns true, execution of llama_decode() will be aborted
@@ -1037,6 +1038,7 @@ class llama_context_params(ctypes.Structure):
         type_v (int): data type for V cache
 
         moe_cache_size (int): Device cache bytes for host-memory MoE experts, split among devices like layers; 0 disables it. Experimental.
+        moe_cache_cpu_share (float): Share of MoE cache misses computed on CPU, from 0 to 1; 0 uploads all misses. Experimental.
 
         abort_callback (ggml_abort_callback): abort callback if it returns true, execution of llama_decode() will be aborted
         abort_callback_data (ctypes.ctypes.c_void_p): data for abort_callback
@@ -1082,6 +1084,7 @@ class llama_context_params(ctypes.Structure):
         type_k: int
         type_v: int
         moe_cache_size: int
+        moe_cache_cpu_share: float
         abort_callback: Callable[[ctypes.c_void_p], bool]
         abort_callback_data: ctypes.c_void_p
         embeddings: bool
@@ -1122,6 +1125,7 @@ class llama_context_params(ctypes.Structure):
         ("type_k", ctypes.c_int),
         ("type_v", ctypes.c_int),
         ("moe_cache_size", ctypes.c_size_t),
+        ("moe_cache_cpu_share", ctypes.c_float),
         ("abort_callback", ggml_abort_callback),
         ("abort_callback_data", ctypes.c_void_p),
         ("embeddings", ctypes.c_bool),
