@@ -71,7 +71,8 @@ def main():
     parser.add_argument("--output", help="Output path; multiple requests add a numbered suffix")
     parser.add_argument("--max-frames", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--temperature", type=float, default=0.8, help="Qwen/Soprano backbone sampling temperature")
+    parser.add_argument("--temperature", type=float,
+                        help="Backbone sampling temperature (default: 0.8) or Pocket flow noise (default: model setting)")
     parser.add_argument("--ctx-size", type=int, default=4096)
     parser.add_argument("--gpu-layers", type=int, default=0)
     parser.add_argument("--mmproj-gpu", action="store_true")

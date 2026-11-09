@@ -587,7 +587,7 @@ def test_mtmd_boolean_capabilities_abi(mtmd, name, fields):
     ("mtmd_gen_state_params", dict(seed=0xFFFFFFFF), "mtmd_gen_state_free"),
     ("mtmd_helper_gen_audio_inp", dict(stream=False, seq_id=0, prompt=None, prompt_len=0,
                                      n_past=0, out_mode=0, speaker_ref=None, lang=None,
-                                     top_k=50, top_p=1.0, seed=0xFFFFFFFF, out_type=1), None),
+                                     top_k=50, top_p=1.0, temp=-1.0, seed=0xFFFFFFFF, out_type=1), None),
 ])
 def test_mtmd_audio_defaults(mtmd, name, expected, free):
     default = getattr(mtmd, name + "_default")
@@ -651,12 +651,6 @@ def test_mtmd_helper_function_signatures(mtmd):
 
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
 @pytest.mark.parametrize("name, size, offsets", [
-    ("clip_context_params", 80, {
-        "use_gpu": 0, "device": 8, "flash_attn_type": 16, "image_min_tokens": 20,
-        "image_max_tokens": 24, "warmup": 28, "cb_eval": 32, "cb_eval_user_data": 40,
-        "no_alloc": 48, "progress_callback": 56, "progress_callback_user_data": 64,
-        "n_threads": 72,
-    }),
     ("mtmd_gen_inp", 72, {
         "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20,
         "temp": 24, "penalty_repeat": 28, "penalty_last_n": 32,
@@ -673,10 +667,10 @@ def test_mtmd_helper_function_signatures(mtmd):
                                          "timestamp_interval_ms": 16, "no_soundtrack": 24}),
     ("mtmd_helper_init_opt", 32, {"video_params": 0}),
     ("mtmd_gen_audio_info", 24, {"type": 0, "sample_rate": 4, "model_variant": 8, "n_voices": 16}),
-    ("mtmd_helper_gen_audio_inp", 64, {
+    ("mtmd_helper_gen_audio_inp", 72, {
         "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16,
         "n_past": 24, "out_mode": 28, "speaker_ref": 32, "lang": 40,
-        "top_k": 48, "top_p": 52, "seed": 56, "out_type": 60,
+        "top_k": 48, "top_p": 52, "temp": 56, "seed": 60, "out_type": 64,
     }),
 ])
 def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
@@ -875,7 +869,6 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         mtmd_support_audio_stream=Mock(return_value=True),
         mtmd_gen_audio_get_info=Mock(return_value=SimpleNamespace(type=0)),
         mtmd_context_params_default=native.mtmd_context_params_default,
-        clip_flash_attn_type=native.clip_flash_attn_type,
         mtmd_helper_log_set=Mock(),
         mtmd_default_marker=Mock(return_value=b"<default>"),
         mtmd_get_marker=Mock(return_value=b"<media>"),
@@ -1231,6 +1224,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
         assert inp.stream is False and inp.seq_id == 0
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
+        state.frame_temperature = inp.temp
         state.speaker = inp.speaker_ref
         state.steps = 0
         state.out_type = inp.out_type
@@ -1300,7 +1294,8 @@ def audio_pipeline(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("kind", [1, 3, 5], ids=["qwen", "soprano", "chatterbox"])
-def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline, kind):
+@pytest.mark.parametrize("options", [{}, {"temperature": None}, {"temperature": 0.0}, {"temperature": 0.7}])
+def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline, kind, options):
     generator, llama, backend, state, factory, output = audio_pipeline
     state.kind = kind
     state.voices = int(kind == 5)
@@ -1308,13 +1303,16 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
     text = "Hello" if kind == 3 else "你好"
     expected = output.raw[:-1]
     for _ in range(2):
-        result = generator.create_speech(llama=llama, text=text, seed=7, response_format="pcm_f32")
+        result = generator.create_speech(llama=llama, text=text, seed=7, response_format="pcm_f32", **options)
         assert result.data == expected
         assert result.finish_reason == "stop"
         assert result.sample_rate == (32000 if kind == 3 else 24000)
         assert result.duration == 4 / result.sample_rate
     output[0] = b"z"
     assert result.data == expected
+    temperature = options.get("temperature")
+    assert state.frame_temperature == pytest.approx(-1.0 if temperature is None else temperature)
+    assert factory.call_args.kwargs["temperature"] == (0.8 if temperature is None else temperature)
     assert state.prompts == [(text.encode(), 7)] * 2
     assert state.tokens == [42] * 6
     assert llama.reset.call_count == 4
@@ -1377,6 +1375,8 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
     generator, llama, backend, state, factory, _ = audio_pipeline
     cases = [
         (1, {"text": " "}, None), (1, {"max_frames": 0}, None),
+        *((2, {"temperature": value}, "temperature")
+          for value in (-1, float("nan"), float("inf"), float("-inf"), 1e39)),
         (1, {"seed": -1}, None), (1, {"response_format": "mp3"}, None),
         (0, {}, "supported TTS"), (2, {}, "requires speaker_reference"),
         (3, {"speaker_reference": "missing.wav"}, "speaker_reference"),
@@ -1398,10 +1398,14 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
     assert generator.create_speech(llama=llama, text="hello").finish_reason == "stop"
 
 
-def test_tts_pocket_predefined_voice(audio_pipeline):
-    generator, llama, backend, state, _, _ = audio_pipeline
+@pytest.mark.parametrize("temperature", [None, 0.0, 0.7])
+def test_tts_pocket_predefined_voice(audio_pipeline, temperature):
+    generator, llama, backend, state, factory, _ = audio_pipeline
     state.kind = 2
-    assert generator.create_speech(llama=llama, text="hello", voice="alba").finish_reason == "stop"
+    assert generator.create_speech(llama=llama, text="hello", voice="alba",
+                                   temperature=temperature).finish_reason == "stop"
+    assert state.frame_temperature == pytest.approx(-1.0 if temperature is None else temperature)
+    factory.assert_not_called()
     assert state.speaker == 987
     backend.mtmd_gen_audio_get_voice.assert_called_once_with(123, b"alba")
     backend.mtmd_bitmap_free.assert_called_once_with(987)

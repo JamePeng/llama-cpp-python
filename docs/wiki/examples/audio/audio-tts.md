@@ -83,14 +83,23 @@ See the [conversion guide](../../../../vendor/llama.cpp/tools/tts/README.md#chat
 | Reference audio | Optional | Required unless using a predefined voice | Unsupported; fixed voice |
 | Language | `zh`, `en`, `de`, `it`, `pt`, `es`, `ja`, `ko`, `fr`, `ru`, or names accepted by the helper | Selected by weights; omit `language` | English; omit `language` |
 | Token sampling | Uses temperature, top-k, top-p, min-p and repetition penalty | Skipped | Uses the same token sampling options as Qwen |
-| Flow/decoder settings | Managed by vendor | Managed by vendor, including variant settings | Managed by vendor |
+| Flow/decoder settings | Managed by vendor | `temperature` overrides flow noise; other settings follow vendor | Managed by vendor |
 
-Defaults are `temperature=0.8`, `top_k=40`, `top_p=0.95`, `min_p=0.05`, and
+`temperature=None` (the default) uses `0.8` for Qwen3-TTS, Soprano and
+Chatterbox backbone sampling, and the native model default for Pocket.
+An explicit value controls the corresponding stage; for example,
+`temperature=0.7` (CLI: `--temperature 0.7`) sets Pocket flow noise to `0.7`.
+`0` selects greedy backbone sampling or disables Pocket flow noise. Explicit
+values must be finite, nonnegative float32 values. Drama 3 ignores temperature.
+Pocket previously ignored explicit temperature values; they now take effect.
+
+Other defaults are `top_k=40`, `top_p=0.95`, `min_p=0.05`, and
 `repeat_penalty=1.05`. The repetition window uses the active context size.
 Qwen's `top_k` and `top_p` also configure the helper's code predictor. A
 nonpositive `top_k` disables the backbone top-k filter but selects the helper's
-default for the code predictor. Temperature only controls backbone sampling.
-Pocket ignores these sampling options; `seed` still reaches its helper.
+default for the code predictor. Pocket ignores these token sampling options;
+`seed` still reaches its helper.
+This requires native libraries built from the matching vendor revision.
 `seed=None` uses the native random-seed sentinel. Identical seeds do not promise
 bitwise identical audio across hardware or backend versions.
 

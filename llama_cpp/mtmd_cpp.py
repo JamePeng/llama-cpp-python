@@ -225,46 +225,6 @@ class mtmd_input_part(Structure):
 mtmd_input_part_p = NewType("mtmd_input_part_p", int)
 mtmd_input_part_p_ctypes = POINTER(mtmd_input_part)
 
-# enum clip_flash_attn_type {
-#     CLIP_FLASH_ATTN_TYPE_AUTO     = -1,
-#     CLIP_FLASH_ATTN_TYPE_DISABLED = 0,
-#     CLIP_FLASH_ATTN_TYPE_ENABLED  = 1,
-# };
-class clip_flash_attn_type (enum.IntEnum):
-    CLIP_FLASH_ATTN_TYPE_AUTO = -1
-    CLIP_FLASH_ATTN_TYPE_DISABLED = 0
-    CLIP_FLASH_ATTN_TYPE_ENABLED = 1
-
-# struct clip_context_params {
-#     bool use_gpu;
-#     ggml_backend_dev_t device;
-#     enum clip_flash_attn_type flash_attn_type;
-#     int image_min_tokens;
-#     int image_max_tokens;
-#     bool warmup;
-#     ggml_backend_sched_eval_callback cb_eval;
-#     void * cb_eval_user_data;
-#     bool no_alloc;
-#     mtmd_progress_callback progress_callback;
-#     void * progress_callback_user_data;
-#     int n_threads;
-# };
-class clip_context_params(Structure):
-    _fields_ = [
-        ("use_gpu", c_bool),
-        ("device", c_void_p),
-        ("flash_attn_type", c_int),
-        ("image_min_tokens", c_int),
-        ("image_max_tokens", c_int),
-        ("warmup", c_bool),
-        ("cb_eval", ggml_backend_sched_eval_callback),
-        ("cb_eval_user_data", c_void_p),
-        ("no_alloc", c_bool),
-        ("progress_callback", mtmd_progress_callback),
-        ("progress_callback_user_data", c_void_p),
-        ("n_threads", c_int),
-    ]
-
 # struct mtmd_context_params {
 #     bool use_gpu;
 #     ggml_backend_dev_t device;
@@ -2302,6 +2262,7 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     const char * lang; // optional, can be NULL
 #     int32_t  top_k;
 #     float    top_p;
+#     float    temp; // audio frame temperature if supported, < 0 = model default, 0 = greedy
 #     uint32_t seed; // UINT32_MAX for random (default: random)
 #     enum mtmd_helper_gen_audio_outtype out_type;
 # };
@@ -2317,6 +2278,7 @@ class mtmd_helper_gen_audio_inp(Structure):
         ("lang", c_char_p),
         ("top_k", c_int32),
         ("top_p", c_float),
+        ("temp", c_float),
         ("seed", c_uint32),
         ("out_type", c_int),
     ]
@@ -2332,6 +2294,7 @@ class mtmd_helper_gen_audio_inp(Structure):
         lang: Optional[bytes]
         top_k: int
         top_p: float
+        temp: float
         seed: int
         out_type: int
 

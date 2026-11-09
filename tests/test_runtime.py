@@ -80,7 +80,8 @@ def test_runtime_enums_match_vendor(header, enum_name, module, class_name):
 
 @pytest.mark.parametrize("header,name", [
     ("include/llama.h", "llama_context_params"),
-    ("tools/mtmd/clip.h", "clip_context_params"),
+    ("tools/mtmd/mtmd.h", "mtmd_context_params"),
+    ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
 ])
 def test_context_parameter_layout_matches_vendor(header, name):
     from llama_cpp import mtmd_cpp
@@ -90,7 +91,7 @@ def test_context_parameter_layout_matches_vendor(header, name):
     body = re.search(r"\bstruct\s+" + name + r"\s*\{(.*?)\};", source, re.S)[1]
     scalars = {"uint32_t": ctypes.c_uint32, "int32_t": ctypes.c_int32,
                "int": ctypes.c_int, "float": ctypes.c_float, "bool": ctypes.c_bool,
-               "size_t": ctypes.c_size_t}
+               "size_t": ctypes.c_size_t, "llama_seq_id": ctypes.c_int32}
     pointers = {"ggml_backend_sched_eval_callback", "ggml_abort_callback",
                 "mtmd_progress_callback", "ggml_backend_dev_t"}
     fields = []

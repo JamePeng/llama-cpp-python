@@ -248,11 +248,11 @@ class MTMDBaseHandler:
         self.mctx_params.device = None
         self.mctx_params.print_timings = self.verbose
         self.mctx_params.n_threads = llama_model.n_threads
-        flash_types = self._mtmd_cpp.clip_flash_attn_type
+        flash_types = llama_cpp_lib.llama_flash_attn_type
         self.mctx_params.flash_attn_type = (
-            flash_types.CLIP_FLASH_ATTN_TYPE_AUTO if self.flash_attn is None else
-            flash_types.CLIP_FLASH_ATTN_TYPE_ENABLED if self.flash_attn else
-            flash_types.CLIP_FLASH_ATTN_TYPE_DISABLED
+            flash_types.LLAMA_FLASH_ATTN_TYPE_AUTO if self.flash_attn is None else
+            flash_types.LLAMA_FLASH_ATTN_TYPE_ENABLED if self.flash_attn else
+            flash_types.LLAMA_FLASH_ATTN_TYPE_DISABLED
         )
         self.mctx_params.warmup = True
         if self.image_min_tokens > 0:
@@ -1151,7 +1151,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         response_format: Literal["wav", "pcm_f32"] = "wav",
         max_frames: int = 512,
         seed: Optional[int] = None,
-        temperature: float = 0.8,
+        temperature: Optional[float] = None,
         top_k: int = 40,
         top_p: float = 0.95,
         min_p: float = 0.05,
@@ -1161,8 +1161,11 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
         Qwen3-TTS uses the sampling options; top_k/top_p also reach its code
         predictor (top_k <= 0 selects the helper default for that stage).
-        Pocket TTS requires speaker_reference or a predefined voice, ignores sampling options except
-        seed, and selects language and flow settings from its weights.
+        Pocket TTS requires speaker_reference or a predefined voice and selects
+        language from its weights. It uses temperature as the flow noise scale
+        (0 disables noise) and ignores token sampling options except seed.
+        temperature=None uses 0.8 for backbone sampling and the native model
+        default for Pocket; an explicit value overrides the relevant stage.
         Soprano uses token sampling and a fixed English voice; omit language
         and speaker_reference, and allow at least two generated frames.
         Chatterbox uses token sampling and a reference or predefined voice.
@@ -1197,8 +1200,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 raise ValueError("seed must be a uint32 integer or None")
             if not isinstance(top_k, int) or isinstance(top_k, bool) or not -(2**31) <= top_k < 2**31:
                 raise ValueError("top_k must be an int32 integer")
-            if not all(math.isfinite(v) for v in (temperature, top_p, min_p, repeat_penalty)):
+            if not all(math.isfinite(v) for v in (top_p, min_p, repeat_penalty)):
                 raise ValueError("Sampling values must be finite")
+            if temperature is not None and (
+                not math.isfinite(temperature) or not 0 <= temperature <= 3.4028234663852886e38
+            ):
+                raise ValueError("temperature must be a finite nonnegative float32 value or None")
             if not 0 < top_p <= 1 or not 0 <= min_p <= 1 or repeat_penalty <= 0:
                 raise ValueError("Invalid top_p, min_p or repeat_penalty")
             if not getattr(llama._ctx, "ctx", None) or llama.context_params is None:
@@ -1303,7 +1310,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 sampler = None
                 if is_qwen or is_soprano or is_chatterbox:
                     sampler = self._create_audio_sampler(
-                        llama, seed=actual_seed, temperature=temperature, top_k=top_k,
+                        llama, seed=actual_seed, temperature=0.8 if temperature is None else temperature, top_k=top_k,
                         top_p=top_p, min_p=min_p, repeat_penalty=repeat_penalty,
                     )
                     cleanup.callback(sampler.close)
@@ -1318,6 +1325,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     stream=False, seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
                     lang=language.encode("utf-8") if language is not None else None,
                     top_k=top_k, top_p=top_p, seed=actual_seed,
+                    temp=-1.0 if temperature is None else temperature,
                     out_type=(mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
                               if response_format == "wav" else mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM),
                 )
