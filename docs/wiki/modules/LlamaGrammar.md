@@ -2,7 +2,7 @@
 title: Llama Grammar
 module_name: llama_cpp.llama_grammar
 source_file: llama_cpp/llama_grammar.py
-last_updated: 2026-09-15
+last_updated: 2026-11-11
 version_target: "latest"
 ---
 
@@ -33,12 +33,18 @@ Built-in grammar strings:
 | Constant | Description |
 | --- | --- |
 | `JSON_GBNF` | JSON with an object at the root; nested values may have other JSON types. |
-| `JSON_ARR_GBNF` | JSON arrays. |
+| `JSON_ARR_GBNF` | Newline-formatted JSON arrays; uses the vendor whitespace, number and escape rules. |
 | `ARITHMETIC_GBNF` | Simple arithmetic expressions. |
 | `C_GBNF` | Example subset of C-like declarations and statements. |
 | `LIST_GBNF` | Newline-separated Markdown-style list items. |
 | `ENGLISH_GBNF` | Example English-character grammar; incomplete. |
-| `CHESS_GBNF`, `JAPANESE_GBNF` | Currently JSON-like example grammars. |
+| `CHESS_GBNF` | Chess move lists in algebraic notation using PGN conventions. |
+| `JAPANESE_GBNF` | Example Japanese-character grammar covering hiragana, katakana, punctuation and CJK characters. |
+
+`JSON_ARR_GBNF` requires a newline after the root opening `[` and after each
+root-array comma. Use a Schema-generated array grammar if compact JSON output
+is preferred. The chess and Japanese grammars are examples rather than complete
+chess legality or natural-language validators.
 
 Internal rule constants include `SPACE_RULE`, `PRIMITIVE_RULES`,
 `STRING_FORMAT_RULES`, `RESERVED_NAMES`, `DOT`, and `DOTALL`.
@@ -52,16 +58,17 @@ Prefer the factory methods below for application code.
 ```python
 def __init__(
     self,
-    *args,
+    *,
     _grammar: str,
     root: str = LLAMA_GRAMMAR_DEFAULT_ROOT,
     triggers: Optional[List[Union[str, int]]] = None,
-    **kwargs,
 )
 ```
 
-`_grammar` is required. `root` and `triggers` are keyword-only. Legacy `*args`
-and `**kwargs` are accepted but unused.
+All constructor arguments are keyword-only; `_grammar` is required. Extra
+positional arguments and unknown keywords raise `TypeError` rather than being
+silently ignored. The factory methods still accept their documented `verbose`
+parameter for compatibility.
 
 ### Properties
 
@@ -239,11 +246,16 @@ The converter implements a subset of JSON Schema, not a complete validator.
 | Type inference | String length keywords can imply string type. Numeric bounds alone do not imply integer type. |
 | Integer bounds | Supports inclusive/exclusive bounds and rounds fractional bounds inward. |
 | Alternatives | `anyOf` and `oneOf` generate alternatives; `oneOf` does not enforce exclusive matching. |
+| Numeric `allOf` | Intersects explicit integer ranges, including fractional/exclusive bounds. Mixed integer/number components produce an integer grammar. Empty integer ranges raise `ValueError`. |
 | Enum/const | Supports JSON values; `allOf` intersections compare structures and distinguish booleans from numbers. |
 | References | Traverses reachable schemas, supports reference chains, escaped JSON Pointers and root references, and preserves literal const/enum data. |
 
-Compatible object merges and enum/const intersections are supported in `allOf`,
-including nested intersections and optional type filtering. Empty intersections,
+Compatible object merges, numeric intersections and enum/const intersections
+are supported in `allOf`, including nested intersections and optional type
+filtering. Bounds on `number` components are ignored, matching the current
+vendor converter; only `integer` components contribute bounds. Repeated
+constraints on the same object property must still be structurally identical.
+Empty supported intersections,
 conflicting property constraints, and unsupported general intersections raise
 errors. Pure reference cycles and recursive `allOf` are rejected; recursive
 object schemas can be represented.
@@ -254,6 +266,13 @@ possessive quantifiers are rejected. Regex character handling and additional-key
 exclusion use Unicode scalar values, including escaped surrogate pairs, but not
 unpaired surrogates. Unsupported formats such as `uri` and `email` do not add
 format-specific validation.
+
+Schema conversion is limited to 128 levels of nesting. Input containers,
+including const/enum data and fetched documents, are checked before recursive
+copying or conversion. Reference chains, nested intersections, regex groups
+and property-key exclusion traversal are also bounded. Exceeding a conversion
+limit raises `ValueError`; this limit does not validate raw GBNF supplied to
+`from_string`, which is parsed by the native sampler.
 
 ## Internal conversion and reuse
 
@@ -279,12 +298,13 @@ accepted output, or the public API. They do not change per-token sampling.
 
 | Entry point | Error | Condition |
 | --- | --- | --- |
-| Text construction | `TypeError` | Grammar is not a string. |
+| Text construction | `TypeError` | Grammar is not a string, or the constructor receives extra positional/unknown keyword arguments. |
 | Text construction | `ValueError` | Empty/blank grammar, embedded NUL, or invalid root/trigger inputs. |
 | `from_file` | `FileNotFoundError` | File does not exist. |
 | `from_file` | `IOError` | File cannot be read as UTF-8. |
 | `from_json_schema` | `ValueError` | Conversion or definition validation fails. |
 | `json_schema_to_gbnf` | `TypeError` | Input is neither a string nor a dictionary. |
+| Schema conversion | `ValueError` | Empty numeric intersection, unsupported constraint combination, or conversion depth exceeds 128 levels. |
 | Native sampler initialization | `RuntimeError` | Native GBNF parsing fails or the start rule is missing. |
 
 Root names must match `[A-Za-z0-9-]+`. Trigger strings must be non-empty and

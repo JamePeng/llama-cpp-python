@@ -51,6 +51,32 @@ their input order. When declaring properties, set `additionalProperties: true`
 explicitly if undeclared keys should be allowed. Additional keys cannot reuse
 declared names, including equivalent spellings such as `"a"` and `"\u0061"`.
 
+### Numeric intersections and depth limits
+
+Use `allOf` to combine explicit integer ranges:
+
+```python
+grammar = LlamaGrammar.from_json_schema({
+    "allOf": [
+        {"type": "integer", "minimum": 0},
+        {"type": "integer", "maximum": 10},
+    ],
+})
+```
+
+This accepts integers from `0` through `10`. Integer bounds are rounded inward,
+including exclusive and fractional bounds. A mixed `integer`/`number`
+intersection remains integer-only, and an empty integer range raises
+`ValueError`. Bounds declared on `number` components are ignored by the current
+vendor converter and by Python; put bounds on the `integer` components when
+integer output is required.
+
+Schema conversion enforces a 128-level depth limit. The checks cover input
+containers (including const/enum data and fetched documents), reference chains,
+Schema traversal, nested intersections, regex groups and property-key exclusion
+traversal. Exceeding a limit raises `ValueError` before Python stack exhaustion.
+This conversion limit is separate from native parsing of raw GBNF.
+
 ### Conversion performance and reuse
 
 Optional property suffixes are built once from right to left, avoiding repeated
@@ -116,10 +142,10 @@ does not need `close` because it owns no native resources.
 
 ## Vendor compatibility audit
 
-Compared against vendor commit `acecd56032ddc34bada14a2d978f110d9c987095`.
-The former upstream Python conversion example was deleted in that commit;
-ongoing references are `common/json-schema.cpp`,
-`common/json-schema-to-grammar.cpp`, and their tests.
+The current Python converter follows `common/json-schema.cpp` and
+`common/json-schema-to-grammar.cpp`, including the numeric `allOf` update in
+vendor commit `45c8ea837`. The former upstream Python conversion example has
+been removed; use the current C++ implementation and its tests as references.
 
 | Area | Python status |
 | --- | --- |
@@ -132,6 +158,9 @@ ongoing references are `common/json-schema.cpp`,
 | Regex non-capturing groups | Supported, including nested groups |
 | Regex character escapes | Supports digit, word, whitespace and complement classes, control and Unicode escapes |
 | Reachable references | Schema-aware traversal, escaped JSON Pointers, root references and reference chains |
+| Numeric `allOf` | Intersects integer ranges; mixed integer/number schemas remain integer-only; empty integer ranges are rejected |
+| Conversion depth | Bounded to 128 levels, including input data, references and recursive conversion paths |
+| Built-in grammars | Follow the matching files under `vendor/llama.cpp/grammars` |
 | Enum intersections | Compares JSON values structurally; supports objects, arrays and mixed types |
 | Additional property names | Excludes decoded names, including equivalent JSON escapes and overlapping prefixes |
 | Native grammar root and lazy initialization | Passed through the Python sampling context |
@@ -146,14 +175,16 @@ ongoing references are `common/json-schema.cpp`,
   failure. This fallback requires an object at the root but no longer enforces
   the original Schema's field and type constraints.
 - `allOf`: Python supports enum/const intersections, optional type filtering,
-  reference chains, nested intersections and compatible object-property merges.
+  numeric intersections, reference chains, nested intersections and compatible
+  object-property merges.
   Booleans are distinct from numbers; numerically equal integers and floats
   compare equally. Empty enum/const intersections and unsupported combinations
   raise an error instead of producing an unrelated object grammar. There is no
   general algorithm for detecting empty Schema intersections. General string
-  and numeric intersections remain unsupported. Constraints on the same property
-  must be structurally identical to merge; even compatible constraints such as
-  separate `minimum` and `maximum` bounds are not combined automatically.
+  intersections and arbitrary combinations of constraints remain unsupported.
+  Bounds on `number` are not enforced. Constraints on the same property
+  must be structurally identical across object branches; bounds split between
+  two definitions of that property are not combined automatically.
   Where possible, express these constraints in a single schema.
 - References: Python retains opt-in HTTPS fetching (`allow_fetch=True`), while
   the vendor builder supports document-local references. Python resolves only
