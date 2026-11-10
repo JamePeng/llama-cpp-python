@@ -2628,7 +2628,8 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         "[IMG]",
 
         # Kimi-style placeholders.
-        "<|media_pad|>",
+        "<|media_pad|>",               # Kimi-K2.x
+        "<|kimi_image_placeholder|>",  # Kimi-K3.x
         "<|kimi_k25_video_placeholder|>",
     ]
 
