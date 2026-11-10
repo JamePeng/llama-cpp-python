@@ -21,6 +21,36 @@ from typing import (
 )
 
 LLAMA_GRAMMAR_DEFAULT_ROOT = "root"
+# Keep conversion bounded like vendor COMMON_RECURSIVE_LIMIT.
+_SCHEMA_MAX_DEPTH = 128
+
+
+def _check_depth(depth):
+    """Reject recursion beyond the shared conversion limit."""
+    if depth > _SCHEMA_MAX_DEPTH:
+        raise ValueError(f"JSON schema exceeds {_SCHEMA_MAX_DEPTH} levels of nesting")
+
+
+def _check_json_depth(value):
+    """Check container depth iteratively, including const/enum payloads."""
+    # Check before deepcopy/json literal conversion can exhaust Python's stack.
+    pending = [(value, 1)]
+    while pending:
+        node, depth = pending.pop()
+        if isinstance(node, (dict, list)):
+            _check_depth(depth)
+            children = node.values() if isinstance(node, dict) else node
+            pending.extend((child, depth + 1) for child in children)
+
+
+def _integer_bounds(schema):
+    """Convert inclusive/exclusive bounds to inclusive integers; None is unbounded."""
+    lower = (math.ceil(schema['minimum']) if 'minimum' in schema else
+             math.floor(schema['exclusiveMinimum']) + 1 if 'exclusiveMinimum' in schema else None)
+    upper = (math.floor(schema['maximum']) if 'maximum' in schema else
+             math.ceil(schema['exclusiveMaximum']) - 1 if 'exclusiveMaximum' in schema else None)
+    return lower, upper
+
 
 
 class LlamaGrammar:
@@ -31,7 +61,7 @@ class LlamaGrammar:
     compatibility on the factory methods.
     """
 
-    def __init__(self, *args, _grammar: str, root: str = LLAMA_GRAMMAR_DEFAULT_ROOT, triggers: Optional[List[Union[str, int]]] = None, **kwargs):
+    def __init__(self, *, _grammar: str, root: str = LLAMA_GRAMMAR_DEFAULT_ROOT, triggers: Optional[List[Union[str, int]]] = None):
         if not isinstance(_grammar, str):
             raise TypeError("grammar must be a string")
         # Native APIs receive NUL-terminated strings.
@@ -181,31 +211,19 @@ ws ::= ([ \t\n]+)
 """
 
 CHESS_GBNF = r"""
-root   ::= object
-value  ::= object | array | string | number | ("true" | "false" | "null") ws
+# Specifies chess moves as a list in algebraic notation, using PGN conventions
 
-object ::=
-  "{" ws (
-            string ":" ws value
-    ("," ws string ":" ws value)*
-  )? "}" ws
+# Force first move to "1. ", then any 1-2 digit number after, relying on model to follow the pattern
+root    ::= "1. " move " " move "\n" ([1-9] [0-9]? ". " move " " move "\n")+
+move    ::= (pawn | nonpawn | castle) [+#]?
 
-array  ::=
-  "[" ws (
-            value
-    ("," ws value)*
-  )? "]" ws
+# piece type, optional file/rank, optional capture, dest file & rank
+nonpawn ::= [NBKQR] [a-h]? [1-8]? "x"? [a-h] [1-8]
 
-string ::=
-  "\"" (
-    [^"\\] |
-    "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) # escapes
-  )* "\"" ws
+# optional file & capture, dest file & rank, optional promotion
+pawn    ::= ([a-h] "x")? [a-h] [1-8] ("=" [NBKQR])?
 
-number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
-
-# Optional space: by convention, applied in this grammar after literal chars when allowed
-ws ::= ([ \t\n] ws)?
+castle  ::= "O-O" "-O"?
 """
 
 ENGLISH_GBNF = r"""
@@ -218,31 +236,13 @@ punctuation ::= [!"#$%&'()*+,-./:;<=>?@[\\\]^_`{|}~]
 """
 
 JAPANESE_GBNF = r"""
-root   ::= object
-value  ::= object | array | string | number | ("true" | "false" | "null") ws
-
-object ::=
-  "{" ws (
-            string ":" ws value
-    ("," ws string ":" ws value)*
-  )? "}" ws
-
-array  ::=
-  "[" ws (
-            value
-    ("," ws value)*
-  )? "]" ws
-
-string ::=
-  "\"" (
-    [^"\\] |
-    "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) # escapes
-  )* "\"" ws
-
-number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
-
-# Optional space: by convention, applied in this grammar after literal chars when allowed
-ws ::= ([ \t\n] ws)?
+# A probably incorrect grammar for Japanese
+root        ::= jp-char+ ([ \t\n] jp-char+)*
+jp-char     ::= hiragana | katakana | punctuation | cjk
+hiragana    ::= [ぁ-ゟ]
+katakana    ::= [ァ-ヿ]
+punctuation ::= [、-〾]
+cjk         ::= [一-鿿]
 """
 
 JSON_ARR_GBNF = r"""
@@ -273,13 +273,13 @@ array  ::=
 string ::=
   "\"" (
     [^"\\\x7F\x00-\x1F] |
-    "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F]) # escapes
+    "\\" (["\\bfnrt] | "u" [0-9a-fA-F]{4}) # escapes
   )* "\"" ws
 
-number ::= ("-"? ([0-9] | [1-9] [0-9]*)) ("." [0-9]+)? ([eE] [-+]? [0-9]+)? ws
+number ::= ("-"? ([0-9] | [1-9] [0-9]{0,15})) ("." [0-9]+)? ([eE] [-+]? [1-9] [0-9]{0,15})? ws
 
 # Optional space: by convention, applied in this grammar after literal chars when allowed
-ws ::= ([ \t\n] ws)?
+ws ::= | " " | "\n" [ \t]{0,20}
 """
 
 
@@ -318,9 +318,10 @@ root ::= item+
 item ::= "- " [^\r\n\x0b\x0c\x85\u2028\u2029]+ "\n"
 """
 
-"""llama.cpp json-schema to grammar converter from vendor/llama.cpp/examples/json-schema-to-grammar.py"""
+# JSON Schema conversion follows vendor/llama.cpp/common/json-schema{,-to-grammar}.cpp.
 
 def _build_repetition(item_rule, min_items, max_items, separator_rule=None):
+    """Build bounded repetition, keeping separators between items only."""
 
     if max_items == 0:
         return ""
@@ -340,6 +341,7 @@ def _build_repetition(item_rule, min_items, max_items, separator_rule=None):
     return f'({result})?' if min_items == 0 else result
 
 def _generate_min_max_int(min_value: Optional[int], max_value: Optional[int], out: list, decimals_left: int = 16, top_level: bool = True):
+    """Append a digit grammar for an inclusive integer range."""
     def digit_range(from_char: str, to_char: str):
         out.append("[")
         if from_char == to_char:
@@ -548,7 +550,9 @@ GRAMMAR_LITERAL_ESCAPES = {'\r': '\\r', '\n': '\\n', '"': '\\"', '-': '\\-', ']'
 _MISSING = object()
 
 class SchemaConverter:
+    """Convert schemas to named GBNF rules with per-conversion reference caches."""
     def __init__(self, *, prop_order, allow_fetch, dotall, raw_pattern):
+        self._depth = 0
         self._prop_order = prop_order
         self._allow_fetch = allow_fetch
         self._dotall = dotall
@@ -700,13 +704,14 @@ class SchemaConverter:
             node[None] = True
         any_char = self._character_rule([(0, 0x10FFFF)])
 
-        def build(node):
+        def build(node, depth=1):
+            _check_depth(depth)
             children = sorted(ch for ch in node if ch is not None)
             options = ['""'] if None not in node else []
             remaining = self._subtract_ranges([(0, 0x10FFFF)], [(ord(ch), ord(ch)) for ch in children])
             options.append(self._character_rule(remaining) + ' ' + any_char + '*')
             for ch in children:
-                options.append(self._character_rule([(ord(ch), ord(ch))]) + ' (' + build(node[ch]) + ')')
+                options.append(self._character_rule([(ord(ch), ord(ch))]) + ' (' + build(node[ch], depth + 1) + ')')
             return ' | '.join(options)
 
         quote = self._format_literal('"')
@@ -735,9 +740,10 @@ class SchemaConverter:
         documents = {url: schema}
         visited = {}
 
-        def walk(node, base):
+        def walk(node, base, depth=1):
             if not isinstance(node, dict) or id(node) in visited:
                 return
+            _check_depth(depth)
             visited[id(node)] = node
             if '$ref' in node:
                 ref = node['$ref']
@@ -757,6 +763,7 @@ class SchemaConverter:
                     response = requests.get(document_url, timeout=30)
                     response.raise_for_status()
                     documents[document_url] = response.json()
+                    _check_json_depth(documents[document_url])
                 fragment = unquote(fragment)
                 if fragment and not fragment.startswith('/'):
                     raise ValueError(f'Unsupported reference anchor: {ref}')
@@ -778,13 +785,13 @@ class SchemaConverter:
                         raise ValueError(f'Reference {ref} must target a schema object')
                     # Register before descending so recursive objects can refer back.
                     self._refs[canonical] = target
-                    walk(target, document_url)
+                    walk(target, document_url, depth + 1)
                 return
             # Match converter precedence; const/enum payloads are data, not schemas.
             if 'allOf' in node:
                 children = list(node['allOf']) if isinstance(node['allOf'], list) else []
                 siblings = {k: v for k, v in node.items() if k != 'allOf'}
-                walk(siblings, base)
+                walk(siblings, base, depth)
             elif 'oneOf' in node or 'anyOf' in node:
                 children = node.get('oneOf', node.get('anyOf'))
             elif 'const' in node or 'enum' in node:
@@ -799,18 +806,20 @@ class SchemaConverter:
                     children.extend(value if isinstance(value, list) else [value])
             if isinstance(children, list):
                 for child in children:
-                    walk(child, base)
+                    walk(child, base, depth + 1)
 
         walk(schema, url)
         return schema
 
     def _dereference(self, schema):
+        """Follow reference aliases; reject cycles without a concrete schema."""
         seen = set()
         while isinstance(schema, dict) and '$ref' in schema:
             ref = schema['$ref']
             if ref in seen:
                 raise ValueError('Reference cycle contains no concrete schema')
             seen.add(ref)
+            _check_depth(len(seen) + 1)
             schema = self._refs[ref]
         return schema
 
@@ -883,8 +892,9 @@ class SchemaConverter:
             pos += 1
             return [(value, value)]
 
-        def expression(grouped=False):
+        def expression(grouped=False, depth=1):
             nonlocal pos
+            _check_depth(depth)
             alternatives, sequence = [], []
             while pos < len(source):
                 ch = source[pos]
@@ -903,7 +913,7 @@ class SchemaConverter:
                         pos += 2
                     elif source[pos:pos+1] == '?':
                         raise ValueError('Unsupported regex group syntax')
-                    atom = '(' + expression(grouped=True) + ')'
+                    atom = '(' + expression(grouped=True, depth=depth + 1) + ')'
                     if pos >= len(source) or source[pos] != ')':
                         raise ValueError('Unbalanced parentheses in pattern')
                     pos += 1
@@ -981,6 +991,7 @@ class SchemaConverter:
 
     @staticmethod
     def _json_value_key(value):
+        """Compare JSON values structurally, keeping booleans distinct from numbers."""
         if value is None:
             return ('null',)
         if isinstance(value, bool):
@@ -998,10 +1009,12 @@ class SchemaConverter:
         raise ValueError('Invalid JSON value in enum')
 
     def _visit_all_of(self, schema, name, rule_name):
+        """Intersect supported constraints; reject combinations that would lose restrictions."""
         components = []
         active = set()
 
-        def collect(node):
+        def collect(node, depth=1):
+            _check_depth(depth)
             node = self._dereference(node)
             if not isinstance(node, dict):
                 raise ValueError('allOf components must be schema objects')
@@ -1015,7 +1028,7 @@ class SchemaConverter:
                 if siblings:
                     components.append(siblings)
                 for child in node['allOf']:
-                    collect(child)
+                    collect(child, depth + 1)
                 active.remove(id(node))
             else:
                 components.append(node)
@@ -1057,6 +1070,21 @@ class SchemaConverter:
             return self._add_rule(rule_name, '(' + ' | '.join(self._generate_constant_rule(v) for v in values) + ')')
         if len(components) == 1:
             return self.visit(components[0], name)
+        numeric_keys = {'type', 'minimum', 'maximum', 'exclusiveMinimum', 'exclusiveMaximum'}
+        if all(node.get('type') in ('integer', 'number') and set(node) <= numeric_keys for node in components):
+            integers = [node for node in components if node['type'] == 'integer']
+            merged = {'type': 'integer' if integers else 'number'}
+            # Vendor currently ignores bounds on number schemas; only integers carry ranges.
+            bounds = [_integer_bounds(node) for node in integers]
+            lower = [lo for lo, _ in bounds if lo is not None]
+            upper = [hi for _, hi in bounds if hi is not None]
+            if lower:
+                merged['minimum'] = max(lower)
+            if upper:
+                merged['maximum'] = min(upper)
+            if lower and upper and merged['minimum'] > merged['maximum']:
+                raise ValueError('allOf has an empty numeric range')
+            return self.visit(merged, name)
         allowed = {'type', 'properties', 'required', 'additionalProperties'}
         if not all(set(node) <= allowed and node.get('type', 'object') == 'object' for node in components):
             raise ValueError('Unsupported allOf intersection; combine constraints in a single schema')
@@ -1080,6 +1108,15 @@ class SchemaConverter:
         return self._add_rule(rule_name, self._build_object_rule(list(properties.items()), required, name, True if allow_additional else None))
 
     def visit(self, schema, name):
+        """Visit a schema within the depth budget, restoring the counter on failure."""
+        _check_depth(self._depth + 1)
+        self._depth += 1
+        try:
+            return self._visit(schema, name)
+        finally:
+            self._depth -= 1
+
+    def _visit(self, schema, name):
         if not isinstance(schema, dict):
             raise ValueError(f'Schema at {name or "root"} must be an object')
         for key in ('oneOf', 'anyOf', 'allOf', 'enum'):
@@ -1158,16 +1195,7 @@ class SchemaConverter:
 
         elif schema_type == 'integer' and \
                 ('minimum' in schema or 'exclusiveMinimum' in schema or 'maximum' in schema or 'exclusiveMaximum' in schema):
-            min_value = None
-            max_value = None
-            if 'minimum' in schema:
-                min_value = math.ceil(schema['minimum'])
-            elif 'exclusiveMinimum' in schema:
-                min_value = math.floor(schema['exclusiveMinimum']) + 1
-            if 'maximum' in schema:
-                max_value = math.floor(schema['maximum'])
-            elif 'exclusiveMaximum' in schema:
-                max_value = math.ceil(schema['exclusiveMaximum']) - 1
+            min_value, max_value = _integer_bounds(schema)
 
             out = ["("]
             _generate_min_max_int(min_value, max_value, out)
@@ -1263,6 +1291,7 @@ class SchemaConverter:
         return rule
 
     def format_grammar(self):
+        """Emit named rules in a stable order for reproducible output."""
         return '\n'.join(
             f'{name} ::= {rule}'
             for name, rule in sorted(self._rules.items(), key=lambda kv: kv[0])
@@ -1276,14 +1305,18 @@ def json_schema_to_gbnf(
     dotall: bool = False,
     raw_pattern: bool = False,
 ):
+    """Convert a schema copy to GBNF; remote references require allow_fetch=True."""
     prop_order = prop_order or []
 
     if isinstance(schema, str):
-        schema = json.loads(schema)
-    elif isinstance(schema, dict):
-        schema = copy.deepcopy(schema)
-    else:
+        try:
+            schema = json.loads(schema)
+        except RecursionError as exc:
+            raise ValueError(f"JSON schema exceeds {_SCHEMA_MAX_DEPTH} levels of nesting") from exc
+    elif not isinstance(schema, dict):
         raise TypeError("schema must be a JSON string or dictionary")
+    _check_json_depth(schema)
+    schema = copy.deepcopy(schema)
 
     converter = SchemaConverter(
         prop_order={name: idx for idx, name in enumerate(prop_order)},

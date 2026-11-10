@@ -7,23 +7,13 @@ import ctypes
 import sys
 from types import SimpleNamespace
 from unittest.mock import Mock
+from pathlib import Path
 
 import pytest
 import numpy as np
 
 from llama_cpp import llama_grammar
 from llama_cpp import _internals
-
-
-    # assert grammar._n_rules == 3
-    # assert grammar._start_rule_index == 2
-    # assert grammar.grammar is not None
-
-
-    # assert grammar.grammar is not None
-
-
-    # assert grammar.grammar is not None
 
 
 @pytest.mark.parametrize('schema, expected', [
@@ -216,6 +206,66 @@ def test_allof_impossible_or_unsupported_intersections_fail(schema):
         llama_cpp.LlamaGrammar.from_json_schema(schema)
 
 
+@pytest.mark.parametrize('components, expected', [
+    ([{'type': 'integer'}], {'type': 'integer'}),
+    ([{'type': 'string'}], {'type': 'string'}),
+    ([{'type': 'integer'}, {'type': 'number', 'minimum': 0, 'maximum': 100}], {'type': 'integer'}),
+    ([{'type': 'number'}, {'type': 'number'}], {'type': 'number'}),
+    ([{'type': 'integer', 'minimum': 0}, {'type': 'integer', 'maximum': 10}],
+     {'type': 'integer', 'minimum': 0, 'maximum': 10}),
+    ([{'type': 'integer', 'exclusiveMinimum': -2.5}, {'type': 'integer', 'exclusiveMaximum': 2.5}],
+     {'type': 'integer', 'minimum': -2, 'maximum': 2}),
+    ([{'type': 'integer', 'minimum': 9}, {'type': 'integer', 'maximum': 5}], None),
+])
+def test_numeric_allof_matches_vendor(components, expected):
+    convert = llama_grammar.json_schema_to_gbnf
+    # Exercise nested allOf and $ref through the same intersection path.
+    schema = {'$defs': {'part': components[0]}, 'allOf': [
+        {'$ref': '#/$defs/part'}, {'allOf': components[1:] or [{}]},
+    ]}
+    if expected is None:
+        with pytest.raises(ValueError, match='empty numeric range'):
+            convert(schema)
+    else:
+        grammar = convert(schema)
+        assert grammar == convert(expected)
+        with _internals.GrammarSampler(SimpleNamespace(vocab=None), grammar):
+            pass
+
+
+@pytest.mark.parametrize('kind', ['array', 'reference', 'pattern', 'literal'])
+@pytest.mark.parametrize('depth', [8, 128, 129])
+def test_schema_recursion_limit(kind, depth):
+    schema = {'type': 'string'}
+    if kind == 'reference':
+        definitions = {str(i): {'$ref': f'#/$defs/{i + 1}'} for i in range(depth - 2)}
+        definitions[str(depth - 2)] = schema
+        schema = {'$defs': definitions, '$ref': '#/$defs/0'}
+    elif kind == 'pattern':
+        schema = {'type': 'string', 'pattern': '^' + '(' * (depth - 1) + 'x' + ')' * (depth - 1) + '$'}
+    else:
+        for _ in range(depth - (1 if kind == 'array' else 2)):
+            schema = {'type': 'array', 'items': schema} if kind == 'array' else [schema]
+        if kind == 'literal':
+            schema = {'const': schema}
+    if depth > 128:
+        for value in (schema, json.dumps(schema)):
+            with pytest.raises(ValueError, match='128'):
+                llama_grammar.json_schema_to_gbnf(value)
+    else:
+        assert 'root ::=' in llama_grammar.json_schema_to_gbnf(schema)
+
+
+@pytest.mark.parametrize('name', ['arithmetic', 'c', 'chess', 'english', 'japanese', 'json', 'json_arr', 'list'])
+def test_builtin_grammars_match_vendor(name):
+    grammar = getattr(llama_grammar, name.upper() + '_GBNF')
+    source = (Path(__file__).resolve().parents[1] / 'vendor/llama.cpp/grammars' / (name + '.gbnf')).read_text('utf-8')
+    normalize = lambda text: [line.strip() for line in text.splitlines() if line.strip() and not line.lstrip().startswith('#')]
+    assert normalize(grammar) == normalize(source)
+    with _internals.GrammarSampler(SimpleNamespace(vocab=None), grammar):
+        pass
+
+
 @pytest.mark.parametrize('pattern', [r'^\bword$', r'^(a)\1$', r'^a{3,2}$', r'^[z-a]$', r'^a*?$', r'^[\d-a]$'])
 def test_unsupported_or_invalid_regex_is_rejected(pattern):
     with pytest.raises(ValueError):
@@ -234,6 +284,24 @@ def _native_accepts(model, grammar, text):
                 return False
             sampler.accept(token)
         return True
+
+
+def test_native_updated_grammar_constraints():
+    path = Path(__file__).resolve().parents[1] / 'vendor/llama.cpp/models/ggml-vocab-qwen2.gguf'
+    schema = {'allOf': [{'type': 'integer', 'minimum': 0}, {'type': 'integer', 'maximum': 10}]}
+    cases = [
+        (llama_grammar.json_schema_to_gbnf(schema), ['0', '5', '10'], ['-1', '11', '1.5', '{}']),
+        (llama_grammar.CHESS_GBNF, ['1. e4 e5\n2. Nf3 Nc6\n'], ['{}', '1. hello world\n']),
+        (llama_grammar.JAPANESE_GBNF, ['こんにちは', '日本語'], ['{}', 'hello']),
+        (llama_grammar.JSON_ARR_GBNF, ['[\n1]', '[\n"a"]'], ['{}', '[\n1e0]']),
+    ]
+    model = llama_cpp.Llama(model_path=str(path), vocab_only=True, n_gpu_layers=0, verbose=False)
+    try:
+        for grammar, good, bad in cases:
+            for text in good + bad:
+                assert _native_accepts(model, grammar, text) == (text in good), text
+    finally:
+        model.close()
 
 
 @pytest.mark.parametrize('pattern, good, bad', [
