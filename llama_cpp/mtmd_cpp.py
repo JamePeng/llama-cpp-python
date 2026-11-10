@@ -979,6 +979,7 @@ def mtmd_encode(
 
 
 # // text chunk will be ignored silently, only media chunk will be encoded
+# // the output is stored in ctx: do not call it from several threads at once
 # // returns 0 on success
 # // returns 1 on generic error
 # MTMD_API int32_t mtmd_encode_chunk(mtmd_context * ctx,
@@ -997,6 +998,7 @@ def mtmd_encode_chunk(
 ) -> c_int32:
     """
     text chunk will be ignored silently, only media chunk will be encoded
+    Output is stored in ctx; do not encode concurrently on the same context.
     returns 0 on success
     returns 1 on generic error
     """
@@ -1073,6 +1075,7 @@ def mtmd_batch_add_chunk(
 
 # // returns 0 on success
 # // returns 1 on generic error
+# // thread-safe, the output is stored in the batch
 # MTMD_API int32_t mtmd_batch_encode(mtmd_batch * batch);
 @ctypes_function_mtmd(
     "mtmd_batch_encode",
@@ -1081,6 +1084,7 @@ def mtmd_batch_add_chunk(
 )
 def mtmd_batch_encode(batch: mtmd_batch_p, /) -> c_int32:
     """
+    Thread-safe across batches; output is stored in the batch.
     returns 0 on success
     returns 1 on generic error
     """
@@ -1242,6 +1246,7 @@ def mtmd_audio_stream_push(
 # // pad the stream so that all pending rows can be produced
 # // end = false: the stream stays open (use it on a pause, to get a partial transcript)
 # // end = true:  no more push() is accepted
+# // thread-safe across streams
 # // returns 0 on success, 1 if the stream has ended
 # MTMD_API int32_t mtmd_audio_stream_flush(mtmd_audio_stream * stream, bool end);
 @ctypes_function_mtmd(
@@ -1253,12 +1258,14 @@ def mtmd_audio_stream_flush(stream: mtmd_audio_stream_p, end: bool) -> int:
 
     Use end=False on a pause to get a partial transcript and keep the stream
     open. Return 0 on success, or 1 if it has already ended.
+    Thread-safe across distinct streams.
     """
     ...
 
 
 # // produce the next decoder rows
 # // last_token is the token sampled from the previous row, LLAMA_TOKEN_NULL before the first sample
+# // thread-safe across streams
 # // return value:
 # //   > 0 number of rows ready, read them with mtmd_audio_stream_get_output_embd()
 # //   0   more audio is needed
@@ -1276,6 +1283,7 @@ def mtmd_audio_stream_step(stream: mtmd_audio_stream_p, last_token: int) -> int:
 
     Pass LLAMA_TOKEN_NULL before the first sample. Return a positive row
     count, 0 for more audio, -1 for end of stream, or -2 on error.
+    Thread-safe across distinct streams.
     """
     ...
 
@@ -1595,6 +1603,7 @@ def mtmd_gen_inp_default(
     ...
 
 # // run one step and update the state in place
+# // thread-safe across gen states
 # // the caller drives the backbone and collects the audio frames
 # MTMD_API int32_t mtmd_gen_audio_process(mtmd_context * ctx,
 #                                 mtmd_gen_state * state,
@@ -1616,7 +1625,8 @@ def mtmd_gen_audio_process(
     inp: POINTER(mtmd_gen_inp),  # type: ignore
     out: POINTER(mtmd_gen_out),  # type: ignore
 ) -> int:
-    """
+    """Thread-safe across distinct generation states.
+
     Run one step and update state in place; the caller drives the backbone
     and collects the audio frames before the next call with this state.
     """
@@ -1805,6 +1815,59 @@ def mtmd_helper_bitmap_init_from_buf(
         - audio files will be auto-detected based on magic bytes
         - output bitmap will have SHA-256 hash as the ID
     returns nullptr on failure
+    """
+    ...
+
+
+# // streaming resampler for raw mono F32 PCM (e.g. realtime input), to match mtmd_get_audio_sample_rate()
+# // it keeps state between calls, use one per stream
+# struct mtmd_helper_resampler;
+# typedef struct mtmd_helper_resampler mtmd_helper_resampler;
+mtmd_helper_resampler_p = NewType("mtmd_helper_resampler_p", int)
+mtmd_helper_resampler_p_ctypes = c_void_p
+
+
+# // returns NULL on failure
+# MTMD_API mtmd_helper_resampler * mtmd_helper_resampler_init(int32_t rate_in, int32_t rate_out);
+@ctypes_function_mtmd(
+    "mtmd_helper_resampler_init", [c_int32, c_int32], mtmd_helper_resampler_p_ctypes,
+    required=False,
+)
+def mtmd_helper_resampler_init(rate_in: int, rate_out: int) -> mtmd_helper_resampler_p:
+    """Create a mono F32 PCM resampler; return NULL on failure.
+
+    Rates must be positive. Use one context per stream and free it when done.
+    """
+    ...
+
+
+# MTMD_API void mtmd_helper_resampler_free(mtmd_helper_resampler * ctx);
+@ctypes_function_mtmd(
+    "mtmd_helper_resampler_free", [mtmd_helper_resampler_p_ctypes], None, required=False,
+)
+def mtmd_helper_resampler_free(ctx: mtmd_helper_resampler_p) -> None:
+    """Free the context and its output buffer. NULL is accepted."""
+    ...
+
+
+# // *out is valid until the next call
+# // returns the number of output samples (can be 0), < 0 on error
+# MTMD_API int64_t mtmd_helper_resampler_process(mtmd_helper_resampler * ctx, const float * in, size_t n_in, const float ** out);
+@ctypes_function_mtmd(
+    "mtmd_helper_resampler_process",
+    [mtmd_helper_resampler_p_ctypes, POINTER(c_float), c_size_t, POINTER(POINTER(c_float))],
+    c_int64, required=False,
+)
+def mtmd_helper_resampler_process(
+    ctx: mtmd_helper_resampler_p, samples: _Pointer[c_float], n_in: int,
+    out: _Pointer[_Pointer[c_float]],
+) -> int:
+    """Consume a PCM chunk; return the output sample count, or < 0 on error.
+
+    Pass a live context and writable output-pointer storage. Copy output before
+    the next call or freeing the context. Equal-rate passthrough aliases the
+    input, so keep the input buffer alive while reading it. Do not free out.
+    An empty chunk produces no samples; it does not flush the resampler tail.
     """
     ...
 
