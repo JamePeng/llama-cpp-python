@@ -5549,6 +5549,81 @@ def llama_opt_epoch(
 # symbols raise RuntimeError when called, so older libraries remain importable.
 ctypes_function_llama_ext = ctypes_function_for_shared_library(_lib)
 
+
+# // llama architecture queries
+# // the canonical name of an architecture (e.g. "llama"), or "unknown"
+# LLAMA_API const char * llama_arch_name(llm_arch arch);
+@ctypes_function_llama_ext(
+    [
+        "llama_arch_name",
+        "?llama_arch_name@@YAPEBDW4llm_arch@@@Z",
+        "__Z15llama_arch_name8llm_arch",
+        "_Z15llama_arch_name8llm_arch",
+    ],
+    [ctypes.c_int],
+    ctypes.c_char_p,
+    required=False,
+)
+def llama_arch_name(arch: int) -> Optional[bytes]:
+    """Return the canonical name for a native llm_arch enum value.
+
+    Architecture IDs follow the loaded build's llama-arch.h; they are not
+    model handles or stable cross-version identifiers."""
+    ...
+
+
+# LLAMA_API bool llama_arch_supports_sm_tensor(llm_arch arch);
+@ctypes_function_llama_ext(
+    [
+        "llama_arch_supports_sm_tensor",
+        "?llama_arch_supports_sm_tensor@@YA_NW4llm_arch@@@Z",
+        "__Z29llama_arch_supports_sm_tensor8llm_arch",
+        "_Z29llama_arch_supports_sm_tensor8llm_arch",
+    ],
+    [ctypes.c_int],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_arch_supports_sm_tensor(arch: int) -> bool:
+    """Whether a native llm_arch supports LLAMA_SPLIT_MODE_TENSOR."""
+    ...
+
+
+# LLAMA_API bool llama_arch_supports_mixed_batch(llm_arch arch);
+@ctypes_function_llama_ext(
+    [
+        "llama_arch_supports_mixed_batch",
+        "?llama_arch_supports_mixed_batch@@YA_NW4llm_arch@@@Z",
+        "__Z31llama_arch_supports_mixed_batch8llm_arch",
+        "_Z31llama_arch_supports_mixed_batch8llm_arch",
+    ],
+    [ctypes.c_int],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_arch_supports_mixed_batch(arch: int) -> bool:
+    """Whether a native llm_arch supports interleaved token/embedding batches."""
+    ...
+
+
+# // FIXME temporary function for better error messages
+# LLAMA_API bool llama_arch_supports_save(llm_arch arch);
+@ctypes_function_llama_ext(
+    [
+        "llama_arch_supports_save",
+        "?llama_arch_supports_save@@YA_NW4llm_arch@@@Z",
+        "__Z24llama_arch_supports_save8llm_arch",
+        "_Z24llama_arch_supports_save8llm_arch",
+    ],
+    [ctypes.c_int],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_arch_supports_save(arch: int) -> bool:
+    """Whether the native implementation supports saving this architecture."""
+    ...
+
+
 # // Reserve a new compute graph. It is valid until the next call to llama_graph_reserve.
 # LLAMA_API struct ggml_cgraph * llama_graph_reserve(
 #         struct llama_context * ctx,
@@ -5596,7 +5671,7 @@ def llama_graph_reserve(
         "_Z28llama_ftype_get_default_type11llama_ftype",
     ],
     [ctypes.c_int],
-    int,
+    ctypes.c_int,
     required=False,
 )
 def llama_ftype_get_default_type(
@@ -5961,6 +6036,28 @@ def llama_batch_ext_set_decision_order(
     """
     ...
 
+# // Label of option i of a decision model ("<arch>.decision.labels"), nullptr past the last one
+# LLAMA_API const char * llama_model_decision_label(const struct llama_model * model, uint32_t i);
+@ctypes_function_llama_ext(
+    [
+        "llama_model_decision_label",
+        "?llama_model_decision_label@@YAPEBDPEBUllama_model@@I@Z",
+        "__Z26llama_model_decision_labelPK11llama_modelj",
+        "_Z26llama_model_decision_labelPK11llama_modelj",
+    ],
+    [llama_model_p_ctypes, ctypes.c_uint32],
+    ctypes.c_char_p,
+    required=False,
+)
+def llama_model_decision_label(model: llama_model_p, i: int) -> Optional[bytes]:
+    """Return the native decision-head label, or None past its label list.
+
+    ctypes copies the borrowed native string into Python bytes. The model must
+    remain open during the call; the returned bytes require no native free.
+    """
+    ...
+
+
 # // mirrors:
 # // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
 # LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
@@ -6149,6 +6246,102 @@ def llama_get_ctx_other(
     does not create a context or transfer responsibility for freeing it.
     """
     ...
+
+
+# // Write the unmasked h_nextn rows (see llama_set_embeddings_nextn) of each decode to a device buffer
+# // [n_embd_out, n_batch + n_seq_max] instead of host memory: row r < n_batch is the token at batch index r of the last decode,
+# // row n_batch + s is free for the caller, e.g. for seq s (see llama_set_embeddings_nextn_rows()).
+# // Returns false if the buffer cannot be used, the rows are then extracted to host memory.
+# LLAMA_API bool llama_set_embeddings_nextn_dev(struct llama_context * ctx, bool value);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_embeddings_nextn_dev",
+        "?llama_set_embeddings_nextn_dev@@YA_NPEAUllama_context@@_N@Z",
+        "__Z30llama_set_embeddings_nextn_devP13llama_contextb",
+        "_Z30llama_set_embeddings_nextn_devP13llama_contextb",
+    ],
+    [llama_context_p_ctypes, ctypes.c_bool],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_set_embeddings_nextn_dev(ctx: llama_context_p, value: bool) -> bool:
+    """Enable unmasked NextN device capture; false preserves host extraction."""
+    ...
+
+
+# // Copy rows of the h_nextn device buffer to or from host memory, ordered after the last decode and its readers
+# LLAMA_API bool llama_get_embeddings_nextn_rows(struct llama_context * ctx, int64_t row0, int64_t n_rows, float * out);
+@ctypes_function_llama_ext(
+    [
+        "llama_get_embeddings_nextn_rows",
+        "?llama_get_embeddings_nextn_rows@@YA_NPEAUllama_context@@_J1PEAM@Z",
+        "__Z31llama_get_embeddings_nextn_rowsP13llama_contextxxPf",
+        "_Z31llama_get_embeddings_nextn_rowsP13llama_contextllPf",
+    ],
+    [llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_get_embeddings_nextn_rows(ctx: llama_context_p, row0: int, n_rows: int, out: ctypes.POINTER(ctypes.c_float)) -> bool:
+    """Copy original-batch NextN device rows to caller-owned float32 storage."""
+    ...
+
+
+# // Copy rows of the h_nextn device buffer to or from host memory, ordered after the last decode and its readers
+# LLAMA_API bool llama_set_embeddings_nextn_rows(struct llama_context * ctx, int64_t row0, int64_t n_rows, const float * data);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_embeddings_nextn_rows",
+        "?llama_set_embeddings_nextn_rows@@YA_NPEAUllama_context@@_J1PEBM@Z",
+        "__Z31llama_set_embeddings_nextn_rowsP13llama_contextxxPKf",
+        "_Z31llama_set_embeddings_nextn_rowsP13llama_contextllPKf",
+    ],
+    [llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_set_embeddings_nextn_rows(ctx: llama_context_p, row0: int, n_rows: int, data: ctypes.POINTER(ctypes.c_float)) -> bool:
+    """Upload float32 state rows, including the reserved per-sequence pending row."""
+    ...
+
+
+# // Read the state rows of batches (see llama_batch_ext_set_embd_state_row()) from the h_nextn device buffer of src.
+# // Returns whether decode accepts batches with state rows.
+# LLAMA_API bool llama_set_embd_state_src(struct llama_context * ctx, struct llama_context * src);
+@ctypes_function_llama_ext(
+    [
+        "llama_set_embd_state_src",
+        "?llama_set_embd_state_src@@YA_NPEAUllama_context@@0@Z",
+        "__Z24llama_set_embd_state_srcP13llama_contextS0_",
+        "_Z24llama_set_embd_state_srcP13llama_contextS0_",
+    ],
+    [llama_context_p_ctypes, llama_context_p_ctypes],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_set_embd_state_src(ctx: llama_context_p, src: Optional[llama_context_p]) -> bool:
+    """Borrow src's NextN device buffer for MTP state inputs; NULL detaches it."""
+    ...
+
+
+# // The state of entry idx is row `row` of the h_nextn device buffer of the context set with llama_set_embd_state_src().
+# // All entries of a batch have a state row, or none.
+# LLAMA_API bool llama_batch_ext_set_embd_state_row(struct llama_batch_ext * batch, int32_t idx, int32_t row);
+@ctypes_function_llama_ext(
+    [
+        "llama_batch_ext_set_embd_state_row",
+        "?llama_batch_ext_set_embd_state_row@@YA_NPEAUllama_batch_ext@@HH@Z",
+        "__Z34llama_batch_ext_set_embd_state_rowP15llama_batch_extii",
+        "_Z34llama_batch_ext_set_embd_state_rowP15llama_batch_extii",
+    ],
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_int32],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_batch_ext_set_embd_state_row(batch: llama_batch_ext_p, idx: int, row: int) -> bool:
+    """Attach a borrowed device state row; all submitted entries require one."""
+    ...
+
 
 # // model/context data extraction
 
