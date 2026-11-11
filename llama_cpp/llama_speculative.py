@@ -272,6 +272,8 @@ class SpecConfig:
     draft_model_kwargs: dict = field(
         default_factory=dict
     )
+    draft_model_shards: Optional[Sequence[str]] = None  # extra GGUF shards, including an external PLE table
+    draft_n_ubatch: int = 0  # physical draft batch size; 0 inherits the target
 
     def enabled(self) -> bool:
         return not self.spec_type.is_none()
@@ -322,6 +324,12 @@ class SpecConfig:
             )
 
         # common draft validation
+        if self.draft_model_shards and not self.draft_model_path:
+            raise ValueError("SpecConfig: draft_model_shards requires draft_model_path")
+        if isinstance(self.draft_model_shards, (str, bytes, os.PathLike)):
+            raise ValueError("SpecConfig: draft_model_shards must be a sequence of paths")
+        if self.draft_n_ubatch < 0:
+            raise ValueError("SpecConfig: draft_n_ubatch must be non-negative")
         if self.draft_n_max <= 0:
             raise ValueError(
                 "SpecConfig: draft_n_max must be greater than zero"
@@ -1167,6 +1175,7 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
         """
         draft_model = internals.LlamaModel(
             path_model=self.config.draft_model_path,
+            shards=self.config.draft_model_shards,
             params=self._build_draft_model_params(
                 model_params, load_mtp=load_mtp
             ),
@@ -1199,6 +1208,8 @@ class _LlamaModelDraftEngine(LlamaSpecEngine):
             context_params, self._llama_cpp_lib.LLAMA_POOLING_TYPE_UNSPECIFIED
         )
         params.n_ctx = target_context.n_ctx()
+        if self.config.draft_n_ubatch:
+            params.n_ubatch = self.config.draft_n_ubatch
         if self.config.draft_n_threads is not None:
             params.n_threads = int(self.config.draft_n_threads)
         if self.config.draft_n_threads_batch is not None:
@@ -1520,6 +1531,9 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                 verbose=verbose,
             )
             self.embedding_batch = None
+            self._use_dev_h = self._dev_h_enabled = False
+            self._verify_h_device_rows = 0
+            self._verify_h_row0 = -1
 
             self._enable_backend_sampling(internals)
             self.target_context.set_embeddings_nextn(True, masked=self.is_mem_shared)
@@ -1536,14 +1550,51 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             )
             self._pending_verification_checkpoint = None
             self.reset_checkpoint_stats()
+            self._configure_device_hidden()
 
             if self.verbose:
                 self._print_runtime_configuration(context_params)
         except BaseException:
             self._close_draft_resources(
-                [], batch_names=("batch",), close_model=self._owns_model
+                [], batch_names=("batch", "embedding_batch"), close_model=self._owns_model
             )
+            self._release_device_hidden([])
             raise
+
+    def _configure_device_hidden(self) -> None:
+        """Use device state rows only where native common/speculative.cpp does."""
+        names = (
+            "llama_set_embeddings_nextn_dev", "llama_get_embeddings_nextn_rows",
+            "llama_set_embeddings_nextn_rows", "llama_set_embd_state_src",
+            "llama_batch_ext_set_embd_state_row",
+        )
+        if self.is_mem_shared or self.chain_heads or os.environ.get("LLAMA_MTP_DEV", "1") == "0":
+            return
+        if any(getattr(self._llama_cpp_lib, name, None) is None or getattr(getattr(self._llama_cpp_lib, name), "__ctypes_optional__", False) for name in names):
+            return
+        if not callable(getattr(self.target_context, "set_embeddings_nextn_dev", None)) or not callable(getattr(self.draft_context, "set_embd_state_src", None)):
+            return
+        self._n_batch_tgt = self.target_context.n_batch()
+        self._dev_h_enabled = True
+        self._use_dev_h = self.target_context.set_embeddings_nextn_dev(True) and self.draft_context.set_embd_state_src(self.target_context)
+        if not self._use_dev_h:
+            self.draft_context.set_embd_state_src(None)
+            self.target_context.set_embeddings_nextn_dev(False)
+            self._dev_h_enabled = False
+
+    def _release_device_hidden(self, errors: List[Exception]) -> None:
+        # Draft readers have been destroyed before releasing the target buffer.
+        if getattr(self, "_dev_h_enabled", False):
+            try:
+                self.target_context.set_embeddings_nextn_dev(False)
+            except Exception as exc:
+                errors.append(exc)
+            self._dev_h_enabled = self._use_dev_h = False
+
+    def _verified_hidden(self, row: int) -> npt.NDArray[np.float32]:
+        if getattr(self, "_verify_h_device_rows", 0):
+            return self.target_context.get_embeddings_nextn_rows(self._verify_h_row0 + row, 1)[0]
+        return self.verify_h[row]
 
     def _candidate(self, output_index: int) -> Tuple[int, float]:
         return super()._candidate(output_index, suppress_tokens=self._suppressed_tokens)
@@ -1606,7 +1657,8 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             "LlamaMTPDecoding: "
             f"backend_sampling=requested:{config.draft_backend_sampling}/"
             f"active:{self._backend_sampling}, mtp_heads={self.n_mtp_layers}, "
-            f"memory_shared={self.is_mem_shared}, chain_heads={self.chain_heads}",
+            f"memory_shared={self.is_mem_shared}, chain_heads={self.chain_heads}, "
+            f"device_hidden={self._use_dev_h}",
             file=sys.stderr,
         )
         print(
@@ -1735,6 +1787,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 
             self.pending_h[:] = checkpoint["pending_h"]
             self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+            self._verify_h_device_rows = 0
             self.verify_tokens.clear()
             self.verify_positions.clear()
             self.verify_embeddings = None
@@ -1789,6 +1842,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         self.draft_context.memory_clear(True)
         self.pending_h.fill(0.0)
         self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+        self._verify_h_device_rows = 0
         self.verify_tokens.clear()
         self.verify_positions.clear()
         self.verify_embeddings = None
@@ -1809,6 +1863,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         self._close_draft_resources(
             errors, batch_names=("batch", "embedding_batch"), close_model=self._owns_model
         )
+        self._release_device_hidden(errors)
         self.verify_embeddings = None
         self.verify_media_positions = None
 
@@ -1875,6 +1930,9 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             )[row_start:]
         # Only non-shared drafts need every row for catch-up. Sparse shared-KV
         # output uses the original batch index, not a compact output index.
+        if getattr(self, "_use_dev_h", False):
+            self._process_device_rows(tokens, positions, embeddings=embeddings, media_positions=media_positions)
+            return
         pointer = (
             self.target_context.get_embeddings_nextn_ith(row_start)
             if row_start else self.target_context.get_embeddings_nextn()
@@ -1887,6 +1945,36 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             tokens, positions, target_h,
             embeddings=embeddings, media_positions=media_positions,
         )
+
+    def _process_device_rows(self, tokens, positions, *, embeddings=None, media_positions=None) -> None:
+        """Catch up from original target batch indices, copying only the pending row."""
+        count = len(positions)
+        if count > self._n_batch_tgt:
+            raise ValueError("MTP target batch exceeds the NextN device buffer")
+        self.target_context.set_embeddings_nextn_rows(self._n_batch_tgt, self.pending_h.reshape(1, -1))
+        if self.embedding_batch is None:
+            from llama_cpp import _internals as internals
+
+            self.embedding_batch = internals.LlamaBatchExt(context=self.draft_context)
+        batch = self.embedding_batch
+        batch.reset()
+        rows = [self._n_batch_tgt] + list(range(count - 1))
+        try:
+            if embeddings is None:
+                batch.add_tokens(tokens, positions=positions, state_rows=rows)
+            else:
+                batch.add_embeddings(embeddings, positions=positions if media_positions is None else media_positions, state_rows=rows)
+            status = self.draft_context.decode(batch)
+            if status != 0:
+                raise RuntimeError(f"MTP catch-up decode failed with status {status}")
+            pending = self.target_context.get_embeddings_nextn_rows(count - 1, 1)[0]
+        finally:
+            batch.reset()
+        self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+        self._verify_h_row0, self._verify_h_device_rows = 0, count
+        self.verify_tokens, self.verify_positions = list(tokens), list(positions)
+        self.verify_embeddings, self.verify_media_positions = embeddings, media_positions
+        self.pending_h[:] = pending
 
     def _process_target_rows(
         self,
@@ -1954,6 +2042,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                     catchup_batch.reset()
 
         self.verify_h = target_h
+        self._verify_h_device_rows = 0
         self.verify_tokens = list(tokens)
         self.verify_positions = list(positions)
         self.verify_embeddings = embeddings
@@ -1988,7 +2077,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                     seq_id, self.verify_positions[count - 1] + 1, -1
                 ):
                     raise RuntimeError("MTP native verification rollback failed")
-                self.pending_h[:] = self.verify_h[count - 1]
+                self.pending_h[:] = self._verified_hidden(count - 1)
             except BaseException:
                 self._checkpoint_owner = None
                 raise
@@ -2001,7 +2090,10 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             # independent copies of the accepted feature rows.
             tokens = self.verify_tokens[:count]
             positions = self.verify_positions[:count]
-            target_h = self.verify_h[:count].copy()
+            target_h = (
+                self.target_context.get_embeddings_nextn_rows(self._verify_h_row0, count)
+                if getattr(self, "_verify_h_device_rows", 0) and count else self.verify_h[:count].copy()
+            )
             embeddings = None if self.verify_embeddings is None else self.verify_embeddings[:count].copy()
             media_positions = None if self.verify_media_positions is None else self.verify_media_positions[:count]
             self.restore(checkpoint, seq_id)
@@ -2097,10 +2189,12 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         """Advance the pending hidden row to the accepted verification prefix."""
         if seq_id != 0:
             raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
-        if self.verify_h.shape[0] == 0:
+        n_rows = getattr(self, "_verify_h_device_rows", 0) or self.verify_h.shape[0]
+        if n_rows == 0:
             return
-        row = min(max(0, int(n_accepted)), self.verify_h.shape[0] - 1)
-        self.pending_h[:] = self.verify_h[row]
+        row = min(max(0, int(n_accepted)), n_rows - 1)
+        if row != n_rows - 1 or not getattr(self, "_verify_h_device_rows", 0):
+            self.pending_h[:] = self._verified_hidden(row)
 
 
 class LlamaDFlashDecoding(_LlamaModelDraftEngine):

@@ -55,6 +55,7 @@ class LlamaModel:
         path_model: str,
         params: llama_cpp.llama_model_params,
         verbose: bool = True,
+        shards: Optional[Sequence[str]] = None,
     ):
         self.path_model = path_model
         self.params = params
@@ -69,10 +70,29 @@ class LlamaModel:
         if not os.path.exists(path_model):
             raise ValueError(f"LlamaModel[__init__]: Model path does not exist: {path_model}")
 
+        if isinstance(shards, (str, bytes, os.PathLike)):
+            raise ValueError("Model shards must be a sequence of paths")
+        paths, seen = [], set()
+        for path in (path_model, *(shards or ())):
+            path = os.fspath(path)
+            if not isinstance(path, str) or not path or "\0" in path:
+                raise ValueError("Model paths must be nonempty strings without NUL characters")
+            key = os.path.normcase(os.path.abspath(path))
+            if key in seen:
+                continue
+            if not os.path.exists(path):
+                raise ValueError(f"LlamaModel[__init__]: Model path does not exist: {path}")
+            paths.append(path)
+            seen.add(key)
+        self.shards = tuple(paths[1:])
         with suppress_stdout_stderr(disable=verbose):
-            model = llama_cpp.llama_model_load_from_file(
-                self.path_model.encode("utf-8"), self.params
-            )
+            if len(paths) == 1:
+                model = llama_cpp.llama_model_load_from_file(
+                    self.path_model.encode("utf-8"), self.params
+                )
+            else:
+                encoded = (ctypes.c_char_p * len(paths))(*(p.encode("utf-8") for p in paths))
+                model = llama_cpp.llama_model_load_from_splits(encoded, len(paths), self.params)
 
         if model is None:
             raise ValueError(f"Failed to load model from file: {path_model}")
@@ -1397,6 +1417,43 @@ class LlamaContext:
         self._assert_ctx()
         llama_cpp.llama_set_embeddings_nextn(self.ctx, enabled, masked)
 
+    def set_embeddings_nextn_dev(self, enabled: bool) -> bool:
+        """Request unmasked NextN device output, falling back to host if unavailable."""
+        self._assert_ctx()
+        return llama_cpp.llama_set_embeddings_nextn_dev(self.ctx, enabled)
+
+    def set_embd_state_src(self, source: Optional[LlamaContext]) -> bool:
+        """Borrow a peer's NextN device state buffer, or detach with None."""
+        self._assert_ctx()
+        if source is not None:
+            source._assert_ctx()
+        return llama_cpp.llama_set_embd_state_src(self.ctx, None if source is None else source.ctx)
+
+    def get_embeddings_nextn_rows(self, row0: int, n_rows: int) -> npt.NDArray[np.float32]:
+        """Copy original-batch device rows into an owned float32 matrix."""
+        self._assert_ctx()
+        row0, n_rows = operator.index(row0), operator.index(n_rows)
+        if row0 < 0 or n_rows < 0:
+            raise ValueError("NextN row offset and count must be nonnegative")
+        rows = np.empty((n_rows, self.model.n_embd_out()), dtype=np.float32)
+        if not llama_cpp.llama_get_embeddings_nextn_rows(
+            self.ctx, row0, n_rows, rows.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        ):
+            raise RuntimeError("NextN device rows are unavailable or out of range")
+        return rows
+
+    def set_embeddings_nextn_rows(self, row0: int, rows) -> None:
+        """Upload a matrix of hidden states into the NextN device buffer."""
+        self._assert_ctx()
+        row0 = operator.index(row0)
+        data = np.ascontiguousarray(rows, dtype=np.float32)
+        if row0 < 0 or data.ndim != 2 or data.shape[1] != self.model.n_embd_out():
+            raise ValueError("NextN rows require a nonnegative offset and matching output width")
+        if not llama_cpp.llama_set_embeddings_nextn_rows(
+            self.ctx, row0, len(data), data.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+        ):
+            raise RuntimeError("NextN device rows are unavailable or out of range")
+
     def get_embeddings_nextn(self):
         """Synchronize and return the complete auxiliary NextN output buffer.
 
@@ -1687,6 +1744,7 @@ class LlamaBatchEntry:
     decision_order: int = 0
     state: Optional[npt.NDArray[np.float32]] = None
     embd_row: Optional[int] = None
+    state_row: Optional[int] = None
 
 
 class LlamaBatchExt:
@@ -1701,6 +1759,8 @@ class LlamaBatchExt:
       Paired entries cannot share a submitted range with unpaired entries.
     * ``state=`` / ``states=``: separate hidden states, e.g. from the MTP target.
       A submitted range must carry states on every entry or on none.
+    * ``state_row=`` / ``state_rows=``: hidden rows borrowed from the context's
+      state source. All submitted entries require one; host states cannot mix.
     * ``add_embd_row``: borrowed device features from ctx_other. Every entry in
       the submitted range must be a device row; consume before the peer decodes.
 
@@ -1790,7 +1850,7 @@ class LlamaBatchExt:
             raise ValueError("seq_ids must be nonempty and within context sequence capacity")
         return ids
 
-    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, state=None, embd_row=None, validated_seq_ids=None):
+    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, state=None, embd_row=None, state_row=None, validated_seq_ids=None):
         """Validate input metadata and construct a logical entry without copying features."""
         if token is not None:
             token = self._integer(token, "token")
@@ -1804,6 +1864,10 @@ class LlamaBatchExt:
                 raise ValueError("A device row cannot carry a token or embedding")
         if token is None and embedding is None and embd_row is None:
             raise ValueError("An entry requires a token, embedding or device row")
+        if state_row is not None:
+            state_row = self._integer(state_row, "state_row")
+            if not 0 <= state_row <= 2**31 - 1 or state is not None:
+                raise ValueError("state_row must be a nonnegative int32 without a host state")
         ids = self._seq_ids(seq_ids) if validated_seq_ids is None else validated_seq_ids
         n_pos = 1 if token is not None else self._n_pos
         if isinstance(position, (int, np.integer)):
@@ -1815,7 +1879,7 @@ class LlamaBatchExt:
         order = self._integer(decision_order, "decision_order")
         if order not in self._decision_orders:
             raise ValueError("Unknown decision_order")
-        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order, state, embd_row)
+        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order, state, embd_row, state_row)
 
     @staticmethod
     def _embedding(data, name="embedding"):
@@ -1853,17 +1917,18 @@ class LlamaBatchExt:
         """Return the maximum entries per native submission (context.n_batch())."""
         return self._capacity
 
-    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0, state=None) -> int:
+    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0, state=None, state_row: Optional[int] = None) -> int:
         """Append one text entry and return its logical index (int).
 
         token (int): Vocabulary ID; position (int): Scalar model position.
         seq_ids (Sequence[int]): Context sequences sharing this entry, default (0,).
         output (bool): Request an output row, default False.
         decision_order (int): Decision-head metadata, default 0 for ordinary text.
-        state (array-like or None): Separate hidden state, copied when supplied."""
+        state (array-like or None): Separate hidden state, copied when supplied.
+        state_row (int or None): Borrow a NextN device state row instead of state."""
         self._require_open()
         state = None if state is None else self._embedding(state, "state")
-        entry = self._entry(token, None, position, seq_ids, output, decision_order, state=state)
+        entry = self._entry(token, None, position, seq_ids, output, decision_order, state=state, state_row=state_row)
         self._entries.append(entry)
         return len(self) - 1
 
@@ -1881,21 +1946,22 @@ class LlamaBatchExt:
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_embedding(self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None) -> int:
+    def add_embedding(self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None, state_row: Optional[int] = None) -> int:
         """Copy one external feature entry and return its logical index (int).
 
         embedding (array-like): Vector or matrix forming one entry's payload.
         position (int or Sequence[int]): Scalar, or four axes for M-RoPE/IM-RoPE.
         seq_ids (Sequence[int]): Sequences sharing the entry, default (0,).
         output (bool): Request an output row, default False.
-        state (array-like or None): Separate hidden state, copied when supplied."""
+        state (array-like or None): Separate hidden state, copied when supplied.
+        state_row (int or None): Borrow a NextN device state row instead of state."""
         self._require_open()
         state = None if state is None else self._embedding(state, "state")
-        entry = self._entry(None, self._embedding(embedding), position, seq_ids, output, 0, state=state)
+        entry = self._entry(None, self._embedding(embedding), position, seq_ids, output, 0, state=state, state_row=state_row)
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_token_embedding(self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None) -> int:
+    def add_token_embedding(self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None, state_row: Optional[int] = None) -> int:
         """Append a token ID and token embedding; return its logical index (int).
 
         token (int): Vocabulary ID; embedding (array-like): Copied feature payload.
@@ -1903,15 +1969,16 @@ class LlamaBatchExt:
         seq_ids (Sequence[int]): Sequences sharing the entry, default (0,).
         output (bool): Request an output row, default False.
         state (array-like or None): Separate hidden state, copied when supplied.
+        state_row (int or None): Borrow a NextN device state row instead of state.
         For MTP token IDs plus hidden states, use add_token(..., state=hidden).
         All entries submitted with this entry must also be paired."""
         self._require_open()
         state = None if state is None else self._embedding(state, "state")
-        entry = self._entry(token, self._embedding(embedding), position, seq_ids, output, 0, state=state)
+        entry = self._entry(token, self._embedding(embedding), position, seq_ids, output, 0, state=state, state_row=state_row)
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_tokens(self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None) -> Tuple[int, ...]:
+    def add_tokens(self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None, state_rows: Optional[Sequence[int]] = None) -> Tuple[int, ...]:
         """Append a validated text span; return logical indices (Tuple[int, ...]).
 
         tokens (Sequence[int]): Vocabulary IDs; positions (Sequence[int]):
@@ -1919,19 +1986,23 @@ class LlamaBatchExt:
         seq_ids (Sequence[int]): Common sequence IDs, default (0,).
         outputs (Optional[Sequence[bool]]): One flag per token; None means all False.
         states (array-like or None): Matrix [entries, state_width], copied once.
+        state_rows (Sequence[int] or None): One borrowed device row per entry, instead of states.
         Lengths must match; validation failure leaves existing entries unchanged."""
         self._require_open()
         flags = [False] * len(tokens) if outputs is None else outputs
         if len(positions) != len(tokens) or len(flags) != len(tokens):
             raise ValueError("tokens, positions and outputs must have equal lengths")
         ids = self._seq_ids(seq_ids)
-        state_rows = self._states(states, len(tokens))
-        entries = [self._entry(t, None, p, ids, o, 0, state=s, validated_seq_ids=ids) for t, p, o, s in zip(tokens, positions, flags, state_rows)]
+        host_states = self._states(states, len(tokens))
+        rows = [None] * len(tokens) if state_rows is None else state_rows
+        if len(rows) != len(tokens) or (state_rows is not None and any(row is None for row in rows)):
+            raise ValueError("state_rows must have one row index per entry")
+        entries = [self._entry(t, None, p, ids, o, 0, state=s, state_row=r, validated_seq_ids=ids) for t, p, o, s, r in zip(tokens, positions, flags, host_states, rows)]
         start = len(self)
         self._entries.extend(entries)
         return tuple(range(start, len(self)))
 
-    def add_embeddings(self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None) -> Tuple[int, ...]:
+    def add_embeddings(self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None, state_rows: Optional[Sequence[int]] = None) -> Tuple[int, ...]:
         """Copy a feature span once; return logical indices (Tuple[int, ...]).
 
         embeddings (array-like): Matrix [entries, width], one entry per row.
@@ -1939,6 +2010,7 @@ class LlamaBatchExt:
         seq_ids (Sequence[int]): Common sequence IDs, default (0,).
         outputs (Optional[Sequence[bool]]): One flag per entry; None means all False.
         states (array-like or None): Matrix [entries, state_width], copied once.
+        state_rows (Sequence[int] or None): One borrowed device row per entry, instead of states.
         Lengths must match; validation failure leaves existing entries unchanged."""
         self._require_open()
         data = self._embedding(embeddings)
@@ -1948,8 +2020,11 @@ class LlamaBatchExt:
         if len(positions) != len(data) or len(flags) != len(data):
             raise ValueError("embeddings, positions and outputs must have equal lengths")
         ids = self._seq_ids(seq_ids)
-        state_rows = self._states(states, len(data))
-        entries = [self._entry(None, row, p, ids, o, 0, state=s, validated_seq_ids=ids) for row, p, o, s in zip(data, positions, flags, state_rows)]
+        host_states = self._states(states, len(data))
+        rows = [None] * len(data) if state_rows is None else state_rows
+        if len(rows) != len(data) or (state_rows is not None and any(row is None for row in rows)):
+            raise ValueError("state_rows must have one row index per entry")
+        entries = [self._entry(None, row, p, ids, o, 0, state=s, state_row=r, validated_seq_ids=ids) for row, p, o, s, r in zip(data, positions, flags, host_states, rows)]
         start = len(self)
         self._entries.extend(entries)
         return tuple(range(start, len(self)))
@@ -1976,6 +2051,9 @@ class LlamaBatchExt:
         device_rows = sum(e.embd_row is not None for e in entries)
         if device_rows and device_rows != count:
             raise ValueError("Device rows cannot mix with token or embedding entries")
+        state_rows = sum(e.state_row is not None for e in entries)
+        if state_rows and (state_rows != count or any(e.state is not None for e in entries)):
+            raise ValueError("Device state rows must be present on every entry without host states")
         widths = {e.embedding.size for e in entries if e.embedding is not None}
         if len(widths) > 1:
             raise ValueError("All submitted embeddings must have the same flattened width")
@@ -2017,6 +2095,8 @@ class LlamaBatchExt:
                         1 if data.ndim == 1 else data.shape[0], data.shape[-1],
                     )
                     self._check(llama_cpp.llama_batch_ext_set_embd_state(self._native, idx, state), "state embedding", start + i)
+                if e.state_row is not None:
+                    self._check(llama_cpp.llama_batch_ext_set_embd_state_row(self._native, idx, e.state_row), "state row", start + i)
                 pos = self._pos_buffer
                 for j, value in enumerate(e.position):
                     pos[j] = value

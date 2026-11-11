@@ -58,6 +58,41 @@ def test_backend_sampler_lifecycle_releases_resources_in_order(failure):
     assert events == expected  # Repeated cleanup must not free anything twice.
 
 
+@pytest.mark.parametrize("mode", ["device", "missing", "shared", "chain", "opt-out", "target-fallback", "draft-fallback"])
+def test_mtp_device_hidden_selection_and_cleanup(monkeypatch, mode):
+    engine = _checkpoint_test_engine(native=True)
+    engine._use_dev_h = engine._dev_h_enabled = False
+    engine.is_mem_shared, engine.chain_heads = mode == "shared", mode == "chain"
+    engine._closed, engine._owns_model = False, False
+    engine._backend_sampler, engine._backend_sampling = None, False
+    events = []
+    monkeypatch.setenv("LLAMA_MTP_DEV", "0" if mode == "opt-out" else "1")
+    lib = SimpleNamespace(**{name: Mock() for name in (
+        "llama_set_embeddings_nextn_dev", "llama_get_embeddings_nextn_rows",
+        "llama_set_embeddings_nextn_rows", "llama_set_embd_state_src", "llama_batch_ext_set_embd_state_row",
+    )})
+    if mode == "missing":
+        lib.llama_set_embd_state_src.__ctypes_optional__ = True
+    engine._llama_cpp_lib = lib
+    engine.target_context = SimpleNamespace(
+        n_batch=lambda: 8,
+        set_embeddings_nextn_dev=lambda value: events.append(("target", value)) or mode != "target-fallback",
+    )
+    engine.draft_context.set_embd_state_src = lambda src: events.append(("source", src is not None)) or mode != "draft-fallback"
+    engine.draft_context.close = lambda: events.append(("draft", "closed"))
+    engine.batch = SimpleNamespace(close=Mock())
+    engine.draft_model = SimpleNamespace(close=Mock())
+    engine._configure_device_hidden()
+    assert engine._use_dev_h == (mode == "device")
+    if mode in ("missing", "shared", "chain", "opt-out"):
+        assert events == []
+    elif mode.endswith("fallback"):
+        assert events[-2:] == [("source", False), ("target", False)]
+    engine.close()
+    if mode == "device":
+        assert events[-2:] == [("draft", "closed"), ("target", False)]
+
+
 def test_ngram_map_lifecycle_and_acceptance_feedback():
     decoder = LlamaNGramMapDecoding(
         ngram_size=3,
@@ -157,6 +192,22 @@ def test_spec_config_validates_draft_runtime_arguments():
             spec_type=SpeculativeType.DRAFT_MTP,
             draft_n_cpu_moe=-1,
         ).validate()
+    for kwargs in ({"draft_n_ubatch": -1}, {"draft_model_shards": ["table.gguf"]},
+                   {"draft_model_path": "draft.gguf", "draft_model_shards": "table.gguf"}):
+        with pytest.raises(ValueError, match="draft_n_ubatch|draft_model_shards"):
+            SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, **kwargs).validate()
+
+
+@pytest.mark.parametrize("ubatch", [0, 2])
+def test_draft_context_uses_resolved_capacity_and_optional_microbatch(ubatch):
+    engine = object.__new__(LlamaMTPDecoding)
+    engine.config = SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_ubatch=ubatch)
+    engine._llama_cpp_lib = llama_cpp_lib
+    original = llama_cpp_lib.llama_context_default_params()
+    original.n_ctx, original.n_ubatch = 1024, 8
+    params = engine._build_draft_context_params(original, SimpleNamespace(n_ctx=lambda: 512))
+    assert (params.n_ctx, params.n_ubatch) == (512, ubatch or 8)
+    assert original.n_ctx == 1024 and original.n_ubatch == 8
 
 
 class _FakeVocabModel:
@@ -421,6 +472,39 @@ def test_shared_mtp_process_selects_only_available_hidden_rows(mtp_process_engin
     else:
         np.testing.assert_array_equal(engine.verify_embeddings, kwargs["embeddings"][indices])
         assert engine.verify_tokens == [] and engine.verify_media_positions == engine.verify_positions
+
+
+@pytest.mark.parametrize("kind", ["tokens", "media", "replay"])
+def test_mtp_device_hidden_handoff_acceptance_and_rollback(mtp_process_engine, kind):
+    engine, hidden, _, _, _ = mtp_process_engine
+    engine._use_dev_h, engine._n_batch_tgt = True, 8
+    engine._use_native_draft_rollback = kind != "replay"
+    checkpoint = engine.checkpoint()
+    uploaded = []
+    engine.target_context.set_embeddings_nextn_rows = lambda row, data: uploaded.append((row, data.copy()))
+    engine.target_context.get_embeddings_nextn_rows = Mock(side_effect=lambda row, count: hidden[row:row + count].copy())
+    engine.target_context.get_embeddings_nextn = Mock(side_effect=AssertionError("Device capture has no host output"))
+    engine.draft_context.decode = Mock(return_value=0)
+    batch = SimpleNamespace(reset=Mock(), add_tokens=Mock(), add_embeddings=Mock())
+    engine.embedding_batch = batch
+    features = np.arange(6, dtype=np.float32).reshape(2, 3)
+    with _target_batch([8, 9], **({"embeddings": features} if kind == "media" else {"tokens": [1, 2]})) as source:
+        engine.process(source.batch)
+    assert uploaded[0][0] == 8
+    np.testing.assert_array_equal(uploaded[0][1], [[1, 2]])
+    builder = batch.add_embeddings if kind == "media" else batch.add_tokens
+    assert builder.call_args.kwargs["state_rows"] == [8, 0]
+    assert engine.verify_h.shape == (0, 2) and engine._verify_h_device_rows == 2
+    np.testing.assert_array_equal(engine.pending_h, hidden[-1])
+    engine.accept(0)
+    np.testing.assert_array_equal(engine.pending_h, hidden[0])
+    engine.rollback_verified(checkpoint, n_accepted=0)
+    np.testing.assert_array_equal(engine.pending_h, hidden[0])
+    assert engine.verify_positions == ([8] if kind == "replay" else [8, 9])
+    if kind == "replay":
+        assert engine._verify_h_device_rows == 0
+        np.testing.assert_array_equal(engine.batch.rows[0][1], [1, 2])
+    engine.target_context.get_embeddings_nextn.assert_not_called()
 
 
 @pytest.mark.parametrize("native", [False, True])
@@ -1812,10 +1896,13 @@ def shared_mtp_model(request):
         model_path=path, n_ctx=256, n_batch=64, n_ubatch=64,
         n_gpu_layers=int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0")),
         verbose=False, ctx_checkpoints=checkpoints,
-        speculative=SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3),
+        speculative=SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_n_max=3,
+                               draft_n_ubatch=2 if fallback else 0),
     )) as llm:
         assert llm.is_hybrid and llm._model.n_layer_nextn() > 0
         if fallback:
+            # Cover a draft micro-batch smaller than target verification batches.
+            assert llm.speculative.draft_context.n_ubatch() == 2
             llm._ctx.n_rs_seq = lambda: 0
             llm.speculative._use_native_draft_rollback = False
         if checkpoints == 0:
@@ -1836,6 +1923,42 @@ def mtp_model(shared_mtp_model):
     finally:
         llm._ctx.set_causal_attn(True)
         llm.reset()
+
+
+@pytest.mark.parametrize("shared_mtp_model", [_MTP_WITHOUT_CHECKPOINTS],
+                         indirect=True, scope="module", ids=["native-no-checkpoints"])
+def test_real_mtp_device_hidden_rows_match_independent_host_capture(mtp_model, monkeypatch):
+    llm, _ = mtp_model
+    engine = llm.speculative
+    if not engine._use_dev_h:
+        pytest.skip("Native NextN device state rows are unavailable for this model/backend")
+    tokens = llm.tokenize(b"Explain speculative decoding with a draft model and target verification. " * 8)
+    assert llm.n_batch < len(tokens) < llm.n_ctx() - 3
+    with closing(internals.LlamaContext(model=llm._model, params=llm.context_params, verbose=False)) as reference:
+        reference.set_embeddings_nextn(True, masked=False)
+        decode = llm._ctx.decode
+        seen = []
+
+        def compare(batch):
+            assert reference.decode(batch) == 0
+            status = decode(batch)
+            assert status == 0
+            count = int(batch.batch.n_tokens)
+            hidden = engine._copy_rows(reference.get_embeddings_nextn(), count, engine.n_embd)
+            np.testing.assert_array_equal(llm._ctx.get_embeddings_nextn_rows(0, count), hidden)
+            seen.append(hidden)
+            return status
+
+        monkeypatch.setattr(llm._ctx, "decode", compare)
+        monkeypatch.setattr(llm._ctx, "get_embeddings_nextn", Mock(side_effect=AssertionError("Stale host output")))
+        llm.eval(tokens, copy_logits=False)
+        assert len(seen) > 1
+        np.testing.assert_array_equal(engine.pending_h, seen[-1][-1])
+        with _target_batch(range(len(tokens), len(tokens) + 3), tokens=tokens[:3], outputs=[True] * 3) as batch:
+            llm._ctx.decode(batch)
+            engine.process(batch.batch)
+        engine.accept(1)
+        np.testing.assert_array_equal(engine.pending_h, seen[-1][1])
 
 
 def test_real_mtp_verification_and_interrupted_retry(mtp_model):
@@ -2000,6 +2123,13 @@ def test_real_mtp_zero_checkpoint_score_hooks_match_native_batches(mtp_model, mo
                 assert any(index < count - 1 for index, count in sample_rows)
 
 
+def _target_mtp_hidden(llm, count):
+    engine = llm.speculative
+    if engine._use_dev_h:
+        return llm._ctx.get_embeddings_nextn_rows(0, count)
+    return engine._copy_rows(llm._ctx.get_embeddings_nextn(), count, engine.n_embd)
+
+
 def test_real_mtp_media_then_text_matches_native_catchup(mtp_model):
     llm, _ = mtp_model
     engine = llm.speculative
@@ -2023,7 +2153,7 @@ def test_real_mtp_media_then_text_matches_native_catchup(mtp_model):
     media_positions = np.array(coordinates).T.tolist() if mrope else coordinates[0]
     with _target_batch(media_positions, embeddings=features) as media:
         assert llm._ctx.decode(media) == 0
-        target_h = engine._copy_rows(llm._ctx.get_embeddings_nextn(), 2, engine.n_embd)
+        target_h = _target_mtp_hidden(llm, 2)
         engine.process(media.batch)
     np.testing.assert_array_equal(engine.pending_h, target_h[-1])
     assert engine.draft_context.memory_seq_pos_max(0) == 1
@@ -2056,7 +2186,7 @@ def test_real_mtp_media_then_text_matches_native_catchup(mtp_model):
                                media_positions=np.array(coordinates).T.tolist() if mrope else [0, 1])
     with _target_batch([2], tokens=[token], outputs=[True]) as text:
         assert llm._ctx.decode(text) == 0
-        text_h = engine._copy_rows(llm._ctx.get_embeddings_nextn(), 1, engine.n_embd)
+        text_h = _target_mtp_hidden(llm, 1)
         engine.process(text.batch)
     assert engine.draft_context.memory_seq_pos_max(0) == 2
     assert engine.verify_embeddings is None
@@ -2092,7 +2222,7 @@ def test_real_mtp_image_prefill_process_and_draft(mtp_model):
                 features = None if chunk.embeddings is None else chunk.embeddings[start:end]
                 with _target_batch(positions, tokens=chunk.tokens[start:end], embeddings=features, outputs=outputs) as batch:
                     assert llm._ctx.decode(batch) == 0
-                    target_h = engine._copy_rows(llm._ctx.get_embeddings_nextn(), end - start, engine.n_embd)
+                    target_h = _target_mtp_hidden(llm, end - start)
                     engine.process(batch.batch)
                 np.testing.assert_array_equal(engine.pending_h, target_h[-1])
                 assert engine.draft_context.memory_seq_pos_max(0) == llm._ctx.memory_seq_pos_max(0)

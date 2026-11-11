@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
-from contextlib import closing, contextmanager
+from contextlib import closing, contextmanager, nullcontext
 
 import pytest
 import numpy as np
@@ -223,10 +223,21 @@ def test_ggml_flash_attn_rows_and_comm_callbacks():
 def test_optional_model_and_device_extension_signatures():
     lib = internals.llama_cpp
     signatures = {
+        "llama_arch_name": ([ctypes.c_int], ctypes.c_char_p),
+        "llama_arch_supports_sm_tensor": ([ctypes.c_int], ctypes.c_bool),
+        "llama_arch_supports_mixed_batch": ([ctypes.c_int], ctypes.c_bool),
+        "llama_arch_supports_save": ([ctypes.c_int], ctypes.c_bool),
+        "llama_model_decision_label": ([lib.llama_model_p_ctypes, ctypes.c_uint32], ctypes.c_char_p),
+        "llama_ftype_get_default_type": ([ctypes.c_int], ctypes.c_int),
         "llama_set_embeddings_layer_inp_dev": ([lib.llama_context_p_ctypes, ctypes.c_bool], None),
         "llama_supports_embd_row": ([lib.llama_context_p_ctypes], ctypes.c_bool),
         "llama_batch_ext_add_embd_row": ([lib.llama_batch_ext_p_ctypes, lib.llama_seq_id, ctypes.c_int32], ctypes.c_int32),
         "llama_model_classifier_free_guidance": ([lib.llama_model_p_ctypes], ctypes.c_bool),
+        "llama_set_embeddings_nextn_dev": ([lib.llama_context_p_ctypes, ctypes.c_bool], ctypes.c_bool),
+        "llama_get_embeddings_nextn_rows": ([lib.llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)], ctypes.c_bool),
+        "llama_set_embeddings_nextn_rows": ([lib.llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)], ctypes.c_bool),
+        "llama_set_embd_state_src": ([lib.llama_context_p_ctypes, lib.llama_context_p_ctypes], ctypes.c_bool),
+        "llama_batch_ext_set_embd_state_row": ([lib.llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_int32], ctypes.c_bool),
     }
     tree = ast.parse(Path(lib.__file__).read_text(encoding="utf-8"))
     declarations = ast.Module(body=[node for node in tree.body
@@ -235,7 +246,7 @@ def test_optional_model_and_device_extension_signatures():
 
     def bind(names, args, result, **kwargs):
         recorded[names[0]] = (args, result)
-        assert len(names) == 4 and kwargs == {"required": False}
+        assert len(names) == len(set(names)) == 4 and kwargs == {"required": False}
         return lambda function: function
 
     exec(compile(declarations, lib.__file__, "exec"), dict(vars(lib), ctypes_function_llama_ext=bind))
@@ -244,6 +255,69 @@ def test_optional_model_and_device_extension_signatures():
         function = getattr(lib, name)
         if not getattr(function, "__ctypes_optional__", False):
             assert function.argtypes == args and function.restype is result
+
+
+def test_native_architecture_queries_and_quantization_enum():
+    lib = internals.llama_cpp
+    functions = [getattr(lib, name) for name in (
+        "llama_arch_name", "llama_arch_supports_sm_tensor", "llama_arch_supports_mixed_batch",
+        "llama_arch_supports_save", "llama_ftype_get_default_type",
+    )]
+    if any(getattr(f, "__ctypes_optional__", False) for f in functions):
+        pytest.skip("Native llama-ext architecture queries are unavailable")
+    header = Path("vendor/llama.cpp/src/llama-arch.h").read_text(encoding="utf-8")
+    body = re.search(r"enum llm_arch\s*\{(.*?)\}", header, re.S).group(1)
+    ids = re.findall(r"\bLLM_ARCH_\w+\b", body)
+    for arch, name, capabilities in (
+        ("LLM_ARCH_LLAMA", b"llama", (True, True, True)),
+        ("LLM_ARCH_T5", b"t5", (False, True, False)),
+        ("LLM_ARCH_GEMMA4_ASSISTANT", b"gemma4-assistant", (True, False, True)),
+    ):
+        index = ids.index(arch)
+        assert functions[0](index) == name
+        assert tuple(f(index) for f in functions[1:4]) == capabilities
+    assert functions[-1](lib.llama_ftype.LLAMA_FTYPE_ALL_F32) == 0  # GGML_TYPE_F32
+
+
+@pytest.mark.parametrize("kind", ["single", "shards", "duplicates", "vocab-failure"])
+def test_model_shard_loading_preserves_order_and_ownership(tmp_path, monkeypatch, kind):
+    main, extra = (tmp_path / name for name in ("model.gguf", "table-\u4e2d\u6587.gguf"))
+    for path in (main, extra):
+        path.write_bytes(b"gguf")
+    lib, owned = internals.llama_cpp, object()
+    single, free = Mock(return_value=owned), Mock()
+    paths = []
+
+    def load(files, count, params):
+        paths.extend(files[i].decode("utf-8") for i in range(count))
+        return owned
+
+    monkeypatch.setattr(lib, "llama_model_load_from_file", single)
+    monkeypatch.setattr(lib, "llama_model_load_from_splits", load)
+    monkeypatch.setattr(lib, "llama_model_get_vocab", lambda _: None if kind == "vocab-failure" else object())
+    monkeypatch.setattr(lib, "llama_model_free", free)
+    shards = [] if kind == "single" else [extra]
+    if kind == "duplicates":
+        shards = [main, extra, extra]
+    with pytest.raises(ValueError, match="get vocab") if kind == "vocab-failure" else nullcontext():
+        with closing(internals.LlamaModel(path_model=str(main), shards=shards, params=object(), verbose=False)) as model:
+            assert model.shards == (() if kind == "single" else (str(extra),))
+    assert paths == ([] if kind == "single" else [str(main), str(extra)])
+    assert single.call_count == int(kind == "single")
+    free.assert_called_once_with(owned)
+
+
+def test_model_shards_survive_constructor_settings_roundtrip():
+    # Repeated main paths deduplicate without needing additional model files.
+    with closing(llama_cpp.Llama(MODEL, model_shards=[MODEL, MODEL], vocab_only=True,
+                                 n_ctx=64, n_batch=16, verbose=False)) as llm:
+        if not getattr(llama_cpp.llama_model_decision_label, "__ctypes_optional__", False):
+            assert llama_cpp.llama_model_decision_label(llm._model.model, 0) is None
+            assert llama_cpp.llama_model_decision_label(llm._model.model, 2**32 - 1) is None
+        state = llm.__getstate__()
+    assert state["model_shards"] == (MODEL, MODEL)
+    with closing(llama_cpp.Llama(**state)) as restored:
+        assert restored.model_shards == (MODEL, MODEL)
 
 
 def test_ggml_batch_transfer_signatures():
@@ -631,6 +705,8 @@ def batch_runtime(runtime_context, monkeypatch):
     monkeypatch.setattr(lib, "llama_batch_ext_add_embd_row", add_embd_row)
     monkeypatch.setattr(lib, "llama_batch_ext_set_embd_token", lambda *args: payload(*args, "embedding"))
     monkeypatch.setattr(lib, "llama_batch_ext_set_embd_state", lambda *args: payload(*args, "state"))
+    monkeypatch.setattr(lib, "llama_batch_ext_set_embd_state_row",
+                        lambda _, idx, row: rows[idx].update(state_row=row) is None and state.fail != "state row")
     monkeypatch.setattr(lib, "llama_batch_ext_add_seq", sequence)
     monkeypatch.setattr(lib, "llama_batch_ext_set_pos", position)
     monkeypatch.setattr(lib, "llama_batch_ext_set_output_logits", output)
@@ -640,6 +716,40 @@ def batch_runtime(runtime_context, monkeypatch):
             yield SimpleNamespace(context=context, batch=batch, rows=rows, calls=calls, freed=freed, state=state)
     finally:
         context.ctx = None
+
+
+@pytest.mark.parametrize("kind", ["tokens", "embeddings", "paired"])
+def test_device_state_rows_validate_ranges_and_native_failures(batch_runtime, kind):
+    r, positions = batch_runtime, [(i, i, i, 0) for i in range(4)]
+    if kind == "tokens":
+        r.batch.add_tokens([1, 2, 3, 4], positions=range(4), state_rows=[9, 0, 1, 2])
+    elif kind == "embeddings":
+        r.batch.add_embeddings(np.ones((4, 2)), positions=positions, state_rows=[9, 0, 1, 2])
+    else:
+        for i, row in enumerate([9, 0, 1, 2]):
+            r.batch.add_token_embedding(i + 1, [1, 2], i, state_row=row)
+    assert r.context.decode(r.batch, start=1, count=3) == 0
+    assert [row["state_row"] for row in r.rows] == [0, 1, 2]
+    assert r.batch.submitted_indices == (1, 2, 3)
+    r.state.fail = "state row"
+    with pytest.raises(RuntimeError, match="state row at logical entry 1"):
+        r.batch.render(start=1, count=1)
+    assert not r.rows
+    r.state.fail = False
+    r.batch.reset()
+    r.batch.add_token(1, 0, state_row=0)
+    r.batch.add_token(2, 1)
+    with pytest.raises(ValueError, match="Device state rows"):
+        r.batch.render()
+    for value in (-1, 2**31, True, 0.5):
+        with pytest.raises(ValueError, match="state_row"):
+            r.batch.add_token(3, 2, state_row=value)
+    with pytest.raises(ValueError, match="host state"):
+        r.batch.add_token(3, 2, state=[1, 2], state_row=1)
+    for rows in ([], [None]):
+        with pytest.raises(ValueError, match="one row index"):
+            r.batch.add_tokens([3], positions=[2], state_rows=rows)
+    assert len(r.batch) == 2
 
 
 def test_embedding_normalization_modes_preserve_nonzero_vectors():

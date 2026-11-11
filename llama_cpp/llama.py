@@ -129,6 +129,7 @@ class Llama:
         mmproj_path: Optional[str] = None,
         *,
         # Model Params
+        model_shards: Optional[Sequence[str]] = None,
         n_gpu_layers: Union[int, Literal["auto", "all"]] = "auto",
         cpu_moe: bool = False,
         n_cpu_moe: int = 0,
@@ -252,6 +253,8 @@ class Llama:
             n_cpu_moe: Keep the MoE expert weights of the first N layers on CPU.
                 Useful when VRAM is insufficient for MoE models.
             split_mode: How to split the model across GPUs. See llama_cpp.LLAMA_SPLIT_* for options.
+            model_shards: Additional GGUF files, such as an external PLE table.
+                model_path remains first; native numbered-shard discovery still applies.
             load_mode: How to load the model. See llama_cpp.LLAMA_LOAD_MODE_* for options.
             main_gpu: main_gpu interpretation depends on split_mode: LLAMA_SPLIT_MODE_NONE: the GPU that is used for the entire model. LLAMA_SPLIT_MODE_ROW: the GPU that is used for small tensors and intermediate results. LLAMA_SPLIT_MODE_LAYER: ignored
             tensor_split: How split tensors should be distributed across GPUs. If None, the model is not split.
@@ -428,6 +431,9 @@ class Llama:
                 llama_cpp_lib.llama_numa_init(self.numa)
 
         self.model_path = model_path
+        if isinstance(model_shards, (str, bytes, os.PathLike)):
+            raise ValueError("model_shards must be a sequence of paths")
+        self.model_shards = tuple(os.fspath(path) for path in (model_shards or ()))
 
         if draft_model is not None and speculative is not None:
             raise ValueError("draft_model and speculative cannot be used together")
@@ -761,6 +767,7 @@ class Llama:
             contextlib.closing(
                 internals.LlamaModel(
                     path_model=self.model_path,
+                    shards=self.model_shards,
                     params=self.model_params,
                     verbose=self.verbose,
                 )
@@ -4647,6 +4654,7 @@ prompt: The prompt to generate text from.
     def __getstate__(self):
         return dict(
             model_path=self.model_path,
+            model_shards=self.model_shards,
             # Model Params
             n_gpu_layers=self.model_params.n_gpu_layers,
             cpu_moe=self.cpu_moe,
