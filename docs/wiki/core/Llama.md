@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-11-08
+last_updated: 2026-11-11
 version_target: "latest"
 ---
 
@@ -40,6 +40,7 @@ model allocation for inspection and planning rather than inference.
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
 | `model_path` | `str` | **Required** | Model file path (GGUF format) |
+| `model_shards` | `Optional[Sequence[str]]` | `None` | Extra GGUF files, including external PLE tables. The main model stays first; repeated paths are deduplicated. Native numbered-shard discovery and validation still apply. |
 | `mmproj_path` | `Optional[str]` | `None` | Optional multimodal projection GGUF. When provided, `Llama` creates a generic MTMD chat handler; it replaces an explicitly supplied `chat_handler`. Prefer passing it by keyword. |
 | `n_gpu_layers` | `Union[int, Literal["auto", "all"]]` | `"auto"` | Maximum number of model layers stored in VRAM:<br>• `auto`/`-1`: auto-selected by llama.cpp<br>• `all`/`-2`: all possible layers<br>• positive integer N: offload up to N layers<br>• `0`: disable layer offload |
 | `cpu_moe` | `bool` | `False` | Whether to keep all MoE weights on CPU |
@@ -66,6 +67,31 @@ explicit device list. RPC model construction rejects row split mode and fails
 if a configured server is unavailable; it does not fall back to local GPUs.
 See [RPC model offloading](../features/rpc.md) for setup, lifecycle, and
 multimodal device selection.
+
+#### Loading additional GGUF shards
+
+`model_shards` accepts additional local paths, including paths on other drives.
+The loader uses `llama_model_load_from_splits()` when distinct extra files are
+present. Pass a sequence, not a comma-separated string. Files must exist before
+loading; native validation checks tensor and shard compatibility. Constructor
+serialization preserves the extra paths.
+
+For a model exported with the vendor converter's `--no-ple` and `--ple-only`
+options from the same checkpoint:
+
+```python
+from contextlib import closing
+from llama_cpp import Llama
+
+with closing(Llama(model_path="./model-no-ple.gguf",
+                   model_shards=["./model-ple.gguf"])) as llm:
+    print(llm.create_completion("Hello", max_tokens=32)["choices"][0]["text"])
+```
+
+The native loader also permits an extra shard containing only
+`per_layer_token_embd.weight` to replace an existing PLE table. The table must
+match the model. For a separate speculative draft, use
+[`SpecConfig.draft_model_shards`](../modules/LlamaSpeculative.md#specconfig).
 
 #### Model Load Modes
 
@@ -588,7 +614,7 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     )
     ```
 
-    Omitting `draft_model_path` makes `Llama` enable target MTP tensor loading automatically. MTP has been tested with built-in and external MTP models from the Qwen3.5, Qwen3.6, and Qwen3.8 families. See [Qwen3.5 MTP image chat](../examples/vision/vision-qwen.md#mtp-image-chat) for the supported multimodal workflow. A `gemma4` target paired with an external, compatible `gemma4-assistant` GGUF has also been tested; this path is currently text-only, and the engine handles its target-context and shared-KV workflow automatically.
+    Omitting `draft_model_path` makes `Llama` enable target MTP tensor loading automatically. MTP has been tested with built-in and external MTP models from the Qwen3.5, Qwen3.6, and Qwen3.8 families. See [Qwen3.5 MTP image chat](../examples/vision/vision-qwen.md#mtp-image-chat) for the supported multimodal workflow. A `gemma4` target paired with a compatible external `gemma4-assistant` GGUF uses shared target KV memory; matching MTMD projectors also permit media prefill. The engine handles its target-context and shared-KV workflow automatically.
 
     For Qwen3.8 27B, `draft_n_max=2` is a starting point. Tune it with `examples.benchmark.benchmark_speculative` for your backend, GPU, quantization, prompt, and sampling settings.
 

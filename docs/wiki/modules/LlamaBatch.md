@@ -2,7 +2,7 @@
 title: Llama Batch
 module_name: llama_cpp._internals
 source_file: llama_cpp/_internals.py
-last_updated: 2026-11-06
+last_updated: 2026-11-11
 version_target: "latest"
 ---
 
@@ -90,12 +90,12 @@ embedding and mixed inputs require the corresponding specialized methods.
 `LlamaBatchExt` insertion signatures:
 
 ```text
-add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0, state=None)
-add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None, states=None)
+add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0, state=None, state_row=None)
+add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None, states=None, state_rows=None)
 add_embd_row(row, position, seq_ids=(0,), output=False)
-add_embedding(embedding, position, seq_ids=(0,), output=False, *, state=None)
-add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None, states=None)
-add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, state=None)
+add_embedding(embedding, position, seq_ids=(0,), output=False, *, state=None, state_row=None)
+add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None, states=None, state_rows=None)
+add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, state=None, state_row=None)
 ```
 
 | Input | Type and meaning |
@@ -105,6 +105,7 @@ add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, s
 | `embeddings` | Matrix `[entries, width]`; each row becomes one entry. |
 | `row` | Nonnegative int32 index in the peer context's latest captured target batch. Refers to borrowed device features, independently of the entry's model position. |
 | `state` / `states` | Separate hidden state: vector or matrix for one entry, or matrix `[entries, state_width]` for bulk insertion. Copied into owned storage; currently accepted by native MTP contexts. |
+| `state_row` / `state_rows` | Nonnegative int32 index / one index per entry in the borrowed NextN device buffer of the context's state source. Separate from input `row`; incompatible with host `state` on the same entry. |
 | `position` / `positions` | Nonnegative int32 model position / one position per entry. Token and paired entries use scalars; embedding-only and device-row entries use four coordinates for M-RoPE/IM-RoPE, otherwise scalars. Bulk coordinates are entry-major: `[entries, 4]`. |
 | `seq_ids` | Nonempty sequence of integer IDs in `[0, context.n_seq_max())`. Multiple IDs share the same input and position; bulk calls apply the same IDs to every entry. |
 | `output` / `outputs` | Boolean flag / one flag per entry. Defaults request no outputs. |
@@ -125,6 +126,14 @@ separately from input embedding widths. The native context validates the exact
 width and whether states are supported; a rejected state raises `RuntimeError`
 and clears the partial native batch so the logical inputs can be retried.
 Bulk states are copied once and shared by read-only row views.
+
+Device state rows are rendered through `llama_batch_ext_set_embd_state_row()`.
+Every entry in a submitted range must have one, and none may carry a host state.
+Configure the source with `draft_context.set_embd_state_src(target_context)`
+after enabling unmasked NextN device capture on the target. Consume the rows
+before the target decodes again; these indices do not own or copy hidden data.
+This path requires the new native symbols and a compatible MTP backend. See
+[device hidden-state transfer](LlamaSpeculative.md#device-hidden-state-transfer).
 
 For an MTP context, text and image catch-up inputs can be prepared as separate
 submissions (support for interleaving in one submission depends on the context):

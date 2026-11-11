@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-11-06
+last_updated: 2026-11-11
 version_target: "latest"
 ---
 
@@ -128,6 +128,7 @@ additional Python-engine settings.
 | `draft_p_split` | `0.1` | Reserved split probability matching `llama.cpp`. |
 | `draft_p_min` | `0.0` | MTP/DFlash token-probability threshold, DFlash2 selector-transition threshold, or DSpark predicted acceptance-confidence threshold. |
 | `draft_model_path` | `None` | External draft GGUF. Omit it for built-in target MTP heads. |
+| `draft_model_shards` | `None` | Additional draft GGUF shards, including a compatible external PLE table. Requires `draft_model_path`; supply a sequence of paths, not a comma-separated string. |
 | `draft_backend_sampling` | `True` | Use compact backend candidates instead of full vocabulary rows for MTP, DFlash v1, and DSpark where supported. DFlash2 and LiliCorr use their selector lattices and leave this request inactive. |
 
 ### External draft runtime settings
@@ -137,6 +138,7 @@ additional Python-engine settings.
 | `draft_n_gpu_layers` | `"auto"` | Draft offload setting: integer, `"auto"`, or `"all"`. |
 | `draft_n_threads` | `None` | Draft generation thread count. |
 | `draft_n_threads_batch` | `None` | Draft prompt/batch thread count. When omitted, it follows `draft_n_threads` if that field is set; otherwise it inherits the target default. |
+| `draft_n_ubatch` | `0` | Physical draft micro-batch size; `0` inherits the target setting. Mirrors `--spec-draft-n-ubatch`. |
 | `draft_cpu_moe` | `False` | Keep all draft MoE expert tensors on CPU. |
 | `draft_n_cpu_moe` | `0` | Keep the first N draft MoE layers on CPU. |
 | `draft_devices` | `[]` | Ordered backend device names for the draft model. |
@@ -144,10 +146,15 @@ additional Python-engine settings.
 | `draft_type_k`, `draft_type_v` | `None` | Optional draft KV-cache data types. |
 | `draft_model_kwargs` | `{}` | Additional native draft model parameters. |
 
-The draft context inherits the target context's batch parameters; engines may
-increase capacity to fit their noise block. `SpecConfig` does not currently
-expose the upstream `--spec-draft-n-ubatch` override. `draft_model_kwargs`
-configures model loading, so it cannot override the draft context's `n_ubatch`.
+The draft context inherits the target context's logical batch capacity and uses
+`draft_n_ubatch` when nonzero. Engines may increase capacity to fit their noise
+block. `draft_model_kwargs` configures model loading, so it cannot override the
+draft context's `n_ubatch`. The target's extra shards are supplied separately via
+[`Llama(model_shards=...)`](../core/Llama.md#loading-additional-gguf-shards).
+
+Python draft engines use greedy proposals and target-token matching. Upstream
+probabilistic rejection sampling and synthetic-acceptance benchmarking controls
+are not currently exposed by `SpecConfig`.
 
 Draft proposals use greedy candidate selection. `draft_backend_sampling`
 controls where candidates are processed; it does not enable upstream
@@ -326,8 +333,31 @@ unselected prompt rows before its shared layers. Output-free prompt batches
 leave the pending hidden row unchanged and clear temporary verification rows.
 Sparse prefill retains the selected final row using its original batch index;
 verification batches that select every token retain all rows for acceptance and
-rollback. Non-shared MTP contexts continue to request dense hidden output for
-catch-up on every target row.
+rollback. Non-shared MTP contexts request unmasked hidden output for catch-up on
+every target row.
+
+### Device hidden-state transfer
+
+With compatible native symbols and backends, non-shared, single-head MTP keeps
+target NextN rows in a device buffer. Catch-up batches reference original target
+batch indices through `state_rows`; only the pending hidden row is copied to the
+host. The reserved row at `target_context.n_batch()` carries the previous pending
+state for sequence 0. Acceptance fetches the retained row when needed; fallback
+replay copies the accepted prefix before restoring the draft context.
+
+Shared-KV assistants such as Gemma4 and chained NextN heads retain the host path.
+Older libraries or backends that reject device state rows fall back to host
+capture. Set `LLAMA_MTP_DEV=0` before constructing `Llama` to force host capture.
+Closing the engine destroys its draft readers before releasing the target's
+device buffer.
+
+For manual processing, `LlamaContext.get_embeddings_nextn_rows(row0, n_rows)`
+returns an owned float32 matrix and `set_embeddings_nextn_rows(row0, rows)`
+uploads one. Configure capture with `set_embeddings_nextn_dev(True)` and attach
+the source with `draft_context.set_embd_state_src(target_context)`; both return
+whether the native path is usable. While device capture is enabled, ordinary
+`get_embeddings_nextn()` / `_ith()` host buffers are not updated. Borrowed device
+rows must be consumed before the next target decode.
 
 ### Lower-level embedding processing
 
@@ -346,7 +376,8 @@ Empty batches and batches with both or neither legacy input pointers are ignored
 
 The embedding catch-up builder is created on first use and reused. Input
 features and hidden states are submitted separately through `add_embeddings(...,
-states=...)`. Non-shared contexts fetch dense NextN rows once per target batch.
+states=...)`, or device `state_rows` when enabled. Host-mode non-shared contexts
+fetch dense NextN rows once per target batch.
 Verification records own the media features and coordinates needed for replay.
 If accepted and rejected image rows share a cache position, rollback restores
 the checkpoint and replays the retained prefix instead of truncating by position.
@@ -404,8 +435,10 @@ states and target token embeddings, and its attention memory shares selected
 target KV layers. `LlamaMTPDecoding` detects this shared-memory relationship and
 automatically skips ordinary draft-context catch-up while using the same target
 position for successive draft proposals. No architecture-specific user option
-is required beyond supplying the compatible assistant GGUF. This tested path is
-currently text-only.
+is required beyond supplying the compatible assistant GGUF. With a matching
+multimodal projector, the same shared-KV path can consume MTMD-prefilled media
+through `process_media()`; available media types depend on the projector and
+native MTMD backend.
 
 For Qwen3.8 27B, testing so far suggests `draft_n_max=2` as the best starting
 point. This is not a universal optimum: GPU, backend, quantization, prompt,
