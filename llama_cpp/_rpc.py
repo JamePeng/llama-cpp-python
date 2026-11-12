@@ -10,7 +10,7 @@ from . import _ggml
 
 
 # ggml-rpc.h protocol version and ggml-rpc.cpp command IDs at the bundled vendor revision.
-_RPC_PROTO_MAJOR = 7
+_RPC_PROTO_MAJOR = 9
 _RPC_PROTO_MINOR = 0
 _RPC_CMD_HELLO = 14
 _RPC_CMD_DEVICE_COUNT = 15
