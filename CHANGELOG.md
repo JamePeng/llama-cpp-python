@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.7] MTP Device States, Extra GGUF Shards, and Native API Alignment
+
+- feat(speculative): add NextN device hidden-state transfer for non-shared MTP
+    - Submit catch-up states as borrowed device rows while copying only the
+      pending hidden row to host memory; preserve acceptance and rollback state.
+    - Retain host capture for shared-KV assistants, chained heads, and unsupported
+      native backends. Set `LLAMA_MTP_DEV=0` to force the host path.
+    - Expose `draft_n_ubatch` to configure the draft's physical micro-batch size.
+
+- feat(model): load additional GGUF shards and external PLE tables
+    - Add `Llama(model_shards=...)` and `SpecConfig.draft_model_shards` for
+      additional compatible model files, keeping the main model first.
+    - Validate and deduplicate paths, preserve UTF-8 filenames, and retain extra
+      shard settings through constructor serialization.
+
+- fix(bindings): align llama-ext exports and native context layouts
+    - Add optional NextN device-state, architecture-capability, and decision-label
+      bindings, with verified MSVC, Mach-O, and ELF symbol aliases.
+    - Correct the quantization enum return type and include native API comments.
+    - Align context parameters with `moe_cache_cpu_share`, expose its validated
+      high-level setting, and keep MoE caching disabled for draft contexts.
+
+- fix(rpc): align remote-device preflight with native protocol 9
+    - Accept compatible protocol 9 servers instead of rejecting them as a
+      version mismatch; retain native major/minor compatibility checks.
+    - Check preflight constants against vendor headers and cover fragmented
+      handshake responses, incompatible versions, and empty device lists.
+
+- fix(mtmd): align audio inputs and add streaming resampler bindings
+    - Match the native audio input `temp` field and use one optional TTS
+      temperature setting while preserving model defaults when omitted.
+    - Add mono float32 PCM resampler init/process/free bindings, including
+      documented output ownership and passthrough aliasing.
+    - Recognize Kimi K3.1 image placeholders in multimodal prompts.
+
+- fix(grammar): align JSON Schema conversion and built-in grammars
+    - Support numeric `allOf` intersections, reject empty integer ranges, and
+      enforce the shared 128-level conversion limit.
+    - Correct chess and Japanese rules and synchronize JSON array rules.
+
+- docs/tests/build: prepare the release before native API pruning
+    - Document device-state ownership and fallbacks, shard loading, draft batch
+      configuration, staging APIs, and Gemma4 assistant multimodal prefill.
+    - Extend native ABI, device-state, shard-loading, resampler, and grammar
+      regression coverage; correct the Metal backend registration check.
+    - Pin vendor to `2a4daf0e0`, before `ggml : prune` (`29dbbad2b`) and
+      `llama : prune` (`8ca5a8008`). Native distributions must be rebuilt from
+      this revision to match the updated context and audio parameter ABIs.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20261111
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/ec56af26d9c224e10983ef8b5f40ee34e941ec11...709e56c1a31bf50492dd639cb6ba344533efe04f
+
+
 ## [0.4.6] Chatterbox & Drama 3 TTS, Faster Speculative Decoding, and Native API Alignment & Fixes
 
 - perf(speculative): reduce Gemma4 shared-KV MTP prefill overhead
