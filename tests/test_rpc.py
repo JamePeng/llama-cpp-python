@@ -49,22 +49,16 @@ def test_native_rpc_backend_loads():
     assert llama_cpp.llama_supports_rpc()
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
+def test_normalize_rpc_servers():
+    for value, expected in (
         (None, []),
         (["host-a:50052", "host-b:50053"], ["host-a:50052", "host-b:50053"]),
         ("host-a:50052, host-b:50053", ["host-a:50052", "host-b:50053"]),
-    ],
-)
-def test_normalize_rpc_servers(value, expected):
-    assert _rpc.normalize_rpc_servers(value) == expected
-
-
-@pytest.mark.parametrize("value", ["", "host", "host:0", "host:65536", "host:abc", "host:1,", "bad host:1", "host\x00:1", "例子:1"])
-def test_normalize_rpc_servers_rejects_bad_endpoints(value):
-    with pytest.raises(ValueError):
-        _rpc.normalize_rpc_servers(value)
+    ):
+        assert _rpc.normalize_rpc_servers(value) == expected, value
+    for value in ("", "host", "host:0", "host:65536", "host:abc", "host:1,", "bad host:1", "host\x00:1", "例子:1"):
+        with pytest.raises(ValueError):
+            _rpc.normalize_rpc_servers(value)
 
 
 def test_registration_excludes_other_models_rpc_devices(monkeypatch):
@@ -108,21 +102,12 @@ def test_registration_excludes_other_models_rpc_devices(monkeypatch):
     assert registered == [20]
 
 
-@pytest.mark.parametrize("version,device_count,error", [
-    ((9, 0, 0), 2, None),
-    ((9, 0, 255), 2, None),
-    ((7, 0, 0), 2, "incompatible protocol"),
-    ((8, 0, 0), 2, "incompatible protocol"),
-    ((10, 0, 0), 2, "incompatible protocol"),
-    ((9, 1, 0), 2, "incompatible protocol"),
-    ((9, 0, 0), 0, "exposed no devices"),
-])
-def test_probe_checks_vendor_handshake_and_device_count(monkeypatch, version, device_count, error):
+def test_probe_checks_vendor_handshake_and_device_count(monkeypatch):
     def response(payload):
         return struct.pack("=Q", len(payload)) + payload
 
     class FakeSocket:
-        def __init__(self):
+        def __init__(self, version, device_count):
             self.sent = []
             self.data = bytearray(
                 response(bytes((*version, 1)) + bytes(24))
@@ -147,19 +132,27 @@ def test_probe_checks_vendor_handshake_and_device_count(monkeypatch, version, de
             del self.data[:size]
             return bytes(chunk)
 
-    sock = FakeSocket()
     monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.0.0.1")
-    monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: sock)
-    if error:
-        with pytest.raises(RuntimeError, match=error):
-            _rpc._probe_rpc_server("host:50052")
-    else:
-        assert _rpc._probe_rpc_server("host:50052") == device_count
-    assert sock.sent[0] == bytes((14,)) + struct.pack("=Q", 24) + bytes(24)
-    if error == "incompatible protocol":
-        assert len(sock.sent) == 1
-    else:
-        assert sock.sent[1:] == [bytes((15,)) + struct.pack("=Q", 0)]
+    for version, device_count, error in (
+        ((10, 0, 0), 2, None),
+        ((10, 0, 255), 2, None),
+        ((9, 0, 0), 2, "incompatible protocol"),
+        ((11, 0, 0), 2, "incompatible protocol"),
+        ((10, 1, 0), 2, "incompatible protocol"),
+        ((10, 0, 0), 0, "exposed no devices"),
+    ):
+        sock = FakeSocket(version, device_count)
+        monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: sock)
+        if error:
+            with pytest.raises(RuntimeError, match=error):
+                _rpc._probe_rpc_server("host:50052")
+        else:
+            assert _rpc._probe_rpc_server("host:50052") == device_count
+        assert sock.sent[0] == bytes((14,)) + struct.pack("=Q", 24) + bytes(24), version
+        if error == "incompatible protocol":
+            assert len(sock.sent) == 1, version
+        else:
+            assert sock.sent[1:] == [bytes((15,)) + struct.pack("=Q", 0)], version
 
 
 def test_row_split_rejected_before_rpc_registration():
