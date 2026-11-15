@@ -1565,20 +1565,20 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         """Use device state rows only where native common/speculative.cpp does."""
         names = (
             "llama_set_embeddings_nextn_dev", "llama_get_embeddings_nextn_rows",
-            "llama_set_embeddings_nextn_rows", "llama_set_embd_state_src",
+            "llama_set_embeddings_nextn_rows", "llama_set_ctx_state_src",
             "llama_batch_ext_set_embd_state_row",
         )
         if self.is_mem_shared or self.chain_heads or os.environ.get("LLAMA_MTP_DEV", "1") == "0":
             return
         if any(getattr(self._llama_cpp_lib, name, None) is None or getattr(getattr(self._llama_cpp_lib, name), "__ctypes_optional__", False) for name in names):
             return
-        if not callable(getattr(self.target_context, "set_embeddings_nextn_dev", None)) or not callable(getattr(self.draft_context, "set_embd_state_src", None)):
+        if not callable(getattr(self.target_context, "set_embeddings_nextn_dev", None)) or not callable(getattr(self.draft_context, "set_ctx_state_src", None)):
             return
         self._n_batch_tgt = self.target_context.n_batch()
         self._dev_h_enabled = True
-        self._use_dev_h = self.target_context.set_embeddings_nextn_dev(True) and self.draft_context.set_embd_state_src(self.target_context)
+        self._use_dev_h = self.target_context.set_embeddings_nextn_dev(True) and self.draft_context.set_ctx_state_src(self.target_context)
         if not self._use_dev_h:
-            self.draft_context.set_embd_state_src(None)
+            self.draft_context.set_ctx_state_src(None)
             self.target_context.set_embeddings_nextn_dev(False)
             self._dev_h_enabled = False
 

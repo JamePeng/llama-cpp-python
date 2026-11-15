@@ -304,7 +304,7 @@ class Llama:
             ctx_checkpoints: max number of context checkpoints to create per slot (default: 16)[(more info)](https://github.com/ggml-org/llama.cpp/pull/15293)
             checkpoint_interval: Hybrid model checkpoint token intervals, and archiving of text with interval sizes along the way.
             checkpoint_on_device: Store hybrid/recurrent checkpoint tensor payloads in llama_context-owned device buffers via LLAMA_STATE_SEQ_FLAGS_ON_DEVICE.
-            last_n_tokens_size: Maximum number of tokens to keep in the last_n_tokens deque.
+            last_n_tokens_size: Legacy constructor setting retained for compatibility. Use penalty_last_n to configure repetition history.
             numa: numa policy
             chat_format: String specifying the chat format to use when calling create_chat_completion.
             chat_handler: Optional chat handler to use when calling create_chat_completion.
@@ -1274,7 +1274,7 @@ class Llama:
 
         Args:
             text: The utf-8 encoded string to tokenize.
-            add_bos: Whether to add a beginning of sequence token.
+            add_bos: Enable model-configured special-token insertion (native add_special).
             special: Whether to tokenize special tokens.
 
         Raises:
@@ -1902,7 +1902,7 @@ class Llama:
         dynatemp_exponent: float = 1.0, # controls how entropy maps to temperature in dynamic temperature sampler
         # Common
         top_n_sigma: float = -1.00,   # -1.0 = disabled
-        min_keep: int = 0,            # 0 = disabled, otherwise samplers should return at least min_keep tokens
+        min_keep: int = 0,            # minimum candidates retained by probability filters; 0 adds no minimum
         # Penalties
         penalty_last_n: int = 64,     # last n tokens to penalize (0 = disable penalty, -1 = context size)
         repeat_penalty: float = 1.0,  # 1.0 = disabled
@@ -1917,7 +1917,7 @@ class Llama:
         xtc_threshold: float = 0.1,   # > 0.5 disables XTC
         # DRY
         dry_multiplier: float = 0.0,  # 0.0 = disabled;      DRY repetition penalty for tokens extending repetition:
-        dry_base: float = 1.75,       # 0.0 = disabled;      multiplier * base ^ (length of sequence before token - allowed length)
+        dry_base: float = 1.75,       # < 1.0 disables DRY; multiplier * base ^ (repeat length - allowed length)
         dry_allowed_length: int = 2,  # tokens extending repetitions beyond this receive penalty
         dry_penalty_last_n:int = 64,  # how many tokens to scan for repetitions (0 = disable penalty, -1 = context size)
         dry_seq_breakers: list[str] = ["\n", ":", "\"", "*"], # default sequence breakers for DRY
@@ -1968,7 +1968,7 @@ class Llama:
                 dynatemp_exponent=dynatemp_exponent,
 
                 # Penalties
-                penalty_last_n=penalty_last_n if penalty_last_n != 0 else self.last_n_tokens_size,
+                penalty_last_n=self._n_ctx if penalty_last_n == -1 else penalty_last_n,
                 penalty_repeat=repeat_penalty,
                 penalty_freq=frequency_penalty,
                 penalty_present=present_penalty,
@@ -1986,7 +1986,7 @@ class Llama:
                 dry_multiplier=dry_multiplier,
                 dry_base=dry_base,
                 dry_allowed_length=dry_allowed_length,
-                dry_penalty_last_n=dry_penalty_last_n,
+                dry_penalty_last_n=self._n_ctx if dry_penalty_last_n == -1 else dry_penalty_last_n,
                 dry_sequence_breakers=dry_seq_breakers,
 
                 # Adaptive
@@ -2300,7 +2300,7 @@ class Llama:
             dynatemp_exponent=dynatemp_exponent,
 
             # Penalties
-            penalty_last_n=penalty_last_n,
+            penalty_last_n=self._n_ctx if penalty_last_n == -1 else penalty_last_n,
             penalty_repeat=repeat_penalty,
             penalty_freq=frequency_penalty,
             penalty_present=present_penalty,
@@ -2318,7 +2318,7 @@ class Llama:
             dry_multiplier=dry_multiplier,
             dry_base=dry_base,
             dry_allowed_length=dry_allowed_length,
-            dry_penalty_last_n=dry_penalty_last_n,
+            dry_penalty_last_n=self._n_ctx if dry_penalty_last_n == -1 else dry_penalty_last_n,
             dry_sequence_breakers=dry_seq_breakers,
 
             # Adaptive P
@@ -3622,7 +3622,7 @@ class Llama:
         ):
             if (
                 not ignore_eos
-                and llama_cpp_lib.llama_token_is_eog(self._model.vocab, token)
+                and llama_cpp_lib.llama_vocab_is_eog(self._model.vocab, token)
             ):
                 text = self.detokenize(completion_tokens, prev_tokens=prompt_tokens)
                 finish_reason = "stop"
@@ -4133,7 +4133,7 @@ prompt: The prompt to generate text from.
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
             use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
-            ignore_eos: If True, suppress end-of-generation tokens and continue until another stopping condition is reached.
+            ignore_eos: If True, do not stop on end-of-generation tokens. This does not mask their logits.
             model: The name to use for the model in the completion object.
             stopping_criteria: A list of stopping criteria to use.
             logit_bias: A logit bias to use.
@@ -4344,7 +4344,7 @@ prompt: The prompt to generate text from.
             adaptive-target: Adaptive-p: select tokens near this probability (valid range 0.0 to 1.0; negative = disabled) (default: %.2f) [(more info)](https://github.com/ggml-org/llama.cpp/pull/17927)
             adaptive-decay: Adaptive-p: decay rate for target adaptation over time. lower values are more reactive, higher values are more stable. (valid range 0.0 to 0.99) (default: %.2f)
             use_infill: Determines whether to activate the specialized fill-in-the-middle sampler that consolidates probabilities of tokens sharing common prefixes to ensure the generated text coherently bridges the gap between the prefix and suffix.
-            ignore_eos: If True, suppress end-of-generation tokens and continue until another stopping condition is reached.
+            ignore_eos: If True, do not stop on end-of-generation tokens. This does not mask their logits.
             model: The name to use for the model in the completion object.
             stopping_criteria: A list of stopping criteria to use.
             logit_bias: A logit bias to use.

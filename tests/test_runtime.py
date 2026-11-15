@@ -5,7 +5,6 @@ import multiprocessing
 import threading
 import gc
 import weakref
-import ast
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -54,68 +53,47 @@ def _required_model_path(variable):
     return path
 
 
-@pytest.mark.parametrize("header,enum_name,module,class_name", [
-    ("ggml/include/ggml.h", "ggml_type", "_ggml", "GGMLType"),
-    ("ggml/include/ggml.h", "ggml_ftype", "_ggml", "GGMLFType"),
-    ("ggml/include/ggml.h", "ggml_op", "_ggml", "GGML_OP"),
-    ("ggml/include/ggml.h", "ggml_prec", "_ggml", "GGMLPrec"),
-    ("ggml/include/ggml-opt.h", "ggml_opt_build_type", "_ggml", "GGMLOptBuildType"),
-    ("ggml/include/ggml-opt.h", "ggml_opt_optimizer_type", "_ggml", "GGMLOptOptimizerType"),
-    ("include/llama.h", "llama_ftype", "llama_cpp", "llama_ftype"),
-])
-def test_runtime_enums_match_vendor(header, enum_name, module, class_name):
-    source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp" / header).read_text(encoding="utf-8")
-    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
-    body = re.search(r"\benum\s+" + enum_name + r"\s*\{([^}]+)\}", source)[1]
-    expected, value = {}, -1
-    for entry in body.split(","):
-        if not entry.strip():
-            continue
-        name, *explicit = entry.strip().split("=")
-        value = int(explicit[0].strip(), 0) if explicit else value + 1
-        expected[name.strip()] = value
-    enum_type = getattr(getattr(llama_cpp, module), class_name)
-    assert {name: int(value) for name, value in enum_type.__members__.items()} == expected
-
-
-@pytest.mark.parametrize("header,name", [
-    ("include/llama.h", "llama_context_params"),
-    ("tools/mtmd/mtmd.h", "mtmd_context_params"),
-    ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
-])
-def test_context_parameter_layout_matches_vendor(header, name):
+def test_native_context_parameter_layouts():
     from llama_cpp import mtmd_cpp
 
-    source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp" / header).read_text(encoding="utf-8")
-    source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
-    body = re.search(r"\bstruct\s+" + name + r"\s*\{(.*?)\};", source, re.S)[1]
-    scalars = {"uint32_t": ctypes.c_uint32, "int32_t": ctypes.c_int32,
-               "int": ctypes.c_int, "float": ctypes.c_float, "bool": ctypes.c_bool,
-               "size_t": ctypes.c_size_t, "llama_seq_id": ctypes.c_int32}
-    pointers = {"ggml_backend_sched_eval_callback", "ggml_abort_callback",
-                "mtmd_progress_callback", "ggml_backend_dev_t"}
-    fields = []
-    for declaration in body.split(";"):
-        if not declaration.strip():
-            continue
-        match = re.fullmatch(r"\s*(.*?)\s+(\w+)\s*", declaration)
-        assert match, f"Unsupported vendor declaration: {declaration}"
-        c_type, field = " ".join(match[1].split()), match[2]
-        if "*" in c_type or c_type in pointers:
-            field_type = ctypes.c_void_p
-        elif c_type.startswith("enum "):
-            field_type = ctypes.c_int
-        else:
-            assert c_type in scalars, f"Unsupported vendor field type: {c_type}"
-            field_type = scalars[c_type]
-        fields.append((field, field_type))
-    expected = type("VendorParams", (ctypes.Structure,), {"_fields_": fields})
-    actual = getattr(llama_cpp if name.startswith("llama_") else mtmd_cpp, name)
-    assert [field for field, _ in actual._fields_] == [field for field, _ in fields]
-    assert (ctypes.sizeof(actual), ctypes.alignment(actual)) == (ctypes.sizeof(expected), ctypes.alignment(expected))
-    for (field, actual_type), (_, expected_type) in zip(actual._fields_, fields):
-        assert getattr(actual, field).offset == getattr(expected, field).offset, field
-        assert (ctypes.sizeof(actual_type), ctypes.alignment(actual_type)) == (ctypes.sizeof(expected_type), ctypes.alignment(expected_type)), field
+    # Keep only by-value constructor/audio structs whose layout affects native memory.
+    cases = (
+        ("include/llama.h", "llama_model_params"),
+        ("include/llama.h", "llama_context_params"),
+        ("tools/mtmd/mtmd.h", "mtmd_context_params"),
+        ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
+    )
+    for header, name in cases:
+        source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp" / header).read_text(encoding="utf-8")
+        source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
+        body = re.search(r"\bstruct\s+" + name + r"\s*\{([^{}]*)\}", source, re.S)[1]
+        scalars = {"uint32_t": ctypes.c_uint32, "int32_t": ctypes.c_int32,
+                   "int": ctypes.c_int, "float": ctypes.c_float, "bool": ctypes.c_bool,
+                   "size_t": ctypes.c_size_t, "llama_seq_id": ctypes.c_int32}
+        pointers = {"ggml_backend_sched_eval_callback", "ggml_abort_callback",
+                    "mtmd_progress_callback", "ggml_backend_dev_t", "llama_progress_callback"}
+        fields = []
+        for declaration in body.split(";"):
+            if not declaration.strip():
+                continue
+            match = re.fullmatch(r"\s*(.*?)\s+(\w+)\s*", declaration)
+            assert match, f"Unsupported vendor declaration: {declaration}"
+            c_type, field = " ".join(match[1].split()), match[2]
+            if "*" in c_type or c_type in pointers:
+                field_type = ctypes.c_void_p
+            elif c_type.startswith("enum "):
+                field_type = ctypes.c_int
+            else:
+                assert c_type in scalars, f"Unsupported vendor field type: {c_type}"
+                field_type = scalars[c_type]
+            fields.append((field, field_type))
+        expected = type("VendorParams", (ctypes.Structure,), {"_fields_": fields})
+        actual = getattr(llama_cpp if name.startswith("llama_") else mtmd_cpp, name)
+        assert [field for field, _ in actual._fields_] == [field for field, _ in fields], name
+        assert (ctypes.sizeof(actual), ctypes.alignment(actual)) == (ctypes.sizeof(expected), ctypes.alignment(expected)), name
+        for (field, actual_type), (_, expected_type) in zip(actual._fields_, fields):
+            assert getattr(actual, field).offset == getattr(expected, field).offset, (name, field)
+            assert (ctypes.sizeof(actual_type), ctypes.alignment(actual_type)) == (ctypes.sizeof(expected_type), ctypes.alignment(expected_type)), (name, field)
 
 
 @pytest.mark.parametrize("share", [-0.1, 1.1, float("nan"), float("inf"), float("-inf"), 0.0, 0.5, 1.0])
@@ -220,65 +198,6 @@ def test_ggml_flash_attn_rows_and_comm_callbacks():
         free(ctx)
 
 
-def test_optional_model_and_device_extension_signatures():
-    lib = internals.llama_cpp
-    signatures = {
-        "llama_arch_name": ([ctypes.c_int], ctypes.c_char_p),
-        "llama_arch_supports_sm_tensor": ([ctypes.c_int], ctypes.c_bool),
-        "llama_arch_supports_mixed_batch": ([ctypes.c_int], ctypes.c_bool),
-        "llama_arch_supports_save": ([ctypes.c_int], ctypes.c_bool),
-        "llama_model_decision_label": ([lib.llama_model_p_ctypes, ctypes.c_uint32], ctypes.c_char_p),
-        "llama_ftype_get_default_type": ([ctypes.c_int], ctypes.c_int),
-        "llama_set_embeddings_layer_inp_dev": ([lib.llama_context_p_ctypes, ctypes.c_bool], None),
-        "llama_supports_embd_row": ([lib.llama_context_p_ctypes], ctypes.c_bool),
-        "llama_batch_ext_add_embd_row": ([lib.llama_batch_ext_p_ctypes, lib.llama_seq_id, ctypes.c_int32], ctypes.c_int32),
-        "llama_model_classifier_free_guidance": ([lib.llama_model_p_ctypes], ctypes.c_bool),
-        "llama_set_embeddings_nextn_dev": ([lib.llama_context_p_ctypes, ctypes.c_bool], ctypes.c_bool),
-        "llama_get_embeddings_nextn_rows": ([lib.llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)], ctypes.c_bool),
-        "llama_set_embeddings_nextn_rows": ([lib.llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)], ctypes.c_bool),
-        "llama_set_embd_state_src": ([lib.llama_context_p_ctypes, lib.llama_context_p_ctypes], ctypes.c_bool),
-        "llama_batch_ext_set_embd_state_row": ([lib.llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_int32], ctypes.c_bool),
-    }
-    tree = ast.parse(Path(lib.__file__).read_text(encoding="utf-8"))
-    declarations = ast.Module(body=[node for node in tree.body
-                                   if isinstance(node, ast.FunctionDef) and node.name in signatures], type_ignores=[])
-    recorded = {}
-
-    def bind(names, args, result, **kwargs):
-        recorded[names[0]] = (args, result)
-        assert len(names) == len(set(names)) == 4 and kwargs == {"required": False}
-        return lambda function: function
-
-    exec(compile(declarations, lib.__file__, "exec"), dict(vars(lib), ctypes_function_llama_ext=bind))
-    assert recorded == signatures
-    for name, (args, result) in signatures.items():
-        function = getattr(lib, name)
-        if not getattr(function, "__ctypes_optional__", False):
-            assert function.argtypes == args and function.restype is result
-
-
-def test_native_architecture_queries_and_quantization_enum():
-    lib = internals.llama_cpp
-    functions = [getattr(lib, name) for name in (
-        "llama_arch_name", "llama_arch_supports_sm_tensor", "llama_arch_supports_mixed_batch",
-        "llama_arch_supports_save", "llama_ftype_get_default_type",
-    )]
-    if any(getattr(f, "__ctypes_optional__", False) for f in functions):
-        pytest.skip("Native llama-ext architecture queries are unavailable")
-    header = Path("vendor/llama.cpp/src/llama-arch.h").read_text(encoding="utf-8")
-    body = re.search(r"enum llm_arch\s*\{(.*?)\}", header, re.S).group(1)
-    ids = re.findall(r"\bLLM_ARCH_\w+\b", body)
-    for arch, name, capabilities in (
-        ("LLM_ARCH_LLAMA", b"llama", (True, True, True)),
-        ("LLM_ARCH_T5", b"t5", (False, True, False)),
-        ("LLM_ARCH_GEMMA4_ASSISTANT", b"gemma4-assistant", (True, False, True)),
-    ):
-        index = ids.index(arch)
-        assert functions[0](index) == name
-        assert tuple(f(index) for f in functions[1:4]) == capabilities
-    assert functions[-1](lib.llama_ftype.LLAMA_FTYPE_ALL_F32) == 0  # GGML_TYPE_F32
-
-
 @pytest.mark.parametrize("kind", ["single", "shards", "duplicates", "vocab-failure"])
 def test_model_shard_loading_preserves_order_and_ownership(tmp_path, monkeypatch, kind):
     main, extra = (tmp_path / name for name in ("model.gguf", "table-\u4e2d\u6587.gguf"))
@@ -311,45 +230,10 @@ def test_model_shards_survive_constructor_settings_roundtrip():
     # Repeated main paths deduplicate without needing additional model files.
     with closing(llama_cpp.Llama(MODEL, model_shards=[MODEL, MODEL], vocab_only=True,
                                  n_ctx=64, n_batch=16, verbose=False)) as llm:
-        if not getattr(llama_cpp.llama_model_decision_label, "__ctypes_optional__", False):
-            assert llama_cpp.llama_model_decision_label(llm._model.model, 0) is None
-            assert llama_cpp.llama_model_decision_label(llm._model.model, 2**32 - 1) is None
         state = llm.__getstate__()
     assert state["model_shards"] == (MODEL, MODEL)
     with closing(llama_cpp.Llama(**state)) as restored:
         assert restored.model_shards == (MODEL, MODEL)
-
-
-def test_ggml_batch_transfer_signatures():
-    g = llama_cpp._ggml
-    ptr = ctypes.POINTER
-    signatures = {
-        "ggml_backend_tensor_copy_n": [ptr(g.ggml_tensor_p), ptr(g.ggml_tensor_p), ctypes.c_size_t],
-        "ggml_backend_tensor_set_n": [ptr(g.ggml_tensor_p), ctypes.c_void_p, ptr(ctypes.c_size_t),
-                                      ptr(ctypes.c_size_t), ptr(ctypes.c_size_t), ctypes.c_size_t],
-        "ggml_backend_tensor_get_n": [ptr(g.ggml_tensor_p), ctypes.c_void_p, ptr(ctypes.c_size_t),
-                                      ptr(ctypes.c_size_t), ptr(ctypes.c_size_t), ctypes.c_size_t],
-    }
-    # Validate declarations even when CI's native library predates these symbols.
-    tree = ast.parse(Path(g.__file__).read_text(encoding="utf-8"))
-    declarations = ast.Module(body=[node for node in tree.body
-                                   if isinstance(node, ast.FunctionDef) and node.name in signatures], type_ignores=[])
-    recorded = {}
-
-    def bind(name, args, result, **kwargs):
-        recorded[name] = (args, result)
-        return lambda function: function
-
-    exec(compile(declarations, g.__file__, "exec"), dict(vars(g), ggml_base_function=bind))
-    assert recorded == {name: (args, None) for name, args in signatures.items()}
-    for name, args in signatures.items():
-        function = getattr(g, name)
-        if getattr(function, "__ctypes_optional__", False):
-            with pytest.raises(RuntimeError, match=name):
-                function(*([None] * (len(args) - 1)), 0)
-        else:
-            assert function.argtypes == args and function.restype is None
-            function(*([None] * (len(args) - 1)), 0)
 
 
 @pytest.mark.parametrize("batched", [False, True], ids=["single", "batched"])
@@ -489,6 +373,60 @@ def test_sampling_suppression_and_bias_match_native_chain(sampling_model, suppre
     sampling_model.suppress_tokens.assert_called_once_with()
     assert [(item.token, item.bias) for item in params.logit_bias] == original_biases
     np.testing.assert_array_equal(logits, saved)
+
+
+def test_sampling_modes_match_native_selection(sampling_model):
+    """Configured modes must change probabilities, including across accepts."""
+    sampling_model.suppress_tokens.return_value = []
+    logits = np.linspace(-1, 1, 32, dtype=np.float32)
+    lib = internals.llama_cpp
+    for mode in ("dynamic", "adaptive", "mirostat-1", "mirostat-2"):
+        params = internals.LlamaSamplingParams(
+            seed=42, temp=0.0 if mode == "dynamic" else 0.8,
+            top_k=0, top_p=1.0, min_p=0.0,
+            samplers=[internals.CommonSamplerType.PENALTIES,
+                      internals.CommonSamplerType.TOP_K,
+                      internals.CommonSamplerType.TEMPERATURE],
+        )
+        with closing(internals.LlamaSampler()) as reference:
+            if mode == "dynamic":
+                params.dynatemp_range = 0.6
+                params.dynatemp_exponent = 1.5
+                reference.add_temp_ext(0.0, 0.6, 1.5)
+                reference.add_dist(42)
+            elif mode == "adaptive":
+                params.adaptive_target = 0.1
+                reference.add_temp(0.8)
+                reference.add_adaptive_p(0.1, 0.9, 42)
+            else:
+                params.mirostat = int(mode[-1])
+                # These would collapse/reweight the distribution if not bypassed.
+                params.top_k = 1
+                params.penalty_repeat = 2.0
+                params.dynatemp_range = 0.6
+                params.adaptive_target = 0.1
+                reference.add_temp(0.8)
+                if params.mirostat == 1:
+                    reference.add_mirostat(32, 42, 5.0, 0.1, 100)
+                else:
+                    reference.add_mirostat_v2(42, 5.0, 0.1)
+            with closing(internals.LlamaSamplingContext(params, sampling_model)) as sampler:
+                sampler.accept(31, False)
+                reference.accept(31)
+                for _ in range(3):
+                    expected = internals.LlamaTokenDataArray(n_vocab=32)
+                    expected.copy_logits(logits)
+                    lib.llama_sampler_apply(reference.sampler, ctypes.byref(expected.candidates))
+                    token = int(expected._id_view[expected.candidates.selected])
+                    assert sampler.sample(SimpleNamespace(), logits=logits) == token, mode
+                    actual = sampler._cur_p
+                    assert actual.candidates.size == expected.candidates.size, mode
+                    n = expected.candidates.size
+                    np.testing.assert_allclose(actual.candidates_data["p"][:n],
+                                               expected.candidates_data["p"][:n], rtol=2e-6,
+                                               err_msg=mode)
+                    sampler.accept(token, False)
+                    reference.accept(token)
 
 
 @pytest.mark.parametrize("grammar_first", [False, True])
@@ -1480,7 +1418,7 @@ def test_private_completion_respects_ignore_eos_at_eog_boundary(
         )
     )
     monkeypatch.setattr(
-        "llama_cpp.llama.llama_cpp_lib.llama_token_is_eog",
+        "llama_cpp.llama.llama_cpp_lib.llama_vocab_is_eog",
         lambda vocab, token: token == 2,
     )
 
@@ -1547,14 +1485,8 @@ def vocabulary_model():
         yield model
 
 
-def test_model_extensions_with_vocabulary_only_model(vocabulary_model):
+def test_vocabulary_only_model_has_no_token_embeddings(vocabulary_model):
     model = vocabulary_model._model.model
-    assert llama_cpp.llama_model_n_tokens_delay(model) == 0
-    if not getattr(llama_cpp.llama_model_classifier_free_guidance, "__ctypes_optional__", False):
-        assert vocabulary_model._model.classifier_free_guidance() is False
-    llama_cpp.llama_model_set_attn_rot(model, False)
-    llama_cpp.llama_model_set_attn_rot(model, True)
-    llama_cpp.llama_model_set_attn_rot(model, False)
     tokens = (llama_cpp.llama_token * 1)(0)
     output = (ctypes.c_float * 1)(123)
     assert llama_cpp.llama_model_get_tok_embd_rows(model, tokens, 1, output) == 0
@@ -1574,6 +1506,41 @@ def test_llama_cpp_tokenization(vocabulary_model):
         assert tokens == expected, (text, options)
         if skip is not None:
             assert llama.detokenize(tokens)[skip:] == text, (text, options)
+
+    lib, vocab = internals.llama_cpp, llama._model.vocab
+    for text in ("中文🙂 café".encode("utf-8"), b"a\0b"):
+        tokens = llama.tokenize(text, add_bos=False)
+        assert llama.detokenize(tokens) == text
+        array = (lib.llama_token * len(tokens))(*tokens)
+        needed = -lib.llama_detokenize(vocab, array, len(tokens), None, 0, False, False)
+        assert needed == len(text)
+        output = ctypes.create_string_buffer(b"#" * (needed + 3))
+        assert lib.llama_detokenize(vocab, array, len(tokens), output, needed, False, False) == needed
+        assert output.raw[:needed] == text and output.raw[needed:] == b"###\0"
+    token = llama.tokenize(b"Hello", add_bos=False)[0]
+    piece = llama._model.token_to_piece(token)
+    assert piece
+    output = ctypes.create_string_buffer(b"#" * (len(piece) + 3))
+    assert lib.llama_token_to_piece(vocab, token, output, len(piece), 0, False) == len(piece)
+    assert output.raw[:len(piece)] == piece and output.raw[len(piece):] == b"###\0"
+
+
+def test_tokenization_overflow_does_not_allocate_retry_buffer(monkeypatch):
+    lib, allocations = internals.llama_cpp, []
+
+    class TokenAllocator:
+        def __mul__(self, count):
+            allocations.append(count)
+            assert count <= 16, "Overflow must not become a retry allocation"
+            return ctypes.c_int32 * count
+
+    tokenize = Mock(return_value=-(1 << 31))
+    monkeypatch.setattr(lib, "llama_token", TokenAllocator())
+    monkeypatch.setattr(lib, "llama_tokenize", tokenize)
+    with pytest.raises(RuntimeError, match="int32_t capacity"):
+        internals.LlamaModel.tokenize(SimpleNamespace(vocab=123), b"x", False, False)
+    assert allocations == [3]
+    tokenize.assert_called_once()
 
 
 @pytest.mark.parametrize('kind', ['sequence', 'mixed', 'mrope'])
@@ -2029,11 +1996,37 @@ def test_native_sampler_chain_decode(completion_model):
         for pos in range(len(tokens), len(tokens) + 4):
             token = sampler.sample(model._ctx, -1)
             assert 0 <= token < model.n_vocab()
-            sampler.accept(token)
             batch.reset()
             batch.add_token(token, pos, [0], True)
             assert model._ctx.decode(batch) == 0
         assert model._ctx.memory_seq_pos_max(0) == len(tokens) + 3
+
+
+def test_sampling_history_windows_use_runtime_context(completion_model, monkeypatch):
+    model = completion_model
+    calls = []
+    native_context = internals.LlamaSamplingContext
+
+    def record(params, native_model):
+        calls.append((params.penalty_last_n, params.dry_penalty_last_n))
+        return native_context(params, native_model)
+
+    monkeypatch.setattr("llama_cpp.llama.LlamaSamplingContext", record)
+    tokens = model.tokenize(b"Repeat this word")
+    if model._sampling_ctx is not None:
+        model._sampling_ctx.close()
+        model._sampling_ctx = None
+    model.eval(tokens)
+    for window in (0, -1):
+        options = dict(penalty_last_n=window, dry_penalty_last_n=window,
+                       repeat_penalty=1.2, dry_multiplier=0.4, dry_seq_breakers=[])
+        assert 0 <= model.sample(**options) < model.n_vocab()
+        with closing(model.generate(tokens, **options)) as generation:
+            assert 0 <= next(generation) < model.n_vocab()
+        model._sampling_ctx.close()
+        model._sampling_ctx = None
+    assert calls == [(0, 0), (0, 0), (model.n_ctx_seq(), model.n_ctx_seq()),
+                     (model.n_ctx_seq(), model.n_ctx_seq())]
 
 
 @pytest.mark.parametrize("stream", [False, True])

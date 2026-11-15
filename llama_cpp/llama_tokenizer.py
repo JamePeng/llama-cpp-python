@@ -49,6 +49,7 @@ class LlamaTokenizer(BaseLlamaTokenizer):
     def tokenize(
         self, text: bytes, add_bos: bool = True, special: bool = True
     ) -> List[int]:
+        """Forward add_bos as native add_special and special as parse_special."""
         return self._model.tokenize(text, add_bos=add_bos, special=special)
 
     def detokenize(

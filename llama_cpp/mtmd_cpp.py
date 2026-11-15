@@ -89,18 +89,22 @@ class mtmd_video_template(enum.IntEnum):
     MTMD_VIDEO_TEMPLATE_LFM3_OMNI = 2
     MTMD_VIDEO_TEMPLATE_QWEN3VL = 3
 
-# // position indexing for decoder model
+# // Internal position indexing for decoder models (tools/mtmd/mtmd.cpp).
 # enum mtmd_pos_type {
 #     MTMD_POS_TYPE_NORMAL,    // number of positions equals to number of tokens
 #     MTMD_POS_TYPE_MROPE,     // qwen-vl mrope style, each image takes max(t,h,w) position indexes
 #     MTMD_POS_TYPE_HUNYUANVL, // HunyuanVL mrope + BOI/EOI/newline layout with XD-RoPE dim-3
+#     MTMD_POS_TYPE_SENSENOVA_U1, // U1 uses zero-based H/W and one temporal position per image
+#     MTMD_POS_TYPE_CANVAS,    // MiniCPM-V 4.7: overview + slices sharing one 2D canvas
 #     MTMD_POS_TYPE_COUNT,     // for validation
 # };
 class mtmd_pos_type(enum.IntEnum):
     MTMD_POS_TYPE_NORMAL    = 0  # number of positions equals to number of tokens
     MTMD_POS_TYPE_MROPE     = 1  # qwen-vl mrope style, each image takes max(t,h,w) position indexes
     MTMD_POS_TYPE_HUNYUANVL = 2  # HunyuanVL mrope + BOI/EOI/newline layout with XD-RoPE dim-3
-    MTMD_POS_TYPE_COUNT     = 3  # for validation
+    MTMD_POS_TYPE_SENSENOVA_U1 = 3
+    MTMD_POS_TYPE_CANVAS    = 4
+    MTMD_POS_TYPE_COUNT     = 5  # for validation
 
 # // opaque types
 

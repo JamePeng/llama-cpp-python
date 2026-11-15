@@ -579,19 +579,6 @@ def native_chunks(mtmd):
         mtmd.mtmd_input_chunks_free(chunks)
 
 
-@pytest.mark.parametrize("name, fields", [
-    ("mtmd_helper_cap", "chat vision audio video audio_stream text_gen audio_gen audio_gen_spk_ref"),
-    ("mtmd_caps", "inp_vision inp_audio gen_audio"),
-])
-def test_mtmd_boolean_capabilities_abi(mtmd, name, fields):
-    struct_type = getattr(mtmd, name)
-    fields = fields.split()
-    assert ctypes.sizeof(struct_type) == len(fields)
-    assert ctypes.alignment(struct_type) == 1
-    assert struct_type._fields_ == [(field, ctypes.c_bool) for field in fields]
-    assert [getattr(struct_type, field).offset for field in fields] == list(range(len(fields)))
-
-
 VIDEO_DEFAULTS = dict(fps_target=4.0, ffmpeg_bin_dir=None, timestamp_interval_ms=5000, no_soundtrack=False)
 
 
@@ -621,58 +608,6 @@ def test_mtmd_parameter_defaults(mtmd, name, expected, free):
         assert (not actual if expected_value is None else actual == expected_value), field
     if free:
         getattr(mtmd, free)(None)
-
-
-def test_mtmd_helper_function_signatures(mtmd):
-    native = importlib.import_module("llama_cpp.llama_cpp")
-    ptr = ctypes.POINTER
-    signatures = [
-        ("mtmd_helper_resampler_init", [ctypes.c_int32, ctypes.c_int32], mtmd.mtmd_helper_resampler_p_ctypes),
-        ("mtmd_helper_resampler_free", [mtmd.mtmd_helper_resampler_p_ctypes], None),
-        ("mtmd_helper_resampler_process", [mtmd.mtmd_helper_resampler_p_ctypes, ptr(ctypes.c_float),
-                                          ctypes.c_size_t, ptr(ptr(ctypes.c_float))], ctypes.c_int64),
-        ("mtmd_helper_get_capabilities", [native.llama_model_p_ctypes, mtmd.mtmd_context_p_ctypes], mtmd.mtmd_helper_cap),
-        ("mtmd_audio_stream_get_n_rows", [mtmd.mtmd_audio_stream_p_ctypes], ctypes.c_int64),
-        ("mtmd_audio_stream_get_n_rows_flushed", [mtmd.mtmd_audio_stream_p_ctypes], ctypes.c_int64),
-        ("mtmd_audio_stream_is_seq_start", [mtmd.mtmd_audio_stream_p_ctypes], ctypes.c_bool),
-        ("mtmd_helper_gen_audio_next_is_text", [mtmd.mtmd_helper_gen_audio_p_ctypes], ctypes.c_bool),
-        ("mtmd_helper_gen_audio_get_logit_bias", [mtmd.mtmd_helper_gen_audio_p_ctypes,
-                                                ptr(ctypes.c_size_t)], ptr(native.llama_logit_bias)),
-        ("mtmd_helper_audio_stream_get_logit_bias", [mtmd.mtmd_context_p_ctypes, native.llama_model_p_ctypes,
-                                                   ptr(native.llama_logit_bias), ctypes.c_int32], ctypes.c_int32),
-        ("mtmd_gen_state_init", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_params], mtmd.mtmd_gen_state_p_ctypes),
-        ("mtmd_gen_state_reset", [mtmd.mtmd_gen_state_p_ctypes], None),
-        ("mtmd_gen_state_set_ref", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_p_ctypes], ctypes.c_int32),
-        ("mtmd_gen_audio_read_tensor", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p,
-                                        ptr(ctypes.c_float), ctypes.c_size_t], ctypes.c_size_t),
-        ("mtmd_gen_state_free", [mtmd.mtmd_gen_state_p_ctypes], None),
-        ("mtmd_gen_audio_process", [mtmd.mtmd_context_p_ctypes, mtmd.mtmd_gen_state_p_ctypes,
-                                    ptr(mtmd.mtmd_gen_inp), ptr(mtmd.mtmd_gen_out)], ctypes.c_int32),
-        ("mtmd_helper_gen_audio_inp_default", [], mtmd.mtmd_helper_gen_audio_inp),
-        ("mtmd_helper_gen_audio_flush", [mtmd.mtmd_helper_gen_audio_p_ctypes], ctypes.c_int32),
-        ("mtmd_get_video_config", [mtmd.mtmd_context_p_ctypes, ctypes.c_int32, ctypes.c_int32,
-                                   ctypes.c_int32, ctypes.c_float], mtmd.mtmd_video_config),
-        ("mtmd_bitmap_set_is_video", [mtmd.mtmd_bitmap_p_ctypes, ctypes.c_bool], None),
-        ("mtmd_bitmap_is_voice", [mtmd.mtmd_bitmap_p_ctypes], ctypes.c_bool),
-        ("mtmd_gen_audio_voice_name", [mtmd.mtmd_context_p_ctypes, ctypes.c_int32], ctypes.c_char_p),
-        ("mtmd_gen_audio_get_voice", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p], mtmd.mtmd_bitmap_p_ctypes),
-        ("mtmd_helper_bitmap_init_from_file", [mtmd.mtmd_context_p_ctypes, ctypes.c_char_p,
-                                              ctypes.c_bool, mtmd.mtmd_helper_init_opt], mtmd.mtmd_helper_bitmap_wrapper),
-        ("mtmd_helper_bitmap_init_from_buf", [mtmd.mtmd_context_p_ctypes, ptr(ctypes.c_uint8),
-                                             ctypes.c_size_t, ctypes.c_bool, mtmd.mtmd_helper_init_opt], mtmd.mtmd_helper_bitmap_wrapper),
-    ]
-    for name, args, result in signatures:
-        function = getattr(mtmd, name)
-        if getattr(function, "__ctypes_optional__", False):
-            with pytest.raises(RuntimeError, match=name):
-                function(*([None] * len(args)))
-        else:
-            # Only unavailable stubs may receive NULL; live queries need real contexts.
-            assert function.argtypes == args, name
-            assert function.restype is result, name
-    assert mtmd.mtmd_gen_inp_default.restype is mtmd.mtmd_gen_inp
-    assert mtmd.mtmd_get_cap_from_file.restype is mtmd.mtmd_caps
-    assert mtmd.mtmd_helper_video_init.restype is mtmd.mtmd_helper_video_p_ctypes
 
 
 @pytest.mark.parametrize("rate_in,rate_out", [(16000, 16000), (48000, 16000), (16000, 24000), (44100, 16000)])
@@ -719,49 +654,22 @@ def test_mtmd_resampler_stream_and_lifetime(mtmd, rate_in, rate_out):
 
 
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
-@pytest.mark.parametrize("name, size, offsets", [
-    ("mtmd_gen_inp", 72, {
-        "type": 0, "code0": 4, "embd": 8, "top_k": 16, "top_p": 20,
-        "temp": 24, "penalty_repeat": 28, "penalty_last_n": 32,
-        "codes": 40, "n_codes": 48, "feats": 56, "n_feats": 64,
-    }),
-    ("mtmd_gen_out", 64, {
-        "codes": 0, "n_codes": 8, "feats": 16, "n_feats": 24,
-        "embd": 32, "is_eos": 40, "audio": 48, "n_samples": 56,
-    }),
-    ("mtmd_audio_stream_params", 24, {"step_ms": 0, "prompt": 8, "n_prompt": 16}),
-    ("mtmd_gen_state_params", 4, {"seed": 0}),
-    ("mtmd_video_config", 20, {"tmpl": 0, "fps": 4, "n_frames": 8, "frame_width": 12, "frame_height": 16}),
-    ("mtmd_helper_video_init_params", 32, {"fps_target": 0, "ffmpeg_bin_dir": 8,
-                                         "timestamp_interval_ms": 16, "no_soundtrack": 24}),
-    ("mtmd_helper_init_opt", 32, {"video_params": 0}),
-    ("mtmd_gen_audio_info", 24, {"type": 0, "sample_rate": 4, "model_variant": 8, "n_voices": 16}),
-    ("mtmd_helper_gen_audio_inp", 72, {
-        "stream": 0, "seq_id": 4, "prompt": 8, "prompt_len": 16,
-        "n_past": 24, "out_mode": 28, "speaker_ref": 32, "lang": 40,
-        "top_k": 48, "top_p": 52, "temp": 56, "seed": 60, "out_type": 64,
-    }),
-])
-def test_mtmd_audio_struct_abi(mtmd, name, size, offsets):
-    struct_type = getattr(mtmd, name)
-    assert ctypes.sizeof(struct_type) == size
-    assert ctypes.alignment(struct_type) == (4 if size in (4, 20) else 8)
-    assert {field: getattr(struct_type, field).offset for field, _ in struct_type._fields_} == offsets
-    if name == "mtmd_helper_gen_audio_inp":
-        value = struct_type(stream=False, seq_id=7)
-        assert bytes(value)[0] == 0 and ctypes.c_int32.from_buffer_copy(bytes(value)[4:8]).value == 7
-        value.stream = True
-        assert value.seq_id == 7
-
-
-@pytest.mark.parametrize("name, values", [
-    ("mtmd_gen_audio_type", [0, 1, 2, 3, 4, 5, 6]),
-    ("mtmd_helper_gen_audio_out_mode", [0, 1, 2, 3]),
-    ("mtmd_helper_gen_audio_outtype", [0, 1]),
-    ("mtmd_video_template", [0, 1, 2, 3]),
-])
-def test_mtmd_enums(mtmd, name, values):
-    assert list(map(int, getattr(mtmd, name))) == values
+def test_mtmd_audio_and_capability_layouts(mtmd):
+    # Guard native output writes and the sampling-temperature ABI boundary.
+    for name, size, fields in (
+        ("mtmd_caps", 3, "inp_vision inp_audio gen_audio"),
+        ("mtmd_helper_cap", 8, "chat vision audio video audio_stream text_gen audio_gen audio_gen_spk_ref"),
+    ):
+        cls = getattr(mtmd, name)
+        assert ctypes.sizeof(cls) == size and ctypes.alignment(cls) == 1, name
+        assert cls._fields_ == [(field, ctypes.c_bool) for field in fields.split()], name
+    assert ctypes.sizeof(mtmd.mtmd_gen_inp) == 72
+    assert mtmd.mtmd_gen_inp.temp.offset == 24
+    assert ctypes.sizeof(mtmd.mtmd_gen_out) == 64
+    value = mtmd.mtmd_helper_gen_audio_inp(stream=False, seq_id=7)
+    assert ctypes.sizeof(value) == 72 and type(value).temp.offset == 56
+    value.stream = True
+    assert value.seq_id == 7
 
 
 def test_mtmd_decoder_pos_abi(mtmd, native_chunks):

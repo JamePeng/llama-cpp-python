@@ -366,9 +366,6 @@ class LlamaModel:
     def token_mask(self) -> int:
         return llama_cpp.llama_vocab_mask(self.vocab)
 
-    def token_cls(self) -> int:
-        return llama_cpp.llama_vocab_cls(self.vocab)
-
     def token_fim_pre(self) -> int:
         return llama_cpp.llama_vocab_fim_pre(self.vocab)
 
@@ -401,6 +398,7 @@ class LlamaModel:
     def tokenize(self, text: bytes, add_bos: bool, special: bool):
         """
         Tokenize a string.
+        add_bos forwards native add_special, enabling model-configured BOS/EOS insertion.
         Optimized to use dynamic buffer allocation.
         """
         n_tokens_alloc = len(text) + 2
@@ -409,6 +407,9 @@ class LlamaModel:
         n_tokens = llama_cpp.llama_tokenize(
             self.vocab, text, len(text), tokens, n_tokens_alloc, add_bos, special
         )
+
+        if n_tokens == -(1 << 31):
+            raise RuntimeError("Tokenization result exceeds int32_t capacity")
 
         # If the buffer is insufficient (returns a negative number), reallocate the buffer.
         if n_tokens < 0:
@@ -1422,12 +1423,12 @@ class LlamaContext:
         self._assert_ctx()
         return llama_cpp.llama_set_embeddings_nextn_dev(self.ctx, enabled)
 
-    def set_embd_state_src(self, source: Optional[LlamaContext]) -> bool:
+    def set_ctx_state_src(self, source: Optional[LlamaContext]) -> bool:
         """Borrow a peer's NextN device state buffer, or detach with None."""
         self._assert_ctx()
         if source is not None:
             source._assert_ctx()
-        return llama_cpp.llama_set_embd_state_src(self.ctx, None if source is None else source.ctx)
+        return llama_cpp.llama_set_ctx_state_src(self.ctx, None if source is None else source.ctx)
 
     def get_embeddings_nextn_rows(self, row0: int, n_rows: int) -> npt.NDArray[np.float32]:
         """Copy original-batch device rows into an owned float32 matrix."""
@@ -2951,7 +2952,7 @@ class LlamaSamplingParams:
 
     n_prev: int = 64                 # number of previous tokens to remember
     n_probs: int = 0                 # if greater than 0, output the probabilities of top n_probs tokens.
-    min_keep: int = 0                # 0 = disabled, otherwise samplers should return at least min_keep tokens
+    min_keep: int = 0                # minimum candidates retained by probability filters; 0 adds no minimum
     top_k: int = 40                  # <= 0 to use vocab size
     top_p: float = 0.95              # 1.0 = disabled
     min_p: float = 0.05              # 0.0 = disabled
@@ -2968,7 +2969,7 @@ class LlamaSamplingParams:
     penalty_present: float = 0.00    # 0.0 = disabled
 
     dry_multiplier: float = 0.0      # 0.0 = disabled;      DRY repetition penalty for tokens extending repetition:
-    dry_base: float = 1.75           # 0.0 = disabled;      multiplier * base ^ (length of sequence before token - allowed length)
+    dry_base: float = 1.75           # < 1.0 disables DRY; multiplier * base ^ (repeat length - allowed length)
     dry_allowed_length: int = 2      # tokens extending repetitions beyond this receive penalty
     dry_penalty_last_n: int = 64     # how many tokens to scan for repetitions (0 = disable penalty)
 
@@ -3220,11 +3221,11 @@ class LlamaSamplingContext:
         lparams = llama_cpp.llama_sampler_chain_default_params()
         lparams.no_perf = params.no_perf
 
-        # History (bounded)
-        # Last n tokens to consider for penalize (default: %d, 0 = disabled, -1 = ctx_size)
-        if self.params.penalty_last_n == -1:
-            # full context
-            self.params.penalty_last_n = self.model.n_ctx_train()
+        # Llama resolves -1 against its runtime context before reaching here.
+        # Standalone internal callers only have the model's training capacity.
+        for name in ("penalty_last_n", "dry_penalty_last_n"):
+            if getattr(self.params, name) == -1:
+                setattr(self.params, name, self.model.n_ctx_train())
 
         # params.sampling.n_prev = std::max(params.sampling.n_prev, params.sampling.penalty_last_n);
         if self.params.penalty_last_n > 0:
@@ -3279,7 +3280,9 @@ class LlamaSamplingContext:
         if m is None:
             raise RuntimeError("LlamaSamplingContext: Model required to build sampler chain firstly")
 
-        use_adaptive_p = False
+        if p.mirostat not in (0, 1, 2):
+            raise ValueError("mirostat_mode must be 0, 1, or 2")
+        use_adaptive_p = p.adaptive_target >= 0
 
         # --- 1. Logit Bias and Model Suppression ---
         # Match common_sampler_init: user biases followed by model suppression.
@@ -3294,12 +3297,12 @@ class LlamaSamplingContext:
 
         # --- 2. Usage-Specific Samplers (Infill) ---
         # If Infill is required, it often modifies logits based on prefix/suffix
-        if CommonSamplerType.INFILL in p.samplers and m:
+        if p.mirostat == 0 and CommonSamplerType.INFILL in p.samplers and m:
              s.add_infill(m)
 
         # --- 3. Penalties (Repetition) ---
         # Note: In some implementations, penalties come before other samplers
-        if CommonSamplerType.PENALTIES in p.samplers:
+        if p.mirostat == 0 and CommonSamplerType.PENALTIES in p.samplers:
             s.add_penalties(
                 self.n_vocab,
                 p.penalty_last_n,
@@ -3309,7 +3312,7 @@ class LlamaSamplingContext:
             )
 
         # --- 4. DRY (Don't Repeat Yourself) ---
-        if CommonSamplerType.DRY in p.samplers and m:
+        if p.mirostat == 0 and CommonSamplerType.DRY in p.samplers and m:
             s.add_dry(
                 m,
                 p.dry_multiplier,
@@ -3382,6 +3385,10 @@ class LlamaSamplingContext:
         # --- 6. Core Sampling Strategies (The "Filter" Loop) ---
         # We iterate through the list to preserve user-defined order for these specific samplers
         for stype in p.samplers:
+            # Mirostat uses plain temperature and its own selection algorithm.
+            # Keep Python callbacks active, but bypass the ordinary native filters.
+            if p.mirostat != 0 and stype != CommonSamplerType.CUSTOM:
+                continue
             if stype == CommonSamplerType.CUSTOM:
                 if p.custom_samplers:
                     for cs in p.custom_samplers:
@@ -3400,7 +3407,7 @@ class LlamaSamplingContext:
                 s.add_typical(p.typical_p, p.min_keep)
 
             elif stype == CommonSamplerType.TEMPERATURE:
-                s.add_temp(p.temp)
+                s.add_temp_ext(p.temp, p.dynatemp_range, p.dynatemp_exponent)
 
             elif stype == CommonSamplerType.XTC:
                 s.add_xtc(p.xtc_probability, p.xtc_threshold, p.min_keep, p.seed)
@@ -3414,14 +3421,16 @@ class LlamaSamplingContext:
         # --- 7. Final Distribution / Selection ---
         # Mirostat overrides standard greedy/dist sampling
         if p.mirostat == 1 and m:
+            s.add_temp(p.temp)
             s.add_mirostat(m.n_vocab(), p.seed, p.mirostat_tau, p.mirostat_eta, 100)
         elif p.mirostat == 2:
+            s.add_temp(p.temp)
             s.add_mirostat_v2(p.seed, p.mirostat_tau, p.mirostat_eta)
         else:
             if use_adaptive_p:
                 s.add_adaptive_p(p.adaptive_target, p.adaptive_decay, p.seed)
             else:
-                if p.temp == 0:
+                if p.temp == 0 and p.dynatemp_range <= 0:
                     s.add_greedy()
                 else:
                     s.add_dist(p.seed)

@@ -131,6 +131,7 @@ llama_seq_id = ctypes.c_int32
 #     LLAMA_VOCAB_TYPE_RWKV   = 5, // RWKV tokenizer based on greedy tokenization
 #     LLAMA_VOCAB_TYPE_PLAMO2 = 6, // PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming
 #     LLAMA_VOCAB_TYPE_TEST   = 7, // Dummy tokenizer for testing: rolling hash of fixed-size chunks -> tokens, tokens -> hex
+#     LLAMA_VOCAB_TYPE_PLAMO3 = 8, // PLaMo-3 tokenizer with pre-segmentation and dynamic programming
 # };
 class LlamaVocabType(enum.IntEnum):
     """Vocabulary types; llama_vocab_type is the native query function."""
@@ -151,6 +152,8 @@ class LlamaVocabType(enum.IntEnum):
     """PLaMo-2 tokenizer based on Aho-Corasick with dynamic programming"""
     LLAMA_VOCAB_TYPE_TEST   = 7
     """Dummy tokenizer for testing: rolling hash of fixed-size chunks -> tokens, tokens -> hex"""
+    LLAMA_VOCAB_TYPE_PLAMO3 = 8
+    """PLaMo-3 tokenizer with pre-segmentation and dynamic programming"""
 
 
 # Defined in llama.cpp/src/llama-vocab.h, not the public llama.h.
@@ -221,6 +224,8 @@ class LlamaVocabType(enum.IntEnum):
 #     LLAMA_VOCAB_PRE_TYPE_FLINT             = 62,
 #     LLAMA_VOCAB_PRE_TYPE_DOMYN_SMALL       = 63,
 #     LLAMA_VOCAB_PRE_TYPE_NEMOTRON_3_5_EMBD = 64,
+#     LLAMA_VOCAB_PRE_TYPE_SOPRANO           = 65,
+#     LLAMA_VOCAB_PRE_TYPE_TEKKEN_NUM3       = 66,
 # };
 class llama_vocab_pre_type(enum.IntEnum):
     LLAMA_VOCAB_PRE_TYPE_DEFAULT = 0
@@ -288,6 +293,8 @@ class llama_vocab_pre_type(enum.IntEnum):
     LLAMA_VOCAB_PRE_TYPE_FLINT = 62
     LLAMA_VOCAB_PRE_TYPE_DOMYN_SMALL = 63
     LLAMA_VOCAB_PRE_TYPE_NEMOTRON_3_5_EMBD = 64
+    LLAMA_VOCAB_PRE_TYPE_SOPRANO = 65
+    LLAMA_VOCAB_PRE_TYPE_TEKKEN_NUM3 = 66
 
 
 
@@ -964,7 +971,6 @@ llama_sampler_seq_config_p = ctypes.POINTER(llama_sampler_seq_config)
 #     float    yarn_beta_fast;   // YaRN low correction dim
 #     float    yarn_beta_slow;   // YaRN high correction dim
 #     uint32_t yarn_orig_ctx;    // YaRN original context size
-#     float    defrag_thold;     // [DEPRECATED] defragment the KV cache if holes/size > thold, <= 0 disabled (default)
 
 #     ggml_backend_sched_eval_callback cb_eval;
 #     void * cb_eval_user_data;
@@ -1029,7 +1035,6 @@ class llama_context_params(ctypes.Structure):
         yarn_beta_fast (float): YaRN low correction dim
         yarn_beta_slow (float): YaRN high correction dim
         yarn_orig_ctx (int): YaRN original context size
-        defrag_thold (float): [DEPRECATED] defragment the KV cache if holes/size > thold, <= 0 disabled (default)
 
         cb_eval (ggml_backend_sched_eval_callback): callback for scheduling eval
         cb_eval_user_data (ctypes.ctypes.c_void_p): user data for cb_eval
@@ -1078,7 +1083,6 @@ class llama_context_params(ctypes.Structure):
         yarn_beta_fast: float
         yarn_beta_slow: float
         yarn_orig_ctx: int
-        defrag_thold: float
         cb_eval: Callable[[ctypes.c_void_p, bool], bool]
         cb_eval_user_data: ctypes.c_void_p
         type_k: int
@@ -1119,7 +1123,6 @@ class llama_context_params(ctypes.Structure):
         ("yarn_beta_fast", ctypes.c_float),
         ("yarn_beta_slow", ctypes.c_float),
         ("yarn_orig_ctx", ctypes.c_uint32),
-        ("defrag_thold", ctypes.c_float),
         ("cb_eval", ggml_backend_sched_eval_callback),
         ("cb_eval_user_data", ctypes.c_void_p),
         ("type_k", ctypes.c_int),
@@ -1550,21 +1553,6 @@ def llama_model_init_from_user(
     ...
 
 
-# DEPRECATED(LLAMA_API struct llama_model * llama_load_model_from_file(
-#                          const char * path_model,
-#           struct llama_model_params   params),
-#         "use llama_model_load_from_file instead");
-@ctypes_function(
-    "llama_load_model_from_file",
-    [ctypes.c_char_p, llama_model_params],
-    llama_model_p_ctypes,
-)
-def llama_load_model_from_file(
-    path_model: bytes, params: llama_model_params, /
-) -> Optional[llama_model_p]:
-    ...
-
-
 # // Load a model from a file
 # // If the file is split into multiple parts, the file name must follow this pattern: <name>-%05d-of-%05d.gguf
 # // If the split file name does not follow this pattern, use llama_model_load_from_splits
@@ -1640,21 +1628,6 @@ def llama_model_save_to_file(model: llama_model_p, path_model: bytes, /):
     ...
 
 
-# DEPRECATED(LLAMA_API void llama_free_model(struct llama_model * model),
-#         "use llama_model_free instead");
-@ctypes_function(
-    "llama_free_model",
-    [llama_model_p_ctypes],
-    None,
-)
-def llama_free_model(model: llama_model_p, /):
-    """
-    DEPRECATED(LLAMA_API void llama_free_model(struct llama_model * model),
-         "use llama_model_free instead")
-    """
-    ...
-
-
 # LLAMA_API void llama_model_free(struct llama_model * model);
 @ctypes_function(
     "llama_model_free",
@@ -1674,21 +1647,6 @@ def llama_model_free(model: llama_model_p, /):
     llama_context_p_ctypes,
 )
 def llama_init_from_model(
-    model: llama_model_p, params: llama_context_params, /
-) -> Optional[llama_context_p]:
-    ...
-
-
-# DEPRECATED(LLAMA_API struct llama_context * llama_new_context_with_model(
-#                  struct llama_model * model,
-#         struct llama_context_params   params),
-#         "use llama_init_from_model instead");
-@ctypes_function(
-    "llama_new_context_with_model",
-    [llama_model_p_ctypes, llama_context_params],
-    llama_context_p_ctypes,
-)
-def llama_new_context_with_model(
     model: llama_model_p, params: llama_context_params, /
 ) -> Optional[llama_context_p]:
     ...
@@ -1811,36 +1769,6 @@ def llama_n_seq_max(ctx: llama_context_p, /) -> int:
 # LLAMA_API uint32_t llama_n_rs_seq   (const struct llama_context * ctx);
 @ctypes_function("llama_n_rs_seq", [llama_context_p_ctypes], ctypes.c_uint32)
 def llama_n_rs_seq(ctx: llama_context_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API int32_t llama_n_ctx_train(const struct llama_model * model), "use llama_model_n_ctx_train instead");
-@ctypes_function("llama_n_ctx_train", [llama_model_p_ctypes], ctypes.c_int32)
-def llama_n_ctx_train(model: llama_model_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API int32_t llama_n_embd     (const struct llama_model * model), "use llama_model_n_embd instead");
-@ctypes_function("llama_n_embd", [llama_model_p_ctypes], ctypes.c_int32)
-def llama_n_embd(model: llama_model_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API int32_t llama_n_layer    (const struct llama_model * model), "use llama_model_n_layer instead");
-@ctypes_function("llama_n_layer", [llama_model_p_ctypes], ctypes.c_int32)
-def llama_n_layer(model: llama_model_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API int32_t llama_n_head     (const struct llama_model * model), "use llama_model_n_head instead");
-@ctypes_function("llama_n_head", [llama_model_p_ctypes], ctypes.c_int32)
-def llama_n_head(model: llama_model_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API int32_t llama_n_vocab    (const struct llama_vocab * vocab), "use llama_vocab_n_tokens instead");
-@ctypes_function("llama_n_vocab", [llama_vocab_p_ctypes], ctypes.c_int32)
-def llama_n_vocab(model: llama_vocab_p, /) -> int:
     ...
 
 
@@ -2195,6 +2123,61 @@ def llama_model_quantize(
 ) -> int:
     """Returns 0 on success"""
     ...
+
+
+# //
+# // NextN / speculative draft model queries
+# //
+# // DFlash2 selector: number of candidate tokens the draft keeps per block position from its logits
+# // (the packed lattice also holds the top_k x top_k pairwise transition scores); 0 if the model has no selector head
+# LLAMA_API int32_t llama_model_dflash_selector_top_k(const struct llama_model * model);
+@ctypes_function(
+    "llama_model_dflash_selector_top_k",
+    [llama_model_p_ctypes],
+    ctypes.c_int32,
+)
+def llama_model_dflash_selector_top_k(
+    model: llama_model_p
+) -> int:
+    """Return the DFlash2 selector width, or zero for DFlash v1/DSpark."""
+    ...
+
+
+# // returns pointer to the target-model layer indices
+# LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
+@ctypes_function(
+    "llama_model_target_layer_ids",
+    [llama_model_p_ctypes],
+    ctypes.POINTER(ctypes.c_int32),
+)
+def llama_model_target_layer_ids(
+    model: llama_model_p
+) -> ctypes.POINTER(ctypes.c_int32):  # type: ignore
+    """Return the target layer indices required by this draft model.
+
+    Read llama_model_target_layer_ids_n(model) int32 entries. The returned
+    array belongs to the model and must not be freed or modified. An empty
+    array returns NULL; copy it before freeing the model.
+    """
+    ...
+
+
+# // returns the number of extracted layers from target model
+# LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
+@ctypes_function(
+    "llama_model_target_layer_ids_n",
+    [llama_model_p_ctypes],
+    ctypes.c_uint32,
+)
+def llama_model_target_layer_ids_n(
+    model: llama_model_p
+) -> int:
+    """Return the number of entries in llama_model_target_layer_ids(model).
+
+    Zero means the model does not specify target layer indices.
+    """
+    ...
+
 
 
 # //
@@ -2676,15 +2659,6 @@ def llama_state_get_size(ctx: llama_context_p, /) -> int:
     ...
 
 
-# LLAMA_API DEPRECATED(size_t llama_get_state_size(struct llama_context * ctx),
-#     "use llama_state_get_size instead");
-@ctypes_function("llama_get_state_size", [llama_context_p_ctypes], ctypes.c_size_t)
-def llama_get_state_size(ctx: llama_context_p, /) -> int:
-    """Returns the maximum size in bytes of the state (rng, logits, embedding
-    and kv_cache) - will often be smaller after compacting tokens"""
-    ...
-
-
 # // Copies the state to the specified destination address.
 # // Destination needs to have allocated enough memory.
 # // Returns the number of bytes copied
@@ -2713,27 +2687,6 @@ def llama_state_get_data(
     ...
 
 
-# LLAMA_API DEPRECATED(size_t llama_copy_state_data(
-#         struct llama_context * ctx,
-#                      uint8_t * dst),
-#     "use llama_state_get_data instead");
-@ctypes_function(
-    "llama_copy_state_data",
-    [
-        llama_context_p_ctypes,
-        ctypes.POINTER(ctypes.c_uint8),
-    ],
-    ctypes.c_size_t,
-)
-def llama_copy_state_data(
-    ctx: llama_context_p, dst: CtypesArray[ctypes.c_uint8], /
-) -> int:
-    """Copies the state to the specified destination address.
-    Destination needs to have allocated enough memory.
-    Returns the number of bytes copied"""
-    ...
-
-
 # // Set the state reading from the specified address
 # // Returns the number of bytes read
 # LLAMA_API size_t llama_state_set_data(
@@ -2753,22 +2706,6 @@ def llama_state_set_data(
 ) -> int:
     """Set the state reading from the specified address
     Returns the number of bytes read"""
-    ...
-
-
-# LLAMA_API DEPRECATED(size_t llama_set_state_data(
-#         struct llama_context * ctx,
-#                const uint8_t * src),
-#     "use llama_state_set_data instead");
-@ctypes_function(
-    "llama_set_state_data",
-    [llama_context_p_ctypes, ctypes.POINTER(ctypes.c_uint8)],
-    ctypes.c_size_t,
-)
-def llama_set_state_data(
-    ctx: llama_context_p, src: CtypesArray[ctypes.c_uint8], /
-) -> int:
-    """Set the state reading from the specified address"""
     ...
 
 
@@ -2801,35 +2738,6 @@ def llama_state_load_file(
     ...
 
 
-# LLAMA_API DEPRECATED(bool llama_load_session_file(
-#         struct llama_context * ctx,
-#                   const char * path_session,
-#                  llama_token * tokens_out,
-#                       size_t   n_token_capacity,
-#                       size_t * n_token_count_out),
-#     "use llama_state_load_file instead");
-@ctypes_function(
-    "llama_load_session_file",
-    [
-        llama_context_p_ctypes,
-        ctypes.c_char_p,
-        llama_token_p,
-        ctypes.c_size_t,
-        ctypes.POINTER(ctypes.c_size_t),
-    ],
-    ctypes.c_bool,
-)
-def llama_load_session_file(
-    ctx: llama_context_p,
-    path_session: bytes,
-    tokens_out: CtypesArray[llama_token],
-    n_token_capacity: Union[ctypes.c_size_t, int],
-    n_token_count_out: CtypesPointerOrRef[ctypes.c_size_t],
-    /,
-) -> bool:
-    ...
-
-
 # LLAMA_API bool llama_state_save_file(
 #         struct llama_context * ctx,
 #                   const char * path_session,
@@ -2846,32 +2754,6 @@ def llama_load_session_file(
     ctypes.c_bool,
 )
 def llama_state_save_file(
-    ctx: llama_context_p,
-    path_session: bytes,
-    tokens: CtypesArray[llama_token],
-    n_token_count: Union[ctypes.c_size_t, int],
-    /,
-) -> bool:
-    ...
-
-
-# LLAMA_API DEPRECATED(bool llama_save_session_file(
-#         struct llama_context * ctx,
-#                   const char * path_session,
-#            const llama_token * tokens,
-#                       size_t   n_token_count),
-#     "use llama_state_save_file instead");
-@ctypes_function(
-    "llama_save_session_file",
-    [
-        llama_context_p_ctypes,
-        ctypes.c_char_p,
-        llama_token_p,
-        ctypes.c_size_t,
-    ],
-    ctypes.c_bool,
-)
-def llama_save_session_file(
     ctx: llama_context_p,
     path_session: bytes,
     tokens: CtypesArray[llama_token],
@@ -3364,6 +3246,40 @@ def llama_batch_ext_set_embd_state(batch: llama_batch_ext_p, idx: int, embd: lla
     ...
 
 
+# // Add an entry whose embedding is row `row` of the layer input device buffer of ctx_other.
+# // All entries of the batch must be of this kind. Positions are set with llama_batch_ext_set_pos(), n_pos_per_embd of them.
+# // Returns the batch index (>= 0), or the llama_batch_ext_add() error codes.
+# LLAMA_API int32_t llama_batch_ext_add_embd_row(struct llama_batch_ext * batch, llama_seq_id seq_id, int32_t row);
+@ctypes_function(
+    "llama_batch_ext_add_embd_row",
+    [llama_batch_ext_p_ctypes, llama_seq_id, ctypes.c_int32],
+    ctypes.c_int32,
+)
+def llama_batch_ext_add_embd_row(batch: llama_batch_ext_p, seq_id: int, row: int) -> int:
+    """Append a reference to a row of ctx_other's layer-input device buffer.
+
+    Set positions with llama_batch_ext_set_pos(). All submitted entries must
+    reference device rows, without token IDs or host embeddings. Returns the
+    batch index, or a negative add error code. Consume before ctx_other reuses
+    its buffer; this call does not copy or own the source features.
+    """
+    ...
+
+
+# // The state of entry idx is row `row` of the h_nextn device buffer of the context set with llama_set_ctx_state_src().
+# // All entries of a batch have a state row, or none.
+# LLAMA_API bool llama_batch_ext_set_embd_state_row(struct llama_batch_ext * batch, int32_t idx, int32_t row);
+@ctypes_function(
+    "llama_batch_ext_set_embd_state_row",
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_int32],
+    ctypes.c_bool,
+)
+def llama_batch_ext_set_embd_state_row(batch: llama_batch_ext_p, idx: int, row: int) -> bool:
+    """Attach a borrowed device state row; all submitted entries require one."""
+    ...
+
+
+
 # // Set if output embeddings should be available for the token at index idx in the batch
 # // Note: for now, this is equivalent to setting the output logits
 # LLAMA_API bool llama_batch_ext_set_output_embd(
@@ -3501,20 +3417,6 @@ def llama_get_causal_attn(ctx: llama_context_p, /) -> bool:
     """Returns whether the context is currently using causal attention"""
     ...
 
-
-# // Set whether the model is in warmup mode or not
-# // If true, all model tensors are activated during llama_decode() to load and cache their weights.
-# //
-# // note: using this can cause extra graph reallocations because it changes the graph topology with MoE models,
-# //       so it is generally not recommended to use in practice. will be removed in the future
-# DEPRECATED(LLAMA_API void llama_set_warmup(struct llama_context * ctx, bool warmup),
-#         "user code should do warmup runs manually [TAG_LLAMA_GRAPH_NO_WARMUP]");
-@ctypes_function("llama_set_warmup", [llama_context_p_ctypes, ctypes.c_bool], None)
-def llama_set_warmup(ctx: llama_context_p, warmup: bool, /):
-    """DEPRECATED: using this can cause extra graph reallocations because it changes the graph topology with MoE models,
-    so it is generally not recommended to use in practice. will be removed in the future"""
-    ...
-
 # // Set abort callback
 # LLAMA_API void llama_set_abort_callback(struct llama_context * ctx, ggml_abort_callback abort_callback, void * abort_callback_data);
 @ctypes_function(
@@ -3637,6 +3539,239 @@ def llama_get_embeddings_seq(
     Returns NULL if pooling_type is LLAMA_POOLING_TYPE_NONE
     shape: [n_embd] (1-dimensional)"""
     ...
+
+
+# //
+# // NextN / speculative decoding API
+# //
+# // Set whether the context outputs nextn embeddings or not
+# // If masked == true,  output the embeddings only for the tokens with batch.logits != 0
+# // If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
+# LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value, bool masked);
+@ctypes_function(
+    "llama_set_embeddings_nextn",
+    [llama_context_p_ctypes, ctypes.c_bool, ctypes.c_bool],
+    None,
+)
+def llama_set_embeddings_nextn(
+    ctx: llama_context_p,
+    value: bool,
+    masked: bool,
+):
+    """Enable or disable NextN embeddings used by speculative decoding.
+
+    Args:
+        ctx: Context whose output configuration is changed.
+        value: Whether to produce NextN embeddings.
+        masked: If true, emit only rows selected by batch output flags.
+            Otherwise, emit a row for every input token.
+    """
+    ...
+
+
+# // Select which appended NextN block the DECODER_MTP graph runs (offset past
+# // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
+# // chain multiple trained NextN heads. Default 0 (first head).
+# LLAMA_API void llama_set_nextn_layer_offset(struct llama_context * ctx, int32_t offset);
+@ctypes_function(
+    "llama_set_nextn_layer_offset",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    None,
+)
+def llama_set_nextn_layer_offset(
+    ctx: llama_context_p,
+    offset: ctypes.c_int32,
+):
+    """Select the appended NextN block used by the DECODER_MTP graph.
+
+    offset is zero-based: the selected layer is n_layer() + offset. Use a
+    valid trained head index; zero selects the first head and is the default.
+    """
+    ...
+
+
+# // Get all nextn embeddings, mirroring llama_get_embeddings()
+# LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
+@ctypes_function(
+    "llama_get_embeddings_nextn",
+    [llama_context_p_ctypes],
+    ctypes.POINTER(ctypes.c_float),
+)
+def llama_get_embeddings_nextn(
+    ctx: llama_context_p,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    """Return the contiguous NextN embedding output from the last evaluation.
+
+    Enable it with llama_set_embeddings_nextn() before evaluation. Rows have
+    llama_model_n_embd_out() floats. The context owns the buffer; copy values
+    before another evaluation or before freeing the context.
+    """
+    ...
+
+
+# // Get the nextn embeddings for the ith token, mirroring llama_get_embeddings_ith()
+# LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
+@ctypes_function(
+    "llama_get_embeddings_nextn_ith",
+    [llama_context_p_ctypes, ctypes.c_int32],
+    ctypes.POINTER(ctypes.c_float),
+)
+def llama_get_embeddings_nextn_ith(
+    ctx: llama_context_p,
+    i: ctypes.c_int32,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    """Return a borrowed pointer to one NextN embedding row.
+
+    With masked output, i follows llama_get_embeddings_ith() indexing.
+    With unmasked output, i is a nonnegative input-token row index.
+    Read llama_model_n_embd_out() floats and copy them before reevaluation.
+    """
+    ...
+
+
+# // Set whether the context outputs the input embeddings of a specific layer
+# LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid, bool value);
+@ctypes_function(
+    "llama_set_embeddings_layer_inp",
+    [llama_context_p_ctypes, ctypes.c_uint32, ctypes.c_bool],
+    None,
+)
+def llama_set_embeddings_layer_inp(
+    ctx: llama_context_p,
+    lid: ctypes.c_uint32,
+    value: bool,
+) -> None:  # type: ignore
+    """Enable or disable capture of input embeddings for layer lid.
+
+    Set this before evaluation, using a valid zero-based model layer index.
+    DFlash uses these intermediate embeddings to condition its draft model.
+    """
+    ...
+
+
+# // Get the input embeddings of a specific layer, mirroring llama_get_embeddings()
+# LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
+@ctypes_function(
+    "llama_get_embeddings_layer_inp",
+    [llama_context_p_ctypes, ctypes.c_uint32],
+    ctypes.POINTER(ctypes.c_float),
+)
+def llama_get_embeddings_layer_inp(
+    ctx: llama_context_p,
+    lid: ctypes.c_uint32,
+) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
+    """Return captured input embeddings for zero-based layer lid.
+
+    Capture must be enabled and the layer evaluated before this call; the
+    native implementation asserts that the output exists. The context owns
+    the buffer, which must be copied before another evaluation or teardown.
+    """
+    ...
+
+
+# // Write the enabled layer inputs to a device buffer [n_layer_inp*n_embd, n_batch] instead of host memory.
+# // Row r holds the token at batch index r, layers in ascending layer id order.
+# LLAMA_API void llama_set_embeddings_layer_inp_dev(struct llama_context * ctx, bool value);
+@ctypes_function(
+    "llama_set_embeddings_layer_inp_dev",
+    [llama_context_p_ctypes, ctypes.c_bool],
+    None,
+)
+def llama_set_embeddings_layer_inp_dev(ctx: llama_context_p, value: bool) -> None:
+    """Capture enabled layer inputs on the device instead of in host buffers.
+
+    Rows follow the original input batch order, with layers concatenated in
+    ascending layer-ID order. Configure before decoding. The context owns the
+    buffer, which is reused by subsequent evaluations.
+    """
+    ...
+
+
+# // Whether decode accepts entries added with llama_batch_ext_add_embd_row()
+# // (needs a DFlash/DSpark decoder context whose ctx_other has a layer input device buffer).
+# LLAMA_API bool llama_supports_embd_row(const struct llama_context * ctx);
+@ctypes_function(
+    "llama_supports_embd_row",
+    [llama_context_p_ctypes],
+    ctypes.c_bool,
+)
+def llama_supports_embd_row(ctx: llama_context_p) -> bool:
+    """Whether this DFlash/DSpark context can read ctx_other's device features.
+
+    Enable device layer-input capture on ctx_other before querying. A backend
+    must support reading that buffer for this to return True.
+    """
+    ...
+
+
+# // The paired context (llama_context_params::ctx_other), e.g. the target context of a draft context; may be nullptr
+# LLAMA_API struct llama_context * llama_get_ctx_other(struct llama_context * ctx);
+@ctypes_function(
+    "llama_get_ctx_other",
+    [llama_context_p_ctypes],
+    llama_context_p_ctypes,
+)
+def llama_get_ctx_other(
+    ctx: llama_context_p,
+) -> llama_context_p:
+    """Return the related context configured through ctx_other, or NULL.
+
+    This is a borrowed handle used by paired speculative contexts. This call
+    does not create a context or transfer responsibility for freeing it.
+    """
+    ...
+
+
+# // Write the unmasked h_nextn rows (see llama_set_embeddings_nextn) of each decode to a device buffer
+# // [n_embd_out, n_batch + n_seq_max] instead of host memory: row r < n_batch is the token at batch index r of the last decode,
+# // row n_batch + s is free for the caller, e.g. for seq s (see llama_set_embeddings_nextn_rows()).
+# // Returns false if the buffer cannot be used, the rows are then extracted to host memory.
+# LLAMA_API bool llama_set_embeddings_nextn_dev(struct llama_context * ctx, bool value);
+@ctypes_function(
+    "llama_set_embeddings_nextn_dev",
+    [llama_context_p_ctypes, ctypes.c_bool],
+    ctypes.c_bool,
+)
+def llama_set_embeddings_nextn_dev(ctx: llama_context_p, value: bool) -> bool:
+    """Enable unmasked NextN device capture; false preserves host extraction."""
+    ...
+
+
+# // Copy rows of the h_nextn device buffer to or from host memory, ordered after the last decode and its readers
+# LLAMA_API bool llama_get_embeddings_nextn_rows(struct llama_context * ctx, int64_t row0, int64_t n_rows, float * out);
+@ctypes_function(
+    "llama_get_embeddings_nextn_rows",
+    [llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)],
+    ctypes.c_bool,
+)
+def llama_get_embeddings_nextn_rows(ctx: llama_context_p, row0: int, n_rows: int, out: ctypes.POINTER(ctypes.c_float)) -> bool:
+    """Copy original-batch NextN device rows to caller-owned float32 storage."""
+    ...
+
+
+# LLAMA_API bool llama_set_embeddings_nextn_rows(struct llama_context * ctx, int64_t row0, int64_t n_rows, const float * data);
+@ctypes_function(
+    "llama_set_embeddings_nextn_rows",
+    [llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)],
+    ctypes.c_bool,
+)
+def llama_set_embeddings_nextn_rows(ctx: llama_context_p, row0: int, n_rows: int, data: ctypes.POINTER(ctypes.c_float)) -> bool:
+    """Upload float32 state rows, including the reserved per-sequence pending row."""
+    ...
+
+
+# // Read the state rows of batches (see llama_batch_ext_set_embd_state_row()) from the h_nextn device buffer of ctx_src.
+# // Returns whether decode accepts batches with state rows.
+# LLAMA_API bool llama_set_ctx_state_src(struct llama_context * ctx, struct llama_context * ctx_src);
+@ctypes_function(
+    "llama_set_ctx_state_src",
+    [llama_context_p_ctypes, llama_context_p_ctypes],
+    ctypes.c_bool,
+)
+def llama_set_ctx_state_src(ctx: llama_context_p, ctx_src: Optional[llama_context_p]) -> bool:
+    """Borrow ctx_src's NextN device buffer for MTP state inputs; NULL detaches it."""
+    ...
+
 
 
 # //
@@ -3783,6 +3918,7 @@ def llama_get_sampled_candidates_count_ith(
 def llama_vocab_get_text(
     vocab: llama_vocab_p, token: Union[llama_token, int], /
 ) -> bytes:
+    """Return copied vocabulary text; use token_to_piece for rendered token bytes."""
     ...
 
 
@@ -3990,214 +4126,6 @@ def llama_vocab_fim_sep(vocab: llama_vocab_p, /) -> llama_token:
     ...
 
 
-
-# DEPRECATED(LLAMA_API const char * llama_token_get_text(const struct llama_vocab * vocab, llama_token token), "use llama_vocab_get_text instead");
-@ctypes_function(
-    "llama_token_get_text",
-    [llama_vocab_p_ctypes, llama_token],
-    ctypes.c_char_p,
-)
-def llama_token_get_text(
-    vocab: llama_vocab_p, token: Union[llama_token, int], /
-) -> bytes:
-    ...
-
-
-# DEPRECATED(LLAMA_API float llama_token_get_score(const struct llama_vocab * vocab, llama_token token), "use llama_vocab_get_score instead");
-@ctypes_function(
-    "llama_token_get_score",
-    [llama_vocab_p_ctypes, llama_token],
-    ctypes.c_float,
-)
-def llama_token_get_score(
-    vocab: llama_vocab_p, token: Union[llama_token, int], /
-) -> float:
-    ...
-
-# DEPRECATED(LLAMA_API enum llama_token_attr llama_token_get_attr(const struct llama_vocab * vocab, llama_token token), "use llama_vocab_get_attr instead");
-@ctypes_function(
-    "llama_token_get_attr",
-    [llama_vocab_p_ctypes, llama_token],
-    ctypes.c_int,
-)
-def llama_token_get_attr(
-    vocab: llama_vocab_p, token: Union[llama_token, int], /
-) -> int:
-    ...
-
-# DEPRECATED(LLAMA_API bool llama_token_is_eog(const struct llama_vocab * vocab, llama_token token), "use llama_vocab_is_eog instead");
-@ctypes_function(
-    "llama_token_is_eog",
-    [llama_vocab_p_ctypes, llama_token],
-    ctypes.c_bool,
-)
-def llama_token_is_eog(
-    vocab: llama_vocab_p, token: Union[llama_token, int], /
-) -> bool:
-    ...
-
-# DEPRECATED(LLAMA_API bool llama_token_is_control(const struct llama_vocab * vocab, llama_token token), "use llama_vocab_is_control instead");
-@ctypes_function(
-    "llama_token_is_control",
-    [llama_vocab_p_ctypes, llama_token],
-    ctypes.c_bool,
-)
-def llama_token_is_control(
-    vocab: llama_vocab_p, token: Union[llama_token, int], /
-) -> bool:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_bos(const struct llama_vocab * vocab), "use llama_vocab_bos instead");
-@ctypes_function(
-    "llama_token_bos",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_bos(vocab: llama_vocab_p, /) -> int:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_eos(const struct llama_vocab * vocab), "use llama_vocab_eos instead");
-@ctypes_function(
-    "llama_token_eos",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_eos(vocab: llama_vocab_p, /) -> int:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_eot(const struct llama_vocab * vocab), "use llama_vocab_eot instead");
-@ctypes_function(
-    "llama_token_eot",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_eot(vocab: llama_vocab_p, /) -> int:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_cls(const struct llama_vocab * vocab), "use llama_vocab_cls instead");
-@ctypes_function(
-    "llama_token_cls",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_cls(vocab: llama_vocab_p, /) -> int:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_sep(const struct llama_vocab * vocab), "use llama_vocab_sep instead");
-@ctypes_function(
-    "llama_token_sep",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_sep(vocab: llama_vocab_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API llama_token llama_token_nl (const struct llama_vocab * vocab), "use llama_vocab_nl instead");
-@ctypes_function(
-    "llama_token_nl",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_nl(vocab: llama_vocab_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API llama_token llama_token_pad(const struct llama_vocab * vocab), "use llama_vocab_pad instead");
-@ctypes_function(
-    "llama_token_pad",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_pad(vocab: llama_vocab_p, /) -> int:
-    ...
-
-
-# DEPRECATED(LLAMA_API bool llama_add_bos_token(const struct llama_vocab * vocab), "use llama_vocab_get_add_bos instead");
-@ctypes_function(
-    "llama_add_bos_token",
-    [llama_vocab_p_ctypes],
-    ctypes.c_bool,
-)
-def llama_add_bos_token(vocab: llama_vocab_p, /) -> bool:
-    ...
-
-# DEPRECATED(LLAMA_API bool llama_add_eos_token(const struct llama_vocab * vocab), "use llama_vocab_get_add_eos instead");
-@ctypes_function(
-    "llama_add_eos_token",
-    [llama_vocab_p_ctypes],
-    ctypes.c_bool,
-)
-def llama_add_eos_token(vocab: llama_vocab_p, /) -> bool:
-    ...
-
-
-# DEPRECATED(LLAMA_API llama_token llama_token_fim_pre(const struct llama_vocab * vocab), "use llama_vocab_fim_pre instead");
-@ctypes_function(
-    "llama_token_fim_pre",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_fim_pre(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_fim_suf(const struct llama_vocab * vocab), "use llama_vocab_fim_suf instead");
-@ctypes_function(
-    "llama_token_fim_suf",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_fim_suf(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_fim_mid(const struct llama_vocab * vocab), "use llama_vocab_fim_mid instead");
-@ctypes_function(
-    "llama_token_fim_mid",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_fim_mid(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_fim_pad(const struct llama_vocab * vocab), "use llama_vocab_fim_pad instead");
-@ctypes_function(
-    "llama_token_fim_pad",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_fim_pad(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_fim_rep(const struct llama_vocab * vocab), "use llama_vocab_fim_rep instead");
-@ctypes_function(
-    "llama_token_fim_rep",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_fim_rep(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-# DEPRECATED(LLAMA_API llama_token llama_token_fim_sep(const struct llama_vocab * vocab), "use llama_vocab_fim_sep instead");
-@ctypes_function(
-    "llama_token_fim_sep",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_token_fim_sep(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-# // CLS is equivalent to BOS
-# DEPRECATED(LLAMA_API llama_token llama_vocab_cls(const struct llama_vocab * vocab), // classification
-#         "use llama_vocab_bos instead");
-@ctypes_function(
-    "llama_vocab_cls",
-    [llama_vocab_p_ctypes],
-    llama_token,
-)
-def llama_vocab_cls(vocab: llama_vocab_p, /) -> llama_token:
-    ...
-
-
 # //
 # // Tokenization
 # //
@@ -4249,15 +4177,16 @@ def llama_tokenize(
     Args:
         vocab: The vocabulary to use for tokenization.
         text: The text to tokenize.
-        text_len: The length of the text.
+        text_len: The length of the text in bytes.
         tokens: The tokens pointer must be large enough to hold the resulting tokens.
-        n_max_tokens: The maximum number of tokens to return.
-        add_special: Allow adding special tokenns if the model is configured to do so.
+        n_tokens_max: The maximum number of tokens to return.
+        add_special: Allow adding BOS and EOS tokens if the model is configured to do so.
         parse_special: Allow parsing special tokens.
 
     Returns:
         Returns the number of tokens on success, no more than n_tokens_max
         Returns a negative number on failure - the number of tokens that would have been returned
+        Returns INT32_MIN on tokenization result overflow; this is not a retry buffer size.
     """
     ...
 
@@ -4289,7 +4218,7 @@ def llama_tokenize(
 def llama_token_to_piece(
     vocab: llama_vocab_p,
     token: Union[llama_token, int],
-    buf: Union[ctypes.c_char_p, bytes, CtypesArray[ctypes.c_char]],
+    buf: CtypesArray[ctypes.c_char],
     length: Union[ctypes.c_int, int],
     lstrip: Union[ctypes.c_int, int],
     special: Union[ctypes.c_bool, bool],
@@ -4303,8 +4232,8 @@ def llama_token_to_piece(
     Args:
         vocab: The vocabulary to use for tokenization.
         token: The token to convert.
-        buf: The buffer to write the token to.
-        length: The length of the buffer.
+        buf: Writable character storage, such as ctypes.create_string_buffer(); do not pass immutable bytes.
+        length: The length of the buffer in bytes.
         lstrip: The number of leading spaces to skip.
         special: If true, special tokens are rendered in the output."""
     ...
@@ -4341,7 +4270,7 @@ def llama_detokenize(
     vocab: llama_vocab_p,
     tokens: CtypesArray[llama_token],
     n_tokens: Union[ctypes.c_int, int],
-    text: bytes,
+    text: CtypesArray[ctypes.c_char],
     text_len_max: Union[ctypes.c_int, int],
     remove_special: Union[ctypes.c_bool, bool],
     unparse_special: Union[ctypes.c_bool, bool],
@@ -4353,8 +4282,8 @@ def llama_detokenize(
         vocab: The model vocab to use for tokenization.
         tokens: The tokens to convert.
         n_tokens: The number of tokens.
-        text: The buffer to write the text to.
-        text_len_max: The length of the buffer.
+        text: Writable character storage, such as ctypes.create_string_buffer(); do not pass immutable bytes.
+        text_len_max: The length of the buffer in bytes.
         remove_special: Allow to remove BOS and EOS tokens if model is configured to do so.
         unparse_special: If true, special tokens are rendered in the output.
     """
@@ -5089,7 +5018,18 @@ def llama_sampler_init_penalties(
     penalty_present: float,
     /,
 ) -> llama_sampler_p:
+    """Create penalties for a vocabulary of n_vocab tokens.
+
+    penalty_last_n is a token count; non-positive values disable history.
+    Resolve context-size sentinels in the caller before invoking this C API.
+    """
     ...
+
+
+# /// maximum number of distinct DRY sequence breakers, duplicates not counted
+# /// processing each breaker scans the entire vocabulary, so the init cost is O(num_breakers x n_vocab)
+# #define LLAMA_DRY_MAX_SEQ_BREAKERS 64
+LLAMA_DRY_MAX_SEQ_BREAKERS = 64
 
 
 # ///  @details DRY sampler, designed by p-e-w, as described in: https://github.com/oobabooga/text-generation-webui/pull/5677, porting Koboldcpp implementation authored by pi6am: https://github.com/LostRuins/koboldcpp/pull/982
@@ -5124,6 +5064,12 @@ def llama_sampler_init_dry(
     num_breakers: int,
     /,
 ) -> llama_sampler_p:
+    """Create DRY penalties with a non-negative history length.
+
+    Native code disables scanning for non-positive dry_penalty_last_n. It skips
+    empty breakers, truncates each to 40 bytes, deduplicates them, and processes
+    at most LLAMA_DRY_MAX_SEQ_BREAKERS distinct breakers.
+    """
     ...
 
 
@@ -5927,63 +5873,6 @@ def llama_model_set_attn_rot(model: llama_model_p, value: bool) -> None:
     """Toggle KV attention rotation for contexts subsequently created from this model."""
     ...
 
-
-# // Set whether the context outputs nextn embeddings or not
-# // If masked == true,  output the embeddings only for the tokens with batch.logits != 0
-# // If masked == false, output the embeddings for all tokens in the batch regardless of batch.logits
-# LLAMA_API void llama_set_embeddings_nextn(struct llama_context * ctx, bool value, bool masked);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_embeddings_nextn",
-        "?llama_set_embeddings_nextn@@YAXPEAUllama_context@@_N1@Z",
-        "__Z26llama_set_embeddings_nextnP13llama_contextbb",
-        "_Z26llama_set_embeddings_nextnP13llama_contextbb",
-    ],
-    [llama_context_p_ctypes, ctypes.c_bool, ctypes.c_bool],
-    None,
-    required=False,
-)
-def llama_set_embeddings_nextn(
-    ctx: llama_context_p,
-    value: bool,
-    masked: bool,
-):
-    """Enable or disable NextN embeddings used by speculative decoding.
-
-    Args:
-        ctx: Context whose output configuration is changed.
-        value: Whether to produce NextN embeddings.
-        masked: If true, emit only rows selected by batch output flags.
-            Otherwise, emit a row for every input token.
-    """
-    ...
-
-# // Select which appended NextN block the DECODER_MTP graph runs (offset past
-# // the trunk: il = n_layer() + offset). Used by the speculative NextN driver to
-# // chain multiple trained NextN heads. Default 0 (first head).
-# LLAMA_API void llama_set_nextn_layer_offset(struct llama_context * ctx, int32_t offset);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_nextn_layer_offset",
-        "?llama_set_nextn_layer_offset@@YAXPEAUllama_context@@H@Z",
-        "__Z28llama_set_nextn_layer_offsetP13llama_contexti",
-        "_Z28llama_set_nextn_layer_offsetP13llama_contexti",
-    ],
-    [llama_context_p_ctypes, ctypes.c_int32],
-    None,
-    required=False,
-)
-def llama_set_nextn_layer_offset(
-    ctx: llama_context_p,
-    offset: ctypes.c_int32,
-):
-    """Select the appended NextN block used by the DECODER_MTP graph.
-
-    offset is zero-based: the selected layer is n_layer() + offset. Use a
-    valid trained head index; zero selects the first head and is the default.
-    """
-    ...
-
 # // Marks the entries that a joint decision head (clef) reads, the default is 0
 # // See https://github.com/ggml-org/llama.cpp/pull/29831 for details
 # // A run of entries with the same value is one span, spans must be separated by entries with value 0
@@ -6054,358 +5943,6 @@ def llama_model_decision_label(model: llama_model_p, i: int) -> Optional[bytes]:
 
     ctypes copies the borrowed native string into Python bytes. The model must
     remain open during the call; the returned bytes require no native free.
-    """
-    ...
-
-
-# // mirrors:
-# // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
-# LLAMA_API float * llama_get_embeddings_nextn(struct llama_context * ctx);
-@ctypes_function_llama_ext(
-    [
-        "llama_get_embeddings_nextn",
-        "?llama_get_embeddings_nextn@@YAPEAMPEAUllama_context@@@Z",
-        "__Z26llama_get_embeddings_nextnP13llama_context",
-        "_Z26llama_get_embeddings_nextnP13llama_context",
-    ],
-    [llama_context_p_ctypes],
-    ctypes.POINTER(ctypes.c_float),
-    required=False,
-)
-def llama_get_embeddings_nextn(
-    ctx: llama_context_p,
-) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
-    """Return the contiguous NextN embedding output from the last evaluation.
-
-    Enable it with llama_set_embeddings_nextn() before evaluation. Rows have
-    llama_model_n_embd_out() floats. The context owns the buffer; copy values
-    before another evaluation or before freeing the context.
-    """
-    ...
-
-# // LLAMA_API float * llama_get_embeddings_ith(struct llama_context * ctx, int32_t i);
-# LLAMA_API float * llama_get_embeddings_nextn_ith(struct llama_context * ctx, int32_t i);
-@ctypes_function_llama_ext(
-    [
-        "llama_get_embeddings_nextn_ith",
-        "?llama_get_embeddings_nextn_ith@@YAPEAMPEAUllama_context@@H@Z",
-        "__Z30llama_get_embeddings_nextn_ithP13llama_contexti",
-        "_Z30llama_get_embeddings_nextn_ithP13llama_contexti",
-    ],
-    [llama_context_p_ctypes, ctypes.c_int32],
-    ctypes.POINTER(ctypes.c_float),
-    required=False,
-)
-def llama_get_embeddings_nextn_ith(
-    ctx: llama_context_p,
-    i: ctypes.c_int32,
-) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
-    """Return a borrowed pointer to one NextN embedding row.
-
-    With masked output, i follows llama_get_embeddings_ith() indexing.
-    With unmasked output, i is a nonnegative input-token row index.
-    Read llama_model_n_embd_out() floats and copy them before reevaluation.
-    """
-    ...
-
-# // Set whether the context outputs the input embeddings of a specific layer
-# LLAMA_API void llama_set_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid, bool value);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_embeddings_layer_inp",
-        "?llama_set_embeddings_layer_inp@@YAXPEAUllama_context@@I_N@Z",
-        "__Z30llama_set_embeddings_layer_inpP13llama_contextjb",
-        "_Z30llama_set_embeddings_layer_inpP13llama_contextjb",
-    ],
-    [llama_context_p_ctypes, ctypes.c_uint32, ctypes.c_bool],
-    None,
-    required=False,
-)
-def llama_set_embeddings_layer_inp(
-    ctx: llama_context_p,
-    lid: ctypes.c_uint32,
-    value: bool,
-) -> None:  # type: ignore
-    """Enable or disable capture of input embeddings for layer lid.
-
-    Set this before evaluation, using a valid zero-based model layer index.
-    DFlash uses these intermediate embeddings to condition its draft model.
-    """
-    ...
-
-# // mirrors:
-# // LLAMA_API float * llama_get_embeddings(struct llama_context * ctx);
-# LLAMA_API float * llama_get_embeddings_layer_inp(struct llama_context * ctx, uint32_t lid);
-@ctypes_function_llama_ext(
-    [
-        "llama_get_embeddings_layer_inp",
-        "?llama_get_embeddings_layer_inp@@YAPEAMPEAUllama_context@@I@Z",
-        "__Z30llama_get_embeddings_layer_inpP13llama_contextj",
-        "_Z30llama_get_embeddings_layer_inpP13llama_contextj",
-    ],
-    [llama_context_p_ctypes, ctypes.c_uint32],
-    ctypes.POINTER(ctypes.c_float),
-    required=False,
-)
-def llama_get_embeddings_layer_inp(
-    ctx: llama_context_p,
-    lid: ctypes.c_uint32,
-) -> ctypes.POINTER(ctypes.c_float):  # type: ignore
-    """Return captured input embeddings for zero-based layer lid.
-
-    Capture must be enabled and the layer evaluated before this call; the
-    native implementation asserts that the output exists. The context owns
-    the buffer, which must be copied before another evaluation or teardown.
-    """
-    ...
-
-# LLAMA_API void llama_set_embeddings_layer_inp_dev(struct llama_context * ctx, bool value);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_embeddings_layer_inp_dev",
-        "?llama_set_embeddings_layer_inp_dev@@YAXPEAUllama_context@@_N@Z",
-        "__Z34llama_set_embeddings_layer_inp_devP13llama_contextb",
-        "_Z34llama_set_embeddings_layer_inp_devP13llama_contextb",
-    ],
-    [llama_context_p_ctypes, ctypes.c_bool],
-    None,
-    required=False,
-)
-def llama_set_embeddings_layer_inp_dev(ctx: llama_context_p, value: bool) -> None:
-    """Capture enabled layer inputs on the device instead of in host buffers.
-
-    Rows follow the original input batch order, with layers concatenated in
-    ascending layer-ID order. Configure before decoding. The context owns the
-    buffer, which is reused by subsequent evaluations.
-    """
-    ...
-
-
-# LLAMA_API bool llama_supports_embd_row(const struct llama_context * ctx);
-@ctypes_function_llama_ext(
-    [
-        "llama_supports_embd_row",
-        "?llama_supports_embd_row@@YA_NPEBUllama_context@@@Z",
-        "__Z23llama_supports_embd_rowPK13llama_context",
-        "_Z23llama_supports_embd_rowPK13llama_context",
-    ],
-    [llama_context_p_ctypes],
-    ctypes.c_bool,
-    required=False,
-)
-def llama_supports_embd_row(ctx: llama_context_p) -> bool:
-    """Whether this DFlash/DSpark context can read ctx_other's device features.
-
-    Enable device layer-input capture on ctx_other before querying. A backend
-    must support reading that buffer for this to return True.
-    """
-    ...
-
-
-# LLAMA_API int32_t llama_batch_ext_add_embd_row(struct llama_batch_ext * batch, llama_seq_id seq_id, int32_t row);
-@ctypes_function_llama_ext(
-    [
-        "llama_batch_ext_add_embd_row",
-        "?llama_batch_ext_add_embd_row@@YAHPEAUllama_batch_ext@@HH@Z",
-        "__Z28llama_batch_ext_add_embd_rowP15llama_batch_extii",
-        "_Z28llama_batch_ext_add_embd_rowP15llama_batch_extii",
-    ],
-    [llama_batch_ext_p_ctypes, llama_seq_id, ctypes.c_int32],
-    ctypes.c_int32,
-    required=False,
-)
-def llama_batch_ext_add_embd_row(batch: llama_batch_ext_p, seq_id: int, row: int) -> int:
-    """Append a reference to a row of ctx_other's layer-input device buffer.
-
-    Set positions with llama_batch_ext_set_pos(). All submitted entries must
-    reference device rows, without token IDs or host embeddings. Returns the
-    batch index, or a negative add error code. Consume before ctx_other reuses
-    its buffer; this call does not copy or own the source features.
-    """
-    ...
-
-
-# LLAMA_API llama_context * llama_get_ctx_other(struct llama_context * ctx);
-@ctypes_function_llama_ext(
-    [
-        "llama_get_ctx_other",
-        "?llama_get_ctx_other@@YAPEAUllama_context@@PEAU1@@Z",
-        "__Z19llama_get_ctx_otherP13llama_context",
-        "_Z19llama_get_ctx_otherP13llama_context",
-    ],
-    [llama_context_p_ctypes],
-    llama_context_p_ctypes,
-    required=False,
-)
-def llama_get_ctx_other(
-    ctx: llama_context_p,
-) -> llama_context_p:
-    """Return the related context configured through ctx_other, or NULL.
-
-    This is a borrowed handle used by paired speculative contexts. This call
-    does not create a context or transfer responsibility for freeing it.
-    """
-    ...
-
-
-# // Write the unmasked h_nextn rows (see llama_set_embeddings_nextn) of each decode to a device buffer
-# // [n_embd_out, n_batch + n_seq_max] instead of host memory: row r < n_batch is the token at batch index r of the last decode,
-# // row n_batch + s is free for the caller, e.g. for seq s (see llama_set_embeddings_nextn_rows()).
-# // Returns false if the buffer cannot be used, the rows are then extracted to host memory.
-# LLAMA_API bool llama_set_embeddings_nextn_dev(struct llama_context * ctx, bool value);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_embeddings_nextn_dev",
-        "?llama_set_embeddings_nextn_dev@@YA_NPEAUllama_context@@_N@Z",
-        "__Z30llama_set_embeddings_nextn_devP13llama_contextb",
-        "_Z30llama_set_embeddings_nextn_devP13llama_contextb",
-    ],
-    [llama_context_p_ctypes, ctypes.c_bool],
-    ctypes.c_bool,
-    required=False,
-)
-def llama_set_embeddings_nextn_dev(ctx: llama_context_p, value: bool) -> bool:
-    """Enable unmasked NextN device capture; false preserves host extraction."""
-    ...
-
-
-# // Copy rows of the h_nextn device buffer to or from host memory, ordered after the last decode and its readers
-# LLAMA_API bool llama_get_embeddings_nextn_rows(struct llama_context * ctx, int64_t row0, int64_t n_rows, float * out);
-@ctypes_function_llama_ext(
-    [
-        "llama_get_embeddings_nextn_rows",
-        "?llama_get_embeddings_nextn_rows@@YA_NPEAUllama_context@@_J1PEAM@Z",
-        "__Z31llama_get_embeddings_nextn_rowsP13llama_contextxxPf",
-        "_Z31llama_get_embeddings_nextn_rowsP13llama_contextllPf",
-    ],
-    [llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)],
-    ctypes.c_bool,
-    required=False,
-)
-def llama_get_embeddings_nextn_rows(ctx: llama_context_p, row0: int, n_rows: int, out: ctypes.POINTER(ctypes.c_float)) -> bool:
-    """Copy original-batch NextN device rows to caller-owned float32 storage."""
-    ...
-
-
-# // Copy rows of the h_nextn device buffer to or from host memory, ordered after the last decode and its readers
-# LLAMA_API bool llama_set_embeddings_nextn_rows(struct llama_context * ctx, int64_t row0, int64_t n_rows, const float * data);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_embeddings_nextn_rows",
-        "?llama_set_embeddings_nextn_rows@@YA_NPEAUllama_context@@_J1PEBM@Z",
-        "__Z31llama_set_embeddings_nextn_rowsP13llama_contextxxPKf",
-        "_Z31llama_set_embeddings_nextn_rowsP13llama_contextllPKf",
-    ],
-    [llama_context_p_ctypes, ctypes.c_int64, ctypes.c_int64, ctypes.POINTER(ctypes.c_float)],
-    ctypes.c_bool,
-    required=False,
-)
-def llama_set_embeddings_nextn_rows(ctx: llama_context_p, row0: int, n_rows: int, data: ctypes.POINTER(ctypes.c_float)) -> bool:
-    """Upload float32 state rows, including the reserved per-sequence pending row."""
-    ...
-
-
-# // Read the state rows of batches (see llama_batch_ext_set_embd_state_row()) from the h_nextn device buffer of src.
-# // Returns whether decode accepts batches with state rows.
-# LLAMA_API bool llama_set_embd_state_src(struct llama_context * ctx, struct llama_context * src);
-@ctypes_function_llama_ext(
-    [
-        "llama_set_embd_state_src",
-        "?llama_set_embd_state_src@@YA_NPEAUllama_context@@0@Z",
-        "__Z24llama_set_embd_state_srcP13llama_contextS0_",
-        "_Z24llama_set_embd_state_srcP13llama_contextS0_",
-    ],
-    [llama_context_p_ctypes, llama_context_p_ctypes],
-    ctypes.c_bool,
-    required=False,
-)
-def llama_set_embd_state_src(ctx: llama_context_p, src: Optional[llama_context_p]) -> bool:
-    """Borrow src's NextN device buffer for MTP state inputs; NULL detaches it."""
-    ...
-
-
-# // The state of entry idx is row `row` of the h_nextn device buffer of the context set with llama_set_embd_state_src().
-# // All entries of a batch have a state row, or none.
-# LLAMA_API bool llama_batch_ext_set_embd_state_row(struct llama_batch_ext * batch, int32_t idx, int32_t row);
-@ctypes_function_llama_ext(
-    [
-        "llama_batch_ext_set_embd_state_row",
-        "?llama_batch_ext_set_embd_state_row@@YA_NPEAUllama_batch_ext@@HH@Z",
-        "__Z34llama_batch_ext_set_embd_state_rowP15llama_batch_extii",
-        "_Z34llama_batch_ext_set_embd_state_rowP15llama_batch_extii",
-    ],
-    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_int32],
-    ctypes.c_bool,
-    required=False,
-)
-def llama_batch_ext_set_embd_state_row(batch: llama_batch_ext_p, idx: int, row: int) -> bool:
-    """Attach a borrowed device state row; all submitted entries require one."""
-    ...
-
-
-# // model/context data extraction
-
-# LLAMA_API int32_t llama_model_dflash_selector_top_k(const struct llama_model * model);
-@ctypes_function_llama_ext(
-    [
-        "llama_model_dflash_selector_top_k",
-        "?llama_model_dflash_selector_top_k@@YAHPEBUllama_model@@@Z",
-        "__Z33llama_model_dflash_selector_top_kPK11llama_model",
-        "_Z33llama_model_dflash_selector_top_kPK11llama_model",
-    ],
-    [llama_model_p_ctypes],
-    ctypes.c_int32,
-    required=False,
-)
-def llama_model_dflash_selector_top_k(
-    model: llama_model_p
-) -> int:
-    """Return the DFlash2 selector width, or zero for DFlash v1/DSpark."""
-    ...
-
-# // returns pointer to the target-model layer indices
-# LLAMA_API const int32_t * llama_model_target_layer_ids  (const struct llama_model * model);
-@ctypes_function_llama_ext(
-    [
-        "llama_model_target_layer_ids",
-        "?llama_model_target_layer_ids@@YAPEBHPEBUllama_model@@@Z",
-        "__Z28llama_model_target_layer_idsPK11llama_model",
-        "_Z28llama_model_target_layer_idsPK11llama_model",
-    ],
-    [llama_model_p_ctypes],
-    ctypes.POINTER(ctypes.c_int32),
-    required=False,
-)
-def llama_model_target_layer_ids(
-    model: llama_model_p
-) -> ctypes.POINTER(ctypes.c_int32):  # type: ignore
-    """Return the target layer indices required by this draft model.
-
-    Read llama_model_target_layer_ids_n(model) int32 entries. The returned
-    array belongs to the model and must not be freed or modified. An empty
-    array returns NULL; copy it before freeing the model.
-    """
-    ...
-
-# // returns the number of extracted layers from target model
-# LLAMA_API uint32_t        llama_model_target_layer_ids_n(const struct llama_model * model);
-@ctypes_function_llama_ext(
-    [
-        "llama_model_target_layer_ids_n",
-        "?llama_model_target_layer_ids_n@@YAIPEBUllama_model@@@Z",
-        "__Z30llama_model_target_layer_ids_nPK11llama_model",
-        "_Z30llama_model_target_layer_ids_nPK11llama_model",
-    ],
-    [llama_model_p_ctypes],
-    ctypes.c_uint32,
-    required=False,
-)
-def llama_model_target_layer_ids_n(
-    model: llama_model_p
-) -> int:
-    """Return the number of entries in llama_model_target_layer_ids(model).
-
-    Zero means the model does not specify target layer indices.
     """
     ...
 

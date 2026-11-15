@@ -41,7 +41,7 @@ offload; the default is `0`. Tokenizer tests use the vocabulary-only GGUF in
 | `test_cache.py` | RAM/disk/trie prefix matching, thresholds, ties, eviction and memory bounds |
 | `test_state.py` | Snapshot ownership, Hybrid restore, zero checkpoints, cache reuse and failure recovery |
 | `test_speculation.py` | MTP/DFlash verification, rollback, interrupted continuation and score callbacks |
-| `test_runtime.py` | Native API and batch parity, resource lifetimes, sampling, KV state and embeddings |
+| `test_runtime.py` | Critical ABI layouts, batch behavior, resource lifetimes, sampling, KV state and embeddings |
 | `test_media.py` | Vision/audio handling, MTP image requests and partial-decode recovery |
 | `test_formats.py` | Chat formatting and grammar constraints |
 | `test_rpc.py` | RPC backend, endpoint validation and device ownership |
@@ -50,7 +50,9 @@ Sampling regressions compare suppression, merged user biases, and candidate
 probabilities against native sampler chains. They cover ordinary sampling,
 restored logits, sampler clones, grammar resampling, reasoning-budget forcing,
 MTP internal/sidecar list ownership, CPU confidence cutoffs, and backend-selected
-token bypasses.
+token bypasses. Compact native comparisons also cover dynamic temperature,
+Adaptive-P, and Mirostat mode precedence; runtime-model checks cover zero and
+context-sized penalty windows.
 
 ## Test design and efficiency
 

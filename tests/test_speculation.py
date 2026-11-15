@@ -69,16 +69,16 @@ def test_mtp_device_hidden_selection_and_cleanup(monkeypatch, mode):
     monkeypatch.setenv("LLAMA_MTP_DEV", "0" if mode == "opt-out" else "1")
     lib = SimpleNamespace(**{name: Mock() for name in (
         "llama_set_embeddings_nextn_dev", "llama_get_embeddings_nextn_rows",
-        "llama_set_embeddings_nextn_rows", "llama_set_embd_state_src", "llama_batch_ext_set_embd_state_row",
+        "llama_set_embeddings_nextn_rows", "llama_set_ctx_state_src", "llama_batch_ext_set_embd_state_row",
     )})
     if mode == "missing":
-        lib.llama_set_embd_state_src.__ctypes_optional__ = True
+        lib.llama_set_ctx_state_src.__ctypes_optional__ = True
     engine._llama_cpp_lib = lib
     engine.target_context = SimpleNamespace(
         n_batch=lambda: 8,
         set_embeddings_nextn_dev=lambda value: events.append(("target", value)) or mode != "target-fallback",
     )
-    engine.draft_context.set_embd_state_src = lambda src: events.append(("source", src is not None)) or mode != "draft-fallback"
+    engine.draft_context.set_ctx_state_src = lambda src: events.append(("source", src is not None)) or mode != "draft-fallback"
     engine.draft_context.close = lambda: events.append(("draft", "closed"))
     engine.batch = SimpleNamespace(close=Mock())
     engine.draft_model = SimpleNamespace(close=Mock())

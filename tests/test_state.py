@@ -365,7 +365,7 @@ def test_completion_only_restores_usable_states_and_saves_actual_history(
 
             llm.generate = generate
             llm.detokenize = lambda tokens, **kwargs: b"x" * len(tokens)
-            patch.setattr(lib, "llama_token_is_eog", lambda *args: False)
+            patch.setattr(lib, "llama_vocab_is_eog", lambda *args: False)
             try:
                 list(llm._create_completion(prompt=prompt, max_tokens=1, stream=stream))
                 assert load.call_count == int(should_load), mode
@@ -1014,7 +1014,7 @@ def _native_greedy_reference(llm, context, batch, chunks, max_tokens):
         sampler.add_greedy()
         for index in range(max_tokens):
             token = sampler.sample(context, -1)
-            if lib.llama_token_is_eog(llm._model.vocab, token):
+            if lib.llama_vocab_is_eog(llm._model.vocab, token):
                 break
             generated.append(token)
             sampler.accept(token)
