@@ -60,7 +60,7 @@ def build_parser() -> argparse.ArgumentParser:
   DFlash:
     python -m examples.high_level_api.high_level_api_dflash_dspark_speculative --algorithm dflash --model target.gguf --draft-model dflash.gguf
 
-  DFlash2 (requires selector metadata in the sidecar):
+  DFlash2 (requires a DFlash2 head in the sidecar):
     python -m examples.high_level_api.high_level_api_dflash_dspark_speculative --algorithm dflash2 --model target.gguf --draft-model dflash2.gguf --draft-tokens 7 --draft-p-min 0
 
   DSpark with a shorter draft:
@@ -77,7 +77,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="dflash",
         help=(
             "Draft algorithm described by the external GGUF. 'dflash' also "
-            "auto-detects and labels DFlash2; 'dflash2' requires selector metadata "
+            "auto-detects the loaded head; 'dflash2' requires a DFlash2 draft "
             "(default: dflash)."
         ),
     )
@@ -280,11 +280,7 @@ def benchmark_mode(args: argparse.Namespace, mode: DecodeMode) -> BenchmarkResul
 
     speculative: Optional[SpecConfig] = None
     if mode != "ordinary":
-        spec_type = (
-            SpeculativeType.DRAFT_DSPARK
-            if mode == "dspark"
-            else SpeculativeType.DRAFT_DFLASH
-        )
+        spec_type = SpeculativeType.from_str(mode)
         speculative = SpecConfig(
             spec_type=spec_type,
             draft_model_path=str(args.draft_model),
@@ -313,20 +309,18 @@ def benchmark_mode(args: argparse.Namespace, mode: DecodeMode) -> BenchmarkResul
         if mode != "ordinary":
             engine = llm.speculative
             is_dflash2 = bool(getattr(engine, "is_dflash2", False))
-            if mode == "dflash2" and not is_dflash2:
-                raise ValueError(
-                    "--algorithm dflash2 requires a sidecar with a non-zero "
-                    "DFlash2 selector_top_k"
-                )
-            if mode in {"dflash", "dflash2"} and is_dflash2:
+            is_lilicorr = bool(getattr(engine, "is_lilicorr", False))
+            if is_dflash2:
                 label = "DFlash2"
-            elif mode == "dflash":
-                label = "DFlash"
-            elif mode == "dspark":
+            elif is_lilicorr:
+                label = "LiliCorr"
+            elif getattr(engine, "is_dspark", False):
                 label = "DSpark"
+            else:
+                label = "DFlash"
             runtime_config = {
                 "selector_top_k": int(getattr(engine, "selector_top_k", 0)),
-                "nextn_masked": not is_dflash2,
+                "nextn_masked": not is_dflash2 and not is_lilicorr,
                 "backend_requested": not args.no_backend_sampling,
                 "backend_active": bool(getattr(engine, "_backend_sampling", False)),
                 "mrope": bool(getattr(engine, "is_mrope", False)),

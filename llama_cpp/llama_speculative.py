@@ -91,15 +91,17 @@ class SpeculativeType(enum.IntEnum):
     DRAFT_MTP     = 3   # Multi-token prediction
     DRAFT_DFLASH  = 4   # DFlash speculative decoding
     DRAFT_DSPARK  = 5   # DSpark speculative decoding
+    DRAFT_DFLASH2 = 6   # DFlash2 selector lattice
+    DRAFT_LILICORR = 7  # LiliCorr scorer lattice
 
     # ngram-family (statistical)
-    NGRAM_SIMPLE  = 6   # simple self-speculative decoding based on n-grams
-    NGRAM_MAP_K   = 7   # self-speculative decoding with n-gram keys only
-    NGRAM_MAP_K4V = 8   # self-speculative decoding with n-gram keys and 4 m-gram values
-    NGRAM_MOD     = 9   # self-speculative decoding with n-gram mod
-    NGRAM_CACHE   = 10  # self-speculative decoding with 3-level n-gram cache
+    NGRAM_SIMPLE  = 8   # simple self-speculative decoding based on n-grams
+    NGRAM_MAP_K   = 9   # self-speculative decoding with n-gram keys only
+    NGRAM_MAP_K4V = 10  # self-speculative decoding with n-gram keys and 4 m-gram values
+    NGRAM_MOD     = 11  # self-speculative decoding with n-gram mod
+    NGRAM_CACHE   = 12  # self-speculative decoding with 3-level n-gram cache
 
-    COUNT         = 11  # number of speculative types, not selectable
+    COUNT         = 13  # number of speculative types, not selectable
 
     # helper methods
     def is_draft(self) -> bool:
@@ -121,6 +123,8 @@ class SpeculativeType(enum.IntEnum):
             SpeculativeType.DRAFT_MTP,
             SpeculativeType.DRAFT_DFLASH,
             SpeculativeType.DRAFT_DSPARK,
+            SpeculativeType.DRAFT_DFLASH2,
+            SpeculativeType.DRAFT_LILICORR,
         }
 
 
@@ -151,6 +155,18 @@ class SpeculativeType(enum.IntEnum):
     def is_dspark(self) -> bool:
         return self == SpeculativeType.DRAFT_DSPARK
 
+    def is_dflash2(self) -> bool:
+        return self == SpeculativeType.DRAFT_DFLASH2
+
+    def is_lilicorr(self) -> bool:
+        return self == SpeculativeType.DRAFT_LILICORR
+
+    def is_dflash_family(self) -> bool:
+        return self in {
+            SpeculativeType.DRAFT_DFLASH, SpeculativeType.DRAFT_DSPARK,
+            SpeculativeType.DRAFT_DFLASH2, SpeculativeType.DRAFT_LILICORR,
+        }
+
     def is_none(self) -> bool:
         return self == SpeculativeType.NONE
 
@@ -165,6 +181,8 @@ class SpeculativeType(enum.IntEnum):
             SpeculativeType.DRAFT_MTP: "draft-mtp",
             SpeculativeType.DRAFT_DFLASH: "draft-dflash",
             SpeculativeType.DRAFT_DSPARK: "draft-dspark",
+            SpeculativeType.DRAFT_DFLASH2: "draft-dflash2",
+            SpeculativeType.DRAFT_LILICORR: "draft-lilicorr",
             SpeculativeType.NGRAM_SIMPLE: "ngram-simple",
             SpeculativeType.NGRAM_MAP_K: "ngram-map-k",
             SpeculativeType.NGRAM_MAP_K4V: "ngram-map-k4v",
@@ -193,6 +211,10 @@ class SpeculativeType(enum.IntEnum):
             # DSPARK
             "dspark": cls.DRAFT_DSPARK,
             "draft-dspark": cls.DRAFT_DSPARK,
+            "dflash2": cls.DRAFT_DFLASH2,
+            "draft-dflash2": cls.DRAFT_DFLASH2,
+            "lilicorr": cls.DRAFT_LILICORR,
+            "draft-lilicorr": cls.DRAFT_LILICORR,
             # NGRAM
             "ngram-simple": cls.NGRAM_SIMPLE,
             "ngram-map-k": cls.NGRAM_MAP_K,
@@ -226,6 +248,8 @@ class SpecConfig:
     #   - DRAFT_EAGLE3
     #   - DRAFT_DFLASH
     #   - DRAFT_DSPARK
+    #   - DRAFT_DFLASH2
+    #   - DRAFT_LILICORR
     #   - DRAFT_MTP (optional)
     #
     draft_model_path: Optional[str] = None # draft model for speculative decoding
@@ -314,6 +338,8 @@ class SpecConfig:
             SpeculativeType.DRAFT_MTP,
             SpeculativeType.DRAFT_DFLASH,
             SpeculativeType.DRAFT_DSPARK,
+            SpeculativeType.DRAFT_DFLASH2,
+            SpeculativeType.DRAFT_LILICORR,
             SpeculativeType.NGRAM_MAP_K,
             SpeculativeType.NGRAM_MAP_K4V,
         }
@@ -370,6 +396,8 @@ class SpecConfig:
             SpeculativeType.DRAFT_EAGLE3,
             SpeculativeType.DRAFT_DFLASH,
             SpeculativeType.DRAFT_DSPARK,
+            SpeculativeType.DRAFT_DFLASH2,
+            SpeculativeType.DRAFT_LILICORR,
         } and not self.draft_model_path:
             raise ValueError(
                 f"SpecConfig: {self.spec_type} requires draft_model_path"
@@ -2224,12 +2252,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         from llama_cpp import _internals as internals
         from llama_cpp import llama_cpp as llama_cpp_lib
 
-        if config.spec_type not in {
-            SpeculativeType.DRAFT_DFLASH,
-            SpeculativeType.DRAFT_DSPARK,
-        }:
+        if not config.spec_type.is_dflash_family():
             raise ValueError(
-                "LlamaDFlashDecoding requires DRAFT_DFLASH or DRAFT_DSPARK"
+                "LlamaDFlashDecoding requires a DFlash-family speculative type"
             )
         config.validate()
 
@@ -2254,8 +2279,13 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             internals, model_params, load_mtp=False
         )
         try:
+            self.resolved_type = self._resolve_variant(
+                config.spec_type, self.draft_model.dflash_variant()
+            )
+            self.is_dspark = self.resolved_type == SpeculativeType.DRAFT_DSPARK
+            self.is_dflash2 = self.resolved_type == SpeculativeType.DRAFT_DFLASH2
+            self.is_lilicorr = self.resolved_type == SpeculativeType.DRAFT_LILICORR
             self.selector_top_k = self.draft_model.dflash_selector_top_k()
-            self.is_dflash2 = self.selector_top_k > 0
             self.is_mrope = (
                 self.draft_model.rope_type()
                 == llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE
@@ -2286,12 +2316,11 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             self.lilicorr_top_k = self._metadata_int(
                 metadata, "lilicorr.candidate_topk", 0
             )
-            if self.lilicorr_top_k < 0 or (
-                self.lilicorr_top_k * (self.lilicorr_top_k + 1)
-                > self.n_embd_dec
+            if self.is_lilicorr and (
+                self.lilicorr_top_k <= 0
+                or self.lilicorr_top_k * (self.lilicorr_top_k + 1) > self.n_embd_dec
             ):
                 raise ValueError("LiliCorr candidate lattice does not fit the draft hidden size")
-            self.is_lilicorr = self.lilicorr_top_k > 0
             if not self.is_dflash2 and not self.is_lilicorr:
                 self._suppressed_tokens = tuple(self.draft_model.suppress_tokens())
             self.sample_from_anchor = self._metadata_bool(
@@ -2384,6 +2413,23 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
 
         if self.verbose:
             self._print_runtime_configuration()
+
+    @staticmethod
+    def _resolve_variant(requested: SpeculativeType, variant: int) -> SpeculativeType:
+        """Mirror the native factory: generic DFlash accepts every family head."""
+        from llama_cpp.llama_cpp import llama_dflash_variant as variants
+
+        resolved = {
+            variants.LLAMA_DFLASH_VARIANT_DFLASH: SpeculativeType.DRAFT_DFLASH,
+            variants.LLAMA_DFLASH_VARIANT_DFLASH2: SpeculativeType.DRAFT_DFLASH2,
+            variants.LLAMA_DFLASH_VARIANT_DSPARK: SpeculativeType.DRAFT_DSPARK,
+            variants.LLAMA_DFLASH_VARIANT_LILICORR: SpeculativeType.DRAFT_LILICORR,
+        }.get(variant)
+        if resolved is None:
+            raise ValueError(f"{requested} requires a DFlash draft model")
+        if requested != SpeculativeType.DRAFT_DFLASH and requested != resolved:
+            raise ValueError(f"{requested} does not match the draft model: use {resolved}")
+        return resolved
 
     @staticmethod
     def _metadata_int(metadata: Dict[str, str], key: str, default: int) -> int:
@@ -2489,6 +2535,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         print(
             "LlamaDFlashDecoding: "
             f"type={self.config.spec_type.to_str()}, "
+            f"resolved_type={self.resolved_type.to_str()}, "
             f"model={self.config.draft_model_path!r}, "
             f"draft_n_min={self.config.draft_n_min}, "
             f"draft_n_max={self.config.draft_n_max}, "
@@ -3101,10 +3148,7 @@ def create_native_spec_engine(
             context_params=context_params,
             verbose=verbose,
         )
-    if config.spec_type in {
-        SpeculativeType.DRAFT_DFLASH,
-        SpeculativeType.DRAFT_DSPARK,
-    }:
+    if config.spec_type.is_dflash_family():
         return LlamaDFlashDecoding(
             config,
             target_model=target_model,

@@ -115,18 +115,14 @@ def test_spec_config_requires_draft_model_for_external_architectures():
         SpeculativeType.DRAFT_EAGLE3,
         SpeculativeType.DRAFT_DFLASH,
         SpeculativeType.DRAFT_DSPARK,
+        SpeculativeType.DRAFT_DFLASH2,
+        SpeculativeType.DRAFT_LILICORR,
     ):
         with pytest.raises(ValueError, match="draft_model_path"):
             SpecConfig(spec_type=spec_type).validate()
 
 
-@pytest.mark.parametrize(
-    "spec_type",
-    [SpeculativeType.DRAFT_DFLASH, SpeculativeType.DRAFT_DSPARK],
-)
-def test_native_factory_routes_dflash_family_to_shared_engine(
-    monkeypatch, spec_type
-):
+def test_native_factory_routes_dflash_family_to_shared_engine(monkeypatch):
     created = []
 
     def fake_engine(config, **kwargs):
@@ -136,22 +132,32 @@ def test_native_factory_routes_dflash_family_to_shared_engine(
     monkeypatch.setattr(
         "llama_cpp.llama_speculative.LlamaDFlashDecoding", fake_engine
     )
-    config = SpecConfig(
-        spec_type=spec_type,
-        draft_model_path="draft.gguf",
-    )
-    result = create_native_spec_engine(
-        config,
-        target_model="target-model",
-        target_context="target-context",
-        model_params="model-params",
-        context_params="context-params",
-        verbose=False,
-    )
-
-    assert result == "dflash-engine"
-    assert created[0][0] is config
-    assert created[0][1]["target_model"] == "target-model"
+    variants = llama_cpp_lib.llama_dflash_variant
+    for name, variant in (
+        ("dflash", variants.LLAMA_DFLASH_VARIANT_DFLASH),
+        ("dspark", variants.LLAMA_DFLASH_VARIANT_DSPARK),
+        ("dflash2", variants.LLAMA_DFLASH_VARIANT_DFLASH2),
+        ("lilicorr", variants.LLAMA_DFLASH_VARIANT_LILICORR),
+    ):
+        spec_type = SpeculativeType.from_str(name)
+        config = SpecConfig(spec_type=spec_type, draft_model_path="draft.gguf")
+        config.validate()
+        result = create_native_spec_engine(
+            config, target_model="target-model", target_context="target-context",
+            model_params="model-params", context_params="context-params", verbose=False,
+        )
+        assert result == "dflash-engine"
+        assert created[-1][0] is config
+        assert created[-1][1]["target_model"] == "target-model"
+        assert LlamaDFlashDecoding._resolve_variant(SpeculativeType.DRAFT_DFLASH, variant) == spec_type
+        assert LlamaDFlashDecoding._resolve_variant(spec_type, variant) == spec_type
+        for wrong in (SpeculativeType.DRAFT_DSPARK, SpeculativeType.DRAFT_DFLASH2,
+                      SpeculativeType.DRAFT_LILICORR):
+            if wrong != spec_type:
+                with pytest.raises(ValueError, match="does not match"):
+                    LlamaDFlashDecoding._resolve_variant(wrong, variant)
+        with pytest.raises(ValueError, match="requires a DFlash draft model"):
+            LlamaDFlashDecoding._resolve_variant(spec_type, variants.LLAMA_DFLASH_VARIANT_NONE)
 
 
 def test_speculative_output_limits_match_llama_cpp():
@@ -1353,15 +1359,17 @@ def test_dspark_probability_filter_requires_confidence_head():
     LlamaDFlashDecoding._validate_dspark_confidence_head(metadata, 0.0)
 
 
-@pytest.mark.parametrize("selector_top_k,top_k,device", [
-    (0, 0, False), (2, 0, False), (0, 2, False), (0, -1, False), (0, 3, False),
-    (0, 0, True), (2, 0, True),
-], ids=["dflash", "dflash2", "lilicorr", "negative-k", "oversized-k", "dflash-device", "dflash2-device"])
-def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypatch, selector_top_k, top_k, device):
+@pytest.mark.parametrize("variant,selector_top_k,top_k,device", [
+    (0, 0, 0, False), (1, 2, 0, False), (3, 0, 2, False),
+    (3, 0, -1, False), (3, 0, 3, False),
+    (0, 0, 0, True), (1, 2, 0, True), (2, 0, 0, False),
+], ids=["dflash", "dflash2", "lilicorr", "negative-k", "oversized-k", "dflash-device", "dflash2-device", "auto-dspark"])
+def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypatch, variant, selector_top_k, top_k, device):
     monkeypatch.delenv("LLAMA_DFLASH_DEV", raising=False)
     for name in ("llama_set_embeddings_layer_inp_dev", "llama_supports_embd_row", "llama_batch_ext_add_embd_row"):
         monkeypatch.setattr(llama_cpp_lib, name, Mock(__ctypes_symbol_name__=name))
     model = SimpleNamespace(
+        dflash_variant=lambda: variant,
         dflash_selector_top_k=lambda: selector_top_k, rope_type=lambda: 0,
         target_layer_ids=lambda: [1], n_embd=lambda: 6, n_vocab=lambda: 128,
         token_mask=lambda: 99, is_recurrent=lambda: False, is_hybrid=lambda: False,
@@ -1404,6 +1412,7 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
         return
 
     engine = create()
+    assert engine.is_dspark == (variant == 2)
     assert engine.is_lilicorr == (top_k == 2)
     assert engine.is_dflash2 == (selector_top_k > 0)
     assert engine.draft_limit == 1
