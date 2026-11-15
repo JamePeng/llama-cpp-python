@@ -590,6 +590,21 @@ class llama_context_type(enum.IntEnum):
     LLAMA_CONTEXT_TYPE_DEFAULT = 0
     LLAMA_CONTEXT_TYPE_MTP     = 1
 
+# // the head on the block of a DFlash draft model
+# enum llama_dflash_variant {
+#     LLAMA_DFLASH_VARIANT_NONE     = -1, // not a DFlash draft model
+#     LLAMA_DFLASH_VARIANT_DFLASH   = 0,
+#     LLAMA_DFLASH_VARIANT_DFLASH2  = 1,
+#     LLAMA_DFLASH_VARIANT_DSPARK   = 2,
+#     LLAMA_DFLASH_VARIANT_LILICORR = 3,
+# };
+class llama_dflash_variant(enum.IntEnum):
+    LLAMA_DFLASH_VARIANT_NONE = -1
+    LLAMA_DFLASH_VARIANT_DFLASH = 0
+    LLAMA_DFLASH_VARIANT_DFLASH2 = 1
+    LLAMA_DFLASH_VARIANT_DSPARK = 2
+    LLAMA_DFLASH_VARIANT_LILICORR = 3
+
 # enum llama_process_type {
 #     LLAMA_PROCESS_TYPE_ENCODE,
 #     LLAMA_PROCESS_TYPE_DECODE,
@@ -2128,6 +2143,18 @@ def llama_model_quantize(
 # //
 # // NextN / speculative draft model queries
 # //
+# // the DFlash variant the model loader picked from the head of the draft
+# LLAMA_API enum llama_dflash_variant llama_model_dflash_variant(const struct llama_model * model);
+@ctypes_function(
+    "llama_model_dflash_variant",
+    [llama_model_p_ctypes],
+    ctypes.c_int,
+)
+def llama_model_dflash_variant(model: llama_model_p, /) -> int:
+    """Return the loader-selected DFlash variant, or NONE for other models."""
+    ...
+
+
 # // DFlash2 selector: number of candidate tokens the draft keeps per block position from its logits
 # // (the packed lattice also holds the top_k x top_k pairwise transition scores); 0 if the model has no selector head
 # LLAMA_API int32_t llama_model_dflash_selector_top_k(const struct llama_model * model);

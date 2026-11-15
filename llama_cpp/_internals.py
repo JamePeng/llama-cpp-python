@@ -182,6 +182,10 @@ class LlamaModel:
     def rope_type(self) -> int:
         return llama_cpp.llama_model_rope_type(self.model)
 
+    def dflash_variant(self) -> int:
+        """Return the DFlash head variant selected by the native model loader."""
+        return llama_cpp.llama_model_dflash_variant(self.model)
+
     def dflash_selector_top_k(self) -> int:
         """Return the DFlash2 selector width, or zero for DFlash v1/DSpark."""
         return llama_cpp.llama_model_dflash_selector_top_k(self.model)
