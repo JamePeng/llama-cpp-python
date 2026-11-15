@@ -1098,7 +1098,8 @@ source based on the model and workload:
 | Mode | `SpeculativeType` | Draft source | MTMD chat support |
 |---|---|---|---|
 | MTP | `DRAFT_MTP` | Target NextN/MTP heads or a compatible external MTP GGUF | Image chat validated with Qwen3.5-9B-MTP |
-| DFlash / DFlash2 | `DRAFT_DFLASH` | External block-diffusion draft GGUF; selector metadata identifies DFlash2 | Not supported |
+| DFlash family | `DRAFT_DFLASH` | Native loader selects the external DFlash, DFlash2, DSpark, or LiliCorr head | Not supported |
+| DFlash2 / LiliCorr | `DRAFT_DFLASH2` / `DRAFT_LILICORR` | Explicit selector/scorer head selection; must match the loaded sidecar | Not supported |
 | DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads | Not supported |
 | N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history | Supports MTMD-prefilled prompts |
 | N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key | Supports MTMD-prefilled prompts |
@@ -1111,11 +1112,12 @@ Eagle3, draft-simple, and the other n-gram variants appear in
 `SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
 engines.
 
-DFlash, DFlash2, and DSpark share `LlamaDFlashDecoding`: target-layer features
+DFlash, DFlash2, DSpark, and LiliCorr share `LlamaDFlashDecoding`: target-layer features
 are passed through the fused draft decode path, with attention configuration
-selected from the sidecar metadata. All three require `draft_model_path`. DFlash2 uses the same
-`DRAFT_DFLASH` type and is selected automatically when the sidecar reports a
-non-zero `dflash.selector_top_k`. The requested `draft_n_max` is clamped to the
+selected from the sidecar metadata. All require `draft_model_path`. Generic
+`DRAFT_DFLASH` routes using `llama_model_dflash_variant()`; explicit types must
+match the loaded head. The engine's `resolved_type` reports the selected driver.
+The requested `draft_n_max` is clamped to the
 draft GGUF's trained block size; benchmark several values on the deployment
 hardware because a longer block is not always faster.
 

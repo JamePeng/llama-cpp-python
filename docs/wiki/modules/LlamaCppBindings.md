@@ -2,7 +2,7 @@
 title: llama.cpp ctypes Bindings
 module_name: llama_cpp.llama_cpp
 source_file: llama_cpp/llama_cpp.py
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 version_target: "latest"
 ---
 
@@ -160,6 +160,13 @@ Python bytes and require no native free.
 Python integer; its ctypes return type is `ctypes.c_int`.
 
 ## Public speculative decoding API
+
+`llama_model_dflash_variant(model)` returns `llama_dflash_variant` as a C enum
+(`ctypes.c_int`): `NONE=-1`, `DFLASH=0`, `DFLASH2=1`, `DSPARK=2`, or
+`LILICORR=3` (with the `LLAMA_DFLASH_VARIANT_` prefix). The native model loader
+selects the head. This required C export has no C++ aliases and is exposed by
+the managed `LlamaModel.dflash_variant()` method. Use it for driver routing;
+selector width is a layout query rather than a complete variant discriminator.
 
 Eighteen former staging declarations now live in
 [`llama.h`](../../../vendor/llama.cpp/include/llama.h), including NextN output

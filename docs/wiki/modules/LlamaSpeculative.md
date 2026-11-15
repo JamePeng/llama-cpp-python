@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 version_target: "latest"
 ---
 
@@ -34,8 +34,10 @@ contains algorithms that do not yet have Python engines.
 | Type | Python engine | Status | Availability |
 |---|---|---|---|
 | `DRAFT_MTP` | `LlamaMTPDecoding` | Implemented for built-in and external MTP | Since `0.3.48` |
-| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Implemented for external DFlash, DFlash2, and LiliCorr GGUFs | DFlash/DFlash2 since `0.3.49`; LiliCorr since `0.4.4-preview` |
+| `DRAFT_DFLASH` | `LlamaDFlashDecoding` | Generic routing for external DFlash, DFlash2, DSpark, and LiliCorr GGUFs | Variant selection follows the checked-out native loader |
 | `DRAFT_DSPARK` | `LlamaDFlashDecoding` | Implemented for external DSpark GGUFs | Since `0.3.49` |
+| `DRAFT_DFLASH2` | `LlamaDFlashDecoding` | Explicit DFlash2 selector-head selection | Current source |
+| `DRAFT_LILICORR` | `LlamaDFlashDecoding` | Explicit LiliCorr scorer-head selection | Current source |
 | `NGRAM_MAP_K` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
 | `NGRAM_MAP_K4V` | `LlamaNGramMapDecoding` | Implemented | Since `0.3.48` |
 | `DRAFT_EAGLE3` | none | Declared, not implemented | — |
@@ -103,11 +105,19 @@ Useful helpers include:
 | `is_mtp()` | True only for `DRAFT_MTP`. |
 | `is_dflash()` | True only for `DRAFT_DFLASH`. |
 | `is_dspark()` | True only for `DRAFT_DSPARK`. |
+| `is_dflash2()` | True only for `DRAFT_DFLASH2`. |
+| `is_lilicorr()` | True only for `DRAFT_LILICORR`. |
+| `is_dflash_family()` | True for the four DFlash-family configuration types. |
 | `is_none()` | True only for `NONE`. |
 | `to_str()` | Returns the `llama.cpp`-style name, such as `draft-mtp`. |
 | `from_str(value)` | Parses canonical names and aliases such as `mtp`, `ngram-k`, and `ngram-k4v`. |
 
 ## `SpecConfig`
+
+The enum follows the current vendor order: DFlash2 and LiliCorr are 6 and 7,
+the n-gram types move to 8 through 12, and `COUNT` is 13. Persist canonical names
+such as `ngram-map-k` rather than numeric IDs; older saved integers are not
+automatically migrated. `from_str()` also accepts `dflash2` and `lilicorr`.
 
 ```python
 @dataclass
@@ -462,13 +472,17 @@ and confidence heads.
 
 ### Variant detection and execution
 
-DFlash2 does not have a separate `SpeculativeType`. Configure
-`SpeculativeType.DRAFT_DFLASH`; after loading the sidecar, the engine reads
-`dflash.selector_top_k`. A positive value selects DFlash2. The selector width is
-fixed by the GGUF and is not a runtime tuning parameter.
+The engine queries `llama_model_dflash_variant()` after loading the sidecar.
+This reports the native loader's selected head rather than inferring a variant
+from selector width or LiliCorr metadata. `DRAFT_DFLASH` accepts any DFlash-family
+head, including DSpark, and selects the corresponding execution path. Explicit
+`DRAFT_DSPARK`, `DRAFT_DFLASH2`, and `DRAFT_LILICORR` configurations must match
+the loaded head; mismatches and non-DFlash drafts raise `ValueError` before
+creating the draft context. Owned draft resources are released on failure.
 
-LiliCorr is supported starting with `0.4.4-preview`. It also uses `DRAFT_DFLASH` and is detected from a positive
-`lilicorr.candidate_topk`. It retains the draft encoder's projected target
+`resolved_type` reports the actual execution type without changing the caller's
+`SpecConfig`. DFlash2's selector width remains fixed by the GGUF and is not a
+runtime tuning parameter. LiliCorr retains the draft encoder's projected target
 features and passes the preceding position's projection as a separate hidden
 state on every noise token. LiliCorr always decodes the full trained
 `dflash.block_size`, even when `draft_n_max` is smaller, then reads at most
@@ -526,8 +540,8 @@ llm = Llama(
     n_batch=512,
     n_gpu_layers="all",
     speculative=SpecConfig(
-        # DFlash2 uses DRAFT_DFLASH and is detected from selector metadata.
-        spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
+        # DRAFT_DFLASH automatically selects the loaded DFlash-family head.
+        spec_type=SpeculativeType.DRAFT_DFLASH,  # or an explicit DRAFT_DFLASH2/DRAFT_DSPARK/DRAFT_LILICORR
         draft_model_path="path/to/dflash-dflash2-or-dspark.gguf",
         draft_n_max=7,
         draft_p_min=0.0,

@@ -1,7 +1,7 @@
 ---
 title: DFlash2 Speculative Decoding
 source_file: examples/high_level_api/high_level_api_dflash_dspark_speculative.py
-last_updated: 2026-11-04
+last_updated: 2026-11-15
 version_target: "latest"
 ---
 
@@ -14,13 +14,15 @@ speculative-decoding API, then compare it with ordinary decoding using the
 included benchmark. DFlash2 proposes a block of tokens, but the target model
 still verifies every proposal before it is returned to the caller.
 
-DFlash2 uses `SpeculativeType.DRAFT_DFLASH`. It is selected automatically when
-the sidecar GGUF contains a positive `dflash.selector_top_k`; there is no
-separate `DRAFT_DFLASH2` enum value.
+The current source supports explicit `SpeculativeType.DRAFT_DFLASH2` selection.
+`DRAFT_DFLASH` remains a generic DFlash-family mode and selects the driver using
+the native loader's `llama_model_dflash_variant()` result. Explicit DFlash2
+selection rejects a sidecar with a different head.
 
 ## Prerequisites
 
-- `llama-cpp-python` `0.3.49` or newer.
+- Current source with matching native libraries for the explicit DFlash2 enum
+  and variant query. Older releases since `0.3.49` use generic `DRAFT_DFLASH`.
 - A target GGUF and a DFlash2 GGUF trained for that exact target family.
 - Enough combined memory for the target model, sidecar, contexts, and compute
   buffers.
@@ -54,7 +56,7 @@ llm = Llama(
     n_gpu_layers="all",
     ctx_checkpoints=0,
     speculative=SpecConfig(
-        spec_type=SpeculativeType.DRAFT_DFLASH,
+        spec_type=SpeculativeType.DRAFT_DFLASH2,
         draft_model_path=DFLASH2_MODEL,
         draft_n_max=7,
         draft_n_min=0,
@@ -127,9 +129,9 @@ python -m examples.high_level_api.high_level_api_dflash_dspark_speculative \
   --ignore-eos
 ```
 
-`--algorithm dflash2` requires selector metadata and fails early for a DFlash v1
-sidecar. `--algorithm dflash` remains backward compatible and automatically
-labels a selector-equipped sidecar as DFlash2.
+`--algorithm dflash2` requires the native loader to select a DFlash2 head and
+fails early for another variant. `--algorithm dflash` accepts any DFlash-family
+sidecar and reports the resolved head.
 
 Read these output fields together:
 

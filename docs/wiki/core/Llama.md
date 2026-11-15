@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-11-13
+last_updated: 2026-11-15
 version_target: "latest"
 ---
 
@@ -696,8 +696,8 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
         n_batch=512,
         n_gpu_layers="all",
         speculative=SpecConfig(
-            # DFlash2 uses DRAFT_DFLASH and is detected from selector metadata.
-            spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DSPARK
+            # Generic mode selects the head reported by the native model loader.
+            spec_type=SpeculativeType.DRAFT_DFLASH,  # or DRAFT_DFLASH2 / DRAFT_DSPARK
             draft_model_path="path/to/dflash-dflash2-or-dspark.gguf",
             draft_n_max=7,
             draft_p_min=0.0,
@@ -710,7 +710,9 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
 
     DFlash, DFlash2, and DSpark require a compatible external draft GGUF. Their
     effective draft length is limited by the GGUF's trained block size. DFlash2
-    uses `DRAFT_DFLASH` and is selected when `dflash.selector_top_k` is positive.
+    supports explicit `DRAFT_DFLASH2` selection. Generic `DRAFT_DFLASH` uses
+    `llama_model_dflash_variant()` to select any DFlash-family head, including
+    DSpark and LiliCorr; explicit types reject mismatched sidecars.
     `draft_p_min` filters token probability for DFlash, selector-transition
     probability for DFlash2, and predicted acceptance confidence for DSpark.
     DFlash2 reads unmasked selector rows and does not activate backend vocabulary
