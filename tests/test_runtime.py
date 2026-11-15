@@ -62,16 +62,23 @@ def test_native_context_parameter_layouts():
         ("include/llama.h", "llama_context_params"),
         ("tools/mtmd/mtmd.h", "mtmd_context_params"),
         ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
+        *(('tools/mtmd/mtmd-helper.h', name) for name in (
+            'mtmd_helper_video_stream_info', 'mtmd_helper_video_decoder',
+            'mtmd_helper_video_init_params', 'mtmd_helper_init_opt',
+        )),
     )
     for header, name in cases:
         source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp" / header).read_text(encoding="utf-8")
         source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)
         body = re.search(r"\bstruct\s+" + name + r"\s*\{([^{}]*)\}", source, re.S)[1]
         scalars = {"uint32_t": ctypes.c_uint32, "int32_t": ctypes.c_int32,
-                   "int": ctypes.c_int, "float": ctypes.c_float, "bool": ctypes.c_bool,
+                   "int": ctypes.c_int, "int64_t": ctypes.c_int64, "float": ctypes.c_float, "bool": ctypes.c_bool,
                    "size_t": ctypes.c_size_t, "llama_seq_id": ctypes.c_int32}
         pointers = {"ggml_backend_sched_eval_callback", "ggml_abort_callback",
                     "mtmd_progress_callback", "ggml_backend_dev_t", "llama_progress_callback"}
+        scalars['struct mtmd_helper_video_init_params'] = mtmd_cpp.mtmd_helper_video_init_params
+        # Function-pointer fields have pointer storage; their signatures are checked separately.
+        body = re.sub(r'[^;]+?\(\*(\w+)\)\([^;]*\)', r'void * \1', body)
         fields = []
         for declaration in body.split(";"):
             if not declaration.strip():

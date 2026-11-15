@@ -579,7 +579,7 @@ def native_chunks(mtmd):
         mtmd.mtmd_input_chunks_free(chunks)
 
 
-VIDEO_DEFAULTS = dict(fps_target=4.0, ffmpeg_bin_dir=None, timestamp_interval_ms=5000, no_soundtrack=False)
+VIDEO_DEFAULTS = dict(fps_target=4.0, ffmpeg_bin_dir=None, timestamp_interval_ms=5000, no_soundtrack=False, decoder=None)
 
 
 @pytest.mark.parametrize("name, expected, free", [
@@ -599,6 +599,7 @@ def test_mtmd_parameter_defaults(mtmd, name, expected, free):
         assert getattr(mtmd, name)._fields_ == [
             ("fps_target", ctypes.c_float), ("ffmpeg_bin_dir", ctypes.c_char_p),
             ("timestamp_interval_ms", ctypes.c_int64), ("no_soundtrack", ctypes.c_bool),
+            ("decoder", ctypes.POINTER(mtmd.mtmd_helper_video_decoder)),
         ]
     elif name == "mtmd_helper_init_opt":
         assert getattr(mtmd, name)._fields_ == [("video_params", mtmd.mtmd_helper_video_init_params)]
@@ -608,6 +609,67 @@ def test_mtmd_parameter_defaults(mtmd, name, expected, free):
         assert (not actual if expected_value is None else actual == expected_value), field
     if free:
         getattr(mtmd, free)(None)
+
+
+@pytest.mark.parametrize("failure", ["missing-callback", "open", "stream-info"])
+def test_mtmd_custom_video_decoder_failure_cleanup(mtmd, failure):
+    ptr = ctypes.POINTER
+    for name, result, args in (
+        ("open", ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_char_p, ptr(ctypes.c_uint8),
+                                  ctypes.c_size_t, ptr(mtmd.mtmd_helper_video_stream_info)]),
+        ("start", ctypes.c_bool, [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_float, ptr(ctypes.c_bool)]),
+        ("read_frame", ctypes.c_bool, [ctypes.c_void_p, ptr(ctypes.c_uint8), ctypes.c_uint32, ctypes.c_uint32]),
+        ("read_audio", ctypes.c_void_p, [ctypes.c_void_p, ctypes.c_int, ptr(ctypes.c_size_t)]),
+        ("close", None, [ctypes.c_void_p]),
+    ):
+        callback = getattr(mtmd, "mtmd_helper_video_decoder_" + name)
+        assert callback._restype_ is result and list(callback._argtypes_) == args
+    calls = []
+    state = ctypes.c_int(7)
+
+    @mtmd.mtmd_helper_video_decoder_open
+    def open_decoder(user_data, path, buf, size, info):
+        calls.append("open")
+        assert user_data == ctypes.addressof(state) and path == b"custom"
+        assert not buf and size == 0
+        # Invalid stream dimensions make native initialization fail before using a model.
+        assert info.contents.n_frames == -1 and info.contents.duration == -1
+        return None if failure == "open" else ctypes.addressof(state)
+
+    @mtmd.mtmd_helper_video_decoder_read_frame
+    def read_frame(*args):
+        calls.append("frame")
+        return False
+
+    @mtmd.mtmd_helper_video_decoder_close
+    def close_decoder(handle):
+        assert handle == ctypes.addressof(state)
+        calls.append("close")
+
+    decoder = mtmd.mtmd_helper_video_decoder(
+        open=open_decoder, close=close_decoder, user_data=ctypes.addressof(state),
+    )
+    if failure != "missing-callback":
+        decoder.read_frame = read_frame
+    params = mtmd.mtmd_helper_video_init_params_default()
+    assert not params.decoder
+    params.decoder = ctypes.pointer(decoder)
+    assert not mtmd.mtmd_helper_video_init(None, b"custom", params)
+    assert calls == {"missing-callback": [], "open": ["open"],
+                     "stream-info": ["open", "close"]}[failure]
+
+    # Pointer-returning audio callbacks must return a retained address, not a ctypes pointer.
+    audio = (ctypes.c_float * 2)(0.25, -0.25)
+    @mtmd.mtmd_helper_video_decoder_read_audio
+    def read_audio(handle, rate, count):
+        assert handle == ctypes.addressof(state) and rate == 16000
+        count[0] = 2
+        return ctypes.addressof(audio)
+    decoder.read_audio = read_audio
+    count = ctypes.c_size_t()
+    address = decoder.read_audio(ctypes.addressof(state), 16000, ctypes.byref(count))
+    assert count.value == 2
+    assert ctypes.cast(address, ctypes.POINTER(ctypes.c_float))[:2] == [0.25, -0.25]
 
 
 @pytest.mark.parametrize("rate_in,rate_out", [(16000, 16000), (48000, 16000), (16000, 24000), (44100, 16000)])

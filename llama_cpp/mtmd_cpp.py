@@ -1659,11 +1659,64 @@ mtmd_helper_video_p = NewType("mtmd_helper_video_p", int)
 mtmd_helper_video_p_ctypes = c_void_p
 
 
+# struct mtmd_helper_video_stream_info {
+#     uint32_t width;    // as displayed (rotation and pixel aspect ratio applied)
+#     uint32_t height;
+#     float    fps;
+#     int32_t  n_frames; // -1 if unknown
+#     float    duration; // in seconds, -1 if unknown
+# };
+class mtmd_helper_video_stream_info(Structure):
+    _fields_ = [
+        ("width", c_uint32), ("height", c_uint32), ("fps", c_float),
+        ("n_frames", c_int32), ("duration", c_float),
+    ]
+
+
+# struct mtmd_helper_video_decoder {
+#     void * (*open)(void * user_data, const char * path, const unsigned char * buf, size_t len,
+#                    struct mtmd_helper_video_stream_info * info);
+#     bool (*start)(void * state, uint32_t width, uint32_t height, float fps, bool * fps_picked);
+#     bool (*read_frame)(void * state, unsigned char * rgb, uint32_t width, uint32_t height);
+#     const float * (*read_audio)(void * state, int sample_rate, size_t * n_samples);
+#     void (*close)(void * state);
+#     void * user_data;
+# };
+mtmd_helper_video_decoder_open = CFUNCTYPE(
+    c_void_p, c_void_p, c_char_p, POINTER(c_uint8), c_size_t, POINTER(mtmd_helper_video_stream_info),
+)
+mtmd_helper_video_decoder_start = CFUNCTYPE(c_bool, c_void_p, c_uint32, c_uint32, c_float, POINTER(c_bool))
+mtmd_helper_video_decoder_read_frame = CFUNCTYPE(c_bool, c_void_p, POINTER(c_uint8), c_uint32, c_uint32)
+# ctypes callbacks cannot return POINTER(c_float); return an address (or None) with the same C ABI.
+mtmd_helper_video_decoder_read_audio = CFUNCTYPE(c_void_p, c_void_p, c_int, POINTER(c_size_t))
+mtmd_helper_video_decoder_close = CFUNCTYPE(None, c_void_p)
+
+
+class mtmd_helper_video_decoder(Structure):
+    """Custom decoder: open, optional start/audio, read_frame, then close.
+
+    Keep callbacks, user_data and decoder state alive until
+    mtmd_helper_video_free() finishes. Copy buf during open if needed later. Frames are presentation-order RGB24 at the
+    requested size; a NULL rgb means skip. Audio is mono F32 at the requested
+    rate and must stay alive until the next decoder call. Catch callback errors
+    and return NULL/False; Python exceptions cannot propagate through C.
+    """
+    _fields_ = [
+        ("open", mtmd_helper_video_decoder_open),
+        ("start", mtmd_helper_video_decoder_start),
+        ("read_frame", mtmd_helper_video_decoder_read_frame),
+        ("read_audio", mtmd_helper_video_decoder_read_audio),
+        ("close", mtmd_helper_video_decoder_close),
+        ("user_data", c_void_p),
+    ]
+
+
 # struct mtmd_helper_video_init_params {
 #     float fps_target;            // desired output fps; <= 0 means use the video's native fps, defaulted to 4.0f
 #     const char * ffmpeg_bin_dir; // directory containing ffmpeg/ffprobe binaries; NULL means search PATH
 #     int64_t timestamp_interval_ms; // interval for adding timestamp as text chunk (example: "[10m50.5s]"); <= 0 means no timestamp, defaulted to 5000ms
 #     bool no_soundtrack; // suppress video audio for models that support it
+#     const struct mtmd_helper_video_decoder * decoder; // NULL selects built-in ffmpeg
 #     // TODO @ngxson : allow "placeholder" bitmap output for counting tokens
 # };
 class mtmd_helper_video_init_params(Structure):
@@ -1672,6 +1725,7 @@ class mtmd_helper_video_init_params(Structure):
         ("ffmpeg_bin_dir", c_char_p),
         ("timestamp_interval_ms", c_int64),
         ("no_soundtrack", c_bool),
+        ("decoder", POINTER(mtmd_helper_video_decoder)),
     ]
 mtmd_helper_video_init_params_p_ctypes = POINTER(mtmd_helper_video_init_params)
 
@@ -1778,7 +1832,7 @@ def mtmd_helper_bitmap_init_from_file(
 # // helper function to construct a mtmd_bitmap from a buffer containing a file
 # // supported formats:
 # //     image: formats supported by stb_image: jpg, png, bmp, gif, etc.
-# //            webp is decoded via ffmpeg, requires MTMD_VIDEO build with ffmpeg in PATH
+# //            webp uses built-in ffmpeg, or opt.video_params.decoder if ffmpeg is not built in
 # //     audio: formats supported by miniaudio: wav, mp3, flac
 # // note:
 # //   - for now, video input is only supported via C++ helper functions
@@ -2103,7 +2157,7 @@ class mtmd_helper_video_info(Structure):
 mtmd_helper_video_info_p_ctypes = POINTER(mtmd_helper_video_info)
 
 
-# // returns NULL on failure (ffprobe not found, file unreadable, etc.)
+# // returns NULL on failure (no decoder, ffprobe not found, file unreadable, etc.)
 # MTMD_API mtmd_helper_video * mtmd_helper_video_init(
 #                     struct mtmd_context * mctx,
 #                     const char * path,
@@ -2123,15 +2177,13 @@ def mtmd_helper_video_init(
 ) -> mtmd_helper_video_p:
     """
     helper function to init an mtmd_helper_video object
-    returns NULL on failure (ffprobe not found, file unreadable, etc.)
+    returns NULL on failure (no decoder, ffprobe not found, file unreadable, etc.)
     """
     ...
 
 
 # // Same as mtmd_helper_video_init(), but reads from an in-memory buffer.
-# // The buffer is copied internally; the caller does not need to keep it alive.
-# // Note: pipe input is not seekable, so seeking will use output-side seeking
-# // (ffmpeg decodes and discards frames up to the target position).
+# // The caller does not need to keep the buffer alive.
 # MTMD_API mtmd_helper_video * mtmd_helper_video_init_from_buf(
 #                     struct mtmd_context * mctx,
 #                     const unsigned char * buf, size_t len,
@@ -2156,8 +2208,8 @@ def mtmd_helper_video_init_from_buf(
     """
     helper function to init an mtmd_helper_video object from an in-memory video buffer
 
-    The buffer is copied internally, so the caller does not need to keep it alive
-    after this function returns.
+    The caller need not retain the input buffer after this call. A custom
+    decoder must copy any input bytes it needs during its open callback.
     """
     ...
 
@@ -2231,6 +2283,7 @@ class mtmd_helper_cap(Structure):
 
     text_gen is false for TTS-only models without a chat template.
     audio_stream describes realtime input, not streaming audio output.
+    video counts built-in decoder support only; custom decoders are not counted.
     """
 
     _fields_ = [

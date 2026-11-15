@@ -2,7 +2,7 @@
 title: MTMD ctypes Bindings
 module_name: llama_cpp.mtmd_cpp
 source_file: llama_cpp/mtmd_cpp.py
-last_updated: 2026-10-13
+last_updated: 2026-11-15
 version_target: "latest"
 ---
 
@@ -37,3 +37,28 @@ These bindings track the vendored MTMD headers and are intended for advanced
 integrations. Native handles and returned pointers remain subject to the
 ownership and lifetime rules documented beside their declarations in
 `mtmd_cpp.py` and in the corresponding upstream headers.
+
+## Custom video decoders
+
+`mtmd_helper_video_init_params.decoder` accepts a pointer to a
+`mtmd_helper_video_decoder`; NULL selects built-in ffmpeg. The decoder must
+provide `open`, `read_frame` and `close`; `start` and `read_audio` are optional.
+`mtmd_helper_video_stream_info` describes displayed dimensions (rotation and
+pixel aspect ratio applied), source fps, frame count and duration.
+
+Use the callback types in `mtmd_cpp.py`. Keep callbacks, `user_data` and decoder
+state alive until `mtmd_helper_video_free` finishes. `open` receives input bytes
+valid only during that callback, so copy them if needed later. `read_frame`
+provides scaled RGB24 frames in presentation order; NULL RGB storage asks it to
+skip a frame. `start` can set `fps_picked` when it handles fps resampling itself.
+
+`read_audio` returns mono float32 PCM at the requested rate. Its ctypes callback
+returns a buffer address (or `None`), because ctypes cannot construct Python
+callbacks returning a typed float pointer. Retain the audio buffer until the
+next decoder call. Catch exceptions inside callbacks and return failure values.
+
+The `video` capability flag reports the built-in decoder only; it does not
+account for an application-provided decoder. High-level handlers retain their
+default ffmpeg behavior; these hooks are exposed through the low-level API.
+Rebuild native libraries from the matching vendor revision: the decoder pointer
+changes the layouts of both video parameters and the enclosing bitmap options.
