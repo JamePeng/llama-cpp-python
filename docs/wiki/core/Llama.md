@@ -3,7 +3,7 @@ title: Llama Class
 module_name: llama_cpp.llama
 source_file: llama_cpp/llama.py
 class_name: Llama
-last_updated: 2026-11-11
+last_updated: 2026-11-13
 version_target: "latest"
 ---
 
@@ -195,7 +195,7 @@ mapping:
 | `ctx_checkpoints` | `int` | `16` | Max hybrid/recurrent prompt checkpoints to keep. `0` disables these snapshots. Ordinary text requests can still extend the live prefix; branching or shorter prompts require a fresh prefill. See [zero-checkpoint limits](../features/caching.md#hybrid-checkpoints-and-cache-misses). |
 | `checkpoint_interval` | `int` | `4096` | Token interval for saving periodic Hybrid/Recurrent checkpoints during long prompt evaluation. |
 | `checkpoint_on_device` | `bool` | `False` | Store Hybrid/Recurrent checkpoint tensor payloads in `llama_context`-owned device buffers via `LLAMA_STATE_SEQ_FLAGS_ON_DEVICE`. Reduces device-to-host copy overhead, but only one active checkpoint per `seq_id` is safe. |
-| `last_n_tokens_size` | `int` | `64` | Default recent-token history used by repetition-style samplers when their per-call history length is zero. |
+| `last_n_tokens_size` | `int` | `64` | Legacy constructor setting retained for serialization compatibility. Configure repetition history with per-request `penalty_last_n`; zero disables it. |
 | `spm_infill` | `bool` | `False` | Use the Suffix/Prefix/Middle order for infill instead of Prefix/Suffix/Middle. |
 
 ### Runtime Logging Parameters
@@ -351,6 +351,59 @@ tokens = model.tokenize(b"def fibonacci(n):")
 for token in model.generate(tokens, top_k=40, top_p=0.95, temp=0.2):
     print(model.detokenize([token]).decode('utf-8'), end="", flush=True)
 ```
+
+### Sampling parameters and precedence
+
+Pass sampling options per request. `create_completion()`, `__call__()`, and
+`create_chat_completion()` use `temperature`; `generate()` and `sample()` use
+`temp`. Chat handlers must forward the options they support; a custom handler
+can impose additional limits. The OpenAI-compatible server exposes its own
+request schema, not every Python sampling option.
+
+| Request parameter | Default | Meaning |
+|---|---|---|
+| `temperature` / `temp` | `0.8`; chat `0.2` | Plain logit temperature; with ordinary sampling and dynamic temperature disabled, non-positive values keep only the maximum remaining logit. |
+| `top_k`, `top_p`, `min_p`, `typical_p` | `40`, `0.95`, `0.05`, `1.0` | Candidate filters; disable with `<= 0`, `1.0`, `0.0`, and `1.0`, respectively. |
+| `min_keep` | `0` | Minimum candidate count for top-p, min-p, typical-p, and XTC. Zero adds no minimum; it does not disable those filters. |
+| `dynatemp_range`, `dynatemp_exponent` | `0.0`, `1.0` | A positive range enables entropy-based temperature between `max(0, temp - range)` and `temp + range`. |
+| `top_n_sigma` | `-1.0` | Filter logits by their distance from the maximum in standard deviations; negative disables it. |
+| `xtc_probability`, `xtc_threshold` | `0.0`, `0.1` | Probability and threshold for excluding high-probability choices; zero probability disables XTC. |
+| `repeat_penalty`, `frequency_penalty`, `present_penalty` | `1.0`, `0.0`, `0.0` | Repetition multiplier, frequency-scaled subtraction, and presence subtraction. History includes prompt and accepted generated tokens. |
+| `penalty_last_n`, `dry_penalty_last_n` | `64`, `64` | Separate history lengths. `0` disables the respective history; `-1` uses the initialized `n_ctx_seq()` capacity. |
+| `dry_multiplier`, `dry_base`, `dry_allowed_length` | `0.0`, `1.75`, `2` | DRY repetition penalty; enabled only with nonzero multiplier, base at least `1.0`, and positive history. |
+| `dry_seq_breakers` | `["\n", ":", "\"", "*"]` | Text sequences that interrupt DRY repetition matching; native limits are described below. |
+| `adaptive_target`, `adaptive_decay` | `-1.0`, `0.9` | A target from `0.0` to `1.0` enables Adaptive-P as the final selector. Negative disables it; decay is in `0.0`–`0.99`. |
+| `mirostat_mode`, `mirostat_tau`, `mirostat_eta` | `0`, `5.0`, `0.1` | Disabled, Mirostat 1, or Mirostat 2 (`0`, `1`, `2`); target surprisal and learning rate. Other mode values raise `ValueError` during sampler construction. |
+
+Ordinary sampling applies user biases/model suppression, standard penalties,
+DRY, optional reasoning-budget control and Python callbacks, then top-n-sigma,
+top-k, typical-p, top-p, min-p, XTC, and temperature. Adaptive-P replaces the
+final greedy/distribution selector when enabled; mild filtering such as min-p
+alone is recommended before it. For that setup, disable top-k/top-p with
+`top_k=0, top_p=1.0` and use `temperature=1.0`.
+
+Mirostat follows the native common sampler's separate path: plain temperature
+followed by Mirostat. It bypasses standard/DRY penalties and all the ordinary
+filters, dynamic temperature, and Adaptive-P. User logit biases, model
+suppression, Python logits processors, grammar, and reasoning-budget constraints
+remain active. Sampling controls alter selection after model evaluation; they
+do not themselves reduce prefill computation.
+
+Native DRY ignores empty breakers, truncates each to 40 UTF-8 bytes, deduplicates
+the resulting strings, and processes at most 64 distinct breakers. Initialization
+scans the vocabulary for each distinct breaker, so avoid unnecessarily large
+lists. Direct C constructors take non-negative history counts; their negative
+values disable history instead of selecting context size.
+
+The internal `LlamaSamplingParams` uses different names for several fields:
+`temp`, `mirostat`, `penalty_repeat`, `penalty_freq`, `penalty_present`, and
+`dry_sequence_breakers`. Applications normally use the request parameters above.
+`sample()` reuses an active generation sampler when one exists; its arguments
+only construct a temporary sampler when none is active. A standalone `sample()`
+call does not populate prompt history automatically.
+
+For text completions, `ignore_eos=True` skips the EOG stop check; it does not
+mask EOG logits. Use `logit_bias` to suppress specific token IDs when needed.
 
 ### `n_ctx()` and `n_ctx_seq()`
 

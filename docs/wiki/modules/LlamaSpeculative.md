@@ -2,7 +2,7 @@
 title: Llama Speculative Decoding
 module_name: llama_cpp.llama_speculative
 source_file: llama_cpp/llama_speculative.py
-last_updated: 2026-11-11
+last_updated: 2026-11-13
 version_target: "latest"
 ---
 
@@ -346,15 +346,17 @@ state for sequence 0. Acceptance fetches the retained row when needed; fallback
 replay copies the accepted prefix before restoring the draft context.
 
 Shared-KV assistants such as Gemma4 and chained NextN heads retain the host path.
-Older libraries or backends that reject device state rows fall back to host
-capture. Set `LLAMA_MTP_DEV=0` before constructing `Llama` to force host capture.
+Backends that reject device state rows fall back to host capture. The state-row
+functions are required public C APIs in the current native build; older
+libraries without them cannot be imported. Set `LLAMA_MTP_DEV=0` before
+constructing `Llama` to force host capture.
 Closing the engine destroys its draft readers before releasing the target's
 device buffer.
 
 For manual processing, `LlamaContext.get_embeddings_nextn_rows(row0, n_rows)`
 returns an owned float32 matrix and `set_embeddings_nextn_rows(row0, rows)`
 uploads one. Configure capture with `set_embeddings_nextn_dev(True)` and attach
-the source with `draft_context.set_embd_state_src(target_context)`; both return
+the source with `draft_context.set_ctx_state_src(target_context)`; both return
 whether the native path is usable. While device capture is enabled, ordinary
 `get_embeddings_nextn()` / `_ith()` host buffers are not updated. Borrowed device
 rows must be consumed before the next target decode.
@@ -624,8 +626,9 @@ Changing the environment after construction does not switch an existing engine.
 With `verbose=True`, startup output includes `target_features=device` or
 `target_features=host`.
 
-Missing optional symbols, an unreadable device buffer, unordered taps, or a
-draft rollback path requiring replay select host copies. Host mode still uses
+An unreadable device buffer, unordered taps, or a draft rollback path requiring
+replay select host copies. The device-feature functions are public C APIs in
+the current native build. Host mode still uses
 the configured model devices and fused draft graph. Feature transfer is separate
 from whether checkpoints store recurrent tensors on the device.
 

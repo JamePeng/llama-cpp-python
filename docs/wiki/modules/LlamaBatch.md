@@ -2,7 +2,7 @@
 title: Llama Batch
 module_name: llama_cpp._internals
 source_file: llama_cpp/_internals.py
-last_updated: 2026-11-11
+last_updated: 2026-11-13
 version_target: "latest"
 ---
 
@@ -129,10 +129,10 @@ Bulk states are copied once and shared by read-only row views.
 
 Device state rows are rendered through `llama_batch_ext_set_embd_state_row()`.
 Every entry in a submitted range must have one, and none may carry a host state.
-Configure the source with `draft_context.set_embd_state_src(target_context)`
+Configure the source with `draft_context.set_ctx_state_src(target_context)`
 after enabling unmasked NextN device capture on the target. Consume the rows
 before the target decodes again; these indices do not own or copy hidden data.
-This path requires the new native symbols and a compatible MTP backend. See
+This path uses the public native state-row API and requires a compatible MTP backend. See
 [device hidden-state transfer](LlamaSpeculative.md#device-hidden-state-transfer).
 
 For an MTP context, text and image catch-up inputs can be prepared as separate
@@ -241,7 +241,7 @@ rather than host layer-input accessors.
 The managed context wrappers provide `set_embeddings_layer_inp_dev(enabled)`
 on the target and `supports_embd_row()` on the draft. The latter checks whether
 the decoder and its backends can read the peer's buffer. These wrappers require
-the corresponding optional native extensions. Automatic selection and host
+the corresponding public native APIs. Automatic selection and host
 fallback are handled by [LlamaDFlashDecoding](LlamaSpeculative.md#device-feature-transfer),
 not by the generic batch builder.
 

@@ -616,6 +616,12 @@ bindings for the current native APIs:
 - [`llama_cpp/_ggml.py`](llama_cpp/_ggml.py) contains the supported `ggml`
   backend bindings.
 
+The current source targets the bundled llama.cpp 1.0 API cleanup. Rebuild all
+native libraries together; deprecated model, vocabulary, and state exports have
+been removed. RPC now requires a compatible protocol 10 server. See the
+[native API migration guide](docs/wiki/modules/LlamaCppBindings.md#native-10-api-compatibility)
+before updating an existing low-level integration.
+
 The low-level examples cover streaming generation, chat templates, a
 reason/action tool loop, and model quantization. Start with the tutorial in
 [`examples/low_level_api`](examples/low_level_api):
@@ -875,17 +881,25 @@ response = llm.create_chat_completion(
 
 ##  Sampling Configuration & Usage (LlamaSamplingParams)
 
-The `Llama` class provides extensive control over the `llama.cpp` sampling chain during text generation. You can configure state-of-the-art sampling algorithms, dynamic temperature, and advanced repetition penalties directly via the `generate`, `create_completion`, or `__call__` methods.
+Configure sampling per request through `Llama.generate()`, `create_completion()`,
+or `__call__()`. Completion and chat methods use `temperature`; `generate()` and
+`sample()` use `temp`. The temperature default is `0.8` for text completion and
+token generation, and `0.2` for `create_chat_completion()`.
+`LlamaSamplingParams` is an internal configuration type,
+not an argument to the `Llama` constructor. See the
+[sampling reference](docs/wiki/core/Llama.md#sampling-parameters-and-precedence)
+for parameter mappings and mode precedence.
 
 ### Core Sampling Parameters
 
 These are the most common parameters used to control the randomness and focus of the model's output.
 
-* **`temperature`** (`float`, default: `0.80`): Controls the randomness of the generation. Higher values (e.g., `1.0`) make output more random, while lower values (e.g., `0.2`) make it more deterministic. Set to `<= 0.0` for greedy decoding.
+* **`temperature`** (`float`, default: `0.80`): Controls randomness. Higher values spread probability over more tokens. In ordinary sampling with dynamic temperature disabled, `<= 0.0` selects the maximum remaining logit.
 * **`top_k`** (`int`, default: `40`): Limits the next token selection to the K most probable tokens. Set to `<= 0` to use the full vocabulary size.
 * **`top_p`** (`float`, default: `0.95`): Nucleus sampling. Limits selection to a cumulative probability of P. Set to `1.0` to disable.
 * **`min_p`** (`float`, default: `0.05`): Minimum P sampling. Drops tokens with a probability less than `min_p` relative to the most likely token. Set to `0.0` to disable.
 * **`typical_p`** (`float`, default: `1.0`): Locally typical sampling. Adjusts probabilities based on the entropy of the distribution. Set to `1.0` to disable.
+* **`min_keep`** (`int`, default: `0`): Minimum candidate count for top-p, min-p, typical-p, and XTC filters. `0` adds no explicit minimum; it does not disable the filters.
 
 
 ### Advanced & Experimental Samplers
@@ -896,13 +910,13 @@ These are the most common parameters used to control the randomness and focus of
 
 
 * **Dynamic Temperature**: Adjusts the temperature dynamically based on the entropy of the current token distribution.
-* **`dynatemp_range`** (`float`, default: `0.0`): The range of the dynamic temperature. `0.0` disables it.
+* **`dynatemp_range`** (`float`, default: `0.0`): Positive values enable entropy-based temperature between `max(0, temperature - dynatemp_range)` and `temperature + dynatemp_range`. Non-positive values use plain temperature.
 * **`dynatemp_exponent`** (`float`, default: `1.0`): Controls how entropy maps to temperature.
 
 
 * **`top_n_sigma`** (`float`, default: `-1.0`): Limits selection to tokens with pre-softmax logits within $n * \sigma$ of the max logit. Set to `-1.0` to disable.
 * **Adaptive-P**: Dynamically adjusts the target probability using an exponential moving average (EMA).
-* **`adaptive_target`** (`float`, default: `-1.0`): The target probability (0.0 to 1.0). Negative values disable it.
+* **`adaptive_target`** (`float`, default: `-1.0`): Values from `0.0` to `1.0` enable Adaptive-P as the final token selector, replacing ordinary greedy/distribution selection. Negative values disable it. Prefer mild filtering, such as min-p, before Adaptive-P.
 * **`adaptive_decay`** (`float`, default: `0.9`): The EMA decay rate (0.0 to 0.99).
 
 
@@ -914,13 +928,18 @@ Mirostat actively maintains a target entropy (`tau`) during generation to preven
 * **`mirostat_tau`** (`float`, default: `5.0`): The target cross-entropy (surprisal) value.
 * **`mirostat_eta`** (`float`, default: `0.1`): The learning rate used to update the algorithm's internal state.
 
+Mirostat uses plain temperature followed by its own selector. It bypasses top-k,
+top-p, min-p, typical-p, XTC, top-n-sigma, dynamic temperature, Adaptive-P, and
+standard/DRY penalties, matching the native common sampler. User logit biases,
+model suppression, Python logits processors, grammar, and reasoning-budget
+constraints remain active.
 
 ### Repetition Penalties
 
 * **Standard Penalties**:
 * **`repeat_penalty`** (`float`, default: `1.0`): General penalty for repeated tokens. `1.0` = disabled.
-* **`frequency_penalty`** (`float`, default: `0.0`): Penalty based on the absolute frequency of a token in the prompt.
-* **`present_penalty`** (`float`, default: `0.0`): Flat penalty applied if a token is present anywhere in the context.
+* **`frequency_penalty`** (`float`, default: `0.0`): Penalty proportional to token frequency in the recent accepted-token history.
+* **`present_penalty`** (`float`, default: `0.0`): Flat penalty for tokens appearing in that history.
 * **`presence_penalty`** (`Optional[float]`, default: `None`): Compatibility alias accepted by `create_completion()`, `__call__()`, `create_chat_completion()`, and the OpenAI-compatible server. `present_penalty` remains the primary parameter and takes precedence when set to a non-default value.
 * **`penalty_last_n`** (`int`, default: `64`): The number of recent tokens to consider for standard penalties. `0` = disabled, `-1` = full context size.
 
@@ -932,6 +951,18 @@ Mirostat actively maintains a target entropy (`tau`) during generation to preven
 * **`dry_penalty_last_n`** (`int`, default: `64`): Tokens to scan for repetitions. `0` = disabled, `-1` = context size.
 * **`dry_seq_breakers`** (`list[str]`, default: `["\n", ":", "\"", "*"]`): Tokens that reset the DRY sequence matching.
 
+History includes the prompt and accepted generated tokens. `penalty_last_n=0`
+and `dry_penalty_last_n=0` disable their respective histories; `-1` is resolved
+by `Llama` to the initialized per-sequence context capacity. DRY requires
+`dry_base >= 1.0` and a nonzero multiplier. Native code skips empty breakers,
+truncates each breaker to 40 UTF-8 bytes, deduplicates them, and processes at
+most `LLAMA_DRY_MAX_SEQ_BREAKERS` (64) distinct breakers. A shorter breaker list
+reduces sampler initialization work.
+
+Low-level callers must pass the vocabulary size as the first argument to
+`llama_sampler_init_penalties(n_vocab, penalty_last_n, penalty_repeat,
+penalty_freq, penalty_present)`. The raw penalties and DRY APIs treat negative
+history lengths as zero; they do not resolve the Python `-1` context sentinel.
 
 ### Constraints & Callbacks
 
