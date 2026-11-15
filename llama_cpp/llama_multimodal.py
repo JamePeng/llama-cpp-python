@@ -40,6 +40,7 @@ import llama_cpp.llama_grammar as llama_grammar
 
 if TYPE_CHECKING:
     import llama_cpp.llama as llama_core
+    import llama_cpp.mtmd_cpp as mtmd_cpp
 
 from ._logger import ggml_log_callback
 
@@ -80,7 +81,7 @@ class MTMDInputChunks:
 
 
 class MTMDBaseHandler:
-    """Shared mtmd configuration, context lifecycle, and media loading."""
+    """Shared MTMD configuration, media processing, and native resource management."""
 
     def __init__(
         self,
@@ -96,6 +97,7 @@ class MTMDBaseHandler:
         video_timestamp_interval_ms: Optional[int] = None,
         flash_attn: Optional[bool] = None,
         video_no_soundtrack: Optional[bool] = None,
+        video_decoder: Optional[mtmd_cpp.mtmd_helper_video_decoder] = None,
         **kwargs
     ):
 
@@ -153,6 +155,7 @@ class MTMDBaseHandler:
             video_ffmpeg_bin_dir,
             video_timestamp_interval_ms,
             video_no_soundtrack,
+            video_decoder,
         )
         if mtmd_helper_init_opt is not None and any(
             value is not None for value in video_overrides
@@ -217,6 +220,22 @@ class MTMDBaseHandler:
                 self._mtmd_helper_init_opt.video_params.timestamp_interval_ms = (
                     video_timestamp_interval_ms
                 )
+
+        # Keep decoder/callback owners alive until native child cleanup finishes.
+        # Callbacks may run concurrently; do not mutate the table while open.
+        self._video_decoder = None
+        if video_decoder is not None:
+            if not isinstance(video_decoder, mtmd_cpp.mtmd_helper_video_decoder):
+                raise TypeError("video_decoder must be an mtmd_helper_video_decoder instance")
+            self._mtmd_helper_init_opt.video_params.decoder = ctypes.pointer(video_decoder)
+        decoder_ptr = self._mtmd_helper_init_opt.video_params.decoder
+        if decoder_ptr:
+            decoder = decoder_ptr.contents
+            if not all((decoder.open, decoder.read_frame, decoder.close)):
+                raise ValueError("video_decoder requires open, read_frame and close callbacks")
+            self._video_decoder = video_decoder if video_decoder is not None else decoder
+        # Distinguish decoder output across handlers without invalidating repeated requests.
+        self._video_decoder_cache_key = os.urandom(16).hex() if decoder_ptr else None
 
         self.is_support_vision = False
         self.is_support_audio = False
@@ -299,7 +318,8 @@ class MTMDBaseHandler:
                 print(f"{self.log_prefix}(_init_mtmd_context): Audio is NOT supported by this mmproj model backend.", file=sys.stderr)
 
         # Check if video is supported
-        self.is_support_video = self.capabilities.video
+        self.is_support_video = bool(self.capabilities.video or
+                                     (self.capabilities.vision and self._video_decoder is not None))
         if self.is_support_video:
             if self.verbose:
                 print(f"{self.log_prefix}(_init_mtmd_context): Video support detected.", file=sys.stderr)
@@ -342,6 +362,9 @@ class MTMDBaseHandler:
 
     def close(self) -> None:
         """Explicitly free the shared mtmd resources."""
+        # A decoder worker must not wait on the lock held by its requesting thread.
+        if getattr(self, "_active_requests", 0):
+            raise RuntimeError("Cannot close MTMD handler inside an active request")
         with getattr(self, "_mtmd_lock", ExitStack()):
             if getattr(self, "_active_requests", 0):
                 raise RuntimeError("Cannot close MTMD handler inside an active request")
@@ -359,9 +382,14 @@ class MTMDBaseHandler:
             if cleanup is not None:
                 cleanup.close()
         finally:
-            if getattr(self, "mtmd_ctx", None) is not None:
-                ctx, self.mtmd_ctx = self.mtmd_ctx, None
-                self._mtmd_cpp.mtmd_free(ctx)
+            try:
+                if getattr(self, "mtmd_ctx", None) is not None:
+                    ctx, self.mtmd_ctx = self.mtmd_ctx, None
+                    self._mtmd_cpp.mtmd_free(ctx)
+            finally:
+                # Native video close callbacks must finish before dropping these owners.
+                self._video_decoder = None
+                self._mtmd_helper_init_opt = None
 
     @staticmethod
     def _require_model_open(model) -> None:
@@ -550,7 +578,7 @@ class MTMDBaseHandler:
         Supported formats:
           - Images (via stb_image): jpg, png, bmp, etc.
           - Audio (via miniaudio): wav, mp3, flac.
-          - Video: requires MTMD_VIDEO support and ffmpeg/ffprobe at runtime.
+          - Video: uses a custom decoder, or MTMD_VIDEO with ffmpeg/ffprobe.
 
         Note:
           - Media types (Image vs. Audio) are auto-detected by the C++ backend using magic bytes.
@@ -1971,7 +1999,18 @@ class MTMDChatHandler(MTMDBaseHandler):
     def _save_media_checkpoint(self, llama, cache):
         return cache.save_checkpoint(llama.n_tokens, llama.input_ids[:llama.n_tokens].tolist(), seq_id=0)
 
-    def _process_mtmd_prompt(
+    def _process_mtmd_prompt(self, *args, **kwargs):
+        # Decoders may call back into Python; reject reentrant close until video cleanup finishes.
+        with self._mtmd_lock:
+            if self._closed:
+                raise RuntimeError("MTMD handler is closed")
+            self._active_requests += 1
+            try:
+                return self._process_mtmd_prompt_impl(*args, **kwargs)
+            finally:
+                self._active_requests -= 1
+
+    def _process_mtmd_prompt_impl(
         self,
         llama: llama_core.Llama,
         messages: List[llama_types.ChatCompletionRequestMessage],
@@ -2098,7 +2137,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                 os.path.realpath(self.mmproj_path), projector_stat.st_size, projector_stat.st_mtime_ns,
                 self.image_min_tokens, self.image_max_tokens,
                 float(video_params.fps_target), int(video_params.timestamp_interval_ms),
-                bool(video_params.no_soundtrack),
+                bool(video_params.no_soundtrack), self._video_decoder_cache_key,
             )
 
             for i in range(n_chunks):

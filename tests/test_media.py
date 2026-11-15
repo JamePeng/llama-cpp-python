@@ -1,4 +1,6 @@
 import ctypes
+import gc
+import weakref
 import importlib
 import os
 from types import SimpleNamespace
@@ -838,11 +840,89 @@ def test_mtmd_chat_handler_video_options(tmp_path, make_handler, handler_name, n
     handler = make_handler(handler_name, mtmd_helper_init_opt=opt)
     assert handler._mtmd_helper_init_opt is opt
 
-    for options in ({"video_fps_target": 1.0}, {"video_no_soundtrack": False}):
+    for options in ({"video_fps_target": 1.0}, {"video_no_soundtrack": False},
+                    {"video_decoder": module.mtmd_helper_video_decoder()}):
         with pytest.raises(ValueError, match="cannot be combined"):
             make_handler(handler_name, mtmd_helper_init_opt=opt, **options)
+    with pytest.raises(TypeError, match="video_decoder"):
+        make_handler(handler_name, video_decoder=object())
+    with pytest.raises(ValueError, match="requires open, read_frame and close"):
+        make_handler(handler_name, video_decoder=module.mtmd_helper_video_decoder())
     with pytest.raises(TypeError, match="video_no_soundtrack"):
         make_handler(handler_name, video_no_soundtrack="false")
+
+
+@pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
+@pytest.mark.parametrize("via_options", [False, True])
+def test_mtmd_video_decoder_ownership_and_close(make_handler, mtmd, monkeypatch, handler_name, via_options):
+    events = []
+    state = ctypes.c_int(1)
+
+    @mtmd.mtmd_helper_video_decoder_open
+    def open_decoder(user_data, path, buf, size, info):
+        events.append("open")
+        with pytest.raises(RuntimeError, match="active request"):
+            handler.close()
+        return ctypes.addressof(state)  # Invalid dimensions trigger native close on failure.
+
+    @mtmd.mtmd_helper_video_decoder_read_frame
+    def read_frame(*args):
+        return False
+
+    @mtmd.mtmd_helper_video_decoder_close
+    def close_decoder(handle):
+        events.append("video-close")
+        assert handler._video_decoder is not None
+
+    decoder = mtmd.mtmd_helper_video_decoder(open=open_decoder, read_frame=read_frame, close=close_decoder)
+    refs = [weakref.ref(decoder)]  # ctypes retains callback thunks, not their Python wrappers.
+    opt = mtmd.mtmd_helper_init_opt_default()
+    opt.video_params.decoder = ctypes.pointer(decoder)
+    options = {"mtmd_helper_init_opt": opt} if via_options else {"video_decoder": decoder}
+    handler = make_handler(handler_name, **options)
+    del decoder, open_decoder, read_frame, close_decoder, opt, options
+    gc.collect()
+    assert all(ref() is not None for ref in refs)
+    assert handler._video_decoder_cache_key
+
+    # Run native initialization during the managed preprocessing scope.
+    def prepare():
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            # A worker callback attempting close must fail without waiting for the request lock.
+            return executor.submit(mtmd.mtmd_helper_video_init, None, b"custom",
+                                   handler._mtmd_helper_init_opt.video_params).result(timeout=5)
+    monkeypatch.setattr(handler, "_process_mtmd_prompt_impl", prepare, raising=False)
+    if handler_name == "MTMDBaseHandler":
+        # The shared tokenize scope has the same reentrant-close guard.
+        handler._active_requests += 1
+        try:
+            assert not handler._process_mtmd_prompt_impl()
+        finally:
+            handler._active_requests -= 1
+    else:
+        assert not handler._process_mtmd_prompt()
+    assert events == ["open", "video-close"]
+    assert handler._active_requests == 0
+    handler.mtmd_ctx = 123
+    handler._mtmd_cpp = SimpleNamespace(mtmd_free=lambda ctx: events.append("context"))
+
+    def child_cleanup():
+        assert all(ref() is not None for ref in refs)
+        events.append("child")
+        if via_options:
+            raise RuntimeError("child failure")
+    handler._exit_stack.callback(child_cleanup)
+    if via_options:
+        with pytest.raises(RuntimeError, match="child failure"):
+            handler.close()
+    else:
+        handler.close()
+    handler.close()
+    gc.collect()
+    assert events[-2:] == ["child", "context"]
+    assert handler._video_decoder is handler._mtmd_helper_init_opt is None
+    assert all(ref() is None for ref in refs)
 
 
 def test_mtmd_chat_handler_rejects_invalid_ffmpeg_bin_dir(tmp_path, make_handler):
@@ -855,7 +935,7 @@ def test_mtmd_chat_handler_rejects_invalid_ffmpeg_bin_dir(tmp_path, make_handler
 
 @pytest.mark.parametrize("handler_name", ["MTMDBaseHandler", "MTMDChatHandler"])
 @pytest.mark.parametrize("flash_attn, expected_flash", [(None, -1), (False, 0), (True, 1)])
-@pytest.mark.parametrize("api", ["native", "legacy", "legacy-no-stream"])
+@pytest.mark.parametrize("api", ["native", "legacy", "legacy-no-stream", "custom", "custom-no-vision"])
 def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_attn, expected_flash, api, monkeypatch):
     multimodal = importlib.import_module("llama_cpp.llama_multimodal")
     monkeypatch.setattr(multimodal.llama_cpp_lib, "llama_model_n_tokens_delay", lambda model: 0)
@@ -865,7 +945,14 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         flash_attn=flash_attn,
     )
     native = handler._mtmd_cpp
+    custom = api.startswith("custom")
+    if custom:
+        # Callback validity is tested separately; this isolates effective capability selection.
+        handler._video_decoder = object()
     cap = native.mtmd_helper_cap(chat=True, vision=True, video=True, text_gen=True, audio_stream=True)
+    if custom:
+        cap.video = False
+        cap.vision = api != "custom-no-vision"
     backend = SimpleNamespace(
         mtmd_helper_cap=native.mtmd_helper_cap,
         mtmd_gen_audio_type=native.mtmd_gen_audio_type,
@@ -883,7 +970,7 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         mtmd_helper_support_video=Mock(return_value=True),
         mtmd_free=Mock(),
     )
-    if api != "native":
+    if api.startswith("legacy"):
         backend.mtmd_helper_get_capabilities.__ctypes_optional__ = True
         backend.mtmd_helper_get_capabilities.side_effect = RuntimeError("unavailable")
     if api == "legacy-no-stream":
@@ -901,13 +988,13 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         backend.mtmd_init_from_file.assert_called_once()
         backend.mtmd_get_marker.assert_called_once_with(123)
         assert handler.media_marker == "<media>"
-        assert handler.is_support_vision
+        assert handler.is_support_vision == cap.vision
         assert not handler.is_support_audio
-        assert handler.is_support_video
+        assert handler.is_support_video == cap.vision
         assert handler.capabilities.chat and handler.capabilities.text_gen
         assert not handler.capabilities.audio_gen and not handler.capabilities.audio_gen_spk_ref
         assert handler.capabilities.audio_stream == (api != "legacy-no-stream")
-        if api == "native":
+        if not api.startswith("legacy"):
             backend.mtmd_helper_get_capabilities.assert_called_once_with(456, 123)
             backend.mtmd_support_vision.assert_not_called()
             backend.mtmd_support_audio.assert_not_called()
@@ -1148,13 +1235,19 @@ def test_media_chunk_identity_uses_content_and_subchunk_not_url(chunk_ledger):
     assert ledger([(1, b"")], media) != ledger([(1, b"")], media)
 
 
-@pytest.mark.parametrize("field, value", [("fps_target", 0.5), ("timestamp_interval_ms", 1000), ("no_soundtrack", True)])
+@pytest.mark.parametrize("field, value", [("fps_target", 0.5), ("timestamp_interval_ms", 1000),
+                                         ("no_soundtrack", True), ("decoder", "custom-decoder")])
 def test_media_chunk_identity_includes_video_sampling(chunk_ledger, field, value):
     handler, ledger = chunk_ledger
     media = [{"type": "video", "video": "same.mp4"}]
     first = ledger([(1, b"video+0")], media)
-    setattr(handler._mtmd_helper_init_opt.video_params, field, value)
-    assert ledger([(1, b"video+0")], media) != first
+    if field == "decoder":
+        handler._video_decoder_cache_key = value
+    else:
+        setattr(handler._mtmd_helper_init_opt.video_params, field, value)
+    changed = ledger([(1, b"video+0")], media)
+    assert changed != first
+    assert ledger([(1, b"video+0")], media) == changed
 
 
 def test_media_ledger_and_following_text_use_native_positions(chunk_ledger, monkeypatch):
