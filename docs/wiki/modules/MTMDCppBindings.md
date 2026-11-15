@@ -8,57 +8,61 @@ version_target: "latest"
 
 # MTMD ctypes Bindings
 
-## Overview
+`llama_cpp.mtmd_cpp` exposes the vendored MTMD C API through ctypes. For image,
+audio and video chat, start with [Llama Multimodal](LlamaMultimodal.md). Use these
+bindings when integrating a custom runtime that manages native handles directly.
 
-This is the low-level ctypes interface to the bundled MTMD multimodal C API.
-Most applications should use `mmproj_path`, the multimodal chat handlers, or
-the higher-level APIs in `llama_cpp.llama_multimodal` instead.
+## Open and query a projector
 
-## Source References
+Replace the paths with matching backbone/mmproj GGUF files. Keep the backbone
+alive until the MTMD context is released.
 
-This page intentionally stays source-oriented so it does not become a stale
-copy of the native API:
+```python
+from contextlib import closing
 
-- [`llama_cpp/mtmd_cpp.py`](../../../llama_cpp/mtmd_cpp.py) is the authoritative
-  list of MTMD types, enums, callbacks, structures, and bound functions.
-- [`llama_cpp/llama_multimodal.py`](../../../llama_cpp/llama_multimodal.py)
-  provides `MTMDBaseHandler`, multimodal chat/TTS handlers, and
-  `MTMDEmbeddingHandler` for managed encoding and inference.
-- [`llama_cpp/llama_chat_format.py`](../../../llama_cpp/llama_chat_format.py)
-  provides chat-format registration and shared completion/message helpers.
+from llama_cpp import Llama, mtmd_cpp as mtmd
 
-For text/image/audio embeddings with a matching projector, see
-[LlamaEmbedding](LlamaEmbedding.md). The loaded context's media marker is queried
-with `mtmd_get_marker()`; `mtmd_default_marker()` is only the default marker.
+with closing(Llama(model_path="/path/to/model/backbone.gguf", n_gpu_layers=-1)) as llm:
+    params = mtmd.mtmd_context_params_default()
+    ctx = mtmd.mtmd_init_from_file(b"/path/to/model/mmproj.gguf", llm._model.model, params)
+    if not ctx:
+        raise RuntimeError("Failed to load the multimodal projector")
+    try:
+        print("Media marker:", mtmd.mtmd_get_marker(ctx).decode("utf-8"))
+        print("Vision:", mtmd.mtmd_support_vision(ctx))
+        print("Audio:", mtmd.mtmd_support_audio(ctx))
+    finally:
+        mtmd.mtmd_free(ctx)
+```
 
-## Stability
+`llm._model.model` is an internal native handle used here for direct C API access.
+Use `mtmd_get_marker(ctx)` for the loaded model rather than assuming the default
+marker matches every projector.
 
-These bindings track the vendored MTMD headers and are intended for advanced
-integrations. Native handles and returned pointers remain subject to the
-ownership and lifetime rules documented beside their declarations in
-`mtmd_cpp.py` and in the corresponding upstream headers.
+## Processing flow
 
-## Custom video decoders
+| Step | API |
+| --- | --- |
+| Decode encoded media | `mtmd_helper_bitmap_init_from_file` / `mtmd_helper_bitmap_init_from_buf`. |
+| Prepare inputs | `mtmd_input_chunks_init`, then `mtmd_tokenize` or `mtmd_tokenize_from_parts`. |
+| Encode media | `mtmd_encode_chunk` or `mtmd_batch_*`; text chunks already contain token IDs. |
+| Evaluate with the backbone | `mtmd_helper_eval_chunks`, or submit copied embeddings and positions to the llama context. |
+| Release resources | `mtmd_input_chunks_free`, `mtmd_bitmap_free`, `mtmd_helper_video_free`, then `mtmd_free`. |
 
-`mtmd_helper_video_init_params.decoder` accepts a pointer to a
-`mtmd_helper_video_decoder`; NULL selects built-in ffmpeg. The decoder must
-provide `open`, `read_frame` and `close`; `start` and `read_audio` are optional.
-`mtmd_helper_video_stream_info` describes displayed dimensions (rotation and
-pixel aspect ratio applied), source fps, frame count and duration.
+Check return codes and release partially created resources on failure. Copy
+borrowed embedding/output buffers before the owning context is reused or freed.
+`mtmd_helper_get_n_tokens` counts input rows; `mtmd_helper_get_n_pos` counts decoder
+positions. These counts can differ for M-RoPE models.
 
-Use the callback types in `mtmd_cpp.py`. Keep callbacks, `user_data` and decoder
-state alive until `mtmd_helper_video_free` finishes. `open` receives input bytes
-valid only during that callback, so copy them if needed later. `read_frame`
-provides scaled RGB24 frames in presentation order; NULL RGB storage asks it to
-skip a frame. `start` can set `fps_picked` when it handles fps resampling itself.
+Video options accept a `mtmd_helper_video_decoder` callback table. See the
+[custom decoder contract and runnable example](LlamaMultimodal.md#custom-video-decoders).
+The native `video` capability reports built-in decoding only; it does not count
+custom decoders.
 
-`read_audio` returns mono float32 PCM at the requested rate. Its ctypes callback
-returns a buffer address (or `None`), because ctypes cannot construct Python
-callbacks returning a typed float pointer. Retain the audio buffer until the
-next decoder call. Catch exceptions inside callbacks and return failure values.
+## Source and compatibility
 
-The `video` capability flag reports the built-in decoder only; it does not
-account for an application-provided decoder. High-level handlers retain their
-default ffmpeg behavior; these hooks are exposed through the low-level API.
-Rebuild native libraries from the matching vendor revision: the decoder pointer
-changes the layouts of both video parameters and the enclosing bitmap options.
+[`mtmd_cpp.py`](../../../llama_cpp/mtmd_cpp.py) documents signatures, callbacks,
+return codes and ownership next to their original C declarations. The matching
+[vendor headers](../../../vendor/llama.cpp/tools/mtmd/mtmd-helper.h) define the
+helper ABI. Use a library built from the matching vendor revision: MTMD helpers
+can change structure layouts and are not a stable ABI.

@@ -35,7 +35,8 @@ vendored `llama.cpp` APIs remain the source of truth.
 | [Llama Speculative Decoding](modules/LlamaSpeculative.md) | Stateful MTP, DFlash, DFlash2, DSpark, and n-gram engines; configuration, lifecycle, rollback, statistics, and benchmarks. |
 | [Logger](modules/Logger.md) | Python and native logging configuration, callbacks, levels, filtering, and output routing. |
 | [llama.cpp ctypes Bindings](modules/LlamaCppBindings.md) | Source-oriented reference for the low-level llama.cpp and ggml ctypes bindings. |
-| [MTMD ctypes Bindings](modules/MTMDCppBindings.md) | Source-oriented reference for the low-level multimodal ctypes bindings. |
+| [Llama Multimodal](modules/LlamaMultimodal.md) | Base encoding, generic handlers, image/audio/video examples, multi-turn streaming and Gemma4 MTP, placeholder adaptation, and custom decoders. |
+| [MTMD ctypes Bindings](modules/MTMDCppBindings.md) | Minimal native setup, processing flow, ownership, and ABI requirements. |
 
 ### Feature Guides
 
@@ -85,6 +86,12 @@ For embeddings and reranking:
 1. [Llama Embedding](modules/LlamaEmbedding.md)
 2. [Embeddings and Reranking](features/embeddings-rerank.md)
 
+For image, audio and video inputs:
+
+1. [Llama Multimodal](modules/LlamaMultimodal.md)
+2. [Qwen3.5 Image Chat](examples/vision/vision-qwen.md)
+3. [MTMD ctypes Bindings](modules/MTMDCppBindings.md) for native integrations
+
 For grammar-constrained generation:
 
 1. [Grammar and Constrained Generation](features/grammar.md)
@@ -132,6 +139,7 @@ Completed pages currently linked from this index:
 - `modules/Logger.md`
 - `modules/LlamaCppBindings.md`
 - `modules/MTMDCppBindings.md`
+- `modules/LlamaMultimodal.md`
 - `features/embeddings-rerank.md`
 - `features/grammar.md`
 - `features/rpc.md`
