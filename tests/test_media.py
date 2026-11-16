@@ -591,7 +591,7 @@ VIDEO_DEFAULTS = dict(fps_target=4.0, ffmpeg_bin_dir=None, timestamp_interval_ms
     ("mtmd_gen_state_params", dict(seed=0xFFFFFFFF), "mtmd_gen_state_free"),
     ("mtmd_helper_gen_audio_inp", dict(stream=False, seq_id=0, prompt=None, prompt_len=0,
                                      n_past=0, out_mode=0, speaker_ref=None, lang=None,
-                                     top_k=50, top_p=1.0, temp=-1.0, seed=0xFFFFFFFF, out_type=1), None),
+                                     top_k=50, top_p=1.0, temp=-1.0, seed=0xFFFFFFFF, speed=1.0, loudness=0.0, out_type=1), None),
 ])
 def test_mtmd_parameter_defaults(mtmd, name, expected, free):
     default = getattr(mtmd, name + "_default")
@@ -674,6 +674,51 @@ def test_mtmd_custom_video_decoder_failure_cleanup(mtmd, failure):
     assert ctypes.cast(address, ctypes.POINTER(ctypes.c_float))[:2] == [0.25, -0.25]
 
 
+@pytest.mark.parametrize("kind", ["image", "audio", "video", "unknown"])
+def test_mtmd_media_metadata(mtmd, kind):
+    import io
+    import wave
+    from PIL import Image
+
+    events = []
+    @mtmd.mtmd_helper_video_decoder_open
+    def open_decoder(user, path, data, size, info):
+        events.append("open")
+        if kind == "unknown":
+            return None
+        info[0] = mtmd.mtmd_helper_video_stream_info(16, 8, 2, 4, 2)
+        return 1
+    @mtmd.mtmd_helper_video_decoder_read_frame
+    def read_frame(*args):
+        events.append("decode")
+        return False
+    @mtmd.mtmd_helper_video_decoder_close
+    def close_decoder(state):
+        events.append("close")
+    decoder = mtmd.mtmd_helper_video_decoder(open=open_decoder, read_frame=read_frame, close=close_decoder)
+    opt = mtmd.mtmd_helper_init_opt_default()
+    opt.video_params.decoder = ctypes.pointer(decoder)
+    stream = io.BytesIO()
+    if kind == "image":
+        Image.new("RGB", (13, 7)).save(stream, format="PNG")
+    elif kind == "audio":
+        with wave.open(stream, "wb") as wav:
+            wav.setparams((1, 2, 16000, 8000, "NONE", "not compressed"))
+            wav.writeframes(b"\0\0" * 8000)
+    payload = stream.getvalue() or b"custom"
+    buffer = (ctypes.c_uint8 * len(payload)).from_buffer_copy(payload)
+    meta = mtmd.mtmd_helper_media_meta()
+    query = mtmd.mtmd_helper_get_media_meta
+    assert query.argtypes == [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t,
+                             mtmd.mtmd_helper_init_opt, ctypes.POINTER(type(meta))]
+    assert query.restype is ctypes.c_int32
+    assert query(buffer, len(buffer), opt, ctypes.byref(meta)) == int(kind == "unknown")
+    expected = {"image": (1, 13, 7, 0, -1, -1), "audio": (2, 0, 0, 16000, 0.5, -1),
+                "video": (3, 16, 8, 0, 2, 4), "unknown": (0, 0, 0, 0, -1, -1)}[kind]
+    assert tuple(getattr(meta, field) for field, _ in meta._fields_) == expected
+    assert events == {"image": [], "audio": [], "video": ["open", "close"], "unknown": ["open"]}[kind]
+
+
 @pytest.mark.parametrize("rate_in,rate_out", [(16000, 16000), (48000, 16000), (16000, 24000), (44100, 16000)])
 def test_mtmd_resampler_stream_and_lifetime(mtmd, rate_in, rate_out):
     import numpy as np
@@ -731,7 +776,10 @@ def test_mtmd_audio_and_capability_layouts(mtmd):
     assert mtmd.mtmd_gen_inp.temp.offset == 24
     assert ctypes.sizeof(mtmd.mtmd_gen_out) == 64
     value = mtmd.mtmd_helper_gen_audio_inp(stream=False, seq_id=7)
-    assert ctypes.sizeof(value) == 72 and type(value).temp.offset == 56
+    assert ctypes.sizeof(value) == 80
+    assert {key: getattr(type(value), key).offset for key in ("temp", "speed", "loudness", "out_type")} == {
+        "temp": 56, "speed": 64, "loudness": 68, "out_type": 72,
+    }
     value.stream = True
     assert value.seq_id == 7
 
@@ -1320,12 +1368,13 @@ def audio_pipeline(tmp_path, monkeypatch):
     def set_input(ctx, ptr):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
         assert inp.stream is False and inp.seq_id == 0
+        assert (inp.speed, inp.loudness) == (1.0, 0.0)
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
         state.frame_temperature = inp.temp
         state.speaker = inp.speaker_ref
         state.steps = 0
         state.out_type = inp.out_type
-        return 1 if state.fail == "set_input" else 0
+        return 2 if state.fail == "invalid_input" else 1 if state.fail == "set_input" else 0
 
     def step_gen(ctx, token, previous, next_ptr, stop_ptr):
         state.steps += 1
@@ -1441,7 +1490,7 @@ def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames):
 
 
 @pytest.mark.parametrize("stage", [
-    "set_input", "step_prompt", "step_gen", "get_output", "missing_hidden", "abort", "invalid_output",
+    "set_input", "invalid_input", "step_prompt", "step_gen", "get_output", "missing_hidden", "abort", "invalid_output",
 ])
 @pytest.mark.parametrize("kind", [1, 3], ids=["qwen", "soprano"])
 def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, stage, kind):
@@ -1458,7 +1507,7 @@ def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, sta
             patch.setattr(backend, "mtmd_helper_gen_audio_step_prompt", abort)
         elif stage == "invalid_output":
             ctypes.memmove(output, struct.pack("4f", -1, -1, -1, -1), 16)
-        with pytest.raises(InterruptedError if stage == "abort" else RuntimeError,
+        with pytest.raises(InterruptedError if stage == "abort" else ValueError if stage == "invalid_input" else RuntimeError,
                            match="invalid audio" if stage == "invalid_output" else None):
             generator.create_speech(llama=llama, text="hello", response_format=response_format)
     backend.mtmd_helper_gen_audio_reset.assert_called_once()

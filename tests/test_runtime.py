@@ -56,7 +56,7 @@ def _required_model_path(variable):
 def test_native_context_parameter_layouts():
     from llama_cpp import mtmd_cpp
 
-    # Keep only by-value constructor/audio structs whose layout affects native memory.
+    # Check native constructor/helper layouts against the current vendor headers.
     cases = (
         ("include/llama.h", "llama_model_params"),
         ("include/llama.h", "llama_context_params"),
@@ -64,9 +64,16 @@ def test_native_context_parameter_layouts():
         ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
         *(('tools/mtmd/mtmd-helper.h', name) for name in (
             'mtmd_helper_video_stream_info', 'mtmd_helper_video_decoder',
-            'mtmd_helper_video_init_params', 'mtmd_helper_init_opt',
+            'mtmd_helper_video_init_params', 'mtmd_helper_init_opt', 'mtmd_helper_media_meta',
         )),
     )
+    for header, name in (("mtmd.h", "mtmd_gen_audio_type"), ("mtmd-helper.h", "mtmd_helper_media_type")):
+        source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp/tools/mtmd" / header).read_text("utf8")
+        source = re.sub(r"//[^\n]*", "", source)
+        body = re.search(r"enum " + name + r"\s*\{([^}]+)\}", source)[1]
+        expected = [entry.strip() for entry in body.split(",") if entry.strip()]
+        assert list(getattr(mtmd_cpp, name).__members__) == expected
+        assert [int(value) for value in getattr(mtmd_cpp, name)] == list(range(len(expected)))
     for header, name in cases:
         source = (Path(__file__).resolve().parents[1] / "vendor/llama.cpp" / header).read_text(encoding="utf-8")
         source = re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.S)

@@ -1113,6 +1113,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
     def _check_audio_result(self, llama: llama_core.Llama, result: int, stage: str) -> None:
         self._check_audio_abort(llama)
+        if stage == "set_input" and result == 2:
+            raise ValueError("TTS input is invalid for this model (code 2); check model-specific input and delivery settings")
         if result != 0:
             raise RuntimeError(f"TTS {stage} failed (code {result})")
 
@@ -1354,6 +1356,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     lang=language.encode("utf-8") if language is not None else None,
                     top_k=top_k, top_p=top_p, seed=actual_seed,
                     temp=-1.0 if temperature is None else temperature,
+                    speed=1.0, loudness=0.0,
                     out_type=(mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
                               if response_format == "wav" else mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM),
                 )

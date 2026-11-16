@@ -1354,6 +1354,7 @@ def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
 #     MTMD_GEN_AUDIO_TYPE_LFM3A,
 #     MTMD_GEN_AUDIO_TYPE_CHATTERBOX,
 #     MTMD_GEN_AUDIO_TYPE_DRAMA3,
+#     MTMD_GEN_AUDIO_TYPE_ZONOS3,
 # };
 class mtmd_gen_audio_type(enum.IntEnum):
     """Generated audio pipeline type."""
@@ -1364,6 +1365,7 @@ class mtmd_gen_audio_type(enum.IntEnum):
     MTMD_GEN_AUDIO_TYPE_LFM3A     = 4
     MTMD_GEN_AUDIO_TYPE_CHATTERBOX = 5
     MTMD_GEN_AUDIO_TYPE_DRAMA3    = 6
+    MTMD_GEN_AUDIO_TYPE_ZONOS3    = 7
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;
@@ -1411,7 +1413,7 @@ def mtmd_gen_audio_read_tensor(ctx: mtmd_context_p, name: bytes, out, n_max: int
 
 @ctypes_function_mtmd("mtmd_gen_audio_voice_name", [mtmd_context_p_ctypes, c_int32], c_char_p)
 def mtmd_gen_audio_voice_name(ctx: mtmd_context_p, index: int) -> Optional[bytes]:
-    """Return the borrowed name of a predefined voice, or None."""
+    """Return the borrowed voice name, or None; index 0 is the default voice."""
     ...
 
 
@@ -1873,6 +1875,56 @@ def mtmd_helper_bitmap_init_from_buf(
         - audio files will be auto-detected based on magic bytes
         - output bitmap will have SHA-256 hash as the ID
     returns nullptr on failure
+    """
+    ...
+
+
+# enum mtmd_helper_media_type {
+#     MTMD_HELPER_MEDIA_TYPE_UNKNOWN,
+#     MTMD_HELPER_MEDIA_TYPE_IMAGE,
+#     MTMD_HELPER_MEDIA_TYPE_AUDIO,
+#     MTMD_HELPER_MEDIA_TYPE_VIDEO,
+# };
+class mtmd_helper_media_type(enum.IntEnum):
+    MTMD_HELPER_MEDIA_TYPE_UNKNOWN = 0
+    MTMD_HELPER_MEDIA_TYPE_IMAGE = 1
+    MTMD_HELPER_MEDIA_TYPE_AUDIO = 2
+    MTMD_HELPER_MEDIA_TYPE_VIDEO = 3
+
+
+# struct mtmd_helper_media_meta {
+#     enum mtmd_helper_media_type type;
+#     uint32_t width;
+#     uint32_t height;
+#     int32_t sample_rate; // audio source rate
+#     float duration; // seconds, -1 if unknown
+#     int32_t n_frames; // video, -1 if unknown
+# };
+# typedef struct mtmd_helper_media_meta mtmd_helper_media_meta;
+class mtmd_helper_media_meta(Structure):
+    """Header metadata; fields not applicable to the media type are left at defaults."""
+    _fields_ = [
+        ("type", c_int), ("width", c_uint32), ("height", c_uint32),
+        ("sample_rate", c_int32), ("duration", c_float), ("n_frames", c_int32),
+    ]
+
+
+# MTMD_API int32_t mtmd_helper_get_media_meta(
+#     const unsigned char * buf, size_t len,
+#     struct mtmd_helper_init_opt opt, struct mtmd_helper_media_meta * out);
+@ctypes_function_mtmd(
+    "mtmd_helper_get_media_meta",
+    [POINTER(c_uint8), c_size_t, mtmd_helper_init_opt, POINTER(mtmd_helper_media_meta)], c_int32,
+)
+def mtmd_helper_get_media_meta(
+    buf: _Pointer[c_uint8], length: int, opt: mtmd_helper_init_opt,
+    out: _Pointer[mtmd_helper_media_meta],
+) -> int:
+    """Read media metadata without decoding frames; return 0 on success, 1 if unrecognized.
+
+    Thread-safe; no model is needed. Video probing calls decoder open/close (or
+    ffprobe), so retain custom callbacks for the call. Audio uses source sample
+    rate; duration and video frame count are -1 when unknown. Output is caller-owned.
     """
     ...
 
@@ -2384,6 +2436,8 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     float    top_p;
 #     float    temp; // audio frame temperature if supported, < 0 = model default, 0 = greedy
 #     uint32_t seed; // UINT32_MAX for random (default: random)
+#     float speed;    // > 0, default 1.0 (model pace)
+#     float loudness; // < 0 LUFS, default 0.0 (model loudness)
 #     enum mtmd_helper_gen_audio_outtype out_type;
 # };
 class mtmd_helper_gen_audio_inp(Structure):
@@ -2400,6 +2454,8 @@ class mtmd_helper_gen_audio_inp(Structure):
         ("top_p", c_float),
         ("temp", c_float),
         ("seed", c_uint32),
+        ("speed", c_float),
+        ("loudness", c_float),
         ("out_type", c_int),
     ]
 
@@ -2416,6 +2472,8 @@ class mtmd_helper_gen_audio_inp(Structure):
         top_p: float
         temp: float
         seed: int
+        speed: float
+        loudness: float
         out_type: int
 
 # MTMD_API struct mtmd_helper_gen_audio_inp mtmd_helper_gen_audio_inp_default(void);
@@ -2470,6 +2528,7 @@ def mtmd_helper_gen_audio_reset(
 ):
     ...
 
+# // returns 0 on success, 2 for invalid model input, 1 for other errors
 # MTMD_API int32_t mtmd_helper_gen_audio_set_input(
 #                         mtmd_helper_gen_audio * ctx,
 #                         const struct mtmd_helper_gen_audio_inp * inp);
@@ -2486,6 +2545,7 @@ def mtmd_helper_gen_audio_set_input(
     inp: POINTER(mtmd_helper_gen_audio_inp),  # type: ignore
     /,
 ) -> c_int32:
+    """Set input: 0 succeeds, 2 means invalid input for the model, 1 means other errors."""
     ...
 
 # // processes at most n_batch prompt tokens per call
