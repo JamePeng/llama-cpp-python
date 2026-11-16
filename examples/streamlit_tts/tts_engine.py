@@ -4,6 +4,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 import threading
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -12,7 +13,7 @@ class ModelConfig:
     mmproj: str
     gpu_layers: int = -1
     mmproj_gpu: bool = True
-    flash_attn: bool | None = None
+    flash_attn: Optional[bool] = None
     n_ctx: int = 4096
 
 
