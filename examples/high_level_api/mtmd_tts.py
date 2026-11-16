@@ -1,4 +1,4 @@
-"""Non-streaming Qwen3-TTS / Pocket TTS / Soprano / Chatterbox / Drama 3 examples.
+"""Non-streaming Qwen3-TTS / Pocket TTS / Soprano / Chatterbox / Drama 3 / Zonos3 examples.
 
 Run from the repository root with matching backbone and mmproj GGUF files:
 
@@ -16,6 +16,8 @@ Use the same --model and --mmproj arguments with any of these examples:
   --demo game --gpu-layers -1 --mmproj-gpu --mmproj-fa on
   --demo houston --speaker voice.wav
   --demo multilingual --speaker voice.wav      Qwen only: Chinese, English, Japanese
+  --text "Hello" --voice Imogen_en-British_F_1 --speed 1.2    Zonos3
+  --text "Hello" --speaker /path/to/reference.wav --loudness -25    Zonos3 clone
   --text "Hello" --format pcm_f32 --output speech.pcm
 
 Pocket selects its language from the weights; omit --language and use an
@@ -63,16 +65,18 @@ def main():
     source.add_argument("--demo", choices=DEMOS, help="Built-in example sentences")
     voices = parser.add_mutually_exclusive_group()
     voices.add_argument("--speaker", help="Reference audio path, URL or data URI")
-    voices.add_argument("--voice", help="Predefined Pocket TTS or Chatterbox voice name")
+    voices.add_argument("--voice", help="Predefined Pocket TTS, Chatterbox or Zonos3 voice name")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
-    parser.add_argument("--language", help="Qwen language or Chatterbox Multilingual tag; omit for Pocket and Soprano")
+    parser.add_argument("--language", help="Qwen/Chatterbox language or Zonos3 normalization language; omit for Pocket and Soprano")
     parser.add_argument("--cfg", action="store_true", help="Reserve two total sequences with unified KV for a CFG-enabled Chatterbox Multilingual backbone")
     parser.add_argument("--format", choices=("wav", "pcm_f32"), default="wav")
     parser.add_argument("--output", help="Output path; multiple requests add a numbered suffix")
     parser.add_argument("--max-frames", type=int, default=512)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float,
-                        help="Backbone sampling temperature (default: 0.8) or Pocket flow noise (default: model setting)")
+                        help="Backbone temperature (default: 0.8), or Pocket/Zonos3 native temperature (default: model setting)")
+    parser.add_argument("--speed", type=float, default=1.0, help="Zonos3 relative speaking speed")
+    parser.add_argument("--loudness", type=float, default=0.0, help="Zonos3 target LUFS (negative; 0 uses model default)")
     parser.add_argument("--ctx-size", type=int, default=4096)
     parser.add_argument("--gpu-layers", type=int, default=0)
     parser.add_argument("--mmproj-gpu", action="store_true")
@@ -109,6 +113,7 @@ def main():
                     llama=llama, text=text, language=language or args.language,
                     speaker_reference=speaker, voice=args.voice, max_frames=args.max_frames,
                     seed=args.seed, temperature=args.temperature, response_format=args.format,
+                    speed=args.speed, loudness=args.loudness,
                 )
                 path = output if len(requests) == 1 else output.with_name(f"{output.stem}-{index:02d}{output.suffix}")
                 audio.save(path)

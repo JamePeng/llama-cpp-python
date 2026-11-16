@@ -1074,6 +1074,24 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             model=llama._model,
         )
 
+    def _render_zonos_prompt(self, llama, text, language, voice):
+        """Render the model's named TTS template, including native-compatible normalization."""
+        from ._utils import tts_norm_scan, tts_norm_sub
+
+        if not hasattr(self, "_zonos_template"):
+            source = llama._model.model_chat_template(b"tts")
+            if not source:
+                raise ValueError("Zonos3 requires a named 'tts' template in the backbone GGUF")
+            environment = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
+            environment.globals.update(tts_norm_scan=tts_norm_scan, tts_norm_sub=tts_norm_sub,
+                                       raise_exception=Jinja2ChatFormatter.raise_exception)
+            self._zonos_template = environment.from_string(source)
+        prompt = self._zonos_template.render(messages=[{"role": "user", "content": text}],
+                                             language=language or "", voice=voice or "")
+        if not prompt.strip() or "\x00" in prompt:
+            raise ValueError("Zonos3 TTS template returned empty or invalid text")
+        return prompt
+
     @staticmethod
     def _validate_audio(data: bytes, response_format: str, rate: int, samples: int) -> None:
         """Reject malformed buffers and clearly invalid signals, not low volume speech."""
@@ -1186,6 +1204,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         top_p: float = 0.95,
         min_p: float = 0.05,
         repeat_penalty: float = 1.05,
+        speed: float = 1.0,
+        loudness: float = 0.0,
     ) -> GeneratedAudio:
         """Synthesize complete audio and return a Python-owned result.
 
@@ -1203,6 +1223,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         n_seq_max >= 2 and kv_unified=True; sequence capacity is not changed.
         Drama 3 samples inside the helper; only seed affects sampling. Put
         speaker tags in text and omit language, voice and speaker_reference.
+        Zonos3 supports voice/reference audio, native frame temperature, speed
+        (> 0) and loudness (negative LUFS, or 0 for the model default). Its
+        named TTS template normalizes text using language; other sampling
+        options follow the native helper. Delivery overrides require Zonos3.
         References accept encoded audio bytes, local paths, URLs or data URIs.
         max_frames limits helper generation steps, not text tokens or seconds.
         Llama.abort() interrupts synthesis with InterruptedError.
@@ -1238,6 +1262,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 raise ValueError("temperature must be a finite nonnegative float32 value or None")
             if not 0 < top_p <= 1 or not 0 <= min_p <= 1 or repeat_penalty <= 0:
                 raise ValueError("Invalid top_p, min_p or repeat_penalty")
+            if (isinstance(speed, bool) or not isinstance(speed, (int, float)) or
+                not math.isfinite(speed) or not 0 < speed <= 3.4028234663852886e38 or ctypes.c_float(speed).value == 0):
+                raise ValueError("speed must be a finite positive float32 value")
+            if (isinstance(loudness, bool) or not isinstance(loudness, (int, float)) or
+                not math.isfinite(loudness) or not -3.4028234663852886e38 <= loudness <= 0):
+                raise ValueError("loudness must be finite negative LUFS, or 0 for the model default")
             if not getattr(llama._ctx, "ctx", None) or llama.context_params is None:
                 raise RuntimeError("Llama is closed")
             if not llama.context_params.embeddings or llama._ctx.pooling_type() != llama_cpp_lib.LLAMA_POOLING_TYPE_NONE:
@@ -1255,14 +1285,18 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             is_soprano = info.type == types.MTMD_GEN_AUDIO_TYPE_SOPRANO
             is_chatterbox = info.type == types.MTMD_GEN_AUDIO_TYPE_CHATTERBOX
             is_drama = info.type == types.MTMD_GEN_AUDIO_TYPE_DRAMA3
+            is_zonos = info.type == types.MTMD_GEN_AUDIO_TYPE_ZONOS3
             if info.type not in (
                 types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
                 types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,
                 types.MTMD_GEN_AUDIO_TYPE_SOPRANO,
                 types.MTMD_GEN_AUDIO_TYPE_CHATTERBOX,
                 types.MTMD_GEN_AUDIO_TYPE_DRAMA3,
+                types.MTMD_GEN_AUDIO_TYPE_ZONOS3,
             ):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
+            if not is_zonos and (speed != 1.0 or loudness != 0.0):
+                raise ValueError("Non-default speed and loudness require Zonos3")
             if is_drama:
                 if speaker_reference is not None:
                     raise ValueError("Drama 3 does not support speaker_reference")
@@ -1270,9 +1304,9 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     raise ValueError("Drama 3 determines language from text; omit language")
                 if voice is not None:
                     raise ValueError("Drama 3 uses speaker tags in text; omit voice")
-            if voice is not None and not (is_pocket or is_chatterbox):
-                raise ValueError("voice is supported only for Pocket TTS and Chatterbox")
-            if (is_pocket or is_chatterbox) and voice is None and speaker_reference is None and info.n_voices > 0:
+            if voice is not None and not (is_pocket or is_chatterbox or is_zonos):
+                raise ValueError("voice is supported only for Pocket TTS, Chatterbox and Zonos3")
+            if (is_pocket or is_chatterbox or is_zonos) and voice is None and speaker_reference is None and info.n_voices > 0:
                 name = mtmd.mtmd_gen_audio_voice_name(self.mtmd_ctx, 0)
                 if not name:
                     raise RuntimeError("TTS reports predefined voices but returned no default voice")
@@ -1318,8 +1352,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                         self.capabilities.audio_gen_spk_ref
                         if self.capabilities is not None else self.is_support_audio
                     )
-                    # The vendor capability helper currently omits Chatterbox.
-                    supports_reference = supports_reference or is_chatterbox
+                    # Native capability reporting omits these supported reference encoders.
+                    supports_reference = supports_reference or is_chatterbox or is_zonos
                     if not supports_reference:
                         raise ValueError("mmproj does not support reference audio input")
                     payload = speaker_reference if isinstance(speaker_reference, bytes) else self.load_media(os.fspath(speaker_reference), "audio")
@@ -1350,13 +1384,13 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 cleanup.callback(llama.reset)
                 cleanup.callback(mtmd.mtmd_helper_gen_audio_reset, self._audio_ctx)
                 llama.reset()
-                prompt = text.encode("utf-8")
+                prompt = (self._render_zonos_prompt(llama, text, language, voice) if is_zonos else text).encode("utf-8")
                 inp = mtmd.mtmd_helper_gen_audio_inp(
                     stream=False, seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
                     lang=language.encode("utf-8") if language is not None else None,
                     top_k=top_k, top_p=top_p, seed=actual_seed,
                     temp=-1.0 if temperature is None else temperature,
-                    speed=1.0, loudness=0.0,
+                    speed=speed, loudness=loudness,
                     out_type=(mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
                               if response_format == "wav" else mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM),
                 )
