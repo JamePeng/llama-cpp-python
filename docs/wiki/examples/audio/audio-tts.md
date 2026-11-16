@@ -76,7 +76,7 @@ conditioned and unconditional branches. The helper pairs sequence 0 with
 doubling or otherwise modifying them. Turbo does not require the metadata
 flag or paired sequences. These checks do not apply to other TTS pipelines.
 The helper manages both CFG branches and decodes the complete audio at the end.
-See the [conversion guide](../../../../vendor/llama.cpp/tools/tts/README.md#chatterbox).
+See the [conversion guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#chatterbox).
 
 | Option | Qwen3-TTS | Pocket TTS | Soprano |
 | --- | --- | --- | --- |
@@ -104,7 +104,7 @@ This requires native libraries built from the matching vendor revision.
 bitwise identical audio across hardware or backend versions.
 
 Pocket weights must be converted from the appropriate `languages/<name>`
-directory, following the [vendor TTS documentation](../../../../vendor/llama.cpp/tools/tts/README.md).
+directory, following the [vendor TTS documentation](../../../../vendor/llama.cpp/docs/multimodal/tts.md).
 For weights containing predefined voices, pass `voice="alba"` instead of
 `speaker_reference`; the two options cannot be combined. Available names depend
 on the weights. The low-level `mtmd_gen_audio_voice_name` API enumerates them.
@@ -113,7 +113,7 @@ on the weights. The low-level `mtmd_gen_audio_voice_name` API enumerates them.
 
 Soprano-80M and Soprano-1.1-80M require matching backbone and mmproj GGUF files
 converted from the same checkpoint, including its `decoder.pth`. See the
-[vendor conversion instructions](../../../../vendor/llama.cpp/tools/tts/README.md#soprano).
+[vendor conversion instructions](../../../../vendor/llama.cpp/docs/multimodal/tts.md#soprano).
 Use a native build with Soprano support and supply normalized English text;
 the wrapper does not normalize numbers or abbreviations.
 
@@ -162,6 +162,13 @@ Do not use or close the bound Llama concurrently. `llama.abort()` can interrupt
 an active request from another thread; synthesis raises `InterruptedError` and
 cleans up. Cancellation is checked between native calls and does not guarantee
 immediate interruption inside the mmproj encoder or vocoder.
+
+The wrapper passes native delivery defaults (`speed=1.0`, `loudness=0.0`) for
+existing TTS models. It does not expose delivery overrides or enable high-level
+Zonos3 synthesis yet. Native `set_input` code `2` raises `ValueError` for invalid
+model input; other failures raise `RuntimeError`, and cancellation takes
+precedence as `InterruptedError`. Failed requests release temporary resources
+so a later request can retry.
 
 ## Implementation and validation
 

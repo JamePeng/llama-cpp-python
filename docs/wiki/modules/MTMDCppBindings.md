@@ -2,7 +2,7 @@
 title: MTMD ctypes Bindings
 module_name: llama_cpp.mtmd_cpp
 source_file: llama_cpp/mtmd_cpp.py
-last_updated: 2026-11-15
+last_updated: 2026-11-16
 version_target: "latest"
 ---
 
@@ -58,6 +58,38 @@ Video options accept a `mtmd_helper_video_decoder` callback table. See the
 [custom decoder contract and runnable example](LlamaMultimodal.md#custom-video-decoders).
 The native `video` capability reports built-in decoding only; it does not count
 custom decoders.
+
+## Inspect media without loading a model
+
+`mtmd_helper_get_media_meta` reads encoded media metadata: image dimensions,
+audio source sample rate/duration, or video dimensions/duration/frame count.
+It returns `0` on success and `1` for an unrecognized format. Unknown duration
+and video frame count are `-1`; fields not applicable to the media type keep
+their defaults. Video probing uses ffprobe or the configured custom decoder's
+`open`/`close`, without reading frames. Keep custom callbacks alive for the call.
+
+```python
+import ctypes
+from pathlib import Path
+from llama_cpp import mtmd_cpp as mtmd
+
+payload = Path("/path/to/reference.wav").read_bytes()
+buffer = (ctypes.c_uint8 * len(payload)).from_buffer_copy(payload)
+metadata = mtmd.mtmd_helper_media_meta()
+options = mtmd.mtmd_helper_init_opt_default()
+if mtmd.mtmd_helper_get_media_meta(buffer, len(buffer), options, ctypes.byref(metadata)) != 0:
+    raise ValueError("Unrecognized media")
+print(mtmd.mtmd_helper_media_type(metadata.type).name)
+print(metadata.width, metadata.height, metadata.sample_rate, metadata.duration, metadata.n_frames)
+```
+
+The TTS input ABI includes `speed` (default `1.0`) and `loudness` (default `0.0`,
+model-defined loudness). Zero-initializing the structure leaves an invalid
+`speed=0`; use `mtmd_helper_gen_audio_inp_default` or explicitly set both defaults.
+`mtmd_helper_gen_audio_set_input` returns `2` for model-invalid input, including
+unsupported delivery overrides, and `1` for other errors. Non-default speed and
+loudness are currently supported only by the native Zonos3 pipeline. The Zonos3
+enum is bound; this does not enable it in the high-level speech generator.
 
 ## Source and compatibility
 

@@ -2065,7 +2065,7 @@ reconvert older backbones with the current vendor converter if this flag is
 missing. Python validates the metadata and paired capacity without changing
 `n_seq_max`: the value `2` already includes both CFG branches. Turbo does not
 require this flag or paired sequences.
-See the [vendor conversion guide](vendor/llama.cpp/tools/tts/README.md#chatterbox).
+See the [vendor conversion guide](vendor/llama.cpp/docs/multimodal/tts.md#chatterbox).
 
 Drama 3 uses helper-managed sampling and 44.1 kHz audio. Put `<|speaker:0|>`
 through `<|speaker:15|>` in the text for different speakers; omit `language`,
