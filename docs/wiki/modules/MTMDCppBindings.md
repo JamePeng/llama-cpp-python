@@ -88,8 +88,9 @@ model-defined loudness). Zero-initializing the structure leaves an invalid
 `speed=0`; use `mtmd_helper_gen_audio_inp_default` or explicitly set both defaults.
 `mtmd_helper_gen_audio_set_input` returns `2` for model-invalid input, including
 unsupported delivery overrides, and `1` for other errors. Non-default speed and
-loudness are currently supported only by the native Zonos3 pipeline. The Zonos3
-enum is bound; this does not enable it in the high-level speech generator.
+loudness are currently supported only by Zonos3. The high-level
+`MTMDAudioGenerator.create_speech` exposes both settings; see
+[Zonos3 synthesis](../examples/audio/audio-tts.md#zonos3).
 
 ## Source and compatibility
 

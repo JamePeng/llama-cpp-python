@@ -1407,7 +1407,8 @@ For Qwen3.5 image chat with speculative decoding, see
 ordinary-decoding comparison.
 
 For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
-with Qwen3-TTS Base, Pocket TTS and Soprano. See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
+with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3 and Zonos3.
+See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
 for supported models, downloadable weights, and examples.
 
 Below are the supported multi-modal models and their respective chat handlers (Python API) and chat formats (Server API).
@@ -2015,6 +2016,7 @@ or server `chat_format`.
 | Soprano-80M / Soprano-1.1-80M | `MTMDAudioGenerator` | Unsupported; fixed voice | English; omit `language` |
 | Chatterbox Turbo / Multilingual V3 | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Turbo: English; Multilingual V3: selectable |
 | Drama 3 | `MTMDAudioGenerator` | Unsupported; speaker tags in text | Determined by text; omit `language` |
+| Zonos3 Mini | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Follows text; `language` selects text normalization |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
 in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
@@ -2067,6 +2069,14 @@ missing. Python validates the metadata and paired capacity without changing
 require this flag or paired sequences.
 See the [vendor conversion guide](vendor/llama.cpp/docs/multimodal/tts.md#chatterbox).
 
+Zonos3 Mini supports predefined voices or `speaker_reference`, with optional
+`speed` (relative rate) and `loudness` (negative LUFS; `0` uses the model default).
+Choose a preset with `voice="Imogen_en-British_F_1"`, or supply
+`speaker_reference="/path/to/reference.wav"`; these options are mutually exclusive.
+Speed and loudness condition the model without guaranteeing exact duration or LUFS.
+The named `tts` template handles language-specific text normalization. Use matching
+backbone/F32 mmproj files; see the [Zonos3 guide](docs/wiki/examples/audio/audio-tts.md#zonos3).
+
 Drama 3 uses helper-managed sampling and 44.1 kHz audio. Put `<|speaker:0|>`
 through `<|speaker:15|>` in the text for different speakers; omit `language`,
 `voice` and `speaker_reference`. Only `seed` affects its sampling; generation
@@ -2082,7 +2092,11 @@ and speech may be incomplete. There is no streaming output yet.
 
 - [TTS API guide and limitations](docs/wiki/examples/audio/audio-tts.md)
 - [CLI examples: reference voices, multilingual and batch synthesis](examples/high_level_api/mtmd_tts.py)
-- [Streamlit playground: upload, recording, playback and downloads](examples/streamlit_tts/README.md)
+- [Streamlit playground: preset voices, reference audio, speed/loudness, playback and downloads](examples/streamlit_tts/README.md)
+
+The Streamlit demo supports Zonos3 Mini, Qwen3-TTS Base, Pocket TTS and Soprano.
+Speed and loudness controls are available for Zonos3 only; replace the
+`/path/to/model/...` placeholders with matching local GGUF files in the sidebar.
 
 ## Comprehensive Omni MultiModal Example: Gemma-4 (Vision + Audio + Video + Text)
 

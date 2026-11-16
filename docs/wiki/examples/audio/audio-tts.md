@@ -2,7 +2,7 @@
 
 `MTMDAudioGenerator` provides experimental, non-streaming speech synthesis using
 the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS,
-Soprano, Chatterbox and Drama 3
+Soprano, Chatterbox, Drama 3 and Zonos3
 backbones with matching audio generation mmproj files. Audio-input models such
 as Qwen3-ASR are not TTS models.
 
@@ -109,6 +109,67 @@ For weights containing predefined voices, pass `voice="alba"` instead of
 `speaker_reference`; the two options cannot be combined. Available names depend
 on the weights. The low-level `mtmd_gen_audio_voice_name` API enumerates them.
 
+### Zonos3
+
+Use a ZONOS3-Mini backbone and matching F32 mmproj. Output is mono 44.1 kHz.
+Omitting `voice` and `speaker_reference` selects the first voice in the weights
+(`Savannah_en-American_F_1` in the tested release). Set `voice` to another
+predefined name, or pass reference audio; these options are mutually exclusive.
+References use the first 60 seconds and do not require a transcript.
+
+```python
+from llama_cpp import Llama, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_multimodal import MTMDAudioGenerator
+
+llama = Llama(
+    model_path="/path/to/model/zonos3-mini.gguf",
+    embeddings=True, pooling_type=LLAMA_POOLING_TYPE_NONE,
+    n_ctx=4096, n_batch=128, n_ubatch=128, n_gpu_layers=-1,
+)
+generator = MTMDAudioGenerator(mmproj_path="/path/to/model/mmproj-zonos3-mini-f32.gguf")
+try:
+    audio = generator.create_speech(
+        llama=llama, text="Hello, your coffee is ready.",
+        voice="Imogen_en-British_F_1", speed=1.2, seed=42,
+    )
+    audio.save("voice.wav")
+    audio = generator.create_speech(
+        llama=llama, text="It costs $3.50.", language="en",
+        speaker_reference="/path/to/reference.wav", speed=0.8, loudness=-25,
+        response_format="pcm_f32", seed=42,
+    )
+    audio.save("cloned.pcm")
+finally:
+    generator.close()
+    llama.close()
+```
+
+| Option | Zonos3 behavior |
+| --- | --- |
+| `speed` | Positive relative speaking rate; `1.0` leaves the native rate condition at its default. |
+| `loudness` | Negative target LUFS; `0.0` leaves the native loudness condition at its default. |
+| `temperature` | Native frame sampling; `None` uses the model default (`0.75` in the current vendor). |
+| `language` | Selects text normalization, not the spoken language; the language follows the text. |
+| `top_k`, `top_p`, `min_p`, `repeat_penalty` | Zonos3 uses its native helper's sampling settings. |
+
+Delivery values select model conditioning buckets, rather than applying a
+waveform speed/volume filter; exact duration or measured LUFS is not guaranteed.
+Loudness has a stronger effect with cloned references; predefined voices tend
+to retain their reference level. Other TTS models reject non-default `speed` or
+`loudness` with `ValueError`.
+
+The backbone's named `tts` template is required and rendered before generation.
+It normalizes supported numbers, money and times using the packaged vendor
+Python pattern matcher. Use `en`, `fr`, `de`, `es`, `it`, `pt`, `ja` or `zh`/`cmn`
+for the corresponding normalization (regional tags are accepted); unrecognized
+languages pass through. Empty language uses English. Supply already normalized
+text for forms outside the template's coverage.
+
+For the CLI example, select the Zonos3 files and add
+`--voice Imogen_en-British_F_1 --speed 1.2`, or
+`--speaker /path/to/reference.wav --loudness -25`. See the
+[vendor Zonos3 guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#zonos3).
+
 ### Soprano
 
 Soprano-80M and Soprano-1.1-80M require matching backbone and mmproj GGUF files
@@ -163,9 +224,9 @@ an active request from another thread; synthesis raises `InterruptedError` and
 cleans up. Cancellation is checked between native calls and does not guarantee
 immediate interruption inside the mmproj encoder or vocoder.
 
-The wrapper passes native delivery defaults (`speed=1.0`, `loudness=0.0`) for
-existing TTS models. It does not expose delivery overrides or enable high-level
-Zonos3 synthesis yet. Native `set_input` code `2` raises `ValueError` for invalid
+The wrapper preserves delivery defaults (`speed=1.0`, `loudness=0.0`) for existing
+TTS models; only Zonos3 accepts non-default delivery values. Native `set_input`
+code `2` raises `ValueError` for invalid
 model input; other failures raise `RuntimeError`, and cancellation takes
 precedence as `InterruptedError`. Failed requests release temporary resources
 so a later request can retry.
