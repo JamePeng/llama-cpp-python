@@ -74,6 +74,30 @@ class TTSEngine:
             raise RuntimeError("Another request is using the model. Please try again shortly.")
         try:
             self._load(config)
+            assert self._generator is not None and self._llama is not None
             return self._generator.create_speech(llama=self._llama, **request)
+        finally:
+            self._lock.release()
+
+    def describe(self, config):
+        """Load the pair and copy voice names owned by the native context."""
+        if not self._lock.acquire(blocking=False):
+            raise RuntimeError("Another request is using the model. Please try again shortly.")
+        try:
+            self._load(config)
+            assert self._generator is not None and self._llama is not None
+            self._generator._init_mtmd_context(self._llama)
+            mtmd, ctx = self._generator._mtmd_cpp, self._generator.mtmd_ctx
+            info = mtmd.mtmd_gen_audio_get_info(ctx)
+            voices = []
+            for index in range(info.n_voices):
+                name = mtmd.mtmd_gen_audio_voice_name(ctx, index)
+                if name:
+                    voices.append(name.decode("utf-8"))
+            return dict(sample_rate=info.sample_rate, voices=voices)
+        except Exception:
+            # A failed projector initialization must not retain a partial pair.
+            self._unload()
+            raise
         finally:
             self._lock.release()

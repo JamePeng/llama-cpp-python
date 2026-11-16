@@ -1368,7 +1368,7 @@ def audio_pipeline(tmp_path, monkeypatch):
     def set_input(ctx, ptr):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
         assert inp.stream is False and inp.seq_id == 0
-        assert (inp.speed, inp.loudness) == (1.0, 0.0)
+        state.delivery = (inp.speed, inp.loudness)
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
         state.frame_temperature = inp.temp
         state.speaker = inp.speaker_ref
@@ -1389,7 +1389,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         return 0
 
     def get_output(ctx, rate, data, size, samples):
-        sample_rate = {3: 32000, 6: 44100}.get(state.kind, 24000)
+        sample_rate = {3: 32000, 6: 44100, 7: 44100}.get(state.kind, 24000)
         ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = sample_rate
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav:
@@ -1429,7 +1429,8 @@ def audio_pipeline(tmp_path, monkeypatch):
     sampler_factory = Mock(return_value=sampler)
     monkeypatch.setattr(generator, "_create_audio_sampler", sampler_factory)
     llama = SimpleNamespace(
-        _model=SimpleNamespace(classifier_free_guidance=Mock(return_value=True)),
+        _model=SimpleNamespace(classifier_free_guidance=Mock(return_value=True),
+                               model_chat_template=Mock(return_value="{{ messages[0].content }}")),
         _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64, n_seq_max=lambda: 2),
         context_params=SimpleNamespace(embeddings=True, kv_unified=True),
         _abort_event=threading.Event(), _native_abort_flag=ctypes.c_bool(False),
@@ -1459,6 +1460,7 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
     temperature = options.get("temperature")
     assert state.frame_temperature == pytest.approx(-1.0 if temperature is None else temperature)
     assert factory.call_args.kwargs["temperature"] == (0.8 if temperature is None else temperature)
+    assert state.delivery == (1.0, 0.0)
     assert state.prompts == [(text.encode(), 7)] * 2
     assert state.tokens == [42] * 6
     assert llama.reset.call_count == 4
@@ -1492,7 +1494,7 @@ def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames):
 @pytest.mark.parametrize("stage", [
     "set_input", "invalid_input", "step_prompt", "step_gen", "get_output", "missing_hidden", "abort", "invalid_output",
 ])
-@pytest.mark.parametrize("kind", [1, 3], ids=["qwen", "soprano"])
+@pytest.mark.parametrize("kind", [1, 3, 7], ids=["qwen", "soprano", "zonos3"])
 def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, stage, kind):
     generator, llama, backend, state, _, output = audio_pipeline
     state.kind = kind
@@ -1525,6 +1527,7 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
           for value in (-1, float("nan"), float("inf"), float("-inf"), 1e39)),
         (1, {"seed": -1}, None), (1, {"response_format": "mp3"}, None),
         (0, {}, "supported TTS"), (2, {}, "requires speaker_reference"),
+        (7, {"voice": "missing"}, "Unknown predefined voice"),
         (3, {"speaker_reference": "missing.wav"}, "speaker_reference"),
         (3, {"language": "en"}, "omit language"),
         (3, {"max_frames": 1}, "max_frames >= 2"),
@@ -1563,6 +1566,108 @@ def test_tts_pocket_predefined_voice(audio_pipeline, temperature):
     with pytest.raises(RuntimeError):
         generator.create_speech(llama=llama, text="hello", voice="alba")
     assert backend.mtmd_bitmap_free.call_count == 2
+
+
+@pytest.mark.parametrize("options", [
+    {}, {"voice": "alba", "response_format": "pcm_f32", "temperature": 0.7},
+    {"speaker_reference": b"RIFF0000WAVE", "speed": 1.25, "loudness": -20},
+])
+def test_tts_zonos_voice_reference_and_delivery(audio_pipeline, options):
+    generator, llama, backend, state, factory, _ = audio_pipeline
+    state.kind, state.voices = 7, 2
+    generator.capabilities = SimpleNamespace(audio_gen_spk_ref=False)
+    for _ in range(2):
+        audio = generator.create_speech(llama=llama, text="Hello", seed=42, **options)
+        assert audio.sample_rate == 44100 and audio.finish_reason == "stop"
+    assert state.delivery == (options.get("speed", 1), options.get("loudness", 0))
+    assert state.frame_temperature == pytest.approx(options.get("temperature", -1))
+    assert state.prompts == [(b"Hello", 42)] * 2
+    assert state.speaker == (789 if "speaker_reference" in options else 987)
+    assert backend.mtmd_bitmap_free.call_count == 2
+    llama._model.model_chat_template.assert_called_once_with(b"tts")
+    factory.assert_not_called()
+    llama._model.classifier_free_guidance.assert_not_called()
+
+
+def test_tts_demo_voice_query_reuse_and_cleanup(tmp_path, monkeypatch):
+    from pathlib import Path
+    from runpy import run_path
+    import llama_cpp
+    from llama_cpp import llama_multimodal
+
+    demo = run_path(str(Path(__file__).resolve().parents[1] / "examples/streamlit_tts/tts_engine.py"))
+    model = tmp_path / "model.gguf"
+    model.touch()
+    config = demo["ModelConfig"](str(model), str(model))
+    llama, generator = Mock(), Mock()
+    load = Mock(return_value=llama)
+    monkeypatch.setattr(llama_cpp, "Llama", load)
+    monkeypatch.setattr(llama_multimodal, "MTMDAudioGenerator", Mock(return_value=generator))
+    generator._mtmd_cpp.mtmd_gen_audio_get_info.return_value = SimpleNamespace(n_voices=1, sample_rate=44100)
+    generator._mtmd_cpp.mtmd_gen_audio_voice_name.return_value = b"preset"
+    engine = demo["TTSEngine"]()
+    try:
+        assert engine.describe(config) == dict(voices=["preset"], sample_rate=44100)
+        engine.synthesize(config, text="hello", voice="preset")
+        load.assert_called_once()
+        generator.create_speech.assert_called_once_with(llama=llama, text="hello", voice="preset")
+        with engine._lock:
+            for action in (engine.describe, engine.synthesize):
+                with pytest.raises(RuntimeError, match="Another request"):
+                    action(config)
+            with pytest.raises(RuntimeError, match="Wait before unloading"):
+                engine.unload()
+        generator._init_mtmd_context.side_effect = RuntimeError("projector failed")
+        with pytest.raises(RuntimeError, match="projector failed"):
+            engine.describe(config)
+        assert engine._config is None and not engine._lock.locked()
+    finally:
+        engine.close()
+    generator.close.assert_called_once()
+    llama.close.assert_called_once()
+
+
+def test_tts_zonos_normalization_and_template_errors(audio_pipeline):
+    from pathlib import Path
+    from llama_cpp import _utils
+
+    generator, llama, _, state, _, _ = audio_pipeline
+    state.kind = 7
+    root = Path(__file__).resolve().parents[1] / "vendor/llama.cpp"
+    # Package the reference implementation so installed wheels do not depend on vendor files.
+    assert Path(_utils.__file__).read_text("utf8").split("# Upstream reference follows.\n", 1)[1] == (root / "scripts/chat_tts_norm.py").read_text("utf8").replace("from __future__ import annotations\n", "")
+    source = (root / "models/templates/Zyphra-ZONOS3-Mini-tts.jinja").read_text("utf8")
+    llama._model.model_chat_template.return_value = source
+    for text, language, expected in (
+        ("It costs $3.50.", "en", "three dollars"),
+        ("I have 2 cats.", "en", "two cats"),
+        ("有2只猫。", "zh", "二"),
+        ("7 cats", "unsupported", "7 cats"),
+    ):
+        generator.create_speech(llama=llama, text=text, language=language)
+        assert expected in state.prompts[-1][0].decode()
+    del generator._zonos_template
+    llama._model.model_chat_template.return_value = None
+    with pytest.raises(ValueError, match="named 'tts'"):
+        generator.create_speech(llama=llama, text="hello")
+    llama._model.model_chat_template.return_value = "{{ messages[0].content }}"
+    assert generator.create_speech(llama=llama, text="retry").finish_reason == "stop"
+
+
+@pytest.mark.parametrize("kind", [1, 2, 3, 5, 6, 7])
+def test_tts_delivery_validation_preserves_other_models(audio_pipeline, kind):
+    generator, llama, backend, state, _, _ = audio_pipeline
+    state.kind = kind
+    for options in [*({"speed": v} for v in (0, -1, float("nan"), float("inf"), 1e39, 1e-50, True)),
+                    *({"loudness": v} for v in (1, float("nan"), float("-inf"), -1e39, True))]:
+        with pytest.raises(ValueError, match="speed|loudness"):
+            generator.create_speech(llama=llama, text="hello", **options)
+    if kind != 7:
+        for options in ({"speed": 1.1}, {"loudness": -20}):
+            with pytest.raises(ValueError, match="require Zonos3"):
+                generator.create_speech(llama=llama, text="hello", **options)
+    backend.mtmd_helper_gen_audio_init.assert_not_called()
+    llama.reset.assert_not_called()
 
 
 @pytest.mark.parametrize("multilingual,cfg,sequences,unified,error", [

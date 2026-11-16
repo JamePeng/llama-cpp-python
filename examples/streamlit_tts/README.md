@@ -3,16 +3,19 @@
 An English-language UI for local, non-streaming speech synthesis with
 `MTMDAudioGenerator`. Supports audio upload, microphone recording, reference
 paths/URLs, multiple languages, sequential requests, WAV playback/download,
-waveforms, GPU settings and mmproj Flash Attention AUTO/ON/OFF.
+waveforms, preset voice selection, Zonos3 speed/loudness controls, GPU settings
+and mmproj Flash Attention AUTO/ON/OFF.
 
 ## Supported models
 
 | Model | Requirements | Notes |
 | --- | --- | --- |
+| Zonos3 Mini | Backbone GGUF and matching audio mmproj | Predefined voices or reference audio; language normalization, speed and loudness conditioning. |
+| Soprano 1.1 80M | Backbone GGUF and matching audio mmproj | Fixed English voice; no reference audio. |
 | Qwen3-TTS Base | Backbone GGUF and matching audio-generation mmproj | Tested with the 12Hz 1.7B Base BF16 pair. Reference audio is optional; language is selectable. |
-| Pocket TTS | Backbone GGUF and matching language-pack mmproj | Tested with the English `english_2026-04_24l` BF16 pair. Reference audio is required; language comes from the weights. |
+| Pocket TTS | Backbone GGUF and matching language-pack mmproj | Tested with the English `english_2026-04_24l` BF16 pair. Use reference audio or a packaged voice if available; language comes from the weights. |
 
-Qwen CustomVoice, preset speaker IDs and audio-input-only models such as
+Qwen CustomVoice and audio-input-only models such as
 Qwen3-ASR are not supported. Other checkpoint sizes are not validated by this
 example. Qwen reference conditioning uses speaker embeddings only: neither
 `ref_text`-conditioned full cloning nor an `x_vector_only_mode` switch is exposed.
@@ -28,22 +31,31 @@ From the repository root:
 
 ```sh
 python -m pip install -r examples/streamlit_tts/requirements.txt
-cd examples/streamlit_tts
-python -m streamlit run app.py
+python -m streamlit run examples/streamlit_tts/app.py --server.address 127.0.0.1
 ```
 
-Open http://localhost:8501. The included configuration binds to localhost.
+Open http://localhost:8501. The command binds to localhost.
 If the port is occupied, append `--server.port 8502`.
 
 All model paths are placeholders under `/path/to/model/`. Replace both paths
 in the sidebar with your actual GGUF files before generating. No model weights
 or reference audio are bundled or downloaded automatically. Upload a reference,
-record one, enter a path/URL, or select **None** for Qwen without a reference.
+record one, enter a path/URL (for example `/path/to/reference.wav`), or select
+**Preset / default**. Click **Load model / list voices** to load the pair and
+populate the preset selector from the native model. Generating directly also
+loads the model and uses its default voice when available.
 
 The interface is English; Chinese and Japanese example sentences are retained
 to demonstrate multilingual synthesis with Qwen. English Pocket weights should
 be used with English text. Custom path fields do not validate model architecture;
 choose a matching preset and model pair.
+
+Zonos3 language controls text normalization for English, Chinese, Japanese,
+German, French, Spanish, Italian and Portuguese; it does not guarantee a voice
+is equally fluent in each language. Reference audio uses at most its first
+60 seconds. Speed and loudness are model conditioning, not exact duration or
+output LUFS guarantees; preset voices may limit the loudness effect.
+Temperature uses each model's default unless **Override model temperature** is checked.
 
 ## Behavior
 
@@ -61,11 +73,3 @@ choose a matching preset and model pair.
   limit can truncate speech; increase the limit or split the text.
 
 See the [TTS wiki](../../docs/wiki/examples/audio/audio-tts.md) for API details.
-
-## Test without model weights
-
-From this directory:
-
-```sh
-python -m unittest discover -s tests -v
-```
