@@ -1407,7 +1407,8 @@ For Qwen3.5 image chat with speculative decoding, see
 ordinary-decoding comparison.
 
 For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
-with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3 and Zonos3.
+with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3 and Zonos3,
+plus YuE2 stereo song generation.
 See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
 for supported models, downloadable weights, and examples.
 
@@ -2017,6 +2018,7 @@ or server `chat_format`.
 | Chatterbox Turbo / Multilingual V3 | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Turbo: English; Multilingual V3: selectable |
 | Drama 3 | `MTMDAudioGenerator` | Unsupported; speaker tags in text | Determined by text; omit `language` |
 | Zonos3 Mini | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Follows text; `language` selects text normalization |
+| YuE2-3B (songs) | `MTMDAudioGenerator` | Unsupported; `voice` selects score planning | Follows lyrics; omit `language` |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
 in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
@@ -2085,6 +2087,18 @@ is also bounded by the native codebook tower's 4096-position limit.
 For Soprano, use matching backbone and mmproj files, supply English text, and
 omit both `speaker_reference` and `language`. See the
 [Soprano guide](docs/wiki/examples/audio/audio-tts.md#soprano) for conversion and usage.
+
+YuE2 generates 48 kHz stereo songs from `[Tags]`/`[Lyrics]` text. Use the model's
+training context (`n_ctx=0`) and F16 KV; `voice="full"`, `"melody"` or `"off"`
+selects score planning. Pass `max_frames=None` for the native generation limit.
+The native limit is about 6 minutes (9000 audio codes at 40 ms each); EOS or
+context pressure can end a song earlier. With `voice="off"`, `max_frames=750`
+caps audio near 30 seconds; in full/melody modes, score tokens share that budget.
+These limits do not enforce an exact duration. CLI `--max-frames 0` selects the
+native limit.
+Guidance requires a CFG-enabled backbone with `n_seq_max=2, kv_unified=True`.
+See the [YuE2 guide](docs/wiki/examples/audio/audio-tts.md#yue2) for conversion,
+`cfg_scale`, `flow_steps`, and examples.
 
 The result contains complete WAV or raw float32 PCM audio. Invalid audio raises
 an error; `finish_reason="length"` means the generation-step limit was reached

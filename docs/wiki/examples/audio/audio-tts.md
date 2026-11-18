@@ -2,7 +2,7 @@
 
 `MTMDAudioGenerator` provides experimental, non-streaming speech synthesis using
 the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS,
-Soprano, Chatterbox, Drama 3 and Zonos3
+Soprano, Chatterbox, Drama 3 and Zonos3, plus YuE2 song generation,
 backbones with matching audio generation mmproj files. Audio-input models such
 as Qwen3-ASR are not TTS models.
 
@@ -170,6 +170,109 @@ For the CLI example, select the Zonos3 files and add
 `--speaker /path/to/reference.wav --loudness -25`. See the
 [vendor Zonos3 guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#zonos3).
 
+### YuE2
+
+YuE2-3B generates 48 kHz stereo songs from style tags and lyrics. Use matching
+backbone and mmproj GGUF files; the projector includes the separate YuE2-Vae
+decoder. Follow the [vendor conversion guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#yue2).
+
+```python
+from llama_cpp import Llama, LLAMA_POOLING_TYPE_NONE
+from llama_cpp.llama_multimodal import MTMDAudioGenerator
+
+llama = Llama(
+    model_path="/path/to/model/YuE2-3B-BF16.gguf",
+    n_ctx=0, n_seq_max=2, kv_unified=True, n_batch=128, n_ubatch=128,
+    n_gpu_layers=-1, embeddings=True, pooling_type=LLAMA_POOLING_TYPE_NONE,
+)
+generator = MTMDAudioGenerator(mmproj_path="/path/to/model/mmproj-YuE2-3B-BF16.gguf")
+try:
+    audio = generator.create_speech(
+        llama=llama,
+        text="[Tags]\nGentle acoustic pop, warm vocals\n[Lyrics]\n[Verse]\nMorning light across the bay\nWe begin another day\n",
+        voice="full", max_frames=None, seed=42,
+    )
+    audio.save("song.wav")
+    print(audio.channels, audio.sample_rate, audio.duration)
+finally:
+    generator.close()
+    llama.close()
+```
+
+`voice` selects score planning: `full` (default), `melody`, or `off`; it is not
+a predefined speaker. Omit `language` and `speaker_reference`. An optional
+`\n[ABC]\n<score>` suffix supplies a score in full/melody modes.
+
+Use a UTF-8 song file with style tags and lyrics, for example:
+
+```text
+[Tags]
+Gentle acoustic pop, warm vocals, soft guitar, relaxed tempo
+[Lyrics]
+[Verse]
+Morning light across the bay
+We begin another day
+[Chorus]
+Carry every hope along
+Let the morning be our song
+```
+
+- Keep the model's training context (24576 positions per sequence) and F16 KV
+  for both keys and values. `n_ctx=0` selects the model context.
+- `cfg_scale=0` uses native defaults: `1.01` in off mode, `1.0` otherwise.
+  `1.0` disables guidance; other values require a CFG-enabled backbone and
+  `n_seq_max >= 2, kv_unified=True`. Python preserves the supplied sequence count.
+- `flow_steps=0` uses the native 32-step NAR solver. Smaller positive values
+  reduce computation and may reduce quality. The accepted range is 1–1024.
+- `temperature` controls code sampling; other token-sampling options follow
+  the native pipeline. Non-default `cfg_scale`/`flow_steps` are currently YuE2-only.
+- Prefer `max_frames=None` for a complete song. A finite budget counts score
+  tokens and code-generation steps together. Stopping before the first audio
+  code cannot produce audio; shorter planning via `voice="off"` helps bounded tests.
+
+**Duration and generation limits**
+
+The native pipeline allows up to 4096 score tokens and about 9000 audio codes.
+Each audio code represents 40 ms, giving an upper limit of **about 6 minutes**.
+Model EOS or context pressure can end a song earlier; increasing `max_frames`
+or context capacity does not remove the native audio-code limit.
+
+Without a caller limit, native EOS sampling starts after about 200 audio codes
+(roughly 8 seconds). This is not a guaranteed output range: an explicit step
+budget or context limit can produce a shorter clip.
+
+| Use | Python options | Approximate audio limit |
+| --- | --- | --- |
+| Short preview | `voice="off", max_frames=64` | 2.56 seconds |
+| Default step budget, without score planning | `voice="off", max_frames=512` | 20.48 seconds |
+| Up to half a minute | `voice="off", max_frames=750` | 30 seconds |
+| Up to one minute | `voice="off", max_frames=1500` | 60 seconds |
+| Let the model finish | `max_frames=None` | Model EOS/context limit, at most about 6 minutes |
+
+These are caps, not requested durations; the decoder also trims a small number
+of boundary samples. In `full`/`melody` modes, score planning consumes part of
+the same budget, so `max_frames * 0.04` does not predict the audio duration.
+There is no exact-duration argument. A 26-second song ending with
+`finish_reason="stop"` is a normal model ending, not the maximum supported length.
+
+`finish_reason="length"` means the Python step budget was exhausted. `"stop"`
+means the native pipeline stopped, which can include EOS or a native
+code/context limit. Reuse the loaded model and generator for sequential calls;
+each request resets generation state. `seed` controls sampling; repeatability
+also depends on using the same backend and configuration.
+
+CLI input can come from a UTF-8 file:
+
+```sh
+python -m examples.high_level_api.mtmd_tts --model /path/to/model/YuE2-3B-BF16.gguf --mmproj /path/to/model/mmproj-YuE2-3B-BF16.gguf --text-file /path/to/song.txt --voice off --ctx-size 0 --cfg --max-frames 0 --gpu-layers -1 --mmproj-gpu --output song.wav
+```
+
+CLI `--max-frames 0` corresponds to Python `max_frames=None`. For a bounded
+preview, use `--voice off --max-frames 750` instead; this caps audio near 30 seconds,
+but the model may finish earlier. Use `--voice full` or `--voice melody` for
+score planning. The high-level API returns audio after generation completes;
+it does not expose the native streaming mode.
+
 ### Soprano
 
 Soprano-80M and Soprano-1.1-80M require matching backbone and mmproj GGUF files
@@ -206,16 +309,20 @@ accepted directly.
 
 `GeneratedAudio` owns its `data` bytes after the request returns:
 
-- `format="wav"`: complete mono PCM16 little-endian WAV, the default.
-- `format="pcm_f32"`: raw native-endian float32 mono samples, without a header.
-- `sample_rate` and `n_samples`: native output metadata; `duration` is seconds.
-- `finish_reason="stop"`: the helper signalled end-of-speech.
+- `format="wav"`: complete PCM16 little-endian WAV, the default.
+- `format="pcm_f32"`: interleaved native-endian float32 samples, without a header.
+- `channels`: native channel count; YuE2 uses stereo, the supported speech models use mono.
+- `sample_rate` and `n_samples`: output rate and samples **per channel**;
+  `duration = n_samples / sample_rate` is seconds.
+- `finish_reason="stop"`: the native pipeline ended (EOS or a native model/context limit).
 - `finish_reason="length"`: the generation-step budget was exhausted; speech
   may be cut off. Increase `max_frames` and provide sufficient context capacity.
 
 `save()` writes these bytes unchanged. A `.wav` extension does not convert raw
 PCM to WAV. `max_frames=512` bounds helper steps, not text tokens or seconds;
-Pocket's chunk transitions also consume helper steps. There is no automatic
+Pocket's chunk transitions also consume helper steps. Pass `max_frames=None`
+to use the native model limit; a native limit of `0` runs until model EOS.
+There is no automatic
 context shifting in this wrapper. Native decode failures raise `RuntimeError`.
 
 Calls on one generator cannot overlap, and it cannot be closed while generating.
@@ -230,6 +337,9 @@ code `2` raises `ValueError` for invalid
 model input; other failures raise `RuntimeError`, and cancellation takes
 precedence as `InterruptedError`. Failed requests release temporary resources
 so a later request can retry.
+
+The low-level bindings also include MiniMax-Music3 and Fish S2. Their
+model-specific generation/conditioning is not enabled by `create_speech` yet.
 
 ## Implementation and validation
 

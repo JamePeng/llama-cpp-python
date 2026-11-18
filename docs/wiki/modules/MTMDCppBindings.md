@@ -92,6 +92,23 @@ loudness are currently supported only by Zonos3. The high-level
 `MTMDAudioGenerator.create_speech` exposes both settings; see
 [Zonos3 synthesis](../examples/audio/audio-tts.md#zonos3).
 
+The input also includes `speaker_ref_text` (optional reference transcript),
+`cfg_scale` and `flow_steps` (`0` selects model defaults). These options are
+model-specific; non-default CFG/flow settings are rejected by unsupported models.
+`mtmd_gen_inp` includes serialized backbone-state input and flow/guidance fields
+for YuE2 and MiniMax-Music3; initialize it with `mtmd_gen_inp_default(ctx)`.
+YuE2 is also supported by the high-level generator; see
+[song synthesis](../examples/audio/audio-tts.md#yue2).
+MiniMax-Music3 and Fish S2 enums are bound, but those pipelines are not yet
+enabled by `create_speech`.
+
+`mtmd_gen_audio_get_info` reports `n_channels`. Low-level `mtmd_gen_out.n_samples`
+counts samples across all channels; helper `get_output` counts samples **per
+channel**. Raw float32 PCM is interleaved, and WAV headers carry the channel count.
+`mtmd_helper_gen_audio_max_frames` returns the model's default helper-step limit;
+`0` lets the pipeline stop at EOS or its own limits. Helper initialization can return NULL
+when the backbone context cannot run the model, including insufficient capacity.
+
 ## Source and compatibility
 
 [`mtmd_cpp.py`](../../../llama_cpp/mtmd_cpp.py) documents signatures, callbacks,
