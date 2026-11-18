@@ -61,6 +61,9 @@ def test_native_context_parameter_layouts():
         ("include/llama.h", "llama_model_params"),
         ("include/llama.h", "llama_context_params"),
         ("tools/mtmd/mtmd.h", "mtmd_context_params"),
+        *(("tools/mtmd/mtmd.h", name) for name in (
+            "mtmd_gen_audio_info", "mtmd_gen_inp", "mtmd_gen_out", "mtmd_gen_state_params",
+        )),
         ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
         *(('tools/mtmd/mtmd-helper.h', name) for name in (
             'mtmd_helper_video_stream_info', 'mtmd_helper_video_decoder',
@@ -108,6 +111,10 @@ def test_native_context_parameter_layouts():
         for (field, actual_type), (_, expected_type) in zip(actual._fields_, fields):
             assert getattr(actual, field).offset == getattr(expected, field).offset, (name, field)
             assert (ctypes.sizeof(actual_type), ctypes.alignment(actual_type)) == (ctypes.sizeof(expected_type), ctypes.alignment(expected_type)), (name, field)
+    audio = mtmd_cpp.mtmd_helper_gen_audio_inp_default()
+    assert (audio.speed, audio.loudness, audio.cfg_scale, audio.flow_steps) == (1.0, 0.0, 0.0, 0)
+    assert audio.speaker_ref_text is None and audio.out_type == mtmd_cpp.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
+    assert mtmd_cpp.mtmd_helper_gen_audio_max_frames(None) == 0
 
 
 @pytest.mark.parametrize("share", [-0.1, 1.1, float("nan"), float("inf"), float("-inf"), 0.0, 0.5, 1.0])
@@ -1505,6 +1512,8 @@ def test_vocabulary_only_model_has_no_token_embeddings(vocabulary_model):
     output = (ctypes.c_float * 1)(123)
     assert llama_cpp.llama_model_get_tok_embd_rows(model, tokens, 1, output) == 0
     assert output[0] == 123
+    assert llama_cpp.llama_model_meta_arr_n(model, b"tokenizer.tts_dicts") == -1
+    assert llama_cpp.llama_model_meta_arr_str(model, b"tokenizer.tts_dicts", 0) is None
 
 
 def test_llama_cpp_tokenization(vocabulary_model):

@@ -1355,6 +1355,9 @@ def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
 #     MTMD_GEN_AUDIO_TYPE_CHATTERBOX,
 #     MTMD_GEN_AUDIO_TYPE_DRAMA3,
 #     MTMD_GEN_AUDIO_TYPE_ZONOS3,
+#     MTMD_GEN_AUDIO_TYPE_YUE2,
+#     MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3,
+#     MTMD_GEN_AUDIO_TYPE_FISH_S2,
 # };
 class mtmd_gen_audio_type(enum.IntEnum):
     """Generated audio pipeline type."""
@@ -1366,10 +1369,14 @@ class mtmd_gen_audio_type(enum.IntEnum):
     MTMD_GEN_AUDIO_TYPE_CHATTERBOX = 5
     MTMD_GEN_AUDIO_TYPE_DRAMA3    = 6
     MTMD_GEN_AUDIO_TYPE_ZONOS3    = 7
+    MTMD_GEN_AUDIO_TYPE_YUE2      = 8
+    MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3 = 9
+    MTMD_GEN_AUDIO_TYPE_FISH_S2   = 10
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;
 #     int32_t sample_rate; // in Hz, for example 24000 for qwen3tts
+#     int32_t n_channels;  // 1 = mono, 2 = stereo (audio is interleaved)
 #     const char * model_variant; // name of the weight variant, can be nullptr if not applicable
 #     int32_t n_voices; // predefined voices
 # };
@@ -1379,6 +1386,7 @@ class mtmd_gen_audio_info(Structure):
     _fields_ = [
         ("type", c_int),
         ("sample_rate", c_int32),
+        ("n_channels", c_int32),
         ("model_variant", c_char_p),
         ("n_voices", c_int32),
     ]
@@ -1386,6 +1394,7 @@ class mtmd_gen_audio_info(Structure):
     if TYPE_CHECKING:
         type: int
         sample_rate: int
+        n_channels: int
         model_variant: Optional[bytes]
         n_voices: int
 
@@ -1459,6 +1468,12 @@ class mtmd_gen_process_type(enum.IntEnum):
 #     size_t    n_codes;
 #     const float * feats;
 #     size_t        n_feats;
+#     // YuE2 GEN_CODE: serialized backbone sequence state and position count
+#     const uint8_t * backbone_state;
+#     size_t          backbone_state_size;
+#     int32_t         backbone_n_past;
+#     int32_t n_steps; // flow-matching steps; <= 0 uses the model default
+#     float cfg_scale; // residual-code guidance; <= 0 uses the model default
 # };
 class mtmd_gen_inp(Structure):
     """Audio generation input."""
@@ -1478,6 +1493,11 @@ class mtmd_gen_inp(Structure):
         ("n_codes", c_size_t),
         ("feats", POINTER(c_float)),
         ("n_feats", c_size_t),
+        ("backbone_state", POINTER(c_uint8)),
+        ("backbone_state_size", c_size_t),
+        ("backbone_n_past", c_int32),
+        ("n_steps", c_int32),
+        ("cfg_scale", c_float),
     ]
 
     if TYPE_CHECKING:
@@ -1495,6 +1515,11 @@ class mtmd_gen_inp(Structure):
         n_codes: int
         feats: POINTER[c_float]
         n_feats: int
+        backbone_state: POINTER[c_uint8]
+        backbone_state_size: int
+        backbone_n_past: int
+        n_steps: int
+        cfg_scale: float
 
 # struct mtmd_gen_out {
 #     // note: output memory is owned by the state, valid until the next process() call with this state
@@ -1508,12 +1533,13 @@ class mtmd_gen_inp(Structure):
 #     bool is_eos; // only set by pipelines having the EOS head inside mmproj
 #     // for MTMD_GEN_PROCESS_TYPE_GEN_WAV
 #     const float * audio;
-#     size_t        n_samples;
+#     size_t        n_samples; // total over all channels
 # };
 class mtmd_gen_out(Structure):
     """Audio generation output.
     Memory is owned by mtmd_gen_state and valid until
     the next mtmd_gen_audio_process() call with this state, or state destruction.
+    Audio is interleaved; n_samples counts samples across all channels.
     """
 
     _fields_ = [
@@ -2407,12 +2433,12 @@ mtmd_helper_gen_audio_p = NewType("mtmd_helper_gen_audio_p", int)
 mtmd_helper_gen_audio_p_ctypes = c_void_p
 
 # enum mtmd_helper_gen_audio_outtype {
-#     MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM, // raw PCM
-#     MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV, // WAV PCM 16-bit LE, mono
+#     MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM, // raw F32 PCM, channels interleaved
+#     MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV, // WAV PCM 16-bit LE
 # };
 class mtmd_helper_gen_audio_outtype(enum.IntEnum):
-    MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM = 0  # raw PCM
-    MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV = 1  # WAV PCM 16-bit LE, mono
+    MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM = 0  # raw F32 PCM, channels interleaved
+    MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV = 1  # WAV PCM 16-bit LE
 
 
 class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
@@ -2431,6 +2457,7 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     int32_t n_past; // > 0 continues an existing sequence (LFM3A only)
 #     enum mtmd_helper_gen_audio_out_mode out_mode;
 #     mtmd_bitmap * speaker_ref; // optional, can be NULL
+#     const char * speaker_ref_text; // optional reference transcript (e.g. Fish S2)
 #     const char * lang; // optional, can be NULL
 #     int32_t  top_k;
 #     float    top_p;
@@ -2438,6 +2465,8 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     uint32_t seed; // UINT32_MAX for random (default: random)
 #     float speed;    // > 0, default 1.0 (model pace)
 #     float loudness; // < 0 LUFS, default 0.0 (model loudness)
+#     float cfg_scale; // > 0 guidance scale; 0.0 uses the model default
+#     int32_t flow_steps; // flow solver steps; 0 uses the model default
 #     enum mtmd_helper_gen_audio_outtype out_type;
 # };
 class mtmd_helper_gen_audio_inp(Structure):
@@ -2449,6 +2478,7 @@ class mtmd_helper_gen_audio_inp(Structure):
         ("n_past", c_int32),
         ("out_mode", c_int),
         ("speaker_ref", mtmd_bitmap_p_ctypes),
+        ("speaker_ref_text", c_char_p),
         ("lang", c_char_p),
         ("top_k", c_int32),
         ("top_p", c_float),
@@ -2456,6 +2486,8 @@ class mtmd_helper_gen_audio_inp(Structure):
         ("seed", c_uint32),
         ("speed", c_float),
         ("loudness", c_float),
+        ("cfg_scale", c_float),
+        ("flow_steps", c_int32),
         ("out_type", c_int),
     ]
 
@@ -2467,6 +2499,7 @@ class mtmd_helper_gen_audio_inp(Structure):
         n_past: int
         out_mode: int
         speaker_ref: mtmd_bitmap_p
+        speaker_ref_text: Optional[bytes]
         lang: Optional[bytes]
         top_k: int
         top_p: float
@@ -2474,6 +2507,8 @@ class mtmd_helper_gen_audio_inp(Structure):
         seed: int
         speed: float
         loudness: float
+        cfg_scale: float
+        flow_steps: int
         out_type: int
 
 # MTMD_API struct mtmd_helper_gen_audio_inp mtmd_helper_gen_audio_inp_default(void);
@@ -2500,7 +2535,7 @@ def mtmd_helper_gen_audio_init(
     /,
 ) -> mtmd_helper_gen_audio_p:
     """
-    Initialize the experimental audio generation helper context.
+    Initialize the audio helper; NULL means the model/context cannot run it.
     """
     ...
 
@@ -2526,6 +2561,12 @@ def mtmd_helper_gen_audio_reset(
     ctx: mtmd_helper_gen_audio_p,
     /,
 ):
+    ...
+
+# MTMD_API int32_t mtmd_helper_gen_audio_max_frames(const mtmd_helper_gen_audio * ctx);
+@ctypes_function_mtmd("mtmd_helper_gen_audio_max_frames", [mtmd_helper_gen_audio_p_ctypes], c_int32)
+def mtmd_helper_gen_audio_max_frames(ctx: mtmd_helper_gen_audio_p) -> int:
+    """Return the model's default frame limit; 0 means it stops by itself."""
     ...
 
 # // returns 0 on success, 2 for invalid model input, 1 for other errors
@@ -2697,7 +2738,8 @@ def mtmd_helper_gen_audio_get_output(
     out_data is owned by the helper context and remains valid until the next
     get_output() or reset() call.
 
-    out_n_samples (optional, can be NULL) receives the number of generated PCM samples.
+    out_n_samples (optional, can be NULL) counts PCM samples per channel.
+    Read n_channels from mtmd_gen_audio_get_info(); raw PCM is interleaved.
     In stream mode, returns only new audio; out_data_len is zero until a window is ready.
     """
     ...

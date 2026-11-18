@@ -2005,6 +2005,20 @@ def llama_model_meta_val_str_by_index(
     ...
 
 
+# LLAMA_API int32_t llama_model_meta_arr_n(const struct llama_model * model, const char * key);
+@ctypes_function("llama_model_meta_arr_n", [llama_model_p_ctypes, ctypes.c_char_p], ctypes.c_int32)
+def llama_model_meta_arr_n(model: llama_model_p, key: bytes, /) -> int:
+    """Return the retained string-array length, or -1 if absent (TTS dictionaries only)."""
+    ...
+
+
+# LLAMA_API const char * llama_model_meta_arr_str(const struct llama_model * model, const char * key, int32_t i);
+@ctypes_function("llama_model_meta_arr_str", [llama_model_p_ctypes, ctypes.c_char_p, ctypes.c_int32], ctypes.c_char_p)
+def llama_model_meta_arr_str(model: llama_model_p, key: bytes, i: int, /) -> Optional[bytes]:
+    """Return a model-owned string-array element, or None when missing."""
+    ...
+
+
 # // Get a string describing the model type
 # LLAMA_API int32_t llama_model_desc(const struct llama_model * model, char * buf, size_t buf_size);
 @ctypes_function(

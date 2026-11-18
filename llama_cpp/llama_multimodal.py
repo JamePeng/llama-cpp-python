@@ -43,6 +43,7 @@ if TYPE_CHECKING:
     import llama_cpp.mtmd_cpp as mtmd_cpp
 
 from ._logger import ggml_log_callback
+from ._ggml import GGMLType
 
 from llama_cpp.llama_chat_format import (
     _convert_completion_to_chat,
@@ -994,7 +995,7 @@ class MTMDEmbeddingHandler(MTMDBaseHandler):
 
 @dataclass(frozen=True)
 class GeneratedAudio:
-    """Owned mono audio data. Raw PCM uses native-endian float32 samples."""
+    """Owned audio; n_samples is per channel, raw PCM is interleaved native float32."""
 
     data: bytes
     sample_rate: int
@@ -1014,7 +1015,7 @@ class GeneratedAudio:
 
 
 class MTMDAudioGenerator(MTMDBaseHandler):
-    """Non-streaming speech synthesis using the vendor audio generation helper.
+    """Non-streaming audio generation using the vendor helper.
 
     Use a dedicated Llama with embeddings=True and pooling_type=NONE. Requests
     clear its KV and Python token state. Do not use or close that Llama from
@@ -1074,46 +1075,69 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             model=llama._model,
         )
 
-    def _render_zonos_prompt(self, llama, text, language, voice):
+    def _render_tts_prompt(self, llama, text, language, voice):
         """Render the model's named TTS template, including native-compatible normalization."""
-        from ._utils import tts_norm_scan, tts_norm_sub
+        from ._utils import make_tts_dict, tts_norm_scan, tts_norm_sub
 
-        if not hasattr(self, "_zonos_template"):
+        if not hasattr(self, "_tts_template"):
             source = llama._model.model_chat_template(b"tts")
             if not source:
-                raise ValueError("Zonos3 requires a named 'tts' template in the backbone GGUF")
+                raise ValueError("This audio model requires a named 'tts' template in the backbone GGUF")
+            # Model dictionaries contain string keys and JSON values; match native skip rules.
+            model, lib = llama._model.model, llama_cpp_lib
+            dictionaries = {}
+            for index in range(lib.llama_model_meta_arr_n(model, b"tokenizer.tts_dicts")):
+                name = lib.llama_model_meta_arr_str(model, b"tokenizer.tts_dicts", index)
+                if name is None:
+                    continue
+                prefix = b"tokenizer.tts_dict." + name
+                count = lib.llama_model_meta_arr_n(model, prefix + b".keys")
+                if count < 0 or lib.llama_model_meta_arr_n(model, prefix + b".values") != count:
+                    continue
+                arrays = [[lib.llama_model_meta_arr_str(model, prefix + suffix, i)
+                           for i in range(count)] for suffix in (b".keys", b".values")]
+                if any(value is None for values in arrays for value in values):
+                    continue
+                dictionaries[name.decode("utf-8")] = {
+                    label: [value.decode("utf-8") for value in values]
+                    for label, values in zip(("keys", "values"), arrays)
+                }
             environment = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
             environment.globals.update(tts_norm_scan=tts_norm_scan, tts_norm_sub=tts_norm_sub,
+                                       tts_dict=make_tts_dict(dictionaries),
                                        raise_exception=Jinja2ChatFormatter.raise_exception)
-            self._zonos_template = environment.from_string(source)
-        prompt = self._zonos_template.render(messages=[{"role": "user", "content": text}],
+            self._tts_template = environment.from_string(source)
+        prompt = self._tts_template.render(messages=[{"role": "user", "content": text}],
                                              language=language or "", voice=voice or "")
         if not prompt.strip() or "\x00" in prompt:
-            raise ValueError("Zonos3 TTS template returned empty or invalid text")
+            raise ValueError("TTS template returned empty or invalid text")
         return prompt
 
     @staticmethod
-    def _validate_audio(data: bytes, response_format: str, rate: int, samples: int) -> None:
+    def _validate_audio(data: bytes, response_format: str, rate: int, samples: int, channels: int = 1) -> None:
         """Reject malformed buffers and clearly invalid signals, not low volume speech."""
         import numpy as np
 
+        if rate <= 0 or channels <= 0:
+            raise RuntimeError("TTS returned invalid sample rate or channel count")
         if samples <= 0:
             raise RuntimeError("TTS returned empty audio")
         if response_format == "wav":
             try:
                 with wave.open(io.BytesIO(data), "rb") as wav:
-                    if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()) != (1, 2, rate, samples):
+                    if (wav.getnchannels(), wav.getsampwidth(), wav.getframerate(), wav.getnframes()) != (channels, 2, rate, samples):
                         raise RuntimeError("TTS WAV metadata does not match the output metadata")
                     payload = wav.readframes(samples)
-                if len(payload) != samples * 2:
+                if len(payload) != samples * channels * 2:
                     raise RuntimeError("TTS returned truncated WAV samples")
                 signal = np.frombuffer(payload, dtype="<i2").astype(np.float32) / 32768.0
             except (wave.Error, EOFError) as exc:
                 raise RuntimeError("TTS returned malformed WAV data") from exc
         else:
-            if len(data) != samples * 4:
+            if len(data) != samples * channels * 4:
                 raise RuntimeError("TTS PCM byte length does not match the sample count")
             signal = np.frombuffer(data, dtype=np.float32)
+        signal = signal.reshape(samples, channels)
         if not np.isfinite(signal).all():
             raise RuntimeError("TTS returned non-finite audio samples (NaN or infinity)")
         if np.max(np.abs(signal)) > 1.0:
@@ -1181,11 +1205,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         if rate.value <= 0 or samples.value < 0 or (size.value and not data):
             raise RuntimeError("TTS returned invalid audio metadata or buffer")
         audio_data = ctypes.string_at(data, size.value) if size.value else b""
-        self._validate_audio(audio_data, response_format, rate.value, samples.value)
+        channels = mtmd.mtmd_gen_audio_get_info(self.mtmd_ctx).n_channels
+        self._validate_audio(audio_data, response_format, rate.value, samples.value, channels)
         return GeneratedAudio(
             data=audio_data,
             sample_rate=rate.value, n_samples=samples.value,
-            format=response_format, finish_reason=finish_reason,
+            format=response_format, finish_reason=finish_reason, channels=channels,
         )
 
     def create_speech(
@@ -1197,7 +1222,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         speaker_reference: Optional[Union[str, os.PathLike[str], bytes]] = None,
         voice: Optional[str] = None,
         response_format: Literal["wav", "pcm_f32"] = "wav",
-        max_frames: int = 512,
+        max_frames: Optional[int] = 512,
         seed: Optional[int] = None,
         temperature: Optional[float] = None,
         top_k: int = 40,
@@ -1206,6 +1231,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         repeat_penalty: float = 1.05,
         speed: float = 1.0,
         loudness: float = 0.0,
+        cfg_scale: float = 0.0,
+        flow_steps: int = 0,
     ) -> GeneratedAudio:
         """Synthesize complete audio and return a Python-owned result.
 
@@ -1227,8 +1254,13 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         (> 0) and loudness (negative LUFS, or 0 for the model default). Its
         named TTS template normalizes text using language; other sampling
         options follow the native helper. Delivery overrides require Zonos3.
+        YuE2 generates 48 kHz stereo songs from [Tags]/[Lyrics] text. voice
+        selects full/melody/off planning; cfg_scale and flow_steps default to
+        native settings. Use the model's training context and F16 KV; guided
+        requests need a CFG-enabled backbone and two sequences with unified KV.
         References accept encoded audio bytes, local paths, URLs or data URIs.
-        max_frames limits helper generation steps, not text tokens or seconds.
+        max_frames limits helper steps, not text tokens or seconds. None uses
+        the native model limit; zero lets the pipeline stop at EOS or its own limits.
         Llama.abort() interrupts synthesis with InterruptedError.
         """
         if not self._request_lock.acquire(blocking=False):
@@ -1248,8 +1280,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 raise ValueError("voice and speaker_reference are mutually exclusive")
             if response_format not in ("wav", "pcm_f32"):
                 raise ValueError("response_format must be 'wav' or 'pcm_f32'")
-            if isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0:
-                raise ValueError("max_frames must be a positive integer")
+            if max_frames is not None and (
+                isinstance(max_frames, bool) or not isinstance(max_frames, int) or max_frames <= 0
+            ):
+                raise ValueError("max_frames must be a positive integer or None")
             if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int) or not 0 <= seed <= 0xFFFFFFFF):
                 raise ValueError("seed must be a uint32 integer or None")
             if not isinstance(top_k, int) or isinstance(top_k, bool) or not -(2**31) <= top_k < 2**31:
@@ -1268,6 +1302,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             if (isinstance(loudness, bool) or not isinstance(loudness, (int, float)) or
                 not math.isfinite(loudness) or not -3.4028234663852886e38 <= loudness <= 0):
                 raise ValueError("loudness must be finite negative LUFS, or 0 for the model default")
+            if (isinstance(cfg_scale, bool) or not isinstance(cfg_scale, (int, float)) or
+                not math.isfinite(cfg_scale) or not 0 <= cfg_scale <= 3.4028234663852886e38 or
+                (cfg_scale > 0 and ctypes.c_float(cfg_scale).value == 0)):
+                raise ValueError("cfg_scale must be a finite nonnegative float32 value")
+            if isinstance(flow_steps, bool) or not isinstance(flow_steps, int) or not 0 <= flow_steps <= 1024:
+                raise ValueError("flow_steps must be an integer in [0, 1024]")
             if not getattr(llama._ctx, "ctx", None) or llama.context_params is None:
                 raise RuntimeError("Llama is closed")
             if not llama.context_params.embeddings or llama._ctx.pooling_type() != llama_cpp_lib.LLAMA_POOLING_TYPE_NONE:
@@ -1286,6 +1326,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             is_chatterbox = info.type == types.MTMD_GEN_AUDIO_TYPE_CHATTERBOX
             is_drama = info.type == types.MTMD_GEN_AUDIO_TYPE_DRAMA3
             is_zonos = info.type == types.MTMD_GEN_AUDIO_TYPE_ZONOS3
+            is_yue2 = info.type == types.MTMD_GEN_AUDIO_TYPE_YUE2
             if info.type not in (
                 types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
                 types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,
@@ -1293,10 +1334,31 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 types.MTMD_GEN_AUDIO_TYPE_CHATTERBOX,
                 types.MTMD_GEN_AUDIO_TYPE_DRAMA3,
                 types.MTMD_GEN_AUDIO_TYPE_ZONOS3,
+                types.MTMD_GEN_AUDIO_TYPE_YUE2,
             ):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
             if not is_zonos and (speed != 1.0 or loudness != 0.0):
                 raise ValueError("Non-default speed and loudness require Zonos3")
+            if not is_yue2 and (cfg_scale != 0.0 or flow_steps != 0):
+                raise ValueError("Non-default cfg_scale and flow_steps require YuE2")
+            if is_yue2:
+                if speaker_reference is not None:
+                    raise ValueError("YuE2 does not support speaker_reference")
+                if language is not None:
+                    raise ValueError("YuE2 determines language from lyrics; omit language")
+                if voice is not None and voice.lower() not in ("full", "melody", "off"):
+                    raise ValueError("YuE2 voice must be full, melody or off (score planning mode)")
+                required = llama._model.n_ctx_train()
+                if llama._ctx.n_ctx_seq() < required:
+                    raise ValueError(f"YuE2 requires at least {required} context positions per sequence; use n_ctx=0, kv_unified=True")
+                if any(value != GGMLType.GGML_TYPE_F16 for value in (llama.context_params.type_k, llama.context_params.type_v)):
+                    raise ValueError("YuE2 requires an F16 KV cache for both type_k and type_v")
+                guidance = ctypes.c_float(cfg_scale).value or (1.01 if voice is not None and voice.lower() == "off" else 1.0)
+                if guidance != 1.0 and (
+                    not llama._model.classifier_free_guidance() or
+                    llama._ctx.n_seq_max() < 2 or not llama.context_params.kv_unified
+                ):
+                    raise ValueError("YuE2 guidance requires a CFG-enabled backbone and Llama(n_seq_max=2, kv_unified=True); use cfg_scale=1 to disable guidance")
             if is_drama:
                 if speaker_reference is not None:
                     raise ValueError("Drama 3 does not support speaker_reference")
@@ -1304,8 +1366,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     raise ValueError("Drama 3 determines language from text; omit language")
                 if voice is not None:
                     raise ValueError("Drama 3 uses speaker tags in text; omit voice")
-            if voice is not None and not (is_pocket or is_chatterbox or is_zonos):
-                raise ValueError("voice is supported only for Pocket TTS, Chatterbox and Zonos3")
+            if voice is not None and not (is_pocket or is_chatterbox or is_zonos or is_yue2):
+                raise ValueError("voice is supported only for Pocket TTS, Chatterbox, Zonos3 and YuE2")
             if (is_pocket or is_chatterbox or is_zonos) and voice is None and speaker_reference is None and info.n_voices > 0:
                 name = mtmd.mtmd_gen_audio_voice_name(self.mtmd_ctx, 0)
                 if not name:
@@ -1336,12 +1398,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     raise ValueError("Soprano uses a fixed voice and does not support speaker_reference")
                 if language is not None:
                     raise ValueError("Soprano uses English text; omit language")
-                if max_frames < 2:
+                if max_frames is not None and max_frames < 2:
                     raise ValueError("Soprano requires max_frames >= 2 for audio decoding")
 
             with ExitStack() as cleanup:
                 speaker = None
-                if voice is not None:
+                if voice is not None and not is_yue2:
                     speaker = mtmd.mtmd_gen_audio_get_voice(self.mtmd_ctx, voice.encode("utf-8"))
                     if not speaker:
                         raise ValueError(f"Unknown predefined voice: {voice}")
@@ -1366,10 +1428,16 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 if self._audio_ctx is None:
                     audio_ctx = mtmd.mtmd_helper_gen_audio_init(llama._ctx.ctx, self.mtmd_ctx)
                     if not audio_ctx:
-                        raise RuntimeError("Failed to initialize TTS helper")
+                        raise RuntimeError("Failed to initialize TTS helper; check model support and context capacity")
                     self._audio_ctx = audio_ctx
                     self._exit_stack.callback(mtmd.mtmd_helper_gen_audio_free, audio_ctx)
 
+                frame_limit = max_frames
+                if frame_limit is None:
+                    frame_limit = mtmd.mtmd_helper_gen_audio_max_frames(self._audio_ctx)
+                    if frame_limit < 0:
+                        raise RuntimeError("TTS returned an invalid model frame limit")
+                    frame_limit = frame_limit or (2**31 - 1)
                 actual_seed = llama_cpp_lib.LLAMA_DEFAULT_SEED if seed is None else seed
                 sampler = None
                 if is_qwen or is_soprano or is_chatterbox:
@@ -1384,18 +1452,18 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 cleanup.callback(llama.reset)
                 cleanup.callback(mtmd.mtmd_helper_gen_audio_reset, self._audio_ctx)
                 llama.reset()
-                prompt = (self._render_zonos_prompt(llama, text, language, voice) if is_zonos else text).encode("utf-8")
+                prompt = (self._render_tts_prompt(llama, text, language, voice) if is_zonos or is_yue2 else text).encode("utf-8")
                 inp = mtmd.mtmd_helper_gen_audio_inp(
                     stream=False, seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
                     lang=language.encode("utf-8") if language is not None else None,
                     top_k=top_k, top_p=top_p, seed=actual_seed,
                     temp=-1.0 if temperature is None else temperature,
-                    speed=speed, loudness=loudness,
+                    speed=speed, loudness=loudness, cfg_scale=cfg_scale, flow_steps=flow_steps,
                     out_type=(mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
                               if response_format == "wav" else mtmd.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_PCM),
                 )
                 self._check_audio_result(llama, mtmd.mtmd_helper_gen_audio_set_input(self._audio_ctx, ctypes.byref(inp)), "set_input")
-                finish_reason = self._decode_audio(llama, n_batch, sampler, max_frames)
+                finish_reason = self._decode_audio(llama, n_batch, sampler, frame_limit)
                 return self._get_audio_output(llama, response_format, finish_reason)
         finally:
             self._request_lock.release()

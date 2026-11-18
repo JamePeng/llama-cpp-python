@@ -764,7 +764,7 @@ def test_mtmd_resampler_stream_and_lifetime(mtmd, rate_in, rate_out):
 
 @pytest.mark.skipif(ctypes.sizeof(ctypes.c_void_p) != 8, reason="64-bit MTMD ABI")
 def test_mtmd_audio_and_capability_layouts(mtmd):
-    # Guard native output writes and the sampling-temperature ABI boundary.
+    # Audio structure fields/offsets are checked against headers in test_runtime.
     for name, size, fields in (
         ("mtmd_caps", 3, "inp_vision inp_audio gen_audio"),
         ("mtmd_helper_cap", 8, "chat vision audio video audio_stream text_gen audio_gen audio_gen_spk_ref"),
@@ -772,16 +772,6 @@ def test_mtmd_audio_and_capability_layouts(mtmd):
         cls = getattr(mtmd, name)
         assert ctypes.sizeof(cls) == size and ctypes.alignment(cls) == 1, name
         assert cls._fields_ == [(field, ctypes.c_bool) for field in fields.split()], name
-    assert ctypes.sizeof(mtmd.mtmd_gen_inp) == 72
-    assert mtmd.mtmd_gen_inp.temp.offset == 24
-    assert ctypes.sizeof(mtmd.mtmd_gen_out) == 64
-    value = mtmd.mtmd_helper_gen_audio_inp(stream=False, seq_id=7)
-    assert ctypes.sizeof(value) == 80
-    assert {key: getattr(type(value), key).offset for key in ("temp", "speed", "loudness", "out_type")} == {
-        "temp": 56, "speed": 64, "loudness": 68, "out_type": 72,
-    }
-    value.stream = True
-    assert value.seq_id == 7
 
 
 def test_mtmd_decoder_pos_abi(mtmd, native_chunks):
@@ -1363,12 +1353,16 @@ def audio_pipeline(tmp_path, monkeypatch):
     output = ctypes.create_string_buffer(struct.pack("4f", 0.0, 0.1, -0.1, 0.0))
     import io, wave
     state = SimpleNamespace(kind=1, steps=0, fail=None, prompts=[], tokens=[], stop_at=3,
-                            voices=0, multilingual=False)
+                            voices=0, multilingual=False, channels=1)
 
     def set_input(ctx, ptr):
         inp = ctypes.cast(ptr, ctypes.POINTER(native.mtmd_helper_gen_audio_inp)).contents
         assert inp.stream is False and inp.seq_id == 0
         state.delivery = (inp.speed, inp.loudness)
+        assert not inp.speaker_ref_text
+        state.guidance = (inp.cfg_scale, inp.flow_steps)
+        if state.kind != 8:
+            assert state.guidance == (0, 0)
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
         state.frame_temperature = inp.temp
         state.speaker = inp.speaker_ref
@@ -1389,28 +1383,29 @@ def audio_pipeline(tmp_path, monkeypatch):
         return 0
 
     def get_output(ctx, rate, data, size, samples):
-        sample_rate = {3: 32000, 6: 44100, 7: 44100}.get(state.kind, 24000)
+        sample_rate = {3: 32000, 6: 44100, 7: 44100, 8: 48000}.get(state.kind, 24000)
         ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = sample_rate
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav:
-            wav.setparams((1, 2, sample_rate, 4, "NONE", "not compressed"))
+            wav.setparams((state.channels, 2, sample_rate, 4 // state.channels, "NONE", "not compressed"))
             wav.writeframes(b"\x00\x00\x01\x00\xff\xff\x00\x00")
         state.wav_output = ctypes.create_string_buffer(wav_buffer.getvalue())
         buffer = output if state.out_type == 0 else state.wav_output
         ctypes.cast(data, ctypes.POINTER(ctypes.c_char_p))[0] = ctypes.cast(buffer, ctypes.c_char_p)
         ctypes.cast(size, ctypes.POINTER(ctypes.c_size_t))[0] = len(buffer) - 1
-        ctypes.cast(samples, ctypes.POINTER(ctypes.c_int64))[0] = 4
+        ctypes.cast(samples, ctypes.POINTER(ctypes.c_int64))[0] = 4 // state.channels
         return 1 if state.fail == "get_output" else 0
 
     backend = SimpleNamespace(
         mtmd_gen_audio_type=native.mtmd_gen_audio_type,
         mtmd_helper_gen_audio_outtype=native.mtmd_helper_gen_audio_outtype,
         mtmd_helper_gen_audio_inp=native.mtmd_helper_gen_audio_inp,
-        mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=state.kind, n_voices=state.voices),
+        mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=state.kind, n_voices=state.voices, n_channels=state.channels),
         mtmd_gen_audio_voice_name=Mock(return_value=b"default"),
         mtmd_gen_audio_read_tensor=lambda *args: int(state.multilingual),
         mtmd_helper_gen_audio_init=Mock(return_value=456),
         mtmd_helper_gen_audio_free=Mock(), mtmd_helper_gen_audio_reset=Mock(),
+        mtmd_helper_gen_audio_max_frames=Mock(return_value=512),
         mtmd_helper_gen_audio_set_input=set_input,
         mtmd_helper_gen_audio_step_prompt=lambda ctx, batch: -1 if state.fail == "step_prompt" else 0,
         mtmd_helper_gen_audio_step_gen=step_gen,
@@ -1424,15 +1419,17 @@ def audio_pipeline(tmp_path, monkeypatch):
     generator.is_support_audio = True
     monkeypatch.setattr(generator, "_create_bitmap_from_bytes", lambda payload: (789, None))
     monkeypatch.setattr(multimodal.llama_cpp_lib, "llama_get_embeddings_ith", lambda ctx, idx: ctypes.cast(hidden, ctypes.POINTER(ctypes.c_float)))
+    monkeypatch.setattr(multimodal.llama_cpp_lib, "llama_model_meta_arr_n", lambda *args: -1)
     sampler = Mock()
     sampler.sample.return_value = 42
     sampler_factory = Mock(return_value=sampler)
     monkeypatch.setattr(generator, "_create_audio_sampler", sampler_factory)
     llama = SimpleNamespace(
-        _model=SimpleNamespace(classifier_free_guidance=Mock(return_value=True),
+        _model=SimpleNamespace(model=654, classifier_free_guidance=Mock(return_value=True),
+                               n_ctx_train=lambda: 24576,
                                model_chat_template=Mock(return_value="{{ messages[0].content }}")),
-        _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64, n_seq_max=lambda: 2),
-        context_params=SimpleNamespace(embeddings=True, kv_unified=True),
+        _ctx=SimpleNamespace(ctx=321, pooling_type=lambda: 0, n_batch=lambda: 64, n_seq_max=lambda: 2, n_ctx_seq=lambda: 24576),
+        context_params=SimpleNamespace(embeddings=True, kv_unified=True, type_k=1, type_v=1),
         _abort_event=threading.Event(), _native_abort_flag=ctypes.c_bool(False),
         reset=Mock(),
     )
@@ -1473,16 +1470,28 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
     backend.mtmd_helper_gen_audio_free.assert_called_once_with(456)
 
 
-@pytest.mark.parametrize("kind, frames", [(2, 1), (3, 2), (6, 1)], ids=["pocket", "soprano", "drama3"])
-def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames):
+@pytest.mark.parametrize("kind, frames, native_limit", [
+    (2, 1, 512), (3, 2, 512), (6, 1, 512),
+    (3, None, 512), (7, None, 1), (7, None, 512), (7, None, 0), (7, None, -1),
+])
+def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames, native_limit):
     generator, llama, backend, state, factory, _ = audio_pipeline
     state.kind = kind
+    backend.mtmd_helper_gen_audio_max_frames.return_value = native_limit
     options = {"speaker_reference": b"RIFF0000WAVE"} if kind == 2 else {}
+    if frames is None and native_limit < 0:
+        with pytest.raises(RuntimeError, match="invalid model frame limit"):
+            generator.create_speech(llama=llama, text="hello", max_frames=frames)
+        assert not state.prompts
+        llama.reset.assert_not_called()
+        return
     result = generator.create_speech(llama=llama, text="hello", max_frames=frames, **options)
-    assert result.finish_reason == "length"
+    effective = frames if frames is not None else native_limit or state.stop_at
+    assert result.finish_reason == ("stop" if effective >= state.stop_at else "length")
     llama._model.classifier_free_guidance.assert_not_called()
-    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100}[kind]
-    assert state.tokens == ([42, 42] if kind == 3 else [-1])
+    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100, 7: 44100}[kind]
+    assert state.tokens == [42 if kind == 3 else -1] * min(effective, state.stop_at)
+    assert backend.mtmd_helper_gen_audio_max_frames.call_count == int(frames is None)
     if kind != 3:
         factory.assert_not_called()
         if kind == 2:
@@ -1494,7 +1503,7 @@ def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames):
 @pytest.mark.parametrize("stage", [
     "set_input", "invalid_input", "step_prompt", "step_gen", "get_output", "missing_hidden", "abort", "invalid_output",
 ])
-@pytest.mark.parametrize("kind", [1, 3, 7], ids=["qwen", "soprano", "zonos3"])
+@pytest.mark.parametrize("kind", [1, 3, 7, 8], ids=["qwen", "soprano", "zonos3", "yue2"])
 def test_tts_failure_can_be_followed_by_success(audio_pipeline, monkeypatch, stage, kind):
     generator, llama, backend, state, _, output = audio_pipeline
     state.kind = kind
@@ -1526,7 +1535,8 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
         *((2, {"temperature": value}, "temperature")
           for value in (-1, float("nan"), float("inf"), float("-inf"), 1e39)),
         (1, {"seed": -1}, None), (1, {"response_format": "mp3"}, None),
-        (0, {}, "supported TTS"), (2, {}, "requires speaker_reference"),
+        *((kind, {}, "supported TTS") for kind in (0, 9, 10)),
+        (2, {}, "requires speaker_reference"),
         (7, {"voice": "missing"}, "Unknown predefined voice"),
         (3, {"speaker_reference": "missing.wav"}, "speaker_reference"),
         (3, {"language": "en"}, "omit language"),
@@ -1589,6 +1599,55 @@ def test_tts_zonos_voice_reference_and_delivery(audio_pipeline, options):
     llama._model.classifier_free_guidance.assert_not_called()
 
 
+@pytest.mark.parametrize("voice,settings,error", [
+    (None, {}, None), ("full", {}, None), ("melody", {"cfg_scale": 1.2, "flow_steps": 4}, None),
+    ("off", {}, None), ("OFF", {"cfg_scale": 1}, None),
+    ("missing", {}, "voice must"), (None, {"speaker_reference": b"audio"}, "speaker_reference"),
+    (None, {"language": "en"}, "omit language"),
+    ("off", {"context": "small"}, "24576 context positions"),
+    ("off", {"context": "kv-type"}, "F16 KV"),
+    ("off", {"context": "no-cfg"}, "CFG-enabled"),
+    ("off", {"context": "single"}, "n_seq_max=2"),
+    ("off", {"context": "split-kv"}, "kv_unified=True"),
+    ("off", {"context": "single", "cfg_scale": 1}, None),
+    ("off", {"context": "single", "cfg_scale": 1.000000001}, None),
+])
+def test_tts_yue2_planning_context_and_stereo(audio_pipeline, voice, settings, error):
+    generator, llama, backend, state, sampler, _ = audio_pipeline
+    state.kind, state.channels = 8, 2
+    settings = dict(settings)
+    context = settings.pop("context", None)
+    if context == "small":
+        llama._ctx.n_ctx_seq = lambda: 4096
+    elif context == "kv-type":
+        llama.context_params.type_v = 2
+    elif context == "no-cfg":
+        llama._model.classifier_free_guidance.return_value = False
+    elif context == "single":
+        llama._ctx.n_seq_max = lambda: 1
+    elif context == "split-kv":
+        llama.context_params.kv_unified = False
+    if error:
+        with pytest.raises(ValueError, match=error):
+            generator.create_speech(llama=llama, text="song", voice=voice, **settings)
+        backend.mtmd_helper_gen_audio_init.assert_not_called()
+        llama.reset.assert_not_called()
+        return
+    llama._model.model_chat_template.return_value = "{{ voice }}:{{ messages[0].content }}"
+    for format in ("wav", "pcm_f32", "wav"):
+        audio = generator.create_speech(llama=llama, text="song", voice=voice, response_format=format, **settings)
+        assert (audio.channels, audio.sample_rate, audio.n_samples) == (2, 48000, 2)
+        assert audio.duration == 2 / 48000
+        assert audio.finish_reason == "stop"
+        assert state.guidance == pytest.approx((settings.get("cfg_scale", 0), settings.get("flow_steps", 0)))
+    sampler.assert_not_called()
+    backend.mtmd_gen_audio_get_voice.assert_not_called()
+    backend.mtmd_bitmap_free.assert_not_called()
+    backend.mtmd_helper_gen_audio_init.assert_called_once()
+    assert backend.mtmd_helper_gen_audio_reset.call_count == 3
+    llama._model.model_chat_template.assert_called_once_with(b"tts")
+
+
 def test_tts_demo_voice_query_reuse_and_cleanup(tmp_path, monkeypatch):
     from pathlib import Path
     from runpy import run_path
@@ -1627,7 +1686,7 @@ def test_tts_demo_voice_query_reuse_and_cleanup(tmp_path, monkeypatch):
     llama.close.assert_called_once()
 
 
-def test_tts_zonos_normalization_and_template_errors(audio_pipeline):
+def test_tts_zonos_normalization_and_template_errors(audio_pipeline, monkeypatch):
     from pathlib import Path
     from llama_cpp import _utils
 
@@ -1646,25 +1705,52 @@ def test_tts_zonos_normalization_and_template_errors(audio_pipeline):
     ):
         generator.create_speech(llama=llama, text=text, language=language)
         assert expected in state.prompts[-1][0].decode()
-    del generator._zonos_template
+    del generator._tts_template
     llama._model.model_chat_template.return_value = None
     with pytest.raises(ValueError, match="named 'tts'"):
         generator.create_speech(llama=llama, text="hello")
     llama._model.model_chat_template.return_value = "{{ messages[0].content }}"
     assert generator.create_speech(llama=llama, text="retry").finish_reason == "stop"
+    # Retained GGUF dictionaries contain JSON values; malformed arrays are ignored.
+    arrays = {
+        b"tokenizer.tts_dicts": [b"lexicon", b"broken"],
+        b"tokenizer.tts_dict.lexicon.keys": [b"hello"],
+        b"tokenizer.tts_dict.lexicon.values": [b'{"phones": "h eh l ow"}'],
+        b"tokenizer.tts_dict.broken.keys": [b"a"],
+        b"tokenizer.tts_dict.broken.values": [],
+    }
+    lib = importlib.import_module("llama_cpp.llama_cpp")
+    monkeypatch.setattr(lib, "llama_model_meta_arr_n", lambda model, key: len(arrays[key]) if key in arrays else -1)
+    monkeypatch.setattr(lib, "llama_model_meta_arr_str", lambda model, key, index: arrays[key][index])
+    del generator._tts_template
+    llama._model.model_chat_template.return_value = "{{ tts_dict('lexicon', 'hello').phones }} {{ tts_dict('lexicon', 'missing') }}"
+    generator.create_speech(llama=llama, text="hello")
+    assert state.prompts[-1][0] == b"h eh l ow None"
+    lookup = generator._tts_template.environment.globals["tts_dict"]
+    for name in ("broken", "missing"):
+        with pytest.raises(KeyError, match="unknown dictionary"):
+            lookup(name, "a")
+    with pytest.raises(TypeError, match="must be strings"):
+        lookup("lexicon", 1)
 
 
-@pytest.mark.parametrize("kind", [1, 2, 3, 5, 6, 7])
+@pytest.mark.parametrize("kind", [1, 2, 3, 5, 6, 7, 8])
 def test_tts_delivery_validation_preserves_other_models(audio_pipeline, kind):
     generator, llama, backend, state, _, _ = audio_pipeline
     state.kind = kind
     for options in [*({"speed": v} for v in (0, -1, float("nan"), float("inf"), 1e39, 1e-50, True)),
-                    *({"loudness": v} for v in (1, float("nan"), float("-inf"), -1e39, True))]:
-        with pytest.raises(ValueError, match="speed|loudness"):
+                    *({"loudness": v} for v in (1, float("nan"), float("-inf"), -1e39, True)),
+                    *({"cfg_scale": v} for v in (-1, float("nan"), float("inf"), 1e39, 1e-50, True)),
+                    *({"flow_steps": v} for v in (-1, 1025, 1.5, True))]:
+        with pytest.raises(ValueError, match="speed|loudness|cfg_scale|flow_steps"):
             generator.create_speech(llama=llama, text="hello", **options)
     if kind != 7:
         for options in ({"speed": 1.1}, {"loudness": -20}):
             with pytest.raises(ValueError, match="require Zonos3"):
+                generator.create_speech(llama=llama, text="hello", **options)
+    if kind != 8:
+        for options in ({"cfg_scale": 1}, {"flow_steps": 4}):
+            with pytest.raises(ValueError, match="require YuE2"):
                 generator.create_speech(llama=llama, text="hello", **options)
     backend.mtmd_helper_gen_audio_init.assert_not_called()
     llama.reset.assert_not_called()
@@ -1757,15 +1843,25 @@ def test_tts_rejects_concurrent_use(audio_pipeline):
     assert generator.create_speech(llama=llama, text="hello").finish_reason == "stop"
 
 
-def test_generated_audio_wav_save(tmp_path, audio_pipeline):
+@pytest.mark.parametrize("channels", [1, 2])
+@pytest.mark.parametrize("format", ["wav", "pcm_f32"])
+def test_generated_audio_wav_save(tmp_path, audio_pipeline, channels, format):
     import wave
 
-    generator, llama, *_ = audio_pipeline
-    result = generator.create_speech(llama=llama, text="hello")
-    path = tmp_path / "speech.wav"
+    generator, llama, _, state, _, output = audio_pipeline
+    state.channels = channels
+    result = generator.create_speech(llama=llama, text="hello", response_format=format)
+    assert result.channels == channels and result.n_samples == 4 // channels
+    assert result.duration == result.n_samples / result.sample_rate
+    path = tmp_path / ("speech.wav" if format == "wav" else "speech.pcm")
     result.save(path)
     assert path.read_bytes() == result.data
+    if format == "pcm_f32":
+        assert result.data == output.raw[:-1]
+        assert len(result.data) == result.n_samples * channels * 4
+        return
     with wave.open(str(path), "rb") as wav:
+        assert wav.getnchannels() == channels
         assert wav.getnframes() == result.n_samples
         assert wav.getframerate() == result.sample_rate
         assert wav.readframes(result.n_samples) == b"\x00\x00\x01\x00\xff\xff\x00\x00"
@@ -1782,6 +1878,12 @@ def test_tts_audio_validation_keeps_quiet_speech_and_checks_lengths():
     from llama_cpp.llama_multimodal import MTMDAudioGenerator
     payload = struct.pack("4f", 0, 1e-8, -1e-8, 0)
     MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 4)
+    MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 2, 2)
+    for channels in (0, -1):
+        with pytest.raises(RuntimeError, match="channel count"):
+            MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 4, channels)
+    with pytest.raises(RuntimeError, match="constant signal"):
+        MTMDAudioGenerator._validate_audio(struct.pack("4f", 0.1, -0.1, 0.1, -0.1), "pcm_f32", 24000, 2, 2)
     with pytest.raises(RuntimeError, match="byte length"):
         MTMDAudioGenerator._validate_audio(payload, "pcm_f32", 24000, 5)
     with pytest.raises(RuntimeError, match="malformed WAV"):
