@@ -548,6 +548,13 @@ def mtmd_bitmap_set_is_video(bitmap: mtmd_bitmap_p, is_video: bool, /) -> None:
     ...
 
 
+# MTMD_API void mtmd_bitmap_set_transcript(mtmd_bitmap * bitmap, const char * transcript);
+@ctypes_function_mtmd("mtmd_bitmap_set_transcript", [mtmd_bitmap_p_ctypes, c_char_p], None)
+def mtmd_bitmap_set_transcript(bitmap: mtmd_bitmap_p, transcript: Optional[bytes], /) -> None:
+    """Copy the reference transcript onto a bitmap, or clear it with None."""
+    ...
+
+
 # // mtmd_bitmap lazy
 # //
 # // this is a special bitmap that:
@@ -1358,6 +1365,8 @@ def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
 #     MTMD_GEN_AUDIO_TYPE_YUE2,
 #     MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3,
 #     MTMD_GEN_AUDIO_TYPE_FISH_S2,
+#     MTMD_GEN_AUDIO_TYPE_KOKORO,
+#     MTMD_GEN_AUDIO_TYPE_TINY_VOCA,
 # };
 class mtmd_gen_audio_type(enum.IntEnum):
     """Generated audio pipeline type."""
@@ -1372,6 +1381,8 @@ class mtmd_gen_audio_type(enum.IntEnum):
     MTMD_GEN_AUDIO_TYPE_YUE2      = 8
     MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3 = 9
     MTMD_GEN_AUDIO_TYPE_FISH_S2   = 10
+    MTMD_GEN_AUDIO_TYPE_KOKORO    = 11
+    MTMD_GEN_AUDIO_TYPE_TINY_VOCA = 12
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;
@@ -1426,6 +1437,13 @@ def mtmd_gen_audio_voice_name(ctx: mtmd_context_p, index: int) -> Optional[bytes
     ...
 
 
+# MTMD_API int32_t mtmd_gen_audio_g2p(const mtmd_context * ctx, const char * word, char * buf, size_t buf_size);
+@ctypes_function_mtmd("mtmd_gen_audio_g2p", [mtmd_context_p_ctypes, c_char_p, c_char_p, c_size_t], c_int32)
+def mtmd_gen_audio_g2p(ctx: mtmd_context_p, word: bytes, buf, buf_size: int) -> int:
+    """Write NUL-terminated phonemes. Return byte length, 0 if unavailable, or -1 if too small."""
+    ...
+
+
 @ctypes_function_mtmd("mtmd_gen_audio_get_voice", [mtmd_context_p_ctypes, c_char_p], mtmd_bitmap_p_ctypes)
 def mtmd_gen_audio_get_voice(ctx: mtmd_context_p, name: bytes) -> mtmd_bitmap_p:
     """Return a voice bitmap owned by the caller, or NULL."""
@@ -1468,6 +1486,7 @@ class mtmd_gen_process_type(enum.IntEnum):
 #     size_t    n_codes;
 #     const float * feats;
 #     size_t        n_feats;
+#     float speed; // Kokoro speaking speed, default 1.0
 #     // YuE2 GEN_CODE: serialized backbone sequence state and position count
 #     const uint8_t * backbone_state;
 #     size_t          backbone_state_size;
@@ -1493,6 +1512,7 @@ class mtmd_gen_inp(Structure):
         ("n_codes", c_size_t),
         ("feats", POINTER(c_float)),
         ("n_feats", c_size_t),
+        ("speed", c_float),
         ("backbone_state", POINTER(c_uint8)),
         ("backbone_state_size", c_size_t),
         ("backbone_n_past", c_int32),
@@ -1515,6 +1535,7 @@ class mtmd_gen_inp(Structure):
         n_codes: int
         feats: POINTER[c_float]
         n_feats: int
+        speed: float
         backbone_state: POINTER[c_uint8]
         backbone_state_size: int
         backbone_n_past: int
@@ -2457,7 +2478,7 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     int32_t n_past; // > 0 continues an existing sequence (LFM3A only)
 #     enum mtmd_helper_gen_audio_out_mode out_mode;
 #     mtmd_bitmap * speaker_ref; // optional, can be NULL
-#     const char * speaker_ref_text; // optional reference transcript (e.g. Fish S2)
+#     const char * speaker_ref_text; // optional reference transcript (Fish S2, Qwen3-TTS)
 #     const char * lang; // optional, can be NULL
 #     int32_t  top_k;
 #     float    top_p;

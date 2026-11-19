@@ -8,6 +8,7 @@ Use the same --model and --mmproj arguments with any of these examples:
 
   --text "Hello world"                         Basic Qwen or Soprano synthesis
   --text "Welcome back" --speaker /path/to/reference.wav    Reference voice
+  --text "Welcome back" --speaker /path/to/reference.wav --speaker-text "Good morning."    Qwen ICL
   --text "Welcome back" --voice alba           Pocket weights with predefined voices
   --text "<|speaker:0|> Hello. <|speaker:1|> Welcome back."    Drama 3 speakers
   --text "Hello" --speaker voice.wav --speaker-bytes
@@ -18,6 +19,7 @@ Use the same --model and --mmproj arguments with any of these examples:
   --demo multilingual --speaker voice.wav      Qwen only: Chinese, English, Japanese
   --text "Hello" --voice Imogen_en-British_F_1 --speed 1.2    Zonos3
   --text "Hello" --speaker /path/to/reference.wav --loudness -25    Zonos3 clone
+  --text "h ə l ˈoʊ <sp> w ˈɜː l d ." --voice F2 --raw-prompt    tiny-voca phonemes
   --text "Hello" --format pcm_f32 --output speech.pcm
   --text-file /path/to/song.txt --voice off --cfg --ctx-size 0 --max-frames 0    YuE2
   --text-file /path/to/song.txt --voice off --cfg --ctx-size 0 --max-frames 750  YuE2: up to ~30 s
@@ -68,11 +70,13 @@ def main():
     source.add_argument("--text", action="append", help="Repeat for multiple sequential requests")
     source.add_argument("--text-file", type=Path, help="UTF-8 text, e.g. YuE2 [Tags]/[Lyrics] song input")
     source.add_argument("--demo", choices=DEMOS, help="Built-in example sentences")
+    parser.add_argument("--raw-prompt", action="store_true", help="Skip the TTS template and pass model-ready text or phonemes")
     voices = parser.add_mutually_exclusive_group()
     voices.add_argument("--speaker", help="Reference audio path, URL or data URI")
-    voices.add_argument("--voice", help="Pocket/Chatterbox/Zonos3 voice name, or YuE2 full/melody/off planning mode")
+    voices.add_argument("--voice", help="Predefined voice name, or YuE2 full/melody/off planning mode")
+    parser.add_argument("--speaker-text", help="Transcript of --speaker for Qwen3-TTS Base cloning")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
-    parser.add_argument("--language", help="Qwen/Chatterbox language or Zonos3 normalization language; omit for Pocket and Soprano")
+    parser.add_argument("--language", help="Qwen/Chatterbox language or Zonos3/Kokoro template language")
     parser.add_argument("--cfg", action="store_true", help="Reserve two total sequences with unified KV for Chatterbox Multilingual or YuE2 guidance")
     parser.add_argument("--format", choices=("wav", "pcm_f32"), default="wav")
     parser.add_argument("--output", help="Output path; multiple requests add a numbered suffix")
@@ -80,7 +84,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float,
                         help="Backbone temperature (default: 0.8), or Pocket/Zonos3/YuE2 native temperature")
-    parser.add_argument("--speed", type=float, default=1.0, help="Zonos3 relative speaking speed")
+    parser.add_argument("--speed", type=float, default=1.0, help="Relative speaking speed for Zonos3, Kokoro or tiny-voca")
     parser.add_argument("--loudness", type=float, default=0.0, help="Zonos3 target LUFS (negative; 0 uses model default)")
     parser.add_argument("--cfg-scale", type=float, default=0.0, help="YuE2 code guidance; 0 uses model defaults, 1 disables guidance")
     parser.add_argument("--flow-steps", type=int, default=0, help="YuE2 NAR flow steps; 0 uses the model default")
@@ -94,6 +98,8 @@ def main():
         parser.error("--max-frames must be nonnegative")
     if args.speaker_bytes and not args.speaker:
         parser.error("--speaker-bytes requires a local --speaker file")
+    if args.speaker_text is not None and not args.speaker:
+        parser.error("--speaker-text requires --speaker")
     if args.demo == "multilingual" and args.language:
         parser.error("--demo multilingual supplies a language for each request")
 
@@ -122,6 +128,7 @@ def main():
                 audio = generator.create_speech(
                     llama=llama, text=text, language=language or args.language,
                     speaker_reference=speaker, voice=args.voice, max_frames=args.max_frames or None,
+                    speaker_ref_text=args.speaker_text, raw_prompt=args.raw_prompt,
                     seed=args.seed, temperature=args.temperature, response_format=args.format,
                     speed=args.speed, loudness=args.loudness, cfg_scale=args.cfg_scale, flow_steps=args.flow_steps,
                 )

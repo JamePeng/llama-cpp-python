@@ -62,8 +62,9 @@ def test_native_context_parameter_layouts():
         ("include/llama.h", "llama_context_params"),
         ("tools/mtmd/mtmd.h", "mtmd_context_params"),
         *(("tools/mtmd/mtmd.h", name) for name in (
-            "mtmd_gen_audio_info", "mtmd_gen_inp", "mtmd_gen_out", "mtmd_gen_state_params",
+            "mtmd_caps", "mtmd_gen_audio_info", "mtmd_gen_inp", "mtmd_gen_out", "mtmd_gen_state_params",
         )),
+        ("tools/mtmd/mtmd-helper.h", "mtmd_helper_cap"),
         ("tools/mtmd/mtmd-helper.h", "mtmd_helper_gen_audio_inp"),
         *(('tools/mtmd/mtmd-helper.h', name) for name in (
             'mtmd_helper_video_stream_info', 'mtmd_helper_video_decoder',
@@ -110,11 +111,9 @@ def test_native_context_parameter_layouts():
         assert (ctypes.sizeof(actual), ctypes.alignment(actual)) == (ctypes.sizeof(expected), ctypes.alignment(expected)), name
         for (field, actual_type), (_, expected_type) in zip(actual._fields_, fields):
             assert getattr(actual, field).offset == getattr(expected, field).offset, (name, field)
+            if expected_type is ctypes.c_bool:
+                assert actual_type is ctypes.c_bool, (name, field)
             assert (ctypes.sizeof(actual_type), ctypes.alignment(actual_type)) == (ctypes.sizeof(expected_type), ctypes.alignment(expected_type)), (name, field)
-    audio = mtmd_cpp.mtmd_helper_gen_audio_inp_default()
-    assert (audio.speed, audio.loudness, audio.cfg_scale, audio.flow_steps) == (1.0, 0.0, 0.0, 0)
-    assert audio.speaker_ref_text is None and audio.out_type == mtmd_cpp.mtmd_helper_gen_audio_outtype.MTMD_HELPER_GEN_AUDIO_OUTTYPE_WAV
-    assert mtmd_cpp.mtmd_helper_gen_audio_max_frames(None) == 0
 
 
 @pytest.mark.parametrize("share", [-0.1, 1.1, float("nan"), float("inf"), float("-inf"), 0.0, 0.5, 1.0])

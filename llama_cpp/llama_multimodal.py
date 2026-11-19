@@ -1014,6 +1014,14 @@ class GeneratedAudio:
             output.write(self.data)
 
 
+class _TTSTemplateEnvironment(ImmutableSandboxedEnvironment):
+    def is_safe_attribute(self, obj, attr, value):
+        # Kokoro appends candidate pronunciations to lists created by its template.
+        if type(obj) is list and attr == "append":
+            return True
+        return super().is_safe_attribute(obj, attr, value)
+
+
 class MTMDAudioGenerator(MTMDBaseHandler):
     """Non-streaming audio generation using the vendor helper.
 
@@ -1075,13 +1083,23 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             model=llama._model,
         )
 
-    def _render_tts_prompt(self, llama, text, language, voice):
+    def _tts_g2p(self, word: str) -> Optional[str]:
+        """Look up an unknown word with the projector, as in llama-tts."""
+        if not isinstance(word, str) or "\x00" in word:
+            raise ValueError("tts_g2p expects a string without NUL characters")
+        buf = ctypes.create_string_buffer(512)
+        size = self._mtmd_cpp.mtmd_gen_audio_g2p(self.mtmd_ctx, word.encode("utf-8"), buf, len(buf))
+        return buf.value.decode("utf-8") if size > 0 else None
+
+    def _render_tts_prompt(self, llama, text, language, voice, *, allow_phonemes=False):
         """Render the model's named TTS template, including native-compatible normalization."""
         from ._utils import make_tts_dict, tts_norm_scan, tts_norm_sub
 
         if not hasattr(self, "_tts_template"):
             source = llama._model.model_chat_template(b"tts")
             if not source:
+                if allow_phonemes:
+                    return text
                 raise ValueError("This audio model requires a named 'tts' template in the backbone GGUF")
             # Model dictionaries contain string keys and JSON values; match native skip rules.
             model, lib = llama._model.model, llama_cpp_lib
@@ -1102,13 +1120,13 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     label: [value.decode("utf-8") for value in values]
                     for label, values in zip(("keys", "values"), arrays)
                 }
-            environment = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
+            environment = _TTSTemplateEnvironment(trim_blocks=True, lstrip_blocks=True)
             environment.globals.update(tts_norm_scan=tts_norm_scan, tts_norm_sub=tts_norm_sub,
                                        tts_dict=make_tts_dict(dictionaries),
                                        raise_exception=Jinja2ChatFormatter.raise_exception)
             self._tts_template = environment.from_string(source)
         prompt = self._tts_template.render(messages=[{"role": "user", "content": text}],
-                                             language=language or "", voice=voice or "")
+                                           language=language or "", voice=voice or "", tts_g2p=self._tts_g2p)
         if not prompt.strip() or "\x00" in prompt:
             raise ValueError("TTS template returned empty or invalid text")
         return prompt
@@ -1233,11 +1251,18 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         loudness: float = 0.0,
         cfg_scale: float = 0.0,
         flow_steps: int = 0,
+        speaker_ref_text: Optional[str] = None,
+        raw_prompt: bool = False,
     ) -> GeneratedAudio:
         """Synthesize complete audio and return a Python-owned result.
 
+        Set raw_prompt=True to skip TTS template rendering and pass text directly
+        to the native helper, for example to supply Kokoro or tiny-voca phonemes.
+
         Qwen3-TTS uses the sampling options; top_k/top_p also reach its code
         predictor (top_k <= 0 selects the helper default for that stage).
+        Pass speaker_ref_text with a Qwen reference clip for transcript-conditioned
+        cloning. The helper falls back to the speaker embedding if codes are unavailable.
         Pocket TTS requires speaker_reference or a predefined voice and selects
         language from its weights. It uses temperature as the flow noise scale
         (0 disables noise) and ignores token sampling options except seed.
@@ -1253,7 +1278,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         Zonos3 supports voice/reference audio, native frame temperature, speed
         (> 0) and loudness (negative LUFS, or 0 for the model default). Its
         named TTS template normalizes text using language; other sampling
-        options follow the native helper. Delivery overrides require Zonos3.
+        options follow the native helper. Kokoro and tiny-voca also accept speed
+        and predefined voices. Supply phonemes when the GGUF has no TTS template.
         YuE2 generates 48 kHz stereo songs from [Tags]/[Lyrics] text. voice
         selects full/melody/off planning; cfg_scale and flow_steps default to
         native settings. Use the model's training context and F16 KV; guided
@@ -1270,6 +1296,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 raise RuntimeError("Audio generator is closed")
             if not isinstance(text, str) or not text.strip() or "\x00" in text:
                 raise ValueError("text must be a non-empty string without NUL characters")
+            if not isinstance(raw_prompt, bool):
+                raise ValueError("raw_prompt must be a bool")
             if language is not None and (
                 not isinstance(language, str) or not language.strip() or "\x00" in language
             ):
@@ -1278,6 +1306,11 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 raise ValueError("voice must be a non-empty string without NUL characters")
             if voice is not None and speaker_reference is not None:
                 raise ValueError("voice and speaker_reference are mutually exclusive")
+            if speaker_ref_text is not None:
+                if not isinstance(speaker_ref_text, str) or not speaker_ref_text.strip() or "\x00" in speaker_ref_text:
+                    raise ValueError("speaker_ref_text must be a non-empty string without NUL characters")
+                if speaker_reference is None:
+                    raise ValueError("speaker_ref_text requires speaker_reference")
             if response_format not in ("wav", "pcm_f32"):
                 raise ValueError("response_format must be 'wav' or 'pcm_f32'")
             if max_frames is not None and (
@@ -1327,6 +1360,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             is_drama = info.type == types.MTMD_GEN_AUDIO_TYPE_DRAMA3
             is_zonos = info.type == types.MTMD_GEN_AUDIO_TYPE_ZONOS3
             is_yue2 = info.type == types.MTMD_GEN_AUDIO_TYPE_YUE2
+            is_phoneme_model = info.type in (types.MTMD_GEN_AUDIO_TYPE_KOKORO, types.MTMD_GEN_AUDIO_TYPE_TINY_VOCA)
             if info.type not in (
                 types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
                 types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,
@@ -1335,10 +1369,20 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 types.MTMD_GEN_AUDIO_TYPE_DRAMA3,
                 types.MTMD_GEN_AUDIO_TYPE_ZONOS3,
                 types.MTMD_GEN_AUDIO_TYPE_YUE2,
+                types.MTMD_GEN_AUDIO_TYPE_KOKORO,
+                types.MTMD_GEN_AUDIO_TYPE_TINY_VOCA,
             ):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
-            if not is_zonos and (speed != 1.0 or loudness != 0.0):
-                raise ValueError("Non-default speed and loudness require Zonos3")
+            if speaker_ref_text is not None and not is_qwen:
+                raise ValueError("speaker_ref_text is supported only for Qwen3-TTS Base")
+            if loudness != 0.0 and not is_zonos:
+                raise ValueError("Non-default loudness requires Zonos3")
+            if speed != 1.0 and not (is_zonos or is_phoneme_model):
+                raise ValueError("Non-default speed requires Zonos3, Kokoro or tiny-voca")
+            if is_phoneme_model and speaker_reference is not None:
+                raise ValueError("Kokoro and tiny-voca use predefined voices; omit speaker_reference")
+            if info.type == types.MTMD_GEN_AUDIO_TYPE_TINY_VOCA and not 0.25 <= ctypes.c_float(speed).value <= 4:
+                raise ValueError("tiny-voca speed must be between 0.25 and 4")
             if not is_yue2 and (cfg_scale != 0.0 or flow_steps != 0):
                 raise ValueError("Non-default cfg_scale and flow_steps require YuE2")
             if is_yue2:
@@ -1366,9 +1410,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     raise ValueError("Drama 3 determines language from text; omit language")
                 if voice is not None:
                     raise ValueError("Drama 3 uses speaker tags in text; omit voice")
-            if voice is not None and not (is_pocket or is_chatterbox or is_zonos or is_yue2):
-                raise ValueError("voice is supported only for Pocket TTS, Chatterbox, Zonos3 and YuE2")
-            if (is_pocket or is_chatterbox or is_zonos) and voice is None and speaker_reference is None and info.n_voices > 0:
+            has_voice_presets = is_pocket or is_chatterbox or is_zonos or is_phoneme_model
+            if voice is not None and not (has_voice_presets or is_yue2):
+                raise ValueError("voice is supported only for models with predefined voices or YuE2 planning")
+            if has_voice_presets and voice is None and speaker_reference is None and info.n_voices > 0:
                 name = mtmd.mtmd_gen_audio_voice_name(self.mtmd_ctx, 0)
                 if not name:
                     raise RuntimeError("TTS reports predefined voices but returned no default voice")
@@ -1452,9 +1497,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 cleanup.callback(llama.reset)
                 cleanup.callback(mtmd.mtmd_helper_gen_audio_reset, self._audio_ctx)
                 llama.reset()
-                prompt = (self._render_tts_prompt(llama, text, language, voice) if is_zonos or is_yue2 else text).encode("utf-8")
+                if not raw_prompt and (is_zonos or is_yue2 or is_phoneme_model):
+                    text = self._render_tts_prompt(llama, text, language, voice, allow_phonemes=is_phoneme_model)
+                prompt = text.encode("utf-8")
                 inp = mtmd.mtmd_helper_gen_audio_inp(
                     stream=False, seq_id=0, prompt=prompt, prompt_len=len(prompt), speaker_ref=speaker,
+                    speaker_ref_text=speaker_ref_text.encode("utf-8") if speaker_ref_text is not None else None,
                     lang=language.encode("utf-8") if language is not None else None,
                     top_k=top_k, top_p=top_p, seed=actual_seed,
                     temp=-1.0 if temperature is None else temperature,
