@@ -1407,7 +1407,7 @@ For Qwen3.5 image chat with speculative decoding, see
 ordinary-decoding comparison.
 
 For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
-with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3 and Zonos3,
+with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3, Zonos3, Kokoro and tiny-voca,
 plus YuE2 stereo song generation.
 See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
 for supported models, downloadable weights, and examples.
@@ -2012,13 +2012,15 @@ or server `chat_format`.
 
 | Model | Python API | Reference audio | Language |
 |:--- |:--- |:--- |:--- |
-| [Qwen3-TTS-12Hz-Base-GGUF](https://huggingface.co/JamePeng2023/Qwen3-TTS-12Hz-Base-GGUF) | `MTMDAudioGenerator` | Optional speaker reference | Selectable, including Chinese, English and Japanese |
+| [Qwen3-TTS-12Hz-Base-GGUF](https://huggingface.co/JamePeng2023/Qwen3-TTS-12Hz-Base-GGUF) | `MTMDAudioGenerator` | Optional reference audio and transcript | Selectable, including Chinese, English and Japanese |
 | Pocket TTS | `MTMDAudioGenerator` | Reference audio or predefined voice | Determined by the language-pack weights |
 | Soprano-80M / Soprano-1.1-80M | `MTMDAudioGenerator` | Unsupported; fixed voice | English; omit `language` |
 | Chatterbox Turbo / Multilingual V3 | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Turbo: English; Multilingual V3: selectable |
 | Drama 3 | `MTMDAudioGenerator` | Unsupported; speaker tags in text | Determined by text; omit `language` |
 | Zonos3 Mini | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Follows text; `language` selects text normalization |
 | YuE2-3B (songs) | `MTMDAudioGenerator` | Unsupported; `voice` selects score planning | Follows lyrics; omit `language` |
+| Kokoro | `MTMDAudioGenerator` | Predefined voices | English text or model phonemes for other languages |
+| tiny-voca | `MTMDAudioGenerator` | Predefined voices | English |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
 in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
@@ -2057,9 +2059,10 @@ it for Qwen without a reference;
 encoded audio bytes, URLs and data URIs are also accepted. For Pocket, provide
 a reference or `voice="alba"` (when included in the weights), and omit `language`.
 Use the low-level `mtmd_gen_audio_voice_name` API to enumerate available voices.
-Qwen currently uses only the reference speaker
-embedding: `ref_text`-conditioned full cloning, CustomVoice and preset speaker
-IDs are not supported. The FA option controls mmproj independently of the backbone.
+For Qwen3-TTS Base, pass the clip's transcript as `speaker_ref_text` for in-context
+voice cloning. This requires a clip of at most 30 seconds and an mmproj converted
+with the speech tokenizer encoder. Otherwise the helper uses the speaker embedding.
+The FA option controls mmproj independently of the backbone.
 
 For Chatterbox, supply a reference or use a voice included in the weights.
 Omitting both selects the first predefined voice. Multilingual V3 requires
@@ -2087,6 +2090,9 @@ is also bounded by the native codebook tower's 4096-position limit.
 For Soprano, use matching backbone and mmproj files, supply English text, and
 omit both `speaker_reference` and `language`. See the
 [Soprano guide](docs/wiki/examples/audio/audio-tts.md#soprano) for conversion and usage.
+
+For Kokoro and tiny-voca, pass `raw_prompt=True` (CLI `--raw-prompt`) to speak
+model phonemes directly. See the [phoneme examples](docs/wiki/examples/audio/audio-tts.md#kokoro-and-tiny-voca).
 
 YuE2 generates 48 kHz stereo songs from `[Tags]`/`[Lyrics]` text. Use the model's
 training context (`n_ctx=0`) and F16 KV; `voice="full"`, `"melody"` or `"off"`

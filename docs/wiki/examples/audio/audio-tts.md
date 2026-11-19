@@ -2,14 +2,13 @@
 
 `MTMDAudioGenerator` provides experimental, non-streaming speech synthesis using
 the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS,
-Soprano, Chatterbox, Drama 3 and Zonos3, plus YuE2 song generation,
-backbones with matching audio generation mmproj files. Audio-input models such
+Soprano, Chatterbox, Drama 3, Zonos3, Kokoro and tiny-voca, plus YuE2 song
+generation. Each backbone requires a matching audio generation mmproj. Audio-input models such
 as Qwen3-ASR are not TTS models.
 
 For Qwen3-TTS, use the Base variant supported by the vendor example.
-CustomVoice is not currently supported end to end: its checkpoint lacks the
-speaker encoder expected by the mmproj converter, and the generation helper
-does not expose preset speaker IDs. Loading its backbone alone is insufficient.
+The high-level API supports Base reference audio. CustomVoice preset speaker IDs
+are outside the current generation helper's interface.
 
 ## Usage
 
@@ -155,8 +154,7 @@ finally:
 Delivery values select model conditioning buckets, rather than applying a
 waveform speed/volume filter; exact duration or measured LUFS is not guaranteed.
 Loudness has a stronger effect with cloned references; predefined voices tend
-to retain their reference level. Other TTS models reject non-default `speed` or
-`loudness` with `ValueError`.
+to retain their reference level.
 
 The backbone's named `tts` template is required and rendered before generation.
 It normalizes supported numbers, money and times using the packaged vendor
@@ -175,6 +173,10 @@ For the CLI example, select the Zonos3 files and add
 YuE2-3B generates 48 kHz stereo songs from style tags and lyrics. Use matching
 backbone and mmproj GGUF files; the projector includes the separate YuE2-Vae
 decoder. Follow the [vendor conversion guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#yue2).
+
+At vendor revision `52975342f`, the native loader rejects YuE2's NAR decoder
+with `tensor cls.output.weight is missing from the mmproj`. This occurs during
+projector initialization, before the first generation request reaches the helper.
 
 ```python
 from llama_cpp import Llama, LLAMA_POOLING_TYPE_NONE
@@ -291,15 +293,58 @@ utterance into 32 kHz audio. `max_frames` must be at least 2; early termination
 before two frames still raises a native decoding error. Both WAV and float32
 PCM are supported, with no streaming output.
 
-### Qwen voice cloning limitations
+### Kokoro and tiny-voca
 
-The current vendor pipeline uses reference audio only to extract a speaker
-embedding, corresponding to the speaker-only approach of upstream
-`x_vector_only_mode=True`. It does **not** support `ref_text` or full voice
-cloning conditioned on both reference audio and its transcript. Neither
-`ref_text` nor `x_vector_only_mode` is exposed by `create_speech`; the cloning
-mode cannot currently be switched. Voice similarity may be lower than with
-the upstream transcript-conditioned mode.
+Both models use the first voice in the mmproj by default. Pass `voice` to
+select another preset and `speed` to change the speaking rate (tiny-voca accepts
+`0.25` through `4.0`). The helper generates speech without token sampling.
+
+```python
+audio = generator.create_speech(llama=llama, text="The meeting is at noon.", voice="F2", speed=1.2)
+```
+
+This example uses tiny-voca. For Kokoro, try `voice="af_heart"` with matching weights.
+Both models convert English text with the GGUF's named `tts` template.
+Use `raw_prompt=True` to skip template rendering and pass phonemes directly
+to the helper. Each model has its own phoneme format.
+
+```python
+# Use the matching backbone and mmproj for each model.
+kokoro_audio = kokoro_generator.create_speech(
+    llama=kokoro_llama, text="həlˈO wˈɜɹld.", voice="af_heart", raw_prompt=True,
+)
+tiny_voca_audio = tiny_voca_generator.create_speech(
+    llama=tiny_voca_llama, text="h ə l ˈoʊ <sp> w ˈɜː l d .", voice="F2", raw_prompt=True,
+)
+```
+
+Kokoro uses its own phoneme symbols. tiny-voca expects space-separated symbols,
+`<sp>` between words, and `ˈ` or `ˌ` before a stressed vowel.
+The CLI equivalent is `--raw-prompt`, which works with `--text` or a UTF-8
+`--text-file`.
+
+```sh
+python -m examples.high_level_api.mtmd_tts --model /path/to/model/tiny-voca.gguf --mmproj /path/to/model/mmproj-tiny-voca.gguf --text "h ə l ˈoʊ <sp> w ˈɜː l d ." --voice F2 --raw-prompt --output hello.wav
+```
+
+GGUF files converted without a `tts` template already accept phonemes directly.
+See the vendor guides for
+[Kokoro](../../../../vendor/llama.cpp/docs/multimodal/tts.md#kokoro) and
+[tiny-voca](../../../../vendor/llama.cpp/docs/multimodal/tts.md#tiny-voca).
+
+### Qwen voice cloning
+
+Pass the words spoken in the reference clip as `speaker_ref_text` (CLI
+`--speaker-text`) to enable in-context voice cloning. Use a clip of at most
+30 seconds and an mmproj converted with the speech tokenizer encoder. With an
+older mmproj, a longer clip or no transcript, the helper uses the speaker embedding.
+
+```python
+audio = generator.create_speech(
+    llama=llama, text="Your coffee is ready.", language="en",
+    speaker_reference="/path/to/reference.wav", speaker_ref_text="Good morning.",
+)
+```
 
 For reference input, use an encoded audio file path, URL, data URI, or audio
 bytes. Bare base64 strings and `(numpy_array, sample_rate)` tuples are not
@@ -331,8 +376,8 @@ an active request from another thread; synthesis raises `InterruptedError` and
 cleans up. Cancellation is checked between native calls and does not guarantee
 immediate interruption inside the mmproj encoder or vocoder.
 
-The wrapper preserves delivery defaults (`speed=1.0`, `loudness=0.0`) for existing
-TTS models; only Zonos3 accepts non-default delivery values. Native `set_input`
+The delivery defaults are `speed=1.0` and `loudness=0.0`. Zonos3, Kokoro and
+tiny-voca accept speed changes. Zonos3 also accepts loudness changes. Native `set_input`
 code `2` raises `ValueError` for invalid
 model input; other failures raise `RuntimeError`, and cancellation takes
 precedence as `InterruptedError`. Failed requests release temporary resources

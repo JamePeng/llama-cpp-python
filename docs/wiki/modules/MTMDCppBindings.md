@@ -87,8 +87,8 @@ The TTS input ABI includes `speed` (default `1.0`) and `loudness` (default `0.0`
 model-defined loudness). Zero-initializing the structure leaves an invalid
 `speed=0`; use `mtmd_helper_gen_audio_inp_default` or explicitly set both defaults.
 `mtmd_helper_gen_audio_set_input` returns `2` for model-invalid input, including
-unsupported delivery overrides, and `1` for other errors. Non-default speed and
-loudness are currently supported only by Zonos3. The high-level
+unsupported delivery overrides, and `1` for other errors. Zonos3 supports speed
+and loudness. Kokoro and tiny-voca also support speed. The high-level
 `MTMDAudioGenerator.create_speech` exposes both settings; see
 [Zonos3 synthesis](../examples/audio/audio-tts.md#zonos3).
 
@@ -101,6 +101,13 @@ YuE2 is also supported by the high-level generator; see
 [song synthesis](../examples/audio/audio-tts.md#yue2).
 MiniMax-Music3 and Fish S2 enums are bound, but those pipelines are not yet
 enabled by `create_speech`.
+
+`mtmd_bitmap_set_transcript(bitmap, text)` copies a UTF-8 transcript onto a
+reference bitmap. Pass `None` to clear it. For Qwen3-TTS, the helper sets this
+from `speaker_ref_text`. The low-level `mtmd_gen_inp.speed` defaults to `1.0`.
+`mtmd_gen_audio_g2p(ctx, word, buf, size)` writes a word's pronunciation to a
+writable buffer for tiny-voca's template. It returns the byte length on success,
+zero for no pronunciation and `-1` when the buffer is too small.
 
 `mtmd_gen_audio_get_info` reports `n_channels`. Low-level `mtmd_gen_out.n_samples`
 counts samples across all channels; helper `get_output` counts samples **per

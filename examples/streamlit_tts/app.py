@@ -165,7 +165,7 @@ with reference:
         elif pocket:
             st.caption("Use a packaged voice if available, or provide reference audio.")
         else:
-            st.caption("Qwen3-TTS Base uses speaker embeddings only; ref_text-based cloning and CustomVoice are not supported.")
+            st.caption("This demo uses the Qwen reference speaker embedding. For cloning with a transcript, use the CLI with --speaker-text.")
 
 with editor:
     with st.form("synthesis"):

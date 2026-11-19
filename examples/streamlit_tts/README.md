@@ -17,8 +17,8 @@ and mmproj Flash Attention AUTO/ON/OFF.
 
 Qwen CustomVoice and audio-input-only models such as
 Qwen3-ASR are not supported. Other checkpoint sizes are not validated by this
-example. Qwen reference conditioning uses speaker embeddings only: neither
-`ref_text`-conditioned full cloning nor an `x_vector_only_mode` switch is exposed.
+example. This demo uses the Qwen reference speaker embedding. For cloning with
+a transcript, use `--speaker-text` in the [CLI example](../high_level_api/mtmd_tts.py).
 
 ## Run
 
