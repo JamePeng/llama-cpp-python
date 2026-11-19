@@ -2,7 +2,7 @@
 
 `MTMDAudioGenerator` provides experimental, non-streaming speech synthesis using
 the vendored `mtmd_helper_gen_audio_*` API. It supports Qwen3-TTS, Pocket TTS,
-Soprano, Chatterbox, Drama 3, Zonos3, Kokoro and tiny-voca, plus YuE2 song
+Soprano, Chatterbox, Drama 3, Zonos3, Kokoro, tiny-voca and VoxCPM2, plus YuE2 song
 generation. Each backbone requires a matching audio generation mmproj. Audio-input models such
 as Qwen3-ASR are not TTS models.
 
@@ -227,7 +227,7 @@ Let the morning be our song
 - `flow_steps=0` uses the native 32-step NAR solver. Smaller positive values
   reduce computation and may reduce quality. The accepted range is 1–1024.
 - `temperature` controls code sampling; other token-sampling options follow
-  the native pipeline. Non-default `cfg_scale`/`flow_steps` are currently YuE2-only.
+  the native pipeline.
 - Prefer `max_frames=None` for a complete song. A finite budget counts score
   tokens and code-generation steps together. Stopping before the first audio
   code cannot produce audio; shorter planning via `voice="off"` helps bounded tests.
@@ -331,6 +331,33 @@ GGUF files converted without a `tts` template already accept phonemes directly.
 See the vendor guides for
 [Kokoro](../../../../vendor/llama.cpp/docs/multimodal/tts.md#kokoro) and
 [tiny-voca](../../../../vendor/llama.cpp/docs/multimodal/tts.md#tiny-voca).
+
+### VoxCPM2
+
+Use a matching VoxCPM2 backbone and audio mmproj for 48 kHz mono speech. The
+model follows the language of the text. Put a voice description in parentheses
+at the start of the text, or pass `speaker_reference` to clone an existing voice.
+The helper uses up to the first 30 seconds of the reference. Omit `language`,
+`voice`, and `speaker_ref_text`.
+
+```python
+audio = generator.create_speech(
+    llama=llama, text="Your coffee is ready.",
+    speaker_reference="/path/to/reference.wav", max_frames=None,
+    cfg_scale=2.0, flow_steps=10,
+)
+```
+
+`temperature` scales the flow noise (default `1.0`). Set `flow_steps` to
+`2–32`, or leave it at `0` for the model default of 10 steps. `cfg_scale=0`
+selects the native guidance scale of 2.0. A single sequence is sufficient
+for guidance. `max_frames=None` uses the native stop condition and frame limit.
+
+```sh
+python -m examples.high_level_api.mtmd_tts --model /path/to/model/VoxCPM2.gguf --mmproj /path/to/model/mmproj-VoxCPM2.gguf --text "(A calm narrator) Welcome back." --cfg-scale 2 --flow-steps 10 --max-frames 0 --output speech.wav
+```
+
+See the [vendor guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#voxcpm2) for conversion instructions.
 
 ### Qwen voice cloning
 

@@ -97,6 +97,8 @@ The input also includes `speaker_ref_text` (optional reference transcript),
 model-specific; non-default CFG/flow settings are rejected by unsupported models.
 `mtmd_gen_inp` includes serialized backbone-state input and flow/guidance fields
 for YuE2 and MiniMax-Music3; initialize it with `mtmd_gen_inp_default(ctx)`.
+VoxCPM2's `GEN_CODE` stage uses the flow/guidance fields and consumes backbone
+hidden rows plus input embeddings for audio rows.
 YuE2 is also supported by the high-level generator; see
 [song synthesis](../examples/audio/audio-tts.md#yue2).
 MiniMax-Music3 and Fish S2 enums are bound, but those pipelines are not yet

@@ -1407,8 +1407,8 @@ For Qwen3.5 image chat with speculative decoding, see
 ordinary-decoding comparison.
 
 For audio output, `MTMDAudioGenerator` provides non-streaming speech synthesis
-with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3, Zonos3, Kokoro and tiny-voca,
-plus YuE2 stereo song generation.
+with Qwen3-TTS Base, Pocket TTS, Soprano, Chatterbox, Drama 3, Zonos3, Kokoro,
+tiny-voca and VoxCPM2, plus YuE2 stereo song generation.
 See [Text-to-Speech](#speech-synthesis-with-mtmd-text-to-speech)
 for supported models, downloadable weights, and examples.
 
@@ -2021,6 +2021,7 @@ or server `chat_format`.
 | YuE2-3B (songs) | `MTMDAudioGenerator` | Unsupported; `voice` selects score planning | Follows lyrics; omit `language` |
 | Kokoro | `MTMDAudioGenerator` | Predefined voices | English text or model phonemes for other languages |
 | tiny-voca | `MTMDAudioGenerator` | Predefined voices | English |
+| VoxCPM2 | `MTMDAudioGenerator` | Optional reference audio | Follows text |
 
 The Qwen repository currently provides **1.7B Base** backbone and mmproj files
 in BF16, F16 and Q8_0. The example below uses the tested BF16 pair. Download both
@@ -2093,6 +2094,9 @@ omit both `speaker_reference` and `language`. See the
 
 For Kokoro and tiny-voca, pass `raw_prompt=True` (CLI `--raw-prompt`) to speak
 model phonemes directly. See the [phoneme examples](docs/wiki/examples/audio/audio-tts.md#kokoro-and-tiny-voca).
+
+VoxCPM2 generates 48 kHz mono speech. Prefix the text with a voice description
+in parentheses or supply a reference clip. See the [VoxCPM2 guide](docs/wiki/examples/audio/audio-tts.md#voxcpm2).
 
 YuE2 generates 48 kHz stereo songs from `[Tags]`/`[Lyrics]` text. Use the model's
 training context (`n_ctx=0`) and F16 KV; `voice="full"`, `"melody"` or `"off"`
