@@ -1367,6 +1367,7 @@ def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
 #     MTMD_GEN_AUDIO_TYPE_FISH_S2,
 #     MTMD_GEN_AUDIO_TYPE_KOKORO,
 #     MTMD_GEN_AUDIO_TYPE_TINY_VOCA,
+#     MTMD_GEN_AUDIO_TYPE_VOXCPM2,
 # };
 class mtmd_gen_audio_type(enum.IntEnum):
     """Generated audio pipeline type."""
@@ -1383,6 +1384,7 @@ class mtmd_gen_audio_type(enum.IntEnum):
     MTMD_GEN_AUDIO_TYPE_FISH_S2   = 10
     MTMD_GEN_AUDIO_TYPE_KOKORO    = 11
     MTMD_GEN_AUDIO_TYPE_TINY_VOCA = 12
+    MTMD_GEN_AUDIO_TYPE_VOXCPM2  = 13
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;
@@ -1487,12 +1489,15 @@ class mtmd_gen_process_type(enum.IntEnum):
 #     const float * feats;
 #     size_t        n_feats;
 #     float speed; // Kokoro speaking speed, default 1.0
+#     // VoxCPM2 GEN_CODE: embd holds backbone hidden rows; feats holds input
+#     // rows for audio or NULL for text. code0 >= 0 generates the next frame.
+#     // code0 < 0 reads n_codes prompt rows (1 if 0), all text or all audio.
 #     // YuE2 GEN_CODE: serialized backbone sequence state and position count
 #     const uint8_t * backbone_state;
 #     size_t          backbone_state_size;
 #     int32_t         backbone_n_past;
-#     int32_t n_steps; // flow-matching steps; <= 0 uses the model default
-#     float cfg_scale; // residual-code guidance; <= 0 uses the model default
+#     int32_t n_steps; // flow-matching steps; <= 0 uses the model default (VoxCPM2: 10)
+#     float cfg_scale; // classifier-free guidance; <= 0 uses the model default (VoxCPM2: 2.0)
 # };
 class mtmd_gen_inp(Structure):
     """Audio generation input."""

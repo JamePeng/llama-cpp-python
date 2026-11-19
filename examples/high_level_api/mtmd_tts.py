@@ -20,6 +20,7 @@ Use the same --model and --mmproj arguments with any of these examples:
   --text "Hello" --voice Imogen_en-British_F_1 --speed 1.2    Zonos3
   --text "Hello" --speaker /path/to/reference.wav --loudness -25    Zonos3 clone
   --text "h ə l ˈoʊ <sp> w ˈɜː l d ." --voice F2 --raw-prompt    tiny-voca phonemes
+  --text "(A calm narrator) Hello world." --cfg-scale 2 --flow-steps 10    VoxCPM2 voice design
   --text "Hello" --format pcm_f32 --output speech.pcm
   --text-file /path/to/song.txt --voice off --cfg --ctx-size 0 --max-frames 0    YuE2
   --text-file /path/to/song.txt --voice off --cfg --ctx-size 0 --max-frames 750  YuE2: up to ~30 s
@@ -83,11 +84,11 @@ def main():
     parser.add_argument("--max-frames", type=int, default=512, help="Helper-step limit; 0 uses native limits (YuE2: up to ~6 min); not seconds")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float,
-                        help="Backbone temperature (default: 0.8), or Pocket/Zonos3/YuE2 native temperature")
+                        help="Backbone temperature (default: 0.8), or Pocket/Zonos3/YuE2/VoxCPM2 native temperature")
     parser.add_argument("--speed", type=float, default=1.0, help="Relative speaking speed for Zonos3, Kokoro or tiny-voca")
     parser.add_argument("--loudness", type=float, default=0.0, help="Zonos3 target LUFS (negative; 0 uses model default)")
-    parser.add_argument("--cfg-scale", type=float, default=0.0, help="YuE2 code guidance; 0 uses model defaults, 1 disables guidance")
-    parser.add_argument("--flow-steps", type=int, default=0, help="YuE2 NAR flow steps; 0 uses the model default")
+    parser.add_argument("--cfg-scale", type=float, default=0.0, help="YuE2 or VoxCPM2 guidance; 0 uses model defaults")
+    parser.add_argument("--flow-steps", type=int, default=0, help="YuE2 or VoxCPM2 flow steps; 0 uses model defaults (VoxCPM2: 2–32 otherwise)")
     parser.add_argument("--ctx-size", type=int, default=4096)
     parser.add_argument("--gpu-layers", type=int, default=0)
     parser.add_argument("--mmproj-gpu", action="store_true")

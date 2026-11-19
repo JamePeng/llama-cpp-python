@@ -1365,7 +1365,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         state.delivery = (inp.speed, inp.loudness)
         state.speaker_ref_text = inp.speaker_ref_text
         state.guidance = (inp.cfg_scale, inp.flow_steps)
-        if state.kind != 8:
+        if state.kind not in (8, 13):
             assert state.guidance == (0, 0)
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
         state.frame_temperature = inp.temp
@@ -1387,7 +1387,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         return 0
 
     def get_output(ctx, rate, data, size, samples):
-        sample_rate = {3: 32000, 6: 44100, 7: 44100, 8: 48000}.get(state.kind, 24000)
+        sample_rate = {3: 32000, 6: 44100, 7: 44100, 8: 48000, 13: 48000}.get(state.kind, 24000)
         ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = sample_rate
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav:
@@ -1479,6 +1479,7 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
 @pytest.mark.parametrize("kind, frames, native_limit", [
     (2, 1, 512), (3, 2, 512), (6, 1, 512),
     (3, None, 512), (7, None, 1), (7, None, 512), (7, None, 0), (7, None, -1),
+    (13, 1, 0), (13, None, 0),
 ])
 def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames, native_limit):
     generator, llama, backend, state, factory, _ = audio_pipeline
@@ -1495,7 +1496,7 @@ def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames, native_li
     effective = frames if frames is not None else native_limit or state.stop_at
     assert result.finish_reason == ("stop" if effective >= state.stop_at else "length")
     llama._model.classifier_free_guidance.assert_not_called()
-    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100, 7: 44100}[kind]
+    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100, 7: 44100, 13: 48000}[kind]
     assert state.tokens == [42 if kind == 3 else -1] * min(effective, state.stop_at)
     assert backend.mtmd_helper_gen_audio_max_frames.call_count == int(frames is None)
     if kind != 3:
@@ -1567,6 +1568,10 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
         (6, {"speaker_reference": "missing.wav"}, "speaker_reference"),
         (6, {"language": "en"}, "omit language"),
         (6, {"voice": "default"}, "speaker tags"),
+        (13, {"language": "en"}, "omit language"),
+        (13, {"voice": "default"}, "predefined voices"),
+        (13, {"speaker_reference": b"audio", "speaker_ref_text": "hello"}, "only for Qwen"),
+        *((13, {"flow_steps": steps}, "between 2 and 32") for steps in (1, 33)),
     ]
     for kind, options, message in cases:
         state.kind = kind
@@ -1753,11 +1758,11 @@ def test_tts_delivery_validation_before_decode(audio_pipeline):
             with pytest.raises(ValueError, match=field + " must"):
                 generator.create_speech(llama=llama, text="hello", **{field: value})
 
-    for kind in (1, 2, 3, 5, 6, 7, 8, 11, 12):
+    for kind in (1, 2, 3, 5, 6, 7, 8, 11, 12, 13):
         state.kind = kind
         for field, value, supported in (
             ("speed", 1.1, (7, 11, 12)), ("loudness", -20, (7,)),
-            ("cfg_scale", 1, (8,)), ("flow_steps", 4, (8,)),
+            ("cfg_scale", 1, (8, 13)), ("flow_steps", 4, (8, 13)),
         ):
             if kind not in supported:
                 with pytest.raises(ValueError, match="Non-default .*" + field):
@@ -1800,23 +1805,38 @@ def test_tts_chatterbox_cfg_and_reference(audio_pipeline, multilingual, cfg, seq
     assert llama.context_params.kv_unified is unified
 
 
-@pytest.mark.parametrize("supports_reference", [False, True])
-def test_tts_reference_uses_generation_capability(audio_pipeline, supports_reference):
-    generator, llama, backend, state, _, _ = audio_pipeline
+@pytest.mark.parametrize("kind,reference_cap,audio_cap,accepted", [
+    (1, True, False, True), (1, False, True, False),
+    (13, False, True, True), (13, False, False, False),
+])
+def test_tts_reference_uses_generation_capability(audio_pipeline, kind, reference_cap, audio_cap, accepted):
+    generator, llama, backend, state, sampler, _ = audio_pipeline
     native = importlib.import_module("llama_cpp.mtmd_cpp")
-    generator.capabilities = native.mtmd_helper_cap(audio_gen=True, audio_gen_spk_ref=supports_reference)
-    generator.is_support_audio = not supports_reference
-    if supports_reference:
+    state.kind = kind
+    generator.capabilities = native.mtmd_helper_cap(audio_gen=True, audio_gen_spk_ref=reference_cap, audio=audio_cap)
+    generator.is_support_audio = audio_cap
+    request = dict(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE")
+    if not accepted:
+        with pytest.raises(ValueError, match="reference audio"):
+            generator.create_speech(**request)
+        backend.mtmd_helper_gen_audio_init.assert_not_called()
+        return
+
+    if kind == 13:
+        llama._ctx.n_seq_max = lambda: 1
+        llama.context_params.kv_unified = False
+        for steps in (2, 32):
+            audio = generator.create_speech(**request, cfg_scale=1.5, flow_steps=steps, temperature=0.5)
+            assert audio.finish_reason == "stop" and audio.sample_rate == 48000
+            assert state.guidance == (1.5, steps) and state.frame_temperature == 0.5
+        sampler.assert_not_called()
+        llama._model.classifier_free_guidance.assert_not_called()
+    else:
         for transcript in ("早上好", None):
-            audio = generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE",
-                                           speaker_ref_text=transcript)
+            audio = generator.create_speech(**request, speaker_ref_text=transcript)
             assert audio.finish_reason == "stop"
             assert state.speaker_ref_text == (transcript.encode() if transcript else None)
-        assert backend.mtmd_bitmap_free.call_count == 2
-    else:
-        with pytest.raises(ValueError, match="reference audio"):
-            generator.create_speech(llama=llama, text="hello", speaker_reference=b"RIFF0000WAVE")
-        backend.mtmd_helper_gen_audio_init.assert_not_called()
+    assert backend.mtmd_bitmap_free.call_args_list == [((789,), {}), ((789,), {})]
 
 
 @pytest.mark.parametrize("kind", [11, 12], ids=["kokoro", "tiny-voca"])

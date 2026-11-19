@@ -1267,7 +1267,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         language from its weights. It uses temperature as the flow noise scale
         (0 disables noise) and ignores token sampling options except seed.
         temperature=None uses 0.8 for backbone sampling and the native model
-        default for Pocket; an explicit value overrides the relevant stage.
+        default for Pocket and VoxCPM2; an explicit value overrides the relevant stage.
         Soprano uses token sampling and a fixed English voice; omit language
         and speaker_reference, and allow at least two generated frames.
         Chatterbox uses token sampling and a reference or predefined voice.
@@ -1280,6 +1280,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         named TTS template normalizes text using language; other sampling
         options follow the native helper. Kokoro and tiny-voca also accept speed
         and predefined voices. Supply phonemes when the GGUF has no TTS template.
+        VoxCPM2 generates 48 kHz mono audio with optional reference audio.
+        It uses the language and any voice description from text. temperature
+        scales flow noise, cfg_scale controls latent guidance, and flow_steps
+        accepts 2–32 or 0 for the native default.
         YuE2 generates 48 kHz stereo songs from [Tags]/[Lyrics] text. voice
         selects full/melody/off planning; cfg_scale and flow_steps default to
         native settings. Use the model's training context and F16 KV; guided
@@ -1360,6 +1364,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             is_drama = info.type == types.MTMD_GEN_AUDIO_TYPE_DRAMA3
             is_zonos = info.type == types.MTMD_GEN_AUDIO_TYPE_ZONOS3
             is_yue2 = info.type == types.MTMD_GEN_AUDIO_TYPE_YUE2
+            is_voxcpm2 = info.type == types.MTMD_GEN_AUDIO_TYPE_VOXCPM2
             is_phoneme_model = info.type in (types.MTMD_GEN_AUDIO_TYPE_KOKORO, types.MTMD_GEN_AUDIO_TYPE_TINY_VOCA)
             if info.type not in (
                 types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS,
@@ -1371,6 +1376,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 types.MTMD_GEN_AUDIO_TYPE_YUE2,
                 types.MTMD_GEN_AUDIO_TYPE_KOKORO,
                 types.MTMD_GEN_AUDIO_TYPE_TINY_VOCA,
+                types.MTMD_GEN_AUDIO_TYPE_VOXCPM2,
             ):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
             if speaker_ref_text is not None and not is_qwen:
@@ -1383,8 +1389,13 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 raise ValueError("Kokoro and tiny-voca use predefined voices; omit speaker_reference")
             if info.type == types.MTMD_GEN_AUDIO_TYPE_TINY_VOCA and not 0.25 <= ctypes.c_float(speed).value <= 4:
                 raise ValueError("tiny-voca speed must be between 0.25 and 4")
-            if not is_yue2 and (cfg_scale != 0.0 or flow_steps != 0):
-                raise ValueError("Non-default cfg_scale and flow_steps require YuE2")
+            if not (is_yue2 or is_voxcpm2) and (cfg_scale != 0.0 or flow_steps != 0):
+                raise ValueError("Non-default cfg_scale and flow_steps require YuE2 or VoxCPM2")
+            if is_voxcpm2:
+                if language is not None:
+                    raise ValueError("VoxCPM2 determines language from text; omit language")
+                if flow_steps and not 2 <= flow_steps <= 32:
+                    raise ValueError("VoxCPM2 flow_steps must be between 2 and 32, or 0 for the default")
             if is_yue2:
                 if speaker_reference is not None:
                     raise ValueError("YuE2 does not support speaker_reference")
@@ -1460,7 +1471,10 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                         if self.capabilities is not None else self.is_support_audio
                     )
                     # Native capability reporting omits these supported reference encoders.
-                    supports_reference = supports_reference or is_chatterbox or is_zonos
+                    supports_reference = (
+                        supports_reference or is_chatterbox or is_zonos
+                        or (is_voxcpm2 and self.is_support_audio)
+                    )
                     if not supports_reference:
                         raise ValueError("mmproj does not support reference audio input")
                     payload = speaker_reference if isinstance(speaker_reference, bytes) else self.load_media(os.fspath(speaker_reference), "audio")
