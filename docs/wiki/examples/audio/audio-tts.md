@@ -174,9 +174,12 @@ YuE2-3B generates 48 kHz stereo songs from style tags and lyrics. Use matching
 backbone and mmproj GGUF files; the projector includes the separate YuE2-Vae
 decoder. Follow the [vendor conversion guide](../../../../vendor/llama.cpp/docs/multimodal/tts.md#yue2).
 
-At vendor revision `52975342f`, the native loader rejects YuE2's NAR decoder
-with `tensor cls.output.weight is missing from the mmproj`. This occurs during
-projector initialization, before the first generation request reaches the helper.
+The shared projector loader introduced for tiny-voca rejected YuE2 projectors
+that omitted `cls.output.weight`, an optional Qwen3 reranking head that YuE2
+does not use. JamePeng's fix allows the tensor to be absent and was merged
+into the llama.cpp mainline as `53ecea05a`. Use a native build that includes
+this commit. [llama.cpp #32427](https://github.com/ggml-org/llama.cpp/pull/32427)
+· [llama.cpp #32606](https://github.com/ggml-org/llama.cpp/pull/32606)
 
 ```python
 from llama_cpp import Llama, LLAMA_POOLING_TYPE_NONE
