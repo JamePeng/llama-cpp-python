@@ -1124,10 +1124,14 @@ class SchemaConverter:
                 raise ValueError(f'{key} must be a non-empty array')
         if schema.get('type') == []:
             raise ValueError('type must not be empty')
-        for key in ('minLength', 'maxLength', 'minItems', 'maxItems'):
-            if key in schema and (type(schema[key]) is not int or schema[key] < 0):
-                raise ValueError(f'{key} must be a non-negative integer')
         schema_type = schema.get('type')
+        for kind, minimum, maximum in (('string', 'minLength', 'maxLength'),
+                                       ('array', 'minItems', 'maxItems')):
+            for key in (minimum, maximum):
+                if key in schema and (type(schema[key]) is not int or schema[key] < 0):
+                    raise ValueError(f'{key} must be a non-negative integer')
+            if schema_type in (None, kind) and maximum in schema and schema.get(minimum, 0) > schema[maximum]:
+                raise ValueError(f'{minimum} ({schema[minimum]}) exceeds {maximum} ({schema[maximum]})')
         schema_format = schema.get('format')
         rule_name = name + '-' if name in RESERVED_NAMES else name or 'root'
 

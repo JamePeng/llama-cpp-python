@@ -26,11 +26,19 @@ def test_unconstrained_schema(schema, expected):
     assert expected in llama_grammar.json_schema_to_gbnf(schema).splitlines()
 
 
-def test_implicit_string_and_array_bounds():
+@pytest.mark.parametrize('lower, upper', [(2, None), (None, 2), (0, 0), (2, 2), (3, 1), (1, 0)])
+def test_implicit_string_and_array_bounds(lower, upper):
     convert = llama_grammar.json_schema_to_gbnf
-    assert convert({'minLength': 2}) == convert({'type': 'string', 'minLength': 2})
-    assert convert({'type': 'array', 'minItems': 2}) == convert(
-        {'type': 'array', 'items': {}, 'minItems': 2})
+    for kind, unit in [('string', 'Length'), ('array', 'Items')]:
+        minimum, maximum = 'min' + unit, 'max' + unit
+        bounds = {k: v for k, v in [(minimum, lower), (maximum, upper)] if v is not None}
+        implicit = bounds if kind == 'string' else {'type': 'array', **bounds}
+        explicit = {'type': 'string', **bounds} if kind == 'string' else {'items': {}, **implicit}
+        if lower is not None and upper is not None and lower > upper:
+            with pytest.raises(ValueError, match=f'{minimum}.*{maximum}'):
+                llama_cpp.LlamaGrammar.from_json_schema(implicit)
+        else:
+            assert convert(implicit) == convert(explicit)
 
 
 @pytest.mark.parametrize('bounds, integer_bounds', [
