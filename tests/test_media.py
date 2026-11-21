@@ -181,9 +181,14 @@ def test_qwen3_asr_preserves_transcript_history(make_handler, template):
         {"role": "system", "content": "Transcribe."},
         {"role": "user", "content": [{"type": "audio_url", "audio_url": "first.wav"}]},
         {"role": "assistant", "reasoning_content": "language English", "content": "Hello"},
-        {"role": "user", "content": [{"type": "audio_url", "audio_url": "next.wav"}]},
+        {"role": "user", "content": [{"type": "input_audio", "input_audio": {"format": "wav", "data": "YQ=="}}]},
     ]
-    prompt = handler._render_and_replace_media(messages, handler._get_media_items(messages))
+    handler._media_kind = Mock(wraps=handler._media_kind)
+    prepared, media_items = handler._prepare_media_messages(messages)
+    prompt = handler._render_and_replace_media(prepared, media_items)
+    assert handler._media_kind.call_count == 2
+    assert [item["url"] for item in media_items] == ["first.wav", "data:audio/wav;base64,YQ=="]
+    assert isinstance(messages[1]["content"], list)
     assert prompt == (
         "<|im_start|>system\nTranscribe.<|im_end|>\n"
         "<|im_start|>user\n<__media__><|im_end|>\n"
@@ -191,6 +196,75 @@ def test_qwen3_asr_preserves_transcript_history(make_handler, template):
         "<|im_start|>user\n<__media__><|im_end|>\n"
         "<|im_start|>assistant\n"
     )
+
+
+@pytest.mark.parametrize("part, error", [
+    ({"image": "a", "type": "video_url"}, "multiple media types"),
+    ({"input_audio": {"data": "YQ==", "format": "flac"}}, "input_audio.format"),
+    ({"video_url": {}}, "missing video url/data"),
+])
+def test_media_part_validation(make_handler, part, error):
+    handler = make_handler()
+    handler.is_support_audio = handler.is_support_video = True
+    with pytest.raises(ValueError, match=error):
+        handler._prepare_media_messages([{"role": "user", "content": [part]}])
+
+
+@pytest.mark.parametrize("asr, collector, operation", [
+    (False, "super", "rewrite-all"), (False, "custom", "rewrite-all"),
+    (True, "custom", "rewrite-all"), (True, "custom", "keep-last"),
+    (True, "custom", "rewrite-last"), (True, "super", "keep-last"),
+    (True, "super", "rewrite-last"), (True, "subset", "rewrite-last"),
+])
+def test_media_collector_preserves_source_and_parses_once(tmp_path, asr, collector, operation):
+    from llama_cpp.llama_multimodal import GenericMTMDChatHandler
+
+    class CustomHandler(GenericMTMDChatHandler):
+        def _get_media_items(self, messages):
+            """Collect standard or custom clips and optionally filter or rewrite them."""
+            if collector == "custom":
+                items = [{"type": "audio", "url": part["clip"]} for msg in messages
+                         for part in msg["content"] if "clip" in part]
+                if operation == "rewrite-last":
+                    items[-1]["_mtmd_source"] = (1, 1)
+            else:
+                items = super()._get_media_items(messages[1:] if collector == "subset" else messages)
+            if operation != "rewrite-all":
+                items = items[-1:]
+            if operation == "keep-last":
+                return items
+            return [{**item, "url": f"cache/{i}.wav"} for i, item in enumerate(items)]
+
+    key = "clip" if collector == "custom" else "audio_url"
+    first = "skip.wav" if collector == "custom" else "use.wav"
+    messages = [{"role": "user", "content": [{key: first}, {"text": "first"}]},
+                {"role": "user", "content": [{"text": "then"}, {key: "use.wav"}]}]
+    template = "{% for message in messages %}{{ message.content + '|' }}{% endfor %}"
+    with CustomHandler(template, str(tmp_path), verbose=False) as handler:
+        handler._change_chat_template(template)
+        handler.mtmd_bos_token = handler.mtmd_eos_token = ""
+        handler.media_marker = "<__media__>"
+        handler.is_support_audio, handler._uses_qwen3_asr_output = True, asr
+        urls = {"rewrite-all": ["cache/0.wav", "cache/1.wav"], "keep-last": ["use.wav"],
+                "rewrite-last": ["cache/0.wav"]}[operation]
+        expected = [{"type": "audio", "url": url} for url in urls]
+        if operation == "rewrite-all":
+            assert handler._get_media_items(messages) == expected
+
+        handler._get_media_items = Mock(wraps=handler._get_media_items)
+        handler._media_kind = Mock(wraps=handler._media_kind)
+        handler._media_item = Mock(wraps=handler._media_item)
+        prepared, items = handler._prepare_media_messages(messages)
+        handler._get_media_items.assert_called_once()
+        assert handler._get_media_items.call_args.args[0] is messages
+        parsed = {"super": 2, "subset": 1, "custom": 0}[collector]
+        assert (handler._media_kind.call_count, handler._media_item.call_count) == (2 * parsed, parsed)
+        assert items == expected
+        if asr:
+            prompt = handler._render_and_replace_media(prepared, items)
+            assert prompt == ("<__media__>" if operation == "rewrite-all" else "") + "first|then<__media__>|"
+        else:
+            assert prepared is messages
 
 
 def test_qwen3_asr_separates_language_from_transcript(chat_prefill, monkeypatch):
@@ -246,6 +320,7 @@ def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, fail
         backend.mtmd_helper_eval_chunk_single.side_effect = KeyboardInterrupt
 
     match = "expected 4" if failure == "position-in-context" else None
+    handler.is_support_video = True
     video = failure == "video-slots"
     messages = [{"role": "user", "content": [{"type": "video", "video": "clip.mp4"}]}] if video else []
     with pytest.raises((RuntimeError, ValueError, KeyboardInterrupt), match=match) as exc_info:
@@ -320,7 +395,13 @@ def test_chat_prefill_success_hands_off_rebuilt_prompt(chat_prefill, mode, embed
             find_best_checkpoint=Mock(return_value=SimpleNamespace(pos=2)),
             restore_checkpoint=Mock(return_value=True),
         )
-    assert handler(llama=llm, messages=[]) == "completed"
+    items = [{"type": "image", "url": "custom.png"}]
+    handler._get_media_items = Mock(return_value=items)
+    message = {"role": "user", "content": [{"attachment": "custom.png"}]}
+    assert handler(llama=llm, messages=[message]) == "completed"
+    handler._get_media_items.assert_called_once()
+    assert handler._get_media_items.call_args.args[0][-1] is message
+    assert handler._process_mtmd_prompt.call_args.kwargs["media_items"] is items
     assert llm.n_tokens == len(expected)
     assert llm.create_completion.call_args.kwargs["prompt"] == expected
     llm._mark_prefilled_prompt.assert_called_once()
@@ -1095,7 +1176,14 @@ def test_mtmd_context_initialization_and_close(tmp_path, handler_name, flash_att
         model._model = SimpleNamespace(token_get_text=lambda token: {1: "<bos>", 2: "<eos>"}[token])
     try:
         handler._init_mtmd_context(model)
+        other = SimpleNamespace(**vars(model))
+        with pytest.raises(ValueError, match="different Llama"):
+            if handler_name == "MTMDChatHandler":
+                handler(llama=other, messages=[])
+            else:
+                handler._init_mtmd_context(other)
         handler._init_mtmd_context(model)
+        assert handler._bound_model is model
         backend.mtmd_init_from_file.assert_called_once()
         backend.mtmd_get_marker.assert_called_once_with(123)
         assert handler.media_marker == "<media>"
@@ -1252,7 +1340,7 @@ def test_qwen_templates_inject_media_marker(make_handler, kind, handler_name, pa
     rendered = handler._render_mtmd_prompt(messages=messages, add_generation_prompt=False)
     assert "<|vision_start|>" not in rendered and "<|vision_end|>" not in rendered
     assert path in rendered
-    media_items = handler._get_media_items(messages)
+    messages, media_items = handler._prepare_media_messages(messages)
     prompt = handler._render_and_replace_media(
         messages=messages, media_items=media_items, add_generation_prompt=False,
     )
@@ -1312,7 +1400,8 @@ def chunk_ledger(tmp_path, make_handler, monkeypatch):
     def ledger(identities, media_items):
         chunks[:] = [SimpleNamespace(kind=kind, identity=identity) for kind, identity in identities]
         messages = [{"role": "user", "content": media_items}]
-        _, spans, _, _ = handler._process_mtmd_prompt(llama=SimpleNamespace(n_threads=1), messages=messages)
+        messages, items = handler._prepare_media_messages(messages)
+        _, spans, _, _ = handler._process_mtmd_prompt(llama=SimpleNamespace(n_threads=1), messages=messages, media_items=items)
         return [span[4] for span in spans]
 
     return handler, ledger
@@ -1379,6 +1468,7 @@ def test_media_ledger_and_following_text_use_native_positions(chunk_ledger, monk
     ledger, spans, _, _ = handler._process_mtmd_prompt(
         llama=SimpleNamespace(n_threads=1),
         messages=[{"role": "user", "content": [{"type": "image_url", "image_url": "same.png"}]}],
+        media_items=[{"type": "image", "url": "same.png"}],
     )
     assert [(span[0], span[1]) for span in spans] == [(0, 2), (2, 10), (10, 12)]
     assert ledger == [10, 11] + [spans[1][4]] * 8 + [12, 13]
@@ -1506,6 +1596,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         _abort_event=threading.Event(), _native_abort_flag=ctypes.c_bool(False),
         reset=Mock(),
     )
+    generator._bound_model = llama
     yield generator, llama, backend, state, sampler_factory, output
     generator.close()
 
@@ -1939,12 +2030,33 @@ def test_tts_phoneme_model_voices_speed_and_template(audio_pipeline, kind):
     sampler.assert_not_called()
 
 
-def test_tts_rejects_rebinding_and_closed_generator(audio_pipeline):
-    generator, llama, _, _, _, _ = audio_pipeline
+@pytest.mark.parametrize("failure", ["projector", "capabilities", "helper"])
+def test_tts_retries_initialization_then_rejects_rebinding(audio_pipeline, failure):
+    generator, llama, backend, _, _, _ = audio_pipeline
+    generator.mtmd_ctx = generator._bound_model = None
+    llama.model, llama.n_threads = 654, 2
+    other = SimpleNamespace(**{**vars(llama), "model": 655})
+    backend.mtmd_helper_log_set = Mock()
+    backend.mtmd_context_params_default = SimpleNamespace
+    backend.mtmd_init_from_file = Mock(side_effect=[None if failure == "projector" else 111, 222])
+    backend.mtmd_get_marker = Mock(return_value=b"<media>")
+    cap = SimpleNamespace(audio=True, vision=False, video=False, audio_gen_spk_ref=True)
+    backend.mtmd_helper_get_capabilities = Mock(return_value=cap)
+    if failure == "capabilities":
+        backend.mtmd_helper_get_capabilities.side_effect = [RuntimeError("capability query"), cap]
+    if failure == "helper":
+        backend.mtmd_helper_gen_audio_init.side_effect = [None, 456]
+    with pytest.raises((ValueError, RuntimeError), match="Failed to load mtmd|capability query|initialize TTS helper"):
+        generator.create_speech(llama=other, text="hello")
+    assert generator._bound_model is generator.mtmd_ctx is generator._audio_ctx is None
+    assert [call.args[0] for call in backend.mtmd_free.call_args_list] == ([] if failure == "projector" else [111])
     generator.create_speech(llama=llama, text="hello")
+    assert generator._bound_model is llama
     with pytest.raises(ValueError, match="different Llama"):
-        generator.create_speech(llama=SimpleNamespace(**vars(llama)), text="hello")
+        generator.create_speech(llama=other, text="hello")
     generator.close()
+    backend.mtmd_helper_gen_audio_free.assert_called_once_with(456)
+    assert backend.mtmd_free.call_args.args == (222,)
     with pytest.raises(RuntimeError, match="closed"):
         generator.create_speech(llama=llama, text="hello")
 

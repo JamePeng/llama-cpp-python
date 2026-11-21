@@ -12,7 +12,9 @@ import sys
 import threading
 import wave
 
+from collections import Counter
 from contextlib import ExitStack, contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from typing_extensions import Self
 from typing import (
@@ -69,6 +71,7 @@ class MTMDInputChunks:
     """Request-scoped native chunks; encode() returns independently owned data."""
 
     def __init__(self, handler, chunks):
+        """Track the native chunks and their token and position counts for this request."""
         self._handler = handler
         self._chunks = chunks
         self.n_tokens = handler._mtmd_cpp.mtmd_helper_get_n_tokens(chunks)
@@ -101,6 +104,7 @@ class MTMDBaseHandler:
         video_decoder: Optional[mtmd_cpp.mtmd_helper_video_decoder] = None,
         **kwargs
     ):
+        """Configure the projector and media decoders for lazy initialization."""
 
         self.log_prefix = self.__class__.__name__
         self.verbose = verbose
@@ -251,15 +255,24 @@ class MTMDBaseHandler:
         self._bound_model = None
 
     def _init_mtmd_context(self, llama_model: llama_core.Llama):
-        """Initialize mtmd context with the llama model."""
-        self._require_model_open(llama_model)
-        if self._closed:
-            raise RuntimeError("MTMD handler is closed")
-        if self.mtmd_ctx is not None:
-            if self._bound_model is not None and self._bound_model is not llama_model:
-                raise ValueError("MTMD handler is bound to a different Llama model")
-            return
+        """Bind the projector after initialization succeeds and reuse it for the same Llama instance."""
+        with self._mtmd_lock:
+            self._require_model_open(llama_model)
+            if self._closed:
+                raise RuntimeError("MTMD handler is closed")
+            if self.mtmd_ctx is not None:
+                if self._bound_model is not llama_model:
+                    raise ValueError("MTMD handler is bound to a different Llama model")
+                return
+            try:
+                self._open_mtmd_context(llama_model)
+            except BaseException:
+                self._release_projector()
+                raise
+            self._bound_model = llama_model
 
+    def _open_mtmd_context(self, llama_model: llama_core.Llama):
+        """Load the projector for this model and query its media capabilities."""
         self._mtmd_cpp.mtmd_helper_log_set(ggml_log_callback, ctypes.c_void_p(0))
 
         # Get default parameters
@@ -284,9 +297,6 @@ class MTMDBaseHandler:
                                 f"cannot be less than image_min_tokens ({self.image_min_tokens}).")
         self.mctx_params.batch_max_tokens = self.batch_max_tokens
 
-        # Cache the mtmd_default_marker
-        self.media_marker = self._mtmd_cpp.mtmd_default_marker().decode('utf-8')
-
         # Initialize mtmd context
         self.mtmd_ctx = self._mtmd_cpp.mtmd_init_from_file(
             self.mmproj_path.encode(),
@@ -296,7 +306,6 @@ class MTMDBaseHandler:
 
         if self.mtmd_ctx is None:
             raise ValueError(f"{self.log_prefix}(_init_mtmd_context): Failed to load mtmd context from: {self.mmproj_path}")
-        self._bound_model = llama_model
         self.media_marker = self._mtmd_cpp.mtmd_get_marker(self.mtmd_ctx).decode("utf-8")
         self.capabilities = self._query_capabilities(llama_model)
 
@@ -329,6 +338,7 @@ class MTMDBaseHandler:
                 print(f"{self.log_prefix}(_init_mtmd_context): Video support is NOT available in this build.", file=sys.stderr)
 
     def _query_capabilities(self, llama_model: llama_core.Llama):
+        """Read the native capability report or assemble it from legacy queries."""
         mtmd = self._mtmd_cpp
         query = getattr(mtmd, "mtmd_helper_get_capabilities", None)
         if query is not None and not getattr(query, "__ctypes_optional__", False):
@@ -372,32 +382,39 @@ class MTMDBaseHandler:
             self._close_resources()
 
     def _close_resources(self) -> None:
+        """Close dependent resources and the projector before releasing decoder callbacks."""
         cleanup = getattr(self, "_exit_stack", None)
         self._exit_stack = None
         self._closed = True
-        self._bound_model = None
-        self.mctx_params = None
-        self.capabilities = None
         try:
             # Dependent resources must be freed before the mtmd context.
             if cleanup is not None:
                 cleanup.close()
         finally:
             try:
-                if getattr(self, "mtmd_ctx", None) is not None:
-                    ctx, self.mtmd_ctx = self.mtmd_ctx, None
-                    self._mtmd_cpp.mtmd_free(ctx)
+                self._release_projector()
             finally:
                 # Native video close callbacks must finish before dropping these owners.
                 self._video_decoder = None
                 self._mtmd_helper_init_opt = None
 
+    def _release_projector(self):
+        """Release the native projector and clear its model binding and capabilities."""
+        ctx = getattr(self, "mtmd_ctx", None)
+        self.mtmd_ctx = self._bound_model = self.mctx_params = self.capabilities = None
+        self.media_marker = None
+        self.is_support_vision = self.is_support_audio = self.is_support_video = False
+        if ctx is not None:
+            self._mtmd_cpp.mtmd_free(ctx)
+
     @staticmethod
     def _require_model_open(model) -> None:
+        """Raise if the Llama instance has already released its context."""
         if hasattr(model, "_ctx") and (model._ctx is None or not model._ctx.ctx):
             raise RuntimeError("Llama model is closed")
 
     def __del__(self) -> None:
+        """Attempt to close native resources during finalization."""
         try:
             self.close()
         except Exception:
@@ -440,6 +457,7 @@ class MTMDBaseHandler:
                     native = self._mtmd_cpp
 
                     def bitmap(payload):
+                        """Decode an image or audio payload and register its native resources for cleanup."""
                         image, video = self._create_bitmap_from_bytes(payload)
                         if video:
                             cleanup.callback(native.mtmd_helper_video_free, video)
@@ -511,6 +529,7 @@ class MTMDBaseHandler:
                 batch = None
 
                 def flush():
+                    """Encode pending chunks and copy their features before releasing the batch."""
                     nonlocal batch
                     if not pending:
                         return
@@ -833,6 +852,7 @@ class MTMDBaseHandler:
         cache_dir: Optional[Union[str, os.PathLike[str]]] = None,
         **kwargs: Any,
     ) -> Self:
+        """Create a handler from a matching projector file on the Hugging Face Hub."""
         import fnmatch
         from pathlib import Path
 
@@ -1006,6 +1026,7 @@ class GeneratedAudio:
 
     @property
     def duration(self) -> float:
+        """Return the duration of the generated audio in seconds."""
         return self.n_samples / self.sample_rate
 
     def save(self, path: Union[str, os.PathLike[str]]) -> None:
@@ -1016,6 +1037,7 @@ class GeneratedAudio:
 
 class _TTSTemplateEnvironment(ImmutableSandboxedEnvironment):
     def is_safe_attribute(self, obj, attr, value):
+        """Allow list.append in TTS templates and apply sandbox rules to other attributes."""
         # Kokoro appends candidate pronunciations to lists created by its template.
         if type(obj) is list and attr == "append":
             return True
@@ -1034,21 +1056,19 @@ class MTMDAudioGenerator(MTMDBaseHandler):
     """
 
     def __init__(self, *args, flash_attn: Optional[bool] = None, **kwargs):
+        """Prepare the projector and request lock for speech synthesis."""
         self._request_lock = threading.Lock()
-        self._closed = False
-        self._bound_llama = None
         self._audio_ctx = None
         super().__init__(*args, flash_attn=flash_attn, **kwargs)
 
     def __enter__(self) -> Self:
+        """Return the open generator for a managed synthesis session."""
         if self._closed:
             raise RuntimeError("Audio generator is closed")
         return self
 
-    def __exit__(self, exc_type, exc_value, traceback) -> None:
-        self.close()
-
     def close(self) -> None:
+        """Release synthesis resources when the generator is idle."""
         lock = getattr(self, "_request_lock", None)
         if lock is None:
             super().close()
@@ -1056,22 +1076,14 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         if not lock.acquire(blocking=False):
             raise RuntimeError("Cannot close audio generator during synthesis")
         try:
-            self._closed = True
-            try:
-                super().close()
-            finally:
-                self._audio_ctx = None
-                self._bound_llama = None
+            super().close()
         finally:
+            if getattr(self, "_closed", False):
+                self._audio_ctx = None
             lock.release()
 
-    def _init_mtmd_context(self, llama_model: llama_core.Llama):
-        if self._bound_llama is not None and self._bound_llama is not llama_model:
-            raise ValueError("Audio generator is already bound to a different Llama")
-        self._bound_llama = llama_model
-        super()._init_mtmd_context(llama_model)
-
     def _create_audio_sampler(self, llama, *, seed, temperature, top_k, top_p, min_p, repeat_penalty):
+        """Build the backbone token sampler for the current speech request."""
         from ._internals import LlamaSamplingContext, LlamaSamplingParams
 
         return LlamaSamplingContext(
@@ -1168,10 +1180,12 @@ class MTMDAudioGenerator(MTMDBaseHandler):
 
     @staticmethod
     def _check_audio_abort(llama: llama_core.Llama) -> None:
+        """Raise InterruptedError when the caller cancels synthesis."""
         if llama._abort_event.is_set():
             raise InterruptedError("Speech synthesis aborted")
 
     def _check_audio_result(self, llama: llama_core.Llama, result: int, stage: str) -> None:
+        """Translate cancellation and native TTS status codes into Python exceptions."""
         self._check_audio_abort(llama)
         if stage == "set_input" and result == 2:
             raise ValueError("TTS input is invalid for this model (code 2); check model-specific input and delivery settings")
@@ -1179,6 +1193,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             raise RuntimeError(f"TTS {stage} failed (code {result})")
 
     def _decode_audio(self, llama: llama_core.Llama, n_batch: int, sampler, max_frames: int) -> Literal["stop", "length"]:
+        """Evaluate the speech prompt and generate frames until the model stops or the limit is reached."""
         mtmd = self._mtmd_cpp
         while True:
             self._check_audio_abort(llama)
@@ -1215,6 +1230,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         self, llama: llama_core.Llama, response_format: Literal["wav", "pcm_f32"],
         finish_reason: Literal["stop", "length"],
     ) -> GeneratedAudio:
+        """Copy and validate the native audio buffer and return it with its metadata."""
         mtmd = self._mtmd_cpp
         rate, data, size, samples = ctypes.c_int32(), ctypes.c_char_p(), ctypes.c_size_t(), ctypes.c_int64()
         self._check_audio_result(llama, mtmd.mtmd_helper_gen_audio_get_output(
@@ -1456,7 +1472,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 if max_frames is not None and max_frames < 2:
                     raise ValueError("Soprano requires max_frames >= 2 for audio decoding")
 
-            with ExitStack() as cleanup:
+            with self._mtmd_lock, ExitStack() as rollback, ExitStack() as cleanup:
                 speaker = None
                 if voice is not None and not is_yue2:
                     speaker = mtmd.mtmd_gen_audio_get_voice(self.mtmd_ctx, voice.encode("utf-8"))
@@ -1484,11 +1500,15 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                         raise ValueError("speaker_reference must contain audio")
 
                 if self._audio_ctx is None:
+                    # Bitmap cleanup runs before rollback. An active request still owns its projector.
+                    if not self._active_requests:
+                        rollback.callback(self._release_projector)
                     audio_ctx = mtmd.mtmd_helper_gen_audio_init(llama._ctx.ctx, self.mtmd_ctx)
                     if not audio_ctx:
                         raise RuntimeError("Failed to initialize TTS helper; check model support and context capacity")
                     self._audio_ctx = audio_ctx
                     self._exit_stack.callback(mtmd.mtmd_helper_gen_audio_free, audio_ctx)
+                    rollback.pop_all()
 
                 frame_limit = max_frames
                 if frame_limit is None:
@@ -1658,6 +1678,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         video_no_soundtrack: Optional[bool] = None,
         **kwargs
     ):
+        """Configure the chat template and initialize media cache identities."""
 
         super().__init__(
             mmproj_path=mmproj_path,
@@ -1706,6 +1727,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         self._change_chat_template(self.chat_format)
 
     def _change_chat_template(self, new_template: str):
+        """Compile the Jinja template with the chat helper functions."""
         environment = ImmutableSandboxedEnvironment(
             trim_blocks=True,
             lstrip_blocks=True
@@ -1714,18 +1736,18 @@ class MTMDChatHandler(MTMDBaseHandler):
         environment.globals["strftime_now"] = Jinja2ChatFormatter.strftime_now
         self.chat_template = environment.from_string(new_template)
 
-    def _init_mtmd_context(self, llama_model: llama_core.Llama):
-        if self.mtmd_ctx is not None:
-            return
-
+    def _open_mtmd_context(self, llama_model: llama_core.Llama):
+        """Open the projector and store the model's BOS and EOS text for template rendering."""
         # Default detokenization hides control tokens; templates need their actual text.
         bos, eos = llama_model.token_bos(), llama_model.token_eos()
-        self.mtmd_bos_token = llama_model._model.token_get_text(bos) if bos != -1 else ""
-        self.mtmd_eos_token = llama_model._model.token_get_text(eos) if eos != -1 else ""
+        bos_text = llama_model._model.token_get_text(bos) if bos != -1 else ""
+        eos_text = llama_model._model.token_get_text(eos) if eos != -1 else ""
 
-        super()._init_mtmd_context(llama_model)
+        super()._open_mtmd_context(llama_model)
+        self.mtmd_bos_token, self.mtmd_eos_token = bos_text, eos_text
 
     def close(self) -> None:
+        """Clear chat template and cache state and release shared MTMD resources."""
         self.chat_format = None
         self.chat_template = None
         self.chat_template_override = None
@@ -1741,22 +1763,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         keys: Tuple[str, ...],
         media_type: str,
     ) -> str:
-        """
-        Extract a media URL or data URI from a multimodal content item.
-
-        Different chat templates and client APIs may represent the same media
-        payload with slightly different keys. For example, an image may appear as
-        `image`, `image_url`, or a typed chunk with `{"type": "image", ...}`.
-        This helper checks the provided keys in order and returns the first usable
-        media payload.
-
-        Returns an empty string when none of the requested keys exist or when the
-        payload shape is unsupported. The caller is responsible for raising a
-        media-type-specific error when an empty value is not acceptable.
-        """
-        # Try keys in priority order. This lets callers prefer canonical fields
-        # such as "image" over compatibility aliases such as "image_url", while
-        # still accepting either representation.
+        """Read a URL or inline payload from the first matching key in priority order."""
         value = None
         for key in keys:
             if key in content:
@@ -1786,160 +1793,170 @@ class MTMDChatHandler(MTMDBaseHandler):
 
         return ""
 
+    def _media_kind(self, part: dict) -> Optional[str]:
+        """Recognize typed and key-only media parts, rejecting ambiguous inputs."""
+        part_type = part.get("type")
+        found = None
+        for kind, keys in (
+            ("image", ("image", "image_url")),
+            ("audio", ("audio", "audio_url", "input_audio")),
+            ("video", ("video", "video_url")),
+        ):
+            if part_type in keys or any(key in part for key in keys):
+                if found is not None:
+                    raise ValueError(f"{self.log_prefix}: content item contains multiple media types; "
+                                     "each content item must contain only one of image, audio, or video.")
+                found = kind
+        return found
+
+    def _media_item(self, part: dict, kind: str) -> Dict[str, str]:
+        """Validate projector support and extract the URL or inline data for one media part."""
+        if kind == "image" and not self.is_support_vision:
+            raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support image inputs.")
+        if kind == "audio" and not self.is_support_audio:
+            raise ValueError(f"{self.log_prefix}: This mmproj model instance does not support audio inputs.")
+        if kind == "video" and not self.is_support_video:
+            raise ValueError(f"{self.log_prefix}: This libmtmd build does not support video inputs.")
+
+        if kind == "audio" and (part.get("type") == "input_audio" or "input_audio" in part):
+            audio = part.get("input_audio")
+            if isinstance(audio, dict) and "data" in audio:
+                if audio.get("format") not in ("wav", "mp3"):
+                    raise ValueError(f"{self.log_prefix}: input_audio.format must be either 'wav' or 'mp3'")
+                url = f"data:audio/{audio['format']};base64,{audio['data']}"
+            else:
+                url = audio if isinstance(audio, str) else ""
+        else:
+            url = self._get_media_url(part, (kind, kind + "_url"), kind)
+        if not url:
+            raise ValueError(f"{self.log_prefix}: missing {kind} url/data.")
+        return {"type": kind, "url": url}
+
+    # ASR string templates need the source parts even when a subclass rewrites the returned URLs.
+    _media_part_sources: ContextVar = ContextVar("mtmd_media_part_sources", default=None)
+
     def _get_media_items(
-        self,
-        messages: List[llama_types.ChatCompletionRequestMessage],
-    ) -> List[Dict[str, str]]:
-        """
-        Extract media payloads from chat messages in message/content order.
-
-        Supports OpenAI-style typed media chunks as well as template-friendly
-        variants used by multimodal chat templates, such as:
-        - {"type": "image_url", "image_url": {"url": "..."}}
-        - {"type": "image", "image": "..."}
-        - {"image": "..."}
-        - {"type": "audio_url", "audio_url": {"url": "..."}}
-        - {"type": "audio", "audio": "..."}
-        - {"type": "input_audio", "input_audio": {"data": "...", "format": "wav"}}
-        - {"type": "video_url", "video_url": {"url": "..."}}
-        - {"type": "video", "video": "..."}
-        - {"video": "..."}
-
-        The returned order must match the media placeholders emitted by the rendered
-        chat template as closely as possible.
-        """
-        media_items: List[Dict[str, str]] = []
-
-        for message in messages:
-            content_list = message.get("content")
-            if not isinstance(content_list, list):
-                continue
-
-            for content in content_list:
-                if not isinstance(content, dict):
-                    continue
-
-                content_type = content.get("type", "")
-
-                has_image = (
-                    content_type in ("image", "image_url")
-                    or "image" in content
-                    or "image_url" in content
-                )
-                has_audio = (
-                    content_type in ("audio", "audio_url", "input_audio")
-                    or "audio" in content
-                    or "audio_url" in content
-                    or "input_audio" in content
-                )
-                has_video = (
-                    content_type in ("video", "video_url")
-                    or "video" in content
-                    or "video_url" in content
-                )
-
-                media_kind_count = int(has_image) + int(has_audio) + int(has_video)
-                if media_kind_count > 1:
-                    raise ValueError(
-                        f"{self.log_prefix}: content item contains multiple media types; "
-                        "each content item must contain only one of image, audio, or video."
-                    )
-
-                # 1. Vision Processing
-                if has_image:
-                    if not self.is_support_vision:
-                        raise ValueError(
-                            f"{self.log_prefix}: This mmproj model instance does not support image inputs."
-                        )
-
-                    url = self._get_media_url(
-                        content,
-                        keys=("image", "image_url"),
-                        media_type="image",
-                    )
-                    if not url:
-                        raise ValueError(f"{self.log_prefix}: missing image url/data.")
-
-                    media_items.append({"url": url, "type": "image"})
-
-                # 2. Audio Processing
-                elif has_audio:
-                    if not self.is_support_audio:
-                        raise ValueError(
-                            f"{self.log_prefix}: This mmproj model instance does not support audio inputs."
-                        )
-
-                    if content_type == "input_audio" or "input_audio" in content:
-                        input_audio = content.get("input_audio", {})
-
-                        if isinstance(input_audio, dict) and "data" in input_audio:
-                            audio_data = input_audio.get("data", "")
-                            audio_format = input_audio.get("format", "")
-
-                            # Strictly align with llama.cpp.
-                            if audio_format not in ["wav", "mp3"]:
-                                raise ValueError(
-                                    f"{self.log_prefix}: input_audio.format must be either 'wav' or 'mp3'"
-                                )
-
-                            url = f"data:audio/{audio_format};base64,{audio_data}"
-                        else:
-                            url = input_audio if isinstance(input_audio, str) else ""
-                    else:
-                        url = self._get_media_url(
-                            content,
-                            keys=("audio", "audio_url"),
-                            media_type="audio",
-                        )
-
-                    if not url:
-                        raise ValueError(f"{self.log_prefix}: missing audio url/data.")
-
-                    media_items.append({"url": url, "type": "audio"})
-
-                # 3. Video Processing
-                elif has_video:
-                    if not self.is_support_video:
-                        raise ValueError(
-                            f"{self.log_prefix}: This libmtmd build does not support video inputs."
-                        )
-
-                    url = self._get_media_url(
-                        content,
-                        keys=("video", "video_url"),
-                        media_type="video",
-                    )
-                    if not url:
-                        raise ValueError(f"{self.log_prefix}: missing video url/data.")
-
-                    media_items.append({"url": url, "type": "video"})
-
-                # 4. Text & Unknown Types
-                elif content_type == "text" or "text" in content:
-                    continue
-                else:
-                    if self.verbose:
-                        print(
-                            f"{self.log_prefix}: ignored unknown content type '{content_type}'.",
-                            file=sys.stderr,
-                        )
-
-        return media_items
-
-    @staticmethod
-    def _has_video_input(messages: List[llama_types.ChatCompletionRequestMessage]) -> bool:
-        for message in messages:
+        self, messages: List[llama_types.ChatCompletionRequestMessage],
+    ) -> List[Dict[str, Any]]:
+        """Collect media in prompt order. Preserve _mtmd_source when copying ASR descriptors."""
+        media_items = []
+        capture = self._media_part_sources.get()
+        sources = capture[2] if capture and capture[0] is self else None
+        original_slots = None
+        if sources is not None and messages is not capture[1]:
+            # An override may pass a filtered list to super(). Locate reused parts by identity.
+            original_slots = {}
+            for index, message in enumerate(capture[1]):
+                content = message.get("content")
+                if isinstance(content, list):
+                    for offset, part in enumerate(content):
+                        key = id(part)
+                        original_slots[key] = (index, offset) if key not in original_slots else None
+        for index, message in enumerate(messages):
             content = message.get("content")
             if not isinstance(content, list):
                 continue
-            for item in content:
-                if isinstance(item, dict) and (
-                    item.get("type") in ("video", "video_url")
-                    or "video" in item
-                    or "video_url" in item
-                ):
-                    return True
-        return False
+            for offset, part in enumerate(content):
+                if not isinstance(part, dict):
+                    continue
+                kind = self._media_kind(part)
+                item = self._media_item(part, kind) if kind else None
+                if item is not None:
+                    if sources is not None:
+                        position = (index, offset) if original_slots is None else original_slots.get(id(part))
+                        if position is not None:
+                            sources[position] = item
+                            item = {**item, "_mtmd_source": position}
+                    media_items.append(item)
+                elif self.verbose and "text" not in part and part.get("type") != "text":
+                    print(f"{self.log_prefix}: ignored unknown content type '{part.get('type', '')}'.",
+                          file=sys.stderr)
+        return media_items
+
+    def _prepare_media_messages(self, messages, *, llama=None, flatten=False):
+        """Collect media through the subclass hook and prepare string content when needed."""
+        if not flatten:
+            return messages, self._get_media_items(messages)
+
+        sources = {}
+        token = self._media_part_sources.set((self, messages, sources))
+        try:
+            media_items = self._get_media_items(messages)
+        finally:
+            self._media_part_sources.reset(token)
+
+        # Keep source positions across URL rewrites, including copies made by overrides.
+        positions = set()
+        untracked = []
+        payloads = []
+        for item in media_items:
+            if "_mtmd_source" in item:
+                item = item.copy()
+                position = item.pop("_mtmd_source")
+                if (not isinstance(position, tuple) or len(position) != 2
+                        or not all(type(i) is int for i in position) or position in positions):
+                    raise ValueError("Each _mtmd_source must be a unique (message_index, part_index) pair.")
+                positions.add(position)
+            else:
+                untracked.append(item)
+            payloads.append(item)
+
+        prepared = list(messages)
+        string_parts = {}
+        known_slots = []
+        custom_slots = []
+        for index, message in enumerate(messages):
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            pieces = []
+            for offset, part in enumerate(content):
+                if not isinstance(part, dict):
+                    continue
+                position = (index, offset)
+                if position in positions:
+                    positions.remove(position)
+                    pieces.append(self.media_marker)
+                    continue
+                if position not in sources and ("text" in part or part.get("type") == "text"):
+                    pieces.append(part.get("text", ""))
+                    continue
+                if untracked:
+                    if position in sources:
+                        known_slots.append((pieces, len(pieces), sources[position]))
+                    else:
+                        custom_slots.append((pieces, len(pieces), part))
+                    pieces.append("")
+            string_parts[index] = pieces
+
+        if positions:
+            raise ValueError("_mtmd_source must identify an existing message content part.")
+        # Older collectors can return plain descriptors. Match their remaining slots as before.
+        if len(untracked) == len(known_slots):
+            slots = known_slots
+        elif len(untracked) == len(known_slots) + len(custom_slots):
+            slots = known_slots + custom_slots
+        else:
+            # A filtering override may retain only some of the original descriptors.
+            retained = Counter((item["type"], item["url"]) for item in untracked)
+            slots = []
+            for pieces, offset, source in known_slots:
+                key = (source["type"], source["url"])
+                if retained[key]:
+                    retained[key] -= 1
+                    slots.append((pieces, offset, source))
+            # A custom collector may return a URL from its own content key.
+            for pieces, offset, part in custom_slots:
+                values = [value.get("url") if isinstance(value, dict) else value for value in part.values()]
+                match = next((key for key, count in retained.items() if count and key[1] in values), None)
+                if match is not None:
+                    retained[match] -= 1
+                    slots.append((pieces, offset, part))
+        for pieces, offset, _ in slots:
+            pieces[offset] = self.media_marker
+        for index, pieces in string_parts.items():
+            prepared[index] = {**messages[index], "content": "".join(pieces)}
+        return prepared, payloads
 
     def _render_mtmd_prompt(
         self,
@@ -2011,6 +2028,10 @@ class MTMDChatHandler(MTMDBaseHandler):
         media_count = len(media_items)
 
         if marker_count != media_count:
+            asr_hint = ""
+            if marker_count < media_count and getattr(self, "_uses_qwen3_asr_output", False):
+                asr_hint = (" If _get_media_items() filters and rewrites ASR inputs, retain "
+                            "_mtmd_source from super() or supply (message_index, part_index).")
             raise ValueError(
                 f"{self.log_prefix}(_replace_media_placeholders): media marker mismatch\n"
                 f"- marker_count={marker_count}\n"
@@ -2018,7 +2039,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                 f"- media_marker={media_marker!r}\n"
                 "Each media item must render to exactly one MTMD media marker. "
                 "Check whether the chat template rendered both a media tag and the "
-                "original URL/data URI, or failed to render a media placeholder."
+                f"original URL/data URI, or failed to render a media placeholder.{asr_hint}"
             )
 
         return text
@@ -2220,9 +2241,11 @@ class MTMDChatHandler(MTMDBaseHandler):
         return None
 
     def _save_media_checkpoint(self, llama, cache):
+        """Save sequence zero and its evaluated prompt prefix in the checkpoint cache."""
         return cache.save_checkpoint(llama.n_tokens, llama.input_ids[:llama.n_tokens].tolist(), seq_id=0)
 
     def _process_mtmd_prompt(self, *args, **kwargs):
+        """Keep the handler open while preparing the multimodal prompt."""
         # Decoders may call back into Python; reject reentrant close until video cleanup finishes.
         with self._mtmd_lock:
             if self._closed:
@@ -2237,6 +2260,7 @@ class MTMDChatHandler(MTMDBaseHandler):
         self,
         llama: llama_core.Llama,
         messages: List[llama_types.ChatCompletionRequestMessage],
+        media_items: List[Dict[str, str]],
         functions: Optional[List[llama_types.ChatCompletionFunction]] = None,
         function_call: Optional[llama_types.ChatCompletionRequestFunctionCall] = None,
         tools: Optional[List[llama_types.ChatCompletionTool]] = None,
@@ -2244,11 +2268,9 @@ class MTMDChatHandler(MTMDBaseHandler):
         add_generation_prompt: bool = True,
     ) -> Tuple[List[int], List[tuple], Any, List[Any]]:
         """
-        Core multimodal preprocessing pipeline.
-        Converts raw chat messages into C++ MTMD chunk structures and a virtual token ledger.
-
-        Loads media concurrently within a request, assigns negative IDs for prefix
-        matching, and releases owned native resources if preprocessing fails.
+        Render prepared messages and tokenize their ordered media into native chunks.
+        Negative IDs track media positions for prefix matching. On failure, release
+        all chunks, bitmaps and video contexts allocated for the request.
 
         Returns:
             full_prompt_ids: Position ledger of text tokens and negative media IDs for prefix matching.
@@ -2256,14 +2278,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             chunks: Allocated C++ mtmd_input_chunks pointer (must be freed by the caller).
             bitmap_cleanup: List of C++ bitmap pointers to be freed after evaluation.
         """
-        # 1. Inject the default system prompt when absent or empty.
-        system_prompt = next((msg["content"] for msg in messages if msg.get("role") == "system"), "")
-        if system_prompt == "" and self.DEFAULT_SYSTEM_MESSAGE is not None:
-            messages = [{"role": "system", "content": self.DEFAULT_SYSTEM_MESSAGE}] + messages
-
-        media_items = self._get_media_items(messages)
-
-        # 2. Render chat template and normalize media placeholders to MTMD markers.
+        # 1. Render the template and normalize its media placeholders.
         text = self._render_and_replace_media(
             messages=messages,
             media_items=media_items,
@@ -2282,14 +2297,13 @@ class MTMDChatHandler(MTMDBaseHandler):
                 file=sys.stderr,
             )
 
-        # 3. Pre-allocate bitmap array to guarantee chronological order during concurrent decoding
+        # 2. Decode media concurrently and store each bitmap at its input index.
         bitmaps = [None] * len(media_items)
         bitmap_cleanup = []
         video_cleanup = []
         chunks = None
 
         try:
-            # Concurrent Media Decoding
             import concurrent.futures
             from threading import Lock
             if media_items:
@@ -2297,6 +2311,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                 cleanup_lock = Lock()
 
                 def _create_bitmap_func(idx: int, item: dict):
+                    """Decode one media item and return its bitmap with the original input index."""
                     # Each task loads and decodes one media item independently.
                     media_bytes = self.load_media(item["url"], item["type"])
                     bitmap, video_ctx = self._create_bitmap_from_bytes(media_bytes)
@@ -2331,7 +2346,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                 # Text-only requests have no media bitmaps.
                 bitmaps = []
 
-            # 4. Tokenize text and media into native chunks.
+            # 3. Tokenize the rendered text and ordered bitmaps into native chunks.
             chunks = self._mtmd_tokenize(
                 llama=llama,
                 text=text,
@@ -2342,7 +2357,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             # Video helper contexts only need to stay alive until mtmd_tokenize() completes.
             self._free_mtmd_resources(videos=video_cleanup)
 
-            # 5. Virtual Token Ledger Construction
+            # 4. Record chunk spans and position IDs for prefix matching.
             full_prompt_ids = []
             chunk_token_spans = []
             current_idx = 0
@@ -2466,14 +2481,23 @@ class MTMDChatHandler(MTMDBaseHandler):
         llama_types.CreateChatCompletionResponse,
         Iterator[llama_types.CreateChatCompletionStreamResponse],
     ]:
-        # 1. Initialize mtmd context
+        """Prefill the multimodal prompt and return a chat completion or streamed chunks."""
+        # 1. Open the projector or verify its existing model binding.
         self._init_mtmd_context(llama)
         assert self.mtmd_ctx is not None
 
-        # 2. Concurrent Preprocessing & Ledger Construction
+        # 2. Apply the default system prompt and collect media in message order.
+        system_prompt = next((msg["content"] for msg in messages if msg.get("role") == "system"), "")
+        if system_prompt == "" and self.DEFAULT_SYSTEM_MESSAGE is not None:
+            messages = [{"role": "system", "content": self.DEFAULT_SYSTEM_MESSAGE}] + messages
+
+        messages, media_items = self._prepare_media_messages(messages, llama=llama)
+
+        # 3. Build native chunks and the position IDs used for cache matching.
         full_prompt_ids, chunk_token_spans, chunks, bitmap_cleanup = self._process_mtmd_prompt(
             llama=llama,
             messages=messages,
+            media_items=media_items,
             functions=functions,
             function_call=function_call,
             tools=tools,
@@ -2507,8 +2531,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             llama._prefilled_prompt = None
             llama._restored_logits = None
 
-            # 3. KV Cache Synchronization & State Rollback
-            # Subclasses must preserve input_ids; this base path owns cache rollback/reset.
+            # 4. Match the cached prefix and roll back any divergent suffix.
             current_history = llama.input_ids[:llama.n_tokens].tolist()
             # Re-evaluate the final prompt position to obtain fresh generation logits.
             longest_prefix = llama.longest_token_prefix(current_history, full_prompt_ids[:-1], self.verbose)
@@ -2555,10 +2578,8 @@ class MTMDChatHandler(MTMDBaseHandler):
 
             n_past = llama.n_tokens
 
-            # MTMD evaluates prompt chunks before create_completion() starts
-            # its own timing interval. Settle any earlier asynchronous work and
-            # measure this prefill phase separately so that the completion reset
-            # cannot discard or misattribute its context timings.
+            # 5. Evaluate the uncached prompt. Track prefill time separately because
+            # create_completion() starts its own timing interval.
             perf_enabled = not llama.context_params.no_perf
             has_prompt_work = any(
                 end_idx > n_past
@@ -2662,6 +2683,7 @@ class MTMDChatHandler(MTMDBaseHandler):
 
                             @self._mtmd_cpp.mtmd_helper_post_decode_callback
                             def post_decode(batch, user_data):
+                                """Forward each decoded media batch to the speculative engine."""
                                 # ctypes cannot propagate exceptions across C.
                                 # Abort native batching and re-raise after return.
                                 try:
@@ -2687,7 +2709,7 @@ class MTMDChatHandler(MTMDBaseHandler):
                             f"(start_pos={n_past}, media_tokens={chunk_n_tokens}, "
                             f"n_ctx_seq={llama.n_ctx_seq()}, n_batch={llama.n_batch})."
                         )
-                        if self._has_video_input(messages):
+                        if any(item["type"] == "video" for item in media_items):
                             message += (
                                 " Video expands into image batches that can fill the "
                                 "model's context. If the native log reports 'failed to "
@@ -2757,7 +2779,7 @@ class MTMDChatHandler(MTMDBaseHandler):
             # Generation no longer needs these resources once prompt evaluation ends.
             self._free_mtmd_resources(chunks, bitmap_cleanup)
 
-        # Configure response formatting and tool selection.
+        # 6. Configure response formatting and tools, then generate the chat response.
         if response_format is not None and response_format["type"] == "json_object":
             grammar = _grammar_for_response_format(response_format)
 
@@ -2913,6 +2935,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         chat_template_name: Optional[str] = None,
         **kwargs
     ) -> None:
+        """Configure template selection and initialize the media checkpoint cache state."""
         self._qwen_vision_template = False
         self._normalize_vision_wrappers = False
         # One native prefix snapshot, separate from the negative media ID mappings.
@@ -2940,6 +2963,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         )
 
     def _resolve_chat_format(self, llama: llama_core.Llama) -> str:
+        """Select an explicit template, a model template, or the built-in fallback."""
         # Highest priority: use the template explicitly provided by the caller.
         if self.chat_format is not None:
             return self.chat_format
@@ -3038,35 +3062,28 @@ class GenericMTMDChatHandler(MTMDChatHandler):
             self._qwen_vision_template or architecture == "lfm3"
         ) and "<|vision_start|>" in self.chat_format
 
-    def _render_mtmd_prompt(self, messages, **kwargs):
+    def _prepare_media_messages(self, messages, *, llama=None):
+        """Collect media and adapt message content and ASR history to the selected template."""
+        if llama is not None:
+            self._ensure_chat_template(llama)
+            if self.verbose:
+                print(f"{self.log_prefix} - Start processing", file=sys.stderr)
         chat_format = self.chat_format or ""
-        if self._uses_qwen3_asr_output and (
+        flatten = self._uses_qwen3_asr_output and (
             "message.content +" in chat_format or "message['content'] +" in chat_format
-        ):
-            # Qwen3-ASR GGUF templates concatenate a string containing the media marker.
-            renders_reasoning = _QWEN3_ASR_TEXT_SEPARATOR in chat_format
-            flattened = []
-            for message in messages:
-                content = message.get("content")
-                if isinstance(content, list):
-                    parts = []
-                    for part in content:
-                        if not isinstance(part, dict):
-                            continue
-                        if self._get_media_items([{"content": [part]}]):
-                            parts.append(self.media_marker)
-                        elif "text" in part:
-                            parts.append(part.get("text", ""))
-                    message = {**message, "content": "".join(parts)}
-                elif not renders_reasoning and message["role"] == "assistant":
-                    language = message.get("reasoning_content")
-                    if language:
-                        message = {**message, "content": language + _QWEN3_ASR_TEXT_SEPARATOR + (content or "")}
-                flattened.append(message)
-            messages = flattened
-        return super()._render_mtmd_prompt(messages=messages, **kwargs)
+        )
+        prepared, media_items = super()._prepare_media_messages(messages, flatten=flatten)
+        if flatten and _QWEN3_ASR_TEXT_SEPARATOR not in chat_format:
+            # Older ASR templates need the language header folded back into assistant history.
+            for index, message in enumerate(prepared):
+                language = message.get("reasoning_content")
+                if message["role"] == "assistant" and language:
+                    transcript = message.get("content") or ""
+                    prepared[index] = {**message, "content": language + _QWEN3_ASR_TEXT_SEPARATOR + transcript}
+        return prepared, media_items
 
     def _replace_media_placeholders(self, text, media_items):
+        """Normalize media markers and remove vision boundaries supplied by MTMD."""
         text = super()._replace_media_placeholders(text, media_items)
         if self._normalize_vision_wrappers:
             # MTMD owns Qwen/LFM3 image boundaries and LFM3's outer video boundary.
@@ -3075,6 +3092,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         return text
 
     def _get_media_checkpoint_cache(self, llama):
+        """Select host or device storage for the current context's media prefix checkpoint."""
         manager = llama._hybrid_cache_mgr
         if not self._qwen_vision_template or not llama.is_hybrid or manager is None or manager.max_checkpoints <= 0:
             if self._media_checkpoint_cache is not None:
@@ -3110,6 +3128,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         return cache
 
     def _save_media_checkpoint(self, llama, cache):
+        """Save the media prefix and retry on the host if device export fails."""
         saved = super()._save_media_checkpoint(llama, cache)
         if not saved and cache.on_device:
             # A failed device export leaves the live sequence available for a
@@ -3120,21 +3139,12 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         return saved
 
     def close(self):
+        """Release the media checkpoint cache before closing the chat handler."""
         if self._media_checkpoint_cache is not None:
             self._media_checkpoint_cache.close()
             self._media_checkpoint_cache = None
         super().close()
 
-    def __call__(self, **kwargs):
-        llama = kwargs["llama"]
-
-        self._ensure_chat_template(llama)
-
-        if self.verbose:
-            print(f"{self.log_prefix} - Start processing", file=sys.stderr)
-
-        # Use parent implementation
-        return super().__call__(**kwargs)
 
 class Llava15ChatHandler(MTMDChatHandler):
     CHAT_FORMAT = (
@@ -3572,6 +3582,7 @@ class MiniCPMv45ChatHandler(MTMDChatHandler):
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Generate a MiniCPM-V 4.5 response with the configured thinking mode and stop tokens."""
         # Inject thinking control flag into the template
         self.extra_template_arguments["enable_thinking"] = self.enable_thinking
 
@@ -3769,12 +3780,13 @@ class MiniCPMV46ChatHandler(MTMDChatHandler):
 
         Args:
             enable_thinking (bool): Controls whether to open a `<think>` block for reasoning.
-                                    Defaults to False as per the standard template logic.
+                                    Defaults to True in this handler.
         """
         self.enable_thinking = enable_thinking
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Apply MiniCPM-V 4.6 thinking and stop settings to the chat request."""
         # Inject the thinking variable into the Jinja environment
         self.extra_template_arguments["enable_thinking"] = self.enable_thinking
 
@@ -4313,6 +4325,7 @@ class Gemma4ChatHandler(MTMDChatHandler):
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Generate a Gemma 4 response using its thinking setting and stop tokens."""
         # Inject the thinking variable into the Jinja environment
         self.extra_template_arguments["enable_thinking"] = self.enable_thinking
 
@@ -4372,6 +4385,7 @@ class GLM41VChatHandler(MTMDChatHandler):
     )
 
     def __call__(self, **kwargs):
+        """Apply GLM-4.1V end-of-answer and role stop tokens before generation."""
         self.extra_template_arguments["GLM41V_EOS_TOKEN"] = self.GLM41V_EOS_TOKEN
         # https://huggingface.co/zai-org/GLM-4.1V-9B-Thinking/blob/main/generation_config.json
         stop_tokens = [self.GLM41V_EOS_TOKEN, "<|user|>", "<|observation|>", "</answer>"] # Stop token patch
@@ -4447,7 +4461,7 @@ class GLM46VChatHandler(MTMDChatHandler):
 
     def __init__(self, enable_thinking: bool = True, **kwargs):
         """
-        GLM-4.6V Handler
+        Configure the GLM-4.6V thinking mode.
         Parameters:
         - enable_thinking (bool): Whether to enable the model's think process. The default is True.
         """
@@ -4455,6 +4469,7 @@ class GLM46VChatHandler(MTMDChatHandler):
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Apply GLM-4.6V thinking and stop settings before generation."""
         self.extra_template_arguments["enable_thinking"] = self.enable_thinking
         self.extra_template_arguments["GLM46V_EOS_TOKEN"] = self.GLM46V_EOS_TOKEN
 
@@ -4514,7 +4529,7 @@ class GraniteDoclingChatHandler(MTMDChatHandler):
 
     def __init__(self, controls: dict = None, **kwargs):
         """
-        Granite-Docling Handler
+        Configure document controls for the Granite-Docling template.
         Args:
             controls (dict, optional): Operational parameters passed to the assistant role.
 
@@ -4526,6 +4541,7 @@ class GraniteDoclingChatHandler(MTMDChatHandler):
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Apply document controls and the Granite-Docling stop token to the request."""
         # Inject controls into the template environment
         self.extra_template_arguments["controls"] = self.controls
         self.DEFAULT_SYSTEM_MESSAGE = None
@@ -4571,7 +4587,7 @@ class LFM2VLChatHandler(MTMDChatHandler):
 
     def __init__(self, image_min_tokens: int = -1, image_max_tokens: int = -1, **kwargs):
         """
-        LFM2-VL Handler
+        Configure image-token limits for the LFM2-VL projector.
         LiquidAI officially recommends configuring LFM2-VL with the following Vision parameters: min_image_tokens=64, max_image_tokens=256
         """
         self.image_min_tokens = image_min_tokens
@@ -4579,6 +4595,7 @@ class LFM2VLChatHandler(MTMDChatHandler):
         super().__init__(image_min_tokens=self.image_min_tokens, image_max_tokens=self.image_max_tokens, **kwargs)
 
     def __call__(self, **kwargs):
+        """Run the multimodal request with the LFM2-VL template."""
 
         if self.verbose:
             print(f"{self.log_prefix} - Start processing")
@@ -4664,11 +4681,13 @@ class LFM25VLChatHandler(MTMDChatHandler):
     )
 
     def __init__(self, keep_past_thinking: bool = False, **kwargs):
+        """Configure whether LFM2.5-VL keeps prior thinking in the prompt."""
         self.keep_past_thinking = keep_past_thinking
         super().__init__(**kwargs)
 
 
     def __call__(self, **kwargs):
+        """Apply LFM2.5-VL image-token limits and thinking-history settings."""
         if self.image_min_tokens > 256:
             if self.verbose:
                 print(f"{self.log_prefix}: For LFM2.5-VL, using values higher than 256 for `image_min_tokens` could cause errors. Please reset it to between 64 and 256.")
@@ -4768,6 +4787,7 @@ class PaddleOCRChatHandler(MTMDChatHandler):
         image_max_tokens: int = -1,
         **kwargs
     ):
+        """Configure the image-token limits for PaddleOCR requests."""
         self.image_min_tokens = image_min_tokens
         self.image_max_tokens = image_max_tokens
         super().__init__(
@@ -4777,6 +4797,7 @@ class PaddleOCRChatHandler(MTMDChatHandler):
         )
 
     def __call__(self, **kwargs):
+        """Generate an OCR response using the PaddleOCR end token."""
         # Set the specific stop token defined in the PaddleOCR template
         kwargs['stop'] = [self.PADDLEOCR_EOS_TOKEN]
 
@@ -4824,6 +4845,7 @@ class Qwen25VLChatHandler(MTMDChatHandler):
     )
 
     def __call__(self, **kwargs):
+        """Generate a Qwen2.5-VL response with its end and padding stop tokens."""
         kwargs['stop'] = [self.QWEN25_VL_EOS_TOKEN, self.QWEN25_VL_PAD_TOKEN]
 
         if self.verbose:
@@ -4916,9 +4938,11 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
     )
 
     def __init__(self, **kwargs):
+        """Initialize the Qwen3-ASR handler with its transcription template."""
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Transcribe audio with the Qwen3-ASR template and audio stop markers."""
         # Stop on the ASR audio padding and end markers.
         kwargs['stop'] = [self.QWEN3_ASR_AUDIO_PAD_TOKEN, self.QWEN3_ASR_AUDIO_EOS_TOKEN]
 
@@ -5097,6 +5121,8 @@ class Qwen3VLChatHandler(MTMDChatHandler):
         **kwargs,
     ):
         """
+        Configure reasoning and vision labels for the Qwen3-VL template.
+
         Parameters:
         - force_reasoning (bool):
             - True: Force the reasoning in the model by adding <think> to the chat template.
@@ -5111,6 +5137,7 @@ class Qwen3VLChatHandler(MTMDChatHandler):
         self.extra_template_arguments["add_vision_id"] = add_vision_id
 
     def __call__(self, **kwargs):
+        """Generate a Qwen3-VL response using its configured template and stop tokens."""
         kwargs['stop'] = [self.QWEN3_VL_EOS_TOKEN, self.QWEN3_VL_PAD_TOKEN]
 
         if self.verbose:
@@ -5295,6 +5322,8 @@ class Qwen35ChatHandler(MTMDChatHandler):
         **kwargs,
     ):
         """
+        Configure vision labels and thinking history for the Qwen3.5-family template.
+
         Parameters:
         - add_vision_id (bool):
             - True (default): Count all the images. Recommended for multi-image.
@@ -5314,6 +5343,7 @@ class Qwen35ChatHandler(MTMDChatHandler):
         self.extra_template_arguments["preserve_thinking"] = preserve_thinking
 
     def __call__(self, **kwargs):
+        """Run the Qwen3.5-family chat template with the configured thinking settings."""
         if self.verbose:
             print(f"{self.log_prefix}(enable_thinking={self.enable_thinking}, preserve_thinking={self.preserve_thinking}) - Start processing")
 
@@ -5446,6 +5476,7 @@ class Step3VLChatHandler(MTMDChatHandler):
         super().__init__(**kwargs)
 
     def __call__(self, **kwargs):
+        """Apply Step3-VL thinking and stop settings to the chat request."""
         # Pass thinking toggle into Jinja
         self.extra_template_arguments["enable_thinking"] = self.enable_thinking
 

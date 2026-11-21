@@ -195,6 +195,13 @@ include `<|image_pad|>`, `<|image|>`, `<image>`, `[IMG]`, `<|patch|>` and
 `<|kimi_image_placeholder|>`. The full list is `KNOWN_MEDIA_TAGS` in
 [`llama_multimodal.py`](../../../llama_cpp/llama_multimodal.py).
 
+For ASR templates that take string content, a custom `_get_media_items(messages)`
+can filter the descriptors from `super()` and rewrite a URL with
+`{**item, "url": new_url}`. This keeps the marker at the original audio part,
+even when two clips share a URL. If the override builds fresh descriptors and
+both filters and renames clips, include `"_mtmd_source": (message_index, part_index)`
+using zero-based indices into the messages received by the hook.
+
 ### Adapting an unrecognized placeholder
 
 For a template that emits one independent tag per image, extend the list in a
