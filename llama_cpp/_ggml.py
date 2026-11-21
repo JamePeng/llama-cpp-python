@@ -417,6 +417,7 @@ class GGMLFType(enum.IntEnum):
 #     GGML_OP_OPT_STEP_SGD,
 
 #     GGML_OP_GLU,
+#     GGML_OP_SLEEP,
 
 #     GGML_OP_COUNT,
 # };
@@ -530,7 +531,8 @@ class GGML_OP(enum.IntEnum):
 
     GGML_OP_GLU = 98
 
-    GGML_OP_COUNT = 99
+    GGML_OP_SLEEP = 99
+    GGML_OP_COUNT = 100
 
 # enum ggml_unary_op {
 #     GGML_UNARY_OP_ABS,
@@ -789,6 +791,13 @@ class ggml_tensor(ctypes.Structure):
         padding: ctypes.Array[ctypes.c_char]
 
 ggml_tensor_p = ctypes.POINTER(ggml_tensor)
+
+
+# GGML_API struct ggml_tensor * ggml_sleep(struct ggml_context * ctx, struct ggml_tensor * a, int32_t us);
+@ggml_base_function("ggml_sleep", [ggml_context_p, ggml_tensor_p, ctypes.c_int32], ggml_tensor_p)
+def ggml_sleep(ctx: ggml_context_p, a: ggml_tensor_p, us: int) -> ggml_tensor_p:
+    """Create a view that waits for us microseconds after a has executed."""
+    ...
 
 ggml_tensor._fields_ = [
         ("type", ctypes.c_int),

@@ -7,20 +7,12 @@ from typing import Iterable, Optional, TextIO, Union
 import llama_cpp._ggml as _ggml
 import llama_cpp.llama_cpp as llama_cpp_lib
 
-# enum ggml_log_level {
-#     GGML_LOG_LEVEL_NONE  = 0,
-#     GGML_LOG_LEVEL_INFO  = 1,
-#     GGML_LOG_LEVEL_WARN  = 2,
-#     GGML_LOG_LEVEL_ERROR = 3,
-#     GGML_LOG_LEVEL_DEBUG = 4,
-#     GGML_LOG_LEVEL_CONT  = 5, // continue previous log
-# };
-GGML_LOG_LEVEL_NONE = 0
-GGML_LOG_LEVEL_INFO = 1
-GGML_LOG_LEVEL_WARN = 2
-GGML_LOG_LEVEL_ERROR = 3
-GGML_LOG_LEVEL_DEBUG = 4
-GGML_LOG_LEVEL_CONT = 5
+GGML_LOG_LEVEL_NONE = _ggml.GGMLLogLevel.GGML_LOG_LEVEL_NONE
+GGML_LOG_LEVEL_INFO = _ggml.GGMLLogLevel.GGML_LOG_LEVEL_INFO
+GGML_LOG_LEVEL_WARN = _ggml.GGMLLogLevel.GGML_LOG_LEVEL_WARN
+GGML_LOG_LEVEL_ERROR = _ggml.GGMLLogLevel.GGML_LOG_LEVEL_ERROR
+GGML_LOG_LEVEL_DEBUG = _ggml.GGMLLogLevel.GGML_LOG_LEVEL_DEBUG
+GGML_LOG_LEVEL_CONT = _ggml.GGMLLogLevel.GGML_LOG_LEVEL_CONT
 
 # common/log.h model:
 #

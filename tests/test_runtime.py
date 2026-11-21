@@ -1,4 +1,5 @@
 import os
+import sys
 import ctypes
 import json
 import multiprocessing
@@ -150,7 +151,22 @@ def test_moe_cache_cpu_share_validation_and_restore(monkeypatch, share):
             assert restored.context_params.moe_cache_cpu_share == 0.0
 
 
-def test_ggml_graph_and_fp8_layout():
+@pytest.fixture
+def ggml_context():
+    g = llama_cpp._ggml
+    init = ctypes.CFUNCTYPE(g.ggml_context_p, g.ggml_init_params)(("ggml_init", g.libggml_base))
+    free = ctypes.CFUNCTYPE(None, g.ggml_context_p)(("ggml_free", g.libggml_base))
+    new_tensor = ctypes.CFUNCTYPE(g.ggml_tensor_p, g.ggml_context_p, ctypes.c_int,
+                                  *([ctypes.c_int64] * 4))(("ggml_new_tensor_4d", g.libggml_base))
+    ctx = init(g.ggml_init_params(65536, None, True))
+    assert ctx
+    try:
+        yield ctx, new_tensor
+    finally:
+        free(ctx)
+
+
+def test_ggml_graph_and_fp8_layout(ggml_context):
     g = llama_cpp._ggml
     assert ctypes.sizeof(g.ggml_fp8_e4m3_t) == ctypes.alignment(g.ggml_fp8_e4m3_t) == 1
     assert bytes(g.ggml_fp8_e4m3_t(bits=0xFE)) == b"\xfe"
@@ -159,22 +175,31 @@ def test_ggml_graph_and_fp8_layout():
         assert g.ggml_cgraph.uid.offset == 88
         assert g.ggml_cgraph.order.offset == 80
     # Read a native graph, including its tail and the allocation following it.
-    init = ctypes.CFUNCTYPE(ctypes.c_void_p, g.ggml_init_params)(("ggml_init", g.libggml_base))
-    free = ctypes.CFUNCTYPE(None, ctypes.c_void_p)(("ggml_free", g.libggml_base))
-    new_graph = ctypes.CFUNCTYPE(ctypes.POINTER(g.ggml_cgraph), ctypes.c_void_p,
+    ctx, new_tensor = ggml_context
+    new_graph = ctypes.CFUNCTYPE(ctypes.POINTER(g.ggml_cgraph), g.ggml_context_p,
                                 ctypes.c_size_t, ctypes.c_bool)(("ggml_new_graph_custom", g.libggml_base))
-    ctx = init(g.ggml_init_params(65536, None, True))
-    assert ctx
-    try:
-        graph = new_graph(ctx, 16, False)
-        assert graph.contents.size == 16 and graph.contents.n_nodes == 0
-        assert graph.contents.uid == 0
-        assert ctypes.addressof(graph.contents.nodes.contents) >= ctypes.addressof(graph.contents) + ctypes.sizeof(g.ggml_cgraph)
-    finally:
-        free(ctx)
+    graph = new_graph(ctx, 16, False).contents
+    assert (graph.size, graph.n_nodes, graph.uid) == (16, 0, 0)
+    assert ctypes.addressof(graph.nodes.contents) >= ctypes.addressof(graph) + ctypes.sizeof(graph)
+
+    tensor = new_tensor(ctx, g.GGMLType.GGML_TYPE_F32, 1, 1, 1, 1)
+    sleep = g.ggml_sleep(ctx, tensor, 17).contents
+    assert (sleep.op, sleep.op_params[0]) == (g.GGML_OP.GGML_OP_SLEEP, 17)
+    assert g.GGML_OP.GGML_OP_COUNT == 100
+    assert ctypes.addressof(sleep.view_src.contents) == ctypes.addressof(tensor.contents)
 
 
-def test_ggml_flash_attn_rows_and_comm_callbacks():
+def test_native_logger_keeps_errors_at_error_verbosity(monkeypatch, capsys):
+    from llama_cpp import _logger
+
+    monkeypatch.setattr(_logger, "_config", _logger.LoggerConfig(verbosity=_logger.LOG_LEVEL_ERROR, stderr=sys.stderr))
+    monkeypatch.setattr(_logger, "_last_verbosity", _logger.LOG_LEVEL_ERROR)
+    for level, message in enumerate((b"debug", b"info", b"warn", b"error", b"continued"), 1):
+        _logger.ggml_log_callback(level, message + b"\n", None)
+    assert capsys.readouterr().err == "error\ncontinued\n"
+
+
+def test_ggml_flash_attn_rows_and_comm_callbacks(ggml_context):
     g = llama_cpp._ggml
     bootstrap_type = g.ggml_backend_comm_bootstrap_callback
     init_type = g.ggml_backend_comm_init_rank_t
@@ -199,23 +224,15 @@ def test_ggml_flash_attn_rows_and_comm_callbacks():
         pytest.skip("Native ggml lacks flash attention with KV rows")
     assert rows.argtypes == [g.ggml_context_p] + [g.ggml_tensor_p] * 5 + [ctypes.c_float] * 3
     assert rows.restype is g.ggml_tensor_p
-    init = ctypes.CFUNCTYPE(g.ggml_context_p, g.ggml_init_params)(("ggml_init", g.libggml_base))
-    free = ctypes.CFUNCTYPE(None, g.ggml_context_p)(("ggml_free", g.libggml_base))
-    new = ctypes.CFUNCTYPE(g.ggml_tensor_p, g.ggml_context_p, ctypes.c_int,
-                           *([ctypes.c_int64] * 4))(("ggml_new_tensor_4d", g.libggml_base))
-    ctx = init(g.ggml_init_params(65536, None, True))
-    assert ctx
-    try:
-        q, k, v = (new(ctx, 0, *shape) for shape in ((4, 1, 1, 1), (4, 4, 1, 1), (4, 4, 1, 1)))
-        mask = new(ctx, 1, 2, 1, 1, 1)
-        indices = new(ctx, 26, 2, 1, 1, 1)
-        result = rows(ctx, q, k, v, mask, indices, 0.5, 0.0, 0.0)
-        assert result.contents.op == g.GGML_OP.GGML_OP_FLASH_ATTN_EXT
-        assert list(result.contents.ne) == [4, 1, 1, 1]
-        assert ctypes.addressof(result.contents.src[5].contents) == ctypes.addressof(indices.contents)
-        assert ctypes.cast(result.contents.op_params, ctypes.POINTER(ctypes.c_float))[0] == 0.5
-    finally:
-        free(ctx)
+    ctx, new_tensor = ggml_context
+    q, k, v = (new_tensor(ctx, 0, 4, length, 1, 1) for length in (1, 4, 4))
+    mask = new_tensor(ctx, 1, 2, 1, 1, 1)
+    indices = new_tensor(ctx, 26, 2, 1, 1, 1)
+    result = rows(ctx, q, k, v, mask, indices, 0.5, 0.0, 0.0).contents
+    assert result.op == g.GGML_OP.GGML_OP_FLASH_ATTN_EXT
+    assert list(result.ne) == [4, 1, 1, 1]
+    assert ctypes.addressof(result.src[5].contents) == ctypes.addressof(indices.contents)
+    assert ctypes.cast(result.op_params, ctypes.POINTER(ctypes.c_float))[0] == 0.5
 
 
 @pytest.mark.parametrize("kind", ["single", "shards", "duplicates", "vocab-failure"])
