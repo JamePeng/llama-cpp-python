@@ -95,6 +95,9 @@ and loudness. Kokoro and tiny-voca also support speed. The high-level
 The input also includes `speaker_ref_text` (optional reference transcript),
 `cfg_scale` and `flow_steps` (`0` selects model defaults). These options are
 model-specific; non-default CFG/flow settings are rejected by unsupported models.
+`mtmd_gen_state_get_ref_codes` exposes the frame-major reference codes held by
+the generation state. Copy the array before replacing the reference or freeing
+the state.
 `mtmd_gen_inp` includes serialized backbone-state input and flow/guidance fields
 for YuE2 and MiniMax-Music3; initialize it with `mtmd_gen_inp_default(ctx)`.
 VoxCPM2's `GEN_CODE` stage uses the flow/guidance fields and consumes backbone

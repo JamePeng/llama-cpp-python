@@ -1903,6 +1903,10 @@ print(res["choices"][0]["message"]["content"])
 
 The `Qwen3ASRChatHandler` is specifically designed for the Qwen3 Automatic Speech Recognition (ASR) models. Unlike standard multimodal models, this handler aggregates system prompts for instructions and automatically extracts audio data from the user's message, ignoring any user text.
 
+The transcript is returned in `content`. When the model emits a language prefix,
+the prefix appears in `reasoning_content`. Streaming responses expose the same
+fields in their deltas.
+
 > **⚠️ Important Note on Quantization:** > For Qwen3-ASR models, it is highly recommended to use the **BF16** version of the multimodal projector (`mmproj`). Other quantizations are known to cause severe audio degradation.
 
 **Example Code**: <details>
@@ -2016,7 +2020,7 @@ or server `chat_format`.
 | Pocket TTS | `MTMDAudioGenerator` | Reference audio or predefined voice | Determined by the language-pack weights |
 | Soprano-80M / Soprano-1.1-80M | `MTMDAudioGenerator` | Unsupported; fixed voice | English; omit `language` |
 | Chatterbox Turbo / Multilingual V3 | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Turbo: English; Multilingual V3: selectable |
-| Drama 3 | `MTMDAudioGenerator` | Unsupported; speaker tags in text | Determined by text; omit `language` |
+| Drama 3 | `MTMDAudioGenerator` | Optional reference audio and transcript | Determined by text |
 | Zonos3 Mini | `MTMDAudioGenerator` | Reference audio or predefined voice (first voice used by default) | Follows text; `language` selects text normalization |
 | YuE2-3B (songs) | `MTMDAudioGenerator` | Unsupported; `voice` selects score planning | Follows lyrics; omit `language` |
 | Kokoro | `MTMDAudioGenerator` | Predefined voices | English text or model phonemes for other languages |
@@ -2084,9 +2088,10 @@ The named `tts` template handles language-specific text normalization. Use match
 backbone/F32 mmproj files; see the [Zonos3 guide](docs/wiki/examples/audio/audio-tts.md#zonos3).
 
 Drama 3 uses helper-managed sampling and 44.1 kHz audio. Put `<|speaker:0|>`
-through `<|speaker:15|>` in the text for different speakers; omit `language`,
-`voice` and `speaker_reference`. Only `seed` affects its sampling; generation
-is also bounded by the native codebook tower's 4096-position limit.
+through `<|speaker:15|>` in the text for different speakers. To clone a voice,
+use an mmproj with the codec encoder and pass `speaker_reference` and
+`speaker_ref_text`. The prompt and generation share the codec tower's
+4096-position limit. See the [TTS guide](docs/wiki/examples/audio/audio-tts.md#model-options).
 
 For Soprano, use matching backbone and mmproj files, supply English text, and
 omit both `speaker_reference` and `language`. See the

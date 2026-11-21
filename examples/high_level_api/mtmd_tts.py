@@ -11,6 +11,7 @@ Use the same --model and --mmproj arguments with any of these examples:
   --text "Welcome back" --speaker /path/to/reference.wav --speaker-text "Good morning."    Qwen ICL
   --text "Welcome back" --voice alba           Pocket weights with predefined voices
   --text "<|speaker:0|> Hello. <|speaker:1|> Welcome back."    Drama 3 speakers
+  --text "<|speaker:0|> Welcome back." --speaker /path/to/reference.wav --speaker-text "Good morning."    Drama 3 cloning
   --text "Hello" --speaker voice.wav --speaker-bytes
   --text "First message" --text "Next message" --output messages.wav
   --demo daily --speaker voice.wav             Reuse one generator for several lines
@@ -75,7 +76,7 @@ def main():
     voices = parser.add_mutually_exclusive_group()
     voices.add_argument("--speaker", help="Reference audio path, URL or data URI")
     voices.add_argument("--voice", help="Predefined voice name, or YuE2 full/melody/off planning mode")
-    parser.add_argument("--speaker-text", help="Transcript of --speaker for Qwen3-TTS Base cloning")
+    parser.add_argument("--speaker-text", help="Transcript of --speaker for Qwen3-TTS Base or Drama 3 cloning")
     parser.add_argument("--speaker-bytes", action="store_true", help="Read a local --speaker file as encoded audio bytes")
     parser.add_argument("--language", help="Qwen/Chatterbox language or Zonos3/Kokoro template language")
     parser.add_argument("--cfg", action="store_true", help="Reserve two total sequences with unified KV for Chatterbox Multilingual or YuE2 guidance")
