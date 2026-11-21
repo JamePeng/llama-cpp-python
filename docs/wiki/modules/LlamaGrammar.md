@@ -2,7 +2,7 @@
 title: Llama Grammar
 module_name: llama_cpp.llama_grammar
 source_file: llama_cpp/llama_grammar.py
-last_updated: 2026-11-11
+last_updated: 2026-11-21
 version_target: "latest"
 ---
 
@@ -304,6 +304,7 @@ accepted output, or the public API. They do not change per-token sampling.
 | `from_file` | `IOError` | File cannot be read as UTF-8. |
 | `from_json_schema` | `ValueError` | Conversion or definition validation fails. |
 | `json_schema_to_gbnf` | `TypeError` | Input is neither a string nor a dictionary. |
+| Schema conversion | `ValueError` | A string's `minLength` exceeds `maxLength`, or an array's `minItems` exceeds `maxItems`. The error names both fields and their values, e.g. `minItems (2) exceeds maxItems (1)`. |
 | Schema conversion | `ValueError` | Empty numeric intersection, unsupported constraint combination, or conversion depth exceeds 128 levels. |
 | Native sampler initialization | `RuntimeError` | Native GBNF parsing fails or the start rule is missing. |
 

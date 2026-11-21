@@ -38,6 +38,12 @@ Input dictionaries are copied recursively before resolving references.
 Only a subset of JSON Schema is implemented; conversion is not a complete
 JSON Schema validator.
 
+Use `minLength` and `maxLength` to bound a string, or `minItems` and
+`maxItems` to bound a homogeneous array. Either bound can be omitted.
+Equal bounds specify an exact count, including zero. For example,
+`{"type": "array", "minItems": 2, "maxItems": 2}` requires exactly two items.
+Changing `maxItems` to `1` raises `ValueError` during conversion, before sampling.
+
 An empty schema `{}` accepts any JSON value, including arrays and scalars.
 Use `{"type": "object"}` to require an object. This also applies to nested
 schemas such as `items: {}` and `properties: {"answer": {}}`.
