@@ -2,7 +2,7 @@
 title: Llama Multimodal
 module_name: llama_cpp.llama_multimodal
 source_file: llama_cpp/llama_multimodal.py
-last_updated: 2026-11-15
+last_updated: 2026-11-21
 version_target: "latest"
 ---
 
@@ -61,10 +61,13 @@ A custom decoder can provide video frames without that built-in backend.
 The current chat path loads the video into bytes before passing it to MTMD.
 Native file-path reading is available through the low-level API.
 
-Keep the model and handler open throughout a request, including streamed
-response consumption. Use one handler/model pair per concurrent generation.
-Handlers release native resources on `close()` or context exit. A standalone
-base or embedding handler binds to its first model; close it before that model.
+Base, chat, embedding and TTS handlers bind to a specific `Llama` instance
+when projector initialization succeeds. Reuse that pair across requests.
+Passing another `Llama` instance raises `ValueError`, even if it loaded the
+same GGUF. Create a separate handler for each model instance.
+
+Keep the pair open until the response stream finishes. Use one pair per
+concurrent generation and close a manually created handler before its model.
 
 ### Tokenize and encode
 
@@ -117,11 +120,9 @@ at zero for each encoding request; a custom backbone consumer must map them to
 its own sequence position. Results remain usable after the request and handler
 close, but the request itself cannot be encoded after its scope exits.
 
-The handler binds to the first model it initializes and cannot be reused with a
-different model. Keep that model alive until the handler closes, as the nested
-contexts above do. Requests hold the handler lock; do not share the pair across
-concurrent generation or close it from a decoder callback. Base tokenization
-accepts images/audio; video expansion is provided by the chat handlers.
+Requests hold the handler lock until their scope exits. Close the handler
+after leaving that scope and returning from any decoder callbacks. Base
+tokenization accepts images and audio. Chat handlers also expand video.
 For pooled vectors, use [the embedding API](LlamaEmbedding.md#shared-mtmd-encoding-interfaces).
 
 ## MTMDChatHandler and model-specific handlers
@@ -195,7 +196,11 @@ include `<|image_pad|>`, `<|image|>`, `<image>`, `[IMG]`, `<|patch|>` and
 `<|kimi_image_placeholder|>`. The full list is `KNOWN_MEDIA_TAGS` in
 [`llama_multimodal.py`](../../../llama_cpp/llama_multimodal.py).
 
-For ASR templates that take string content, a custom `_get_media_items(messages)`
+Custom chat handlers can override `_get_media_items(messages)`. The chat path
+calls it once with the full message history, including any default system
+message, and uses the returned media descriptors in prompt order.
+
+For generic Qwen3-ASR templates that take string content, the override
 can filter the descriptors from `super()` and rewrite a URL with
 `{**item, "url": new_url}`. This keeps the marker at the original audio part,
 even when two clips share a URL. If the override builds fresh descriptors and
@@ -480,9 +485,12 @@ in your application's `finally` block); it also closes the auto-created handler.
 pooling and normalization. See [the embedding API](LlamaEmbedding.md#shared-mtmd-encoding-interfaces)
 for configuration and return values.
 
-`MTMDAudioGenerator` uses the shared projector and media lifecycle to drive the
-non-streaming speech-generation loop. See [the TTS guide](../examples/audio/audio-tts.md)
-for model setup, reference audio and sampling options.
+`MTMDAudioGenerator` produces non-streaming speech. If the projector fails to
+load, its capability query fails, or the native TTS helper fails to initialize
+on first use, the generator releases the partial initialization. You can retry
+`create_speech()` on the same open generator with the same `Llama` instance
+or another instance compatible with its projector. For model setup, reference
+audio and sampling options, see [the TTS guide](../examples/audio/audio-tts.md).
 
 For integrations that manage native handles directly, see
 [the MTMD ctypes bindings](MTMDCppBindings.md).
