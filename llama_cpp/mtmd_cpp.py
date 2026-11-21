@@ -1643,6 +1643,18 @@ def mtmd_gen_state_set_ref(ctx: mtmd_context_p, state: mtmd_gen_state_p) -> int:
     """Copy the last encoded reference to this model's state; nonzero means failure."""
     ...
 
+
+# MTMD_API const int32_t * mtmd_gen_state_get_ref_codes(const mtmd_gen_state * state, size_t * n_codes);
+@ctypes_function_mtmd("mtmd_gen_state_get_ref_codes", [mtmd_gen_state_p_ctypes, POINTER(c_size_t)], POINTER(c_int32))
+def mtmd_gen_state_get_ref_codes(
+    state: Optional[mtmd_gen_state_p], n_codes: Optional[_Pointer[c_size_t]],
+) -> _Pointer[c_int32]:
+    """Return borrowed frame-major reference codes, or NULL if there are none.
+
+    Copy the codes before replacing the reference or freeing the state.
+    """
+    ...
+
 # // defaults tuned for the loaded pipeline, callers override only what they care about
 # MTMD_API struct mtmd_gen_inp mtmd_gen_inp_default(const mtmd_context * ctx);
 @ctypes_function_mtmd(
@@ -2483,7 +2495,7 @@ class mtmd_helper_gen_audio_out_mode(enum.IntEnum):
 #     int32_t n_past; // > 0 continues an existing sequence (LFM3A only)
 #     enum mtmd_helper_gen_audio_out_mode out_mode;
 #     mtmd_bitmap * speaker_ref; // optional, can be NULL
-#     const char * speaker_ref_text; // optional reference transcript (Fish S2, Qwen3-TTS)
+#     const char * speaker_ref_text; // optional reference transcript (Fish S2, Qwen3-TTS, Drama 3)
 #     const char * lang; // optional, can be NULL
 #     int32_t  top_k;
 #     float    top_p;

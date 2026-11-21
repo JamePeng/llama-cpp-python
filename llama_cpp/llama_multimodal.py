@@ -1273,8 +1273,9 @@ class MTMDAudioGenerator(MTMDBaseHandler):
         Chatterbox uses token sampling and a reference or predefined voice.
         Its multilingual variant requires a CFG-enabled backbone,
         n_seq_max >= 2 and kv_unified=True; sequence capacity is not changed.
-        Drama 3 samples inside the helper; only seed affects sampling. Put
-        speaker tags in text and omit language, voice and speaker_reference.
+        Drama 3 samples inside the helper. Put speaker tags in text and omit
+        language and voice. For cloning, pass speaker_reference and optionally
+        speaker_ref_text with an mmproj that includes the reference encoder.
         Zonos3 supports voice/reference audio, native frame temperature, speed
         (> 0) and loudness (negative LUFS, or 0 for the model default). Its
         named TTS template normalizes text using language; other sampling
@@ -1379,8 +1380,8 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 types.MTMD_GEN_AUDIO_TYPE_VOXCPM2,
             ):
                 raise ValueError("mmproj does not provide a supported TTS pipeline")
-            if speaker_ref_text is not None and not is_qwen:
-                raise ValueError("speaker_ref_text is supported only for Qwen3-TTS Base")
+            if speaker_ref_text is not None and not (is_qwen or is_drama):
+                raise ValueError("speaker_ref_text is supported only for Qwen3-TTS Base and Drama 3")
             if loudness != 0.0 and not is_zonos:
                 raise ValueError("Non-default loudness requires Zonos3")
             if speed != 1.0 and not (is_zonos or is_phoneme_model):
@@ -1415,8 +1416,6 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                 ):
                     raise ValueError("YuE2 guidance requires a CFG-enabled backbone and Llama(n_seq_max=2, kv_unified=True); use cfg_scale=1 to disable guidance")
             if is_drama:
-                if speaker_reference is not None:
-                    raise ValueError("Drama 3 does not support speaker_reference")
                 if language is not None:
                     raise ValueError("Drama 3 determines language from text; omit language")
                 if voice is not None:
@@ -1473,7 +1472,7 @@ class MTMDAudioGenerator(MTMDBaseHandler):
                     # Native capability reporting omits these supported reference encoders.
                     supports_reference = (
                         supports_reference or is_chatterbox or is_zonos
-                        or (is_voxcpm2 and self.is_support_audio)
+                        or ((is_voxcpm2 or is_drama) and self.is_support_audio)
                     )
                     if not supports_reference:
                         raise ValueError("mmproj does not support reference audio input")
@@ -1531,7 +1530,64 @@ class MTMDAudioGenerator(MTMDBaseHandler):
             self._request_lock.release()
 
 
+_QWEN3_ASR_TEXT_SEPARATOR = "<asr_text>"
+_QWEN3_ASR_LANGUAGE_PREFIX = "language "
+
+
+def _split_qwen3_asr_chunks(
+    chunks: Iterator[llama_types.ChatCompletionChunk],
+) -> Iterator[llama_types.ChatCompletionChunk]:
+    """Buffer the language header until its delimiter arrives or the text ends."""
+    pending = []
+    text = ""
+    for chunk in chunks:
+        choice = chunk["choices"][0]
+        piece = choice["delta"].get("content")
+        if not piece:
+            if choice["finish_reason"] is not None:
+                yield from pending
+                yield chunk
+                yield from chunks
+                return
+            if pending:
+                pending.append(chunk)
+            else:
+                yield chunk
+            continue
+
+        pending.append(chunk)
+        text += piece
+        if _QWEN3_ASR_LANGUAGE_PREFIX.startswith(text):
+            continue
+        if not text.startswith(_QWEN3_ASR_LANGUAGE_PREFIX):
+            yield from pending
+            yield from chunks
+            return
+
+        separator = text.find(_QWEN3_ASR_TEXT_SEPARATOR)
+        if separator < 0:
+            continue
+        transcript_start = separator + len(_QWEN3_ASR_TEXT_SEPARATOR)
+        # Keep chunk metadata and log probabilities associated with their tokens.
+        offset = 0
+        for buffered in pending:
+            delta = buffered["choices"][0]["delta"]
+            content = delta.pop("content", None) or ""
+            language = content[:max(0, separator - offset)]
+            transcript = content[max(0, transcript_start - offset):]
+            if language:
+                delta["reasoning_content"] = language
+            if transcript:
+                delta["content"] = transcript
+            offset += len(content)
+            yield buffered
+        yield from chunks
+        return
+    yield from pending
+
+
 class MTMDChatHandler(MTMDBaseHandler):
+    _uses_qwen3_asr_output = False
     DEFAULT_SYSTEM_MESSAGE: Optional[str] = (
 "You are an exceptionally capable, precise, and helpful multimodal AI assistant that excels at deeply understanding and richly describing images, charts, diagrams, text in images, scenes, and any visual content, "
 "while also answering every question accurately, clearly, and step-by-step when appropriate — always responding in the same language as the user's question, remaining polite, professional, and maximally helpful."
@@ -2798,7 +2854,17 @@ class MTMDChatHandler(MTMDBaseHandler):
             return _convert_completion_to_chat_function(
                 tool_name, completion_or_chunks, stream
             )
-        return _convert_completion_to_chat(completion_or_chunks, stream=stream)
+        result = _convert_completion_to_chat(completion_or_chunks, stream=stream)
+        if self._uses_qwen3_asr_output:
+            if stream:
+                return _split_qwen3_asr_chunks(cast(Iterator[llama_types.ChatCompletionChunk], result))
+            message = cast(llama_types.CreateChatCompletionResponse, result)["choices"][0]["message"]
+            text = message["content"] or ""
+            language, separator, transcript = text.partition(_QWEN3_ASR_TEXT_SEPARATOR)
+            if separator and language.startswith(_QWEN3_ASR_LANGUAGE_PREFIX):
+                message["reasoning_content"] = language
+                message["content"] = transcript
+        return result
 
 # Generic template-driven MTMD handler.
 class GenericMTMDChatHandler(MTMDChatHandler):
@@ -2961,11 +3027,44 @@ class GenericMTMDChatHandler(MTMDChatHandler):
 
         self._template_initialized = True
 
-        architecture = getattr(llama, "metadata", {}).get("general.architecture", "")
+        metadata = getattr(llama, "metadata", {})
+        self._uses_qwen3_asr_output = (
+            _QWEN3_ASR_TEXT_SEPARATOR in self.chat_format
+            or metadata.get("general.basename", "").lower() == "qwen3-asr"
+        )
+        architecture = metadata.get("general.architecture", "")
         self._qwen_vision_template = architecture.startswith("qwen") and "<|vision_start|>" in self.chat_format
         self._normalize_vision_wrappers = (
             self._qwen_vision_template or architecture == "lfm3"
         ) and "<|vision_start|>" in self.chat_format
+
+    def _render_mtmd_prompt(self, messages, **kwargs):
+        chat_format = self.chat_format or ""
+        if self._uses_qwen3_asr_output and (
+            "message.content +" in chat_format or "message['content'] +" in chat_format
+        ):
+            # Qwen3-ASR GGUF templates concatenate a string containing the media marker.
+            renders_reasoning = _QWEN3_ASR_TEXT_SEPARATOR in chat_format
+            flattened = []
+            for message in messages:
+                content = message.get("content")
+                if isinstance(content, list):
+                    parts = []
+                    for part in content:
+                        if not isinstance(part, dict):
+                            continue
+                        if self._get_media_items([{"content": [part]}]):
+                            parts.append(self.media_marker)
+                        elif "text" in part:
+                            parts.append(part.get("text", ""))
+                    message = {**message, "content": "".join(parts)}
+                elif not renders_reasoning and message["role"] == "assistant":
+                    language = message.get("reasoning_content")
+                    if language:
+                        message = {**message, "content": language + _QWEN3_ASR_TEXT_SEPARATOR + (content or "")}
+                flattened.append(message)
+            messages = flattened
+        return super()._render_mtmd_prompt(messages=messages, **kwargs)
 
     def _replace_media_placeholders(self, text, media_items):
         text = super()._replace_media_placeholders(text, media_items)
@@ -4740,8 +4839,8 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
     Features:
     - Highly specialized for Speech-to-Text tasks.
     - Aggregates all system text into a single cohesive system block.
-    - Drops user text entirely, extracting ONLY audio data into a unified user turn.
-    - Wraps audio with <|audio_start|><|audio_pad|>[DATA]<|audio_end|>.
+    - Groups consecutive user audio in one turn and preserves assistant transcripts.
+    - Leaves audio boundaries to MTMD.
     - Integrated MTMD-style URL and Base64 injection for input_audio and audio_url.
     """
 
@@ -4758,6 +4857,7 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
     QWEN3_ASR_AUDIO_BOS_TOKEN = "<|audio_start|>"
     QWEN3_ASR_AUDIO_PAD_TOKEN = "<|audio_pad|>"
     QWEN3_ASR_AUDIO_EOS_TOKEN = "<|audio_end|>"
+    _uses_qwen3_asr_output = True
 
     CHAT_FORMAT = (
         "{%- set ns = namespace(system_text='') -%}\n"
@@ -4775,9 +4875,21 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
         "    {%- endif -%}\n"
         "{%- endfor -%}\n"
         "\n"
-        "{%- set ns2 = namespace(audio_tokens='') -%}\n"
+        "{{- '<|im_start|>system\\n' + (ns.system_text if ns.system_text is string else '') + '<|im_end|>\\n' -}}\n"
+        "{%- set ns2 = namespace(audio_tokens='', has_history=false) -%}\n"
         "{%- for m in messages -%}\n"
-        "    {%- if m.content is not string -%}\n"
+        "    {%- if m.role == 'assistant' -%}\n"
+        "        {%- if ns2.audio_tokens -%}\n"
+        "            {{- '<|im_start|>user\\n' + ns2.audio_tokens + '<|im_end|>\\n' -}}\n"
+        "            {%- set ns2.audio_tokens = '' -%}\n"
+        "        {%- endif -%}\n"
+        "        {{- '<|im_start|>assistant\\n' -}}\n"
+        "        {%- if m.reasoning_content is defined and m.reasoning_content -%}\n"
+        "            {{- m.reasoning_content + '<asr_text>' -}}\n"
+        "        {%- endif -%}\n"
+        "        {{- (m.content or '') + '<|im_end|>\\n' -}}\n"
+        "        {%- set ns2.has_history = true -%}\n"
+        "    {%- elif m.role == 'user' and m.content is iterable and m.content is not string -%}\n"
         "        {%- for c in m.content -%}\n"
         "            {%- if c.type == 'audio' or ('audio' in c) or ('audio_url' in c) or c.type == 'input_audio' -%}\n"
         "                {#- MTMD Audio Injection -#}\n"
@@ -4786,15 +4898,18 @@ class Qwen3ASRChatHandler(MTMDChatHandler):
         "                    {%- set audio_val = c.audio_url if c.audio_url is string else c.audio_url.url -%}\n"
         "                {%- elif c.type == 'input_audio' or 'input_audio' in c -%}\n"
         "                    {%- set audio_val = c.input_audio if c.input_audio is string else ('data:audio/' + c.input_audio.format + ';base64,' + c.input_audio.data) -%}\n"
+        "                {%- elif c.type == 'audio' or 'audio' in c -%}\n"
+        "                    {%- set audio_val = c.audio if c.audio is string else c.audio.url -%}\n"
         "                {%- endif -%}\n"
-        "                {%- set ns2.audio_tokens = ns2.audio_tokens + '<|audio_start|><|audio_pad|>' + audio_val + '<|audio_end|>' -%}\n"
+        "                {%- set ns2.audio_tokens = ns2.audio_tokens + audio_val -%}\n"
         "            {%- endif -%}\n"
         "        {%- endfor -%}\n"
         "    {%- endif -%}\n"
         "{%- endfor -%}\n"
         "\n"
-        "{{- '<|im_start|>system\\n' + (ns.system_text if ns.system_text is string else '') + '<|im_end|>\\n' -}}\n"
-        "{{- '<|im_start|>user\\n' + ns2.audio_tokens + '<|im_end|>\\n' -}}\n"
+        "{%- if ns2.audio_tokens or not ns2.has_history -%}\n"
+        "    {{- '<|im_start|>user\\n' + ns2.audio_tokens + '<|im_end|>\\n' -}}\n"
+        "{%- endif -%}\n"
         "{%- if add_generation_prompt -%}\n"
         "    {{- '<|im_start|>assistant\\n' -}}\n"
         "{%- endif -%}\n"

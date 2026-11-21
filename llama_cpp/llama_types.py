@@ -108,6 +108,7 @@ class ChatCompletionResponseMessageAnnotation(TypedDict):
 
 class ChatCompletionResponseMessage(TypedDict):
     content: Optional[str]
+    reasoning_content: NotRequired[Optional[str]]
     refusal: Optional[str]
     role: Literal["assistant"]
     tool_calls: NotRequired["ChatCompletionMessageToolCalls"]
@@ -193,6 +194,7 @@ ChatCompletionRole = Literal[
 
 class ChatCompletionStreamResponseDelta(TypedDict):
     content: NotRequired[Optional[str]]
+    reasoning_content: NotRequired[Optional[str]]
     function_call: NotRequired[
         Optional[ChatCompletionStreamResponseDeltaFunctionCall]
     ]  # DEPRECATED
@@ -429,6 +431,7 @@ class ChatCompletionRequestAssistantMessage(TypedDict):
     role: Literal["assistant"]
     name: NotRequired[Optional[str]]
     content: NotRequired[Optional[str]]
+    reasoning_content: NotRequired[Optional[str]]
     refusal: NotRequired[Optional[str]]
     tool_calls: NotRequired[ChatCompletionMessageToolCalls]
     function_call: NotRequired[

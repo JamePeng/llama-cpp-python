@@ -155,6 +155,72 @@ def test_builtin_templates_do_not_duplicate_auto_boundaries(chat_tokenizer, hand
     assert normalized == text.removeprefix("<bos>").removesuffix("<eos>")
 
 
+@pytest.mark.parametrize("template", ["dedicated", "embedded", "vendor"])
+def test_qwen3_asr_preserves_transcript_history(make_handler, template):
+    if template == "dedicated":
+        handler = make_handler("Qwen3ASRChatHandler")
+    else:
+        legacy = template == "embedded"
+        content = "message['content']" if legacy else "message.content"
+        reasoning = "" if legacy else (
+            "{% if message.reasoning_content %}{{ message.reasoning_content + '<asr_text>' }}{% endif %}"
+        )
+        chat_format = (
+            "{% for message in messages %}{{ '<|im_start|>' + message.role + '\\n' }}"
+            + reasoning + "{{ " + content + " + '<|im_end|>\\n' }}"
+            "{% endfor %}{{ '<|im_start|>assistant\\n' }}"
+        )
+        handler = make_handler("GenericMTMDChatHandler", chat_format=chat_format)
+        metadata = {"general.basename": "Qwen3-ASR"} if legacy else {}
+        handler._ensure_chat_template(SimpleNamespace(metadata=metadata))
+    assert handler._uses_qwen3_asr_output
+    handler.mtmd_bos_token = handler.mtmd_eos_token = ""
+    handler.media_marker = "<__media__>"
+    handler.is_support_audio = True
+    messages = [
+        {"role": "system", "content": "Transcribe."},
+        {"role": "user", "content": [{"type": "audio_url", "audio_url": "first.wav"}]},
+        {"role": "assistant", "reasoning_content": "language English", "content": "Hello"},
+        {"role": "user", "content": [{"type": "audio_url", "audio_url": "next.wav"}]},
+    ]
+    prompt = handler._render_and_replace_media(messages, handler._get_media_items(messages))
+    assert prompt == (
+        "<|im_start|>system\nTranscribe.<|im_end|>\n"
+        "<|im_start|>user\n<__media__><|im_end|>\n"
+        "<|im_start|>assistant\nlanguage English<asr_text>Hello<|im_end|>\n"
+        "<|im_start|>user\n<__media__><|im_end|>\n"
+        "<|im_start|>assistant\n"
+    )
+
+
+def test_qwen3_asr_separates_language_from_transcript(chat_prefill, monkeypatch):
+    from llama_cpp import llama_multimodal as multimodal
+    from llama_cpp.llama_chat_format import _convert_completion_to_chat
+
+    handler, llm, _ = chat_prefill
+    handler._uses_qwen3_asr_output = True
+    monkeypatch.setattr(multimodal, "_convert_completion_to_chat", _convert_completion_to_chat)
+    fields = ("reasoning_content", "content")
+
+    def completion(text, finish=None):
+        return dict(id="test", created=0, model="qwen3-asr",
+                    choices=[dict(text=text, finish_reason=finish, logprobs=None)])
+
+    for parts, reasoning, content in [
+        (["lan", "guage English<as", "r_text>Hello", " world"], "language English", "Hello world"),
+        (["language None<asr_text>"], "language None", ""),
+        (["language Eng", "lish<asr_"], "", "language English<asr_"),
+        (["Hello", " world"], "", "Hello world"),
+    ]:
+        llm.create_completion.return_value = dict(completion("".join(parts), "stop"), usage={})
+        message = handler(llama=llm, messages=[])["choices"][0]["message"]
+        llm.create_completion.return_value = iter([*(completion(part) for part in parts), completion("", "stop")])
+        chunks = [chunk["choices"][0] for chunk in handler(llama=llm, messages=[], stream=True)]
+        assert chunks[0]["delta"]["role"] == "assistant" and chunks[-1]["finish_reason"] == "stop"
+        streamed = tuple("".join(choice["delta"].get(key, "") for choice in chunks) for key in fields)
+        assert streamed == (message.get("reasoning_content", ""), message["content"]) == (reasoning, content)
+
+
 @pytest.mark.parametrize("failure", ["rollback", "shift", "helper", "position", "position-in-context", "interrupt", "slots", "video-slots"])
 def test_chat_prefill_failure_resets_state_and_releases_media(chat_prefill, failure):
     handler, llm, backend = chat_prefill
@@ -766,6 +832,9 @@ def test_mtmd_resampler_stream_and_lifetime(mtmd, rate_in, rate_out):
 
 
 def test_mtmd_native_audio_helpers(mtmd):
+    count = ctypes.c_size_t(17)
+    assert not mtmd.mtmd_gen_state_get_ref_codes(None, ctypes.byref(count))
+    assert count.value == 0
     assert mtmd.mtmd_helper_gen_audio_max_frames(None) == 0
     buf = ctypes.create_string_buffer(16)
     assert mtmd.mtmd_gen_audio_g2p(None, b"word", buf, len(buf)) == 0
@@ -1565,7 +1634,6 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
         (3, {"speaker_reference": "missing.wav"}, "speaker_reference"),
         (3, {"language": "en"}, "omit language"),
         (3, {"max_frames": 1}, "max_frames >= 2"),
-        (6, {"speaker_reference": "missing.wav"}, "speaker_reference"),
         (6, {"language": "en"}, "omit language"),
         (6, {"voice": "default"}, "speaker tags"),
         (13, {"language": "en"}, "omit language"),
@@ -1807,6 +1875,7 @@ def test_tts_chatterbox_cfg_and_reference(audio_pipeline, multilingual, cfg, seq
 
 @pytest.mark.parametrize("kind,reference_cap,audio_cap,accepted", [
     (1, True, False, True), (1, False, True, False),
+    (6, False, True, True), (6, False, False, False),
     (13, False, True, True), (13, False, False, False),
 ])
 def test_tts_reference_uses_generation_capability(audio_pipeline, kind, reference_cap, audio_cap, accepted):
@@ -1835,6 +1904,7 @@ def test_tts_reference_uses_generation_capability(audio_pipeline, kind, referenc
         for transcript in ("早上好", None):
             audio = generator.create_speech(**request, speaker_ref_text=transcript)
             assert audio.finish_reason == "stop"
+            assert state.speaker == 789
             assert state.speaker_ref_text == (transcript.encode() if transcript else None)
     assert backend.mtmd_bitmap_free.call_args_list == [((789,), {}), ((789,), {})]
 
