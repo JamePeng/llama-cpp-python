@@ -5966,6 +5966,27 @@ def llama_batch_ext_set_decision_order(
     """
     ...
 
+# // Questions packed after a shared state in one sequence, contexts without memory only
+# // 0 (default) is the state, k > 0 the k-th question; full attention layers hide other questions from a question
+# LLAMA_API bool llama_batch_ext_set_decision_group(struct llama_batch_ext * batch, int32_t idx, int32_t group);
+@ctypes_function_llama_ext(
+    [
+        "llama_batch_ext_set_decision_group",
+        "?llama_batch_ext_set_decision_group@@YA_NPEAUllama_batch_ext@@HH@Z",
+        "__Z34llama_batch_ext_set_decision_groupP15llama_batch_extii",
+        "_Z34llama_batch_ext_set_decision_groupP15llama_batch_extii",
+    ],
+    [llama_batch_ext_p_ctypes, ctypes.c_int32, ctypes.c_int32],
+    ctypes.c_bool,
+    required=False,
+)
+def llama_batch_ext_set_decision_group(batch: llama_batch_ext_p, idx: int, group: int) -> bool:
+    """Assign an entry to the shared state (0) or a packed question (positive ID).
+
+    Returns False for an invalid entry index or a negative group.
+    """
+    ...
+
 # // Label of option i of a decision model ("<arch>.decision.labels"), nullptr past the last one
 # LLAMA_API const char * llama_model_decision_label(const struct llama_model * model, uint32_t i);
 @ctypes_function_llama_ext(
