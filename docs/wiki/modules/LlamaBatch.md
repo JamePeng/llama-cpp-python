@@ -90,12 +90,12 @@ embedding and mixed inputs require the corresponding specialized methods.
 `LlamaBatchExt` insertion signatures:
 
 ```text
-add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0, state=None, state_row=None)
-add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None, states=None, state_rows=None)
-add_embd_row(row, position, seq_ids=(0,), output=False)
-add_embedding(embedding, position, seq_ids=(0,), output=False, *, state=None, state_row=None)
-add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None, states=None, state_rows=None)
-add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, state=None, state_row=None)
+add_token(token, position, seq_ids=(0,), output=False, *, decision_order=0, decision_group=0, state=None, state_row=None)
+add_tokens(tokens, *, positions, seq_ids=(0,), outputs=None, decision_orders=None, decision_groups=None, states=None, state_rows=None)
+add_embd_row(row, position, seq_ids=(0,), output=False, *, decision_order=0, decision_group=0, state=None, state_row=None)
+add_embedding(embedding, position, seq_ids=(0,), output=False, *, decision_order=0, decision_group=0, state=None, state_row=None)
+add_embeddings(embeddings, *, positions, seq_ids=(0,), outputs=None, decision_orders=None, decision_groups=None, states=None, state_rows=None)
+add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, decision_order=0, decision_group=0, state=None, state_row=None)
 ```
 
 | Input | Type and meaning |
@@ -109,13 +109,14 @@ add_token_embedding(token, embedding, position, seq_ids=(0,), output=False, *, s
 | `position` / `positions` | Nonnegative int32 model position / one position per entry. Token and paired entries use scalars; embedding-only and device-row entries use four coordinates for M-RoPE/IM-RoPE, otherwise scalars. Bulk coordinates are entry-major: `[entries, 4]`. |
 | `seq_ids` | Nonempty sequence of integer IDs in `[0, context.n_seq_max())`. Multiple IDs share the same input and position; bulk calls apply the same IDs to every entry. |
 | `output` / `outputs` | Boolean flag / one flag per entry. Defaults request no outputs. |
-| `decision_order` | Native decision-head metadata for `add_token()`; `0` is ordinary text. Use a defined `llama_decision_order` value when the model requires it. |
+| `decision_order` / `decision_orders` | A `llama_decision_order` value per entry. Bulk calls take a sequence matching the number of inputs. The default `0` leaves the entry outside the decision head's spans. Supported input types depend on the model's decision head. |
+| `decision_group` / `decision_groups` | Nonnegative int32 group ID per entry for questions packed in one sequence on a context without memory. Group 0 (default) is shared state. Give each question a distinct positive ID so full-attention layers mask the other questions. |
 
 Single-entry methods return an integer logical index. Bulk methods return a tuple
 of logical indices and validate the complete span before appending it.
 
-Use single-entry calls for differing metadata; bulk calls are convenient for
-contiguous text or feature spans. `add_token_embedding()` attaches both a token
+Bulk calls accept per-entry output flags, decision orders and decision groups.
+`add_token_embedding()` attaches both a token
 ID and external features to one entry. A submitted range containing such paired
 entries must contain only paired entries. All embeddings in a range must have
 the same flattened width, and native validation checks it against the context.
@@ -126,6 +127,11 @@ separately from input embedding widths. The native context validates the exact
 width and whether states are supported; a rejected state raises `RuntimeError`
 and clears the partial native batch so the logical inputs can be retried.
 Bulk states are copied once and shared by read-only row views.
+
+For `add_embd_row()`, `row` selects a device input embedding. A compatible
+context can also take a copied host `state` or a borrowed `state_row` on each
+entry. Every entry in the submission must use the same kind of hidden state,
+or all entries must omit it.
 
 Device state rows are rendered through `llama_batch_ext_set_embd_state_row()`.
 Every entry in a submitted range must have one, and none may carry a host state.
