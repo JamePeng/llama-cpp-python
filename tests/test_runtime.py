@@ -1017,6 +1017,33 @@ def test_device_row_ranges_reject_mixed_inputs_and_recover_after_native_failure(
     assert r.batch.submitted_indices == (1, 2) and r.batch.output_indices == (1,)
 
 
+@pytest.mark.parametrize("device_state", [False, True], ids=["host-state", "device-state"])
+def test_device_input_row_with_separate_state(batch_runtime, monkeypatch, device_state):
+    r = batch_runtime
+    position = (1, 2, 3, 0)
+    hidden = np.arange(4, dtype=np.float32)
+    decision_order = Mock(return_value=True)
+    monkeypatch.setattr(internals.llama_cpp, "llama_batch_ext_set_decision_order", decision_order)
+    with pytest.raises(ValueError, match="state_row"):
+        r.batch.add_embd_row(7, position, state=hidden, state_row=0)
+    assert len(r.batch) == 0
+
+    state = {"state_row": 0} if device_state else {"state": hidden}
+    r.batch.add_embd_row(7, position, decision_order=2, **state)
+    r.batch.add_embd_row(9, position)
+    hidden[:] = -1
+    with pytest.raises(ValueError, match="State embeddings|Device state rows"):
+        r.batch.render()
+    assert not r.rows
+    native = r.batch.render(count=1)
+    assert r.rows[0]["embd_row"] == 7
+    if device_state:
+        assert r.rows[0]["state_row"] == 0
+    else:
+        np.testing.assert_array_equal(r.rows[0]["state"], np.arange(4))
+    decision_order.assert_called_once_with(native, 0, 2)
+
+
 @pytest.mark.parametrize("status", [0, 1, -1])
 def test_dflash_device_injection_uses_original_rows_across_chunks(batch_runtime, monkeypatch, status):
     from llama_cpp.llama_speculative import LlamaDFlashDecoding
@@ -1071,6 +1098,38 @@ def test_interleaved_range_preserves_positions_and_output_mapping(batch_runtime)
         r.context.decode(r.batch)
 
 
+def test_packed_decision_groups_survive_range_render_and_retry(batch_runtime, monkeypatch):
+    r = batch_runtime
+    r.batch.add_tokens([1, 2], positions=[0, 1], decision_orders=[0, 1])
+    r.batch.add_token(3, 2, decision_order=2, decision_group=1)
+    r.batch.add_embeddings(
+        [[1, 2]], positions=[(2, 2, 2, 0)], decision_orders=[4], decision_groups=[2],
+    )
+    for groups in ([1], [1, -1], [1, 2**31], [1, False]):
+        with pytest.raises(ValueError, match="decision_group"):
+            r.batch.add_tokens([4, 5], positions=[3, 4], decision_groups=groups)
+    for orders in ([1], [1, 5], [1, False]):
+        with pytest.raises(ValueError, match="decision_order"):
+            r.batch.add_tokens([4, 5], positions=[3, 4], decision_orders=orders)
+    assert [entry.decision_group for entry in r.batch.entries] == [0, 0, 1, 2]
+
+    lib = internals.llama_cpp
+    orders = Mock(return_value=True)
+    groups = Mock(side_effect=[True, False])
+    monkeypatch.setattr(lib, "llama_batch_ext_set_decision_order", orders)
+    monkeypatch.setattr(lib, "llama_batch_ext_set_decision_group", groups)
+    with pytest.raises(RuntimeError, match="decision group at logical entry 3"):
+        r.context.encode(r.batch, start=1, count=3)
+    assert not r.rows and not r.calls
+    groups.reset_mock(side_effect=True)
+    groups.return_value = True
+    orders.reset_mock()
+    r.context.encode(r.batch, start=1, count=3)
+    native = r.calls[0][2]
+    assert [call.args for call in groups.call_args_list] == [(native, 1, 1), (native, 2, 2)]
+    assert [call.args for call in orders.call_args_list] == [(native, 0, 1), (native, 1, 2), (native, 2, 4)]
+
+
 def test_batch_render_failure_clears_partial_rows_and_can_retry(batch_runtime, monkeypatch):
     r = batch_runtime
     invalidations = []
@@ -1111,16 +1170,18 @@ def test_bulk_append_validation_is_atomic_and_paired_mode_is_distinct(batch_runt
 
 
 @pytest.mark.parametrize("kind", ["token", "embedding", "paired"])
-def test_extended_batch_keeps_input_embedding_and_hidden_state_separate(batch_runtime, kind):
+def test_extended_batch_keeps_input_embedding_and_hidden_state_separate(batch_runtime, kind, monkeypatch):
     r = batch_runtime
+    decision_order = Mock(return_value=True)
+    monkeypatch.setattr(internals.llama_cpp, "llama_batch_ext_set_decision_order", decision_order)
     hidden = np.arange(6, dtype=np.float32).reshape(2, 3)
     embedding = np.arange(4, dtype=np.float32)
     if kind == "token":
-        r.batch.add_token(1, 2, seq_ids=(0, 1), output=True, state=hidden)
+        r.batch.add_token(1, 2, seq_ids=(0, 1), output=True, decision_order=4, state=hidden)
     elif kind == "embedding":
-        r.batch.add_embedding(embedding, (2, 3, 4, 0), seq_ids=(0, 1), output=True, state=hidden)
+        r.batch.add_embedding(embedding, (2, 3, 4, 0), seq_ids=(0, 1), output=True, decision_order=4, state=hidden)
     else:
-        r.batch.add_token_embedding(1, embedding, 2, seq_ids=(0, 1), output=True, state=hidden)
+        r.batch.add_token_embedding(1, embedding, 2, seq_ids=(0, 1), output=True, decision_order=4, state=hidden)
     hidden[:] = -1
     embedding[:] = -1
     assert r.context.decode(r.batch) == 0
@@ -1132,6 +1193,7 @@ def test_extended_batch_keeps_input_embedding_and_hidden_state_separate(batch_ru
     assert r.rows[0]["position"] == ((2, 3, 4, 0) if kind == "embedding" else (2,))
     assert r.rows[0]["seq_ids"] == [0, 1]
     assert r.batch.output_indices == (0,)
+    decision_order.assert_called_once_with(r.calls[0][2], 0, 4)
 
 
 def test_lilicorr_draft_submits_separate_states_through_extended_batch(batch_runtime, monkeypatch):

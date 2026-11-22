@@ -20,6 +20,7 @@ from typing import (
 )
 
 from dataclasses import dataclass, field
+from itertools import repeat
 from collections import deque
 from contextlib import ExitStack
 
@@ -1750,6 +1751,7 @@ class LlamaBatchEntry:
     state: Optional[npt.NDArray[np.float32]] = None
     embd_row: Optional[int] = None
     state_row: Optional[int] = None
+    decision_group: int = 0
 
 
 class LlamaBatchExt:
@@ -1768,6 +1770,11 @@ class LlamaBatchExt:
       state source. All submitted entries require one; host states cannot mix.
     * ``add_embd_row``: borrowed device features from ctx_other. Every entry in
       the submitted range must be a device row; consume before the peer decodes.
+    * ``decision_order=`` / ``decision_orders=``: decision-head metadata per
+      entry, using values from ``llama_decision_order``.
+    * ``decision_group=`` / ``decision_groups=``: for packed questions in a
+      context without memory. Group 0 is shared state, positive IDs identify
+      questions within the sequence.
 
     Single-entry methods append one input; bulk methods append a validated span.
     Text/paired positions are scalar; embedding positions have one or four axes
@@ -1855,7 +1862,7 @@ class LlamaBatchExt:
             raise ValueError("seq_ids must be nonempty and within context sequence capacity")
         return ids
 
-    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, state=None, embd_row=None, state_row=None, validated_seq_ids=None):
+    def _entry(self, token, embedding, position, seq_ids, output, decision_order, *, decision_group, state=None, embd_row=None, state_row=None, validated_seq_ids=None):
         """Validate input metadata and construct a logical entry without copying features."""
         if token is not None:
             token = self._integer(token, "token")
@@ -1884,7 +1891,10 @@ class LlamaBatchExt:
         order = self._integer(decision_order, "decision_order")
         if order not in self._decision_orders:
             raise ValueError("Unknown decision_order")
-        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order, state, embd_row, state_row)
+        group = self._integer(decision_group, "decision_group")
+        if not 0 <= group <= 2**31 - 1:
+            raise ValueError("decision_group must be a nonnegative int32")
+        return LlamaBatchEntry(token, embedding, pos, ids, bool(output), order, state, embd_row, state_row, decision_group=group)
 
     @staticmethod
     def _embedding(data, name="embedding"):
@@ -1905,6 +1915,14 @@ class LlamaBatchExt:
             raise ValueError("states must be a 2-D matrix with one row per entry")
         return data
 
+    @staticmethod
+    def _decision_values(values, count, name):
+        if values is None:
+            return repeat(0, count)
+        if len(values) != count:
+            raise ValueError(f"{name} must have one value per entry")
+        return values
+
     @property
     def entries(self) -> Tuple[LlamaBatchEntry, ...]:
         """Return a tuple snapshot of entries; their embedding arrays remain shared."""
@@ -1922,36 +1940,51 @@ class LlamaBatchExt:
         """Return the maximum entries per native submission (context.n_batch())."""
         return self._capacity
 
-    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0, state=None, state_row: Optional[int] = None) -> int:
+    def add_token(self, token: int, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, decision_order: int = 0, decision_group: int = 0, state=None, state_row: Optional[int] = None) -> int:
         """Append one text entry and return its logical index (int).
 
         token (int): Vocabulary ID; position (int): Scalar model position.
         seq_ids (Sequence[int]): Context sequences sharing this entry, default (0,).
         output (bool): Request an output row, default False.
         decision_order (int): Decision-head metadata, default 0 for ordinary text.
+        decision_group (int): Shared state (0) or a packed question ID (> 0).
         state (array-like or None): Separate hidden state, copied when supplied.
         state_row (int or None): Borrow a NextN device state row instead of state."""
         self._require_open()
         state = None if state is None else self._embedding(state, "state")
-        entry = self._entry(token, None, position, seq_ids, output, decision_order, state=state, state_row=state_row)
+        entry = self._entry(token, None, position, seq_ids, output, decision_order, decision_group=decision_group, state=state, state_row=state_row)
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_embd_row(self, row: int, position, seq_ids: Sequence[int] = (0,), output: bool = False) -> int:
+    def add_embd_row(
+        self, row: int, position, seq_ids: Sequence[int] = (0,), output: bool = False,
+        *, decision_order: int = 0, decision_group: int = 0,
+        state=None, state_row: Optional[int] = None,
+    ) -> int:
         """Reference a device feature row from ctx_other; return its entry index.
 
         row (int): Nonnegative index in the peer's latest input batch.
         position (int or Sequence[int]): Scalar or four axes for M-RoPE.
+        state (array-like or None): Separate hidden state, copied when supplied.
+        state_row (int or None): Borrow a NextN device state row instead of state.
         The features are borrowed, without a host copy. Submit before the peer
         decodes again. Use valid source row indices; native processing checks
         whether the backend can read the peer's buffer.
         """
         self._require_open()
-        entry = self._entry(None, None, position, seq_ids, output, 0, embd_row=row)
+        state = None if state is None else self._embedding(state, "state")
+        entry = self._entry(
+            None, None, position, seq_ids, output, decision_order,
+            decision_group=decision_group, embd_row=row, state=state, state_row=state_row,
+        )
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_embedding(self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None, state_row: Optional[int] = None) -> int:
+    def add_embedding(
+        self, embedding, position, seq_ids: Sequence[int] = (0,), output: bool = False,
+        *, decision_order: int = 0, decision_group: int = 0,
+        state=None, state_row: Optional[int] = None,
+    ) -> int:
         """Copy one external feature entry and return its logical index (int).
 
         embedding (array-like): Vector or matrix forming one entry's payload.
@@ -1962,11 +1995,18 @@ class LlamaBatchExt:
         state_row (int or None): Borrow a NextN device state row instead of state."""
         self._require_open()
         state = None if state is None else self._embedding(state, "state")
-        entry = self._entry(None, self._embedding(embedding), position, seq_ids, output, 0, state=state, state_row=state_row)
+        entry = self._entry(
+            None, self._embedding(embedding), position, seq_ids, output, decision_order,
+            decision_group=decision_group, state=state, state_row=state_row,
+        )
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_token_embedding(self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False, *, state=None, state_row: Optional[int] = None) -> int:
+    def add_token_embedding(
+        self, token: int, embedding, position: int, seq_ids: Sequence[int] = (0,), output: bool = False,
+        *, decision_order: int = 0, decision_group: int = 0,
+        state=None, state_row: Optional[int] = None,
+    ) -> int:
         """Append a token ID and token embedding; return its logical index (int).
 
         token (int): Vocabulary ID; embedding (array-like): Copied feature payload.
@@ -1979,17 +2019,26 @@ class LlamaBatchExt:
         All entries submitted with this entry must also be paired."""
         self._require_open()
         state = None if state is None else self._embedding(state, "state")
-        entry = self._entry(token, self._embedding(embedding), position, seq_ids, output, 0, state=state, state_row=state_row)
+        entry = self._entry(
+            token, self._embedding(embedding), position, seq_ids, output, decision_order,
+            decision_group=decision_group, state=state, state_row=state_row,
+        )
         self._entries.append(entry)
         return len(self) - 1
 
-    def add_tokens(self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None, state_rows: Optional[Sequence[int]] = None) -> Tuple[int, ...]:
+    def add_tokens(
+        self, tokens: Sequence[int], *, positions: Sequence[int], seq_ids: Sequence[int] = (0,),
+        outputs: Optional[Sequence[bool]] = None, decision_orders: Optional[Sequence[int]] = None,
+        decision_groups: Optional[Sequence[int]] = None, states=None, state_rows: Optional[Sequence[int]] = None,
+    ) -> Tuple[int, ...]:
         """Append a validated text span; return logical indices (Tuple[int, ...]).
 
         tokens (Sequence[int]): Vocabulary IDs; positions (Sequence[int]):
             One scalar model position per token.
         seq_ids (Sequence[int]): Common sequence IDs, default (0,).
         outputs (Optional[Sequence[bool]]): One flag per token; None means all False.
+        decision_orders (Optional[Sequence[int]]): One decision order per token, default 0.
+        decision_groups (Optional[Sequence[int]]): One decision group per token, default 0.
         states (array-like or None): Matrix [entries, state_width], copied once.
         state_rows (Sequence[int] or None): One borrowed device row per entry, instead of states.
         Lengths must match; validation failure leaves existing entries unchanged."""
@@ -2002,18 +2051,32 @@ class LlamaBatchExt:
         rows = [None] * len(tokens) if state_rows is None else state_rows
         if len(rows) != len(tokens) or (state_rows is not None and any(row is None for row in rows)):
             raise ValueError("state_rows must have one row index per entry")
-        entries = [self._entry(t, None, p, ids, o, 0, state=s, state_row=r, validated_seq_ids=ids) for t, p, o, s, r in zip(tokens, positions, flags, host_states, rows)]
+        orders = self._decision_values(decision_orders, len(tokens), "decision_orders")
+        groups = self._decision_values(decision_groups, len(tokens), "decision_groups")
+        entries = [
+            self._entry(
+                token, None, pos, ids, output, order,
+                decision_group=group, state=state, state_row=row, validated_seq_ids=ids,
+            )
+            for token, pos, output, order, group, state, row in zip(tokens, positions, flags, orders, groups, host_states, rows)
+        ]
         start = len(self)
         self._entries.extend(entries)
         return tuple(range(start, len(self)))
 
-    def add_embeddings(self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,), outputs: Optional[Sequence[bool]] = None, states=None, state_rows: Optional[Sequence[int]] = None) -> Tuple[int, ...]:
+    def add_embeddings(
+        self, embeddings, *, positions: Sequence, seq_ids: Sequence[int] = (0,),
+        outputs: Optional[Sequence[bool]] = None, decision_orders: Optional[Sequence[int]] = None,
+        decision_groups: Optional[Sequence[int]] = None, states=None, state_rows: Optional[Sequence[int]] = None,
+    ) -> Tuple[int, ...]:
         """Copy a feature span once; return logical indices (Tuple[int, ...]).
 
         embeddings (array-like): Matrix [entries, width], one entry per row.
         positions (Sequence): Scalars, or [entries, 4] for M-RoPE/IM-RoPE.
         seq_ids (Sequence[int]): Common sequence IDs, default (0,).
         outputs (Optional[Sequence[bool]]): One flag per entry; None means all False.
+        decision_orders (Optional[Sequence[int]]): One decision order per entry, default 0.
+        decision_groups (Optional[Sequence[int]]): One decision group per entry, default 0.
         states (array-like or None): Matrix [entries, state_width], copied once.
         state_rows (Sequence[int] or None): One borrowed device row per entry, instead of states.
         Lengths must match; validation failure leaves existing entries unchanged."""
@@ -2029,7 +2092,15 @@ class LlamaBatchExt:
         rows = [None] * len(data) if state_rows is None else state_rows
         if len(rows) != len(data) or (state_rows is not None and any(row is None for row in rows)):
             raise ValueError("state_rows must have one row index per entry")
-        entries = [self._entry(None, row, p, ids, o, 0, state=s, state_row=r, validated_seq_ids=ids) for row, p, o, s, r in zip(data, positions, flags, host_states, rows)]
+        orders = self._decision_values(decision_orders, len(data), "decision_orders")
+        groups = self._decision_values(decision_groups, len(data), "decision_groups")
+        entries = [
+            self._entry(
+                None, embedding, pos, ids, output, order,
+                decision_group=group, state=state, state_row=row, validated_seq_ids=ids,
+            )
+            for embedding, pos, output, order, group, state, row in zip(data, positions, flags, orders, groups, host_states, rows)
+        ]
         start = len(self)
         self._entries.extend(entries)
         return tuple(range(start, len(self)))
@@ -2111,6 +2182,8 @@ class LlamaBatchExt:
                     self._check(llama_cpp.llama_batch_ext_set_output_logits(self._native, idx, True), "output", start + i)
                 if e.decision_order:
                     self._check(llama_cpp.llama_batch_ext_set_decision_order(self._native, idx, e.decision_order), "decision order", start + i)
+                if e.decision_group:
+                    self._check(llama_cpp.llama_batch_ext_set_decision_group(self._native, idx, e.decision_group), "decision group", start + i)
         except BaseException:
             llama_cpp.llama_batch_ext_clear(self._native)
             raise
