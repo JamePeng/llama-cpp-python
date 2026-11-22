@@ -1365,6 +1365,7 @@ def mtmd_audio_stream_get_n_rows_flushed(stream: mtmd_audio_stream_p) -> int:
 #     MTMD_GEN_AUDIO_TYPE_YUE2,
 #     MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3,
 #     MTMD_GEN_AUDIO_TYPE_FISH_S2,
+#     MTMD_GEN_AUDIO_TYPE_MOSHI,
 #     MTMD_GEN_AUDIO_TYPE_KOKORO,
 #     MTMD_GEN_AUDIO_TYPE_TINY_VOCA,
 #     MTMD_GEN_AUDIO_TYPE_VOXCPM2,
@@ -1382,9 +1383,10 @@ class mtmd_gen_audio_type(enum.IntEnum):
     MTMD_GEN_AUDIO_TYPE_YUE2      = 8
     MTMD_GEN_AUDIO_TYPE_MINIMAX_MUSIC3 = 9
     MTMD_GEN_AUDIO_TYPE_FISH_S2   = 10
-    MTMD_GEN_AUDIO_TYPE_KOKORO    = 11
-    MTMD_GEN_AUDIO_TYPE_TINY_VOCA = 12
-    MTMD_GEN_AUDIO_TYPE_VOXCPM2  = 13
+    MTMD_GEN_AUDIO_TYPE_MOSHI     = 11
+    MTMD_GEN_AUDIO_TYPE_KOKORO    = 12
+    MTMD_GEN_AUDIO_TYPE_TINY_VOCA = 13
+    MTMD_GEN_AUDIO_TYPE_VOXCPM2   = 14
 
 # struct mtmd_gen_audio_info {
 #     enum mtmd_gen_audio_type type;
@@ -1475,6 +1477,8 @@ class mtmd_gen_process_type(enum.IntEnum):
 
 #     // for MTMD_GEN_PROCESS_TYPE_GEN_CODE
 #     int32_t code0;  // the sampled codebook 0 entry from backbone
+#     // Moshi GEN_CODE takes the sampled text token in code0. Supplying all
+#     // frame codes builds only the backbone embedding.
 #     float * embd;   // the hidden state from backbone, must have n_text_embd elements
 #     int32_t top_k;
 #     float   top_p;
@@ -2399,6 +2403,7 @@ class mtmd_helper_cap(Structure):
 
     text_gen is false for TTS-only models without a chat template.
     audio_stream describes realtime input, not streaming audio output.
+    audio_duplex identifies models that can speak while listening (Moshi/Hibiki).
     video counts built-in decoder support only; custom decoders are not counted.
     """
 
@@ -2408,6 +2413,7 @@ class mtmd_helper_cap(Structure):
         ("audio", c_bool),
         ("video", c_bool),
         ("audio_stream", c_bool),
+        ("audio_duplex", c_bool),
         ("text_gen", c_bool),
         ("audio_gen", c_bool),
         ("audio_gen_spk_ref", c_bool),
@@ -2419,6 +2425,7 @@ class mtmd_helper_cap(Structure):
         audio: bool
         video: bool
         audio_stream: bool
+        audio_duplex: bool
         text_gen: bool
         audio_gen: bool
         audio_gen_spk_ref: bool

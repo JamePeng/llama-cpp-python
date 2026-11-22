@@ -13,6 +13,13 @@ from operator import attrgetter
 import pytest
 from jinja2.exceptions import TemplateError
 
+from llama_cpp.mtmd_cpp import mtmd_gen_audio_type
+
+MOSHI = mtmd_gen_audio_type.MTMD_GEN_AUDIO_TYPE_MOSHI
+KOKORO = mtmd_gen_audio_type.MTMD_GEN_AUDIO_TYPE_KOKORO
+TINY_VOCA = mtmd_gen_audio_type.MTMD_GEN_AUDIO_TYPE_TINY_VOCA
+VOXCPM2 = mtmd_gen_audio_type.MTMD_GEN_AUDIO_TYPE_VOXCPM2
+
 
 @pytest.fixture
 def make_handler(tmp_path):
@@ -1244,6 +1251,7 @@ def test_mtmd_base_close_releases_context_after_callback_failure(tmp_path):
     (1, None, 0, (False, False)), (2, b"", 0, (True, True)),
     (0, None, 2, (True, False)), (4, b"chat", 0, (True, True)),
     (0, None, None, (True, True)),
+    (MOSHI, b"chat", 2, (True, False)),
 ])
 def test_mtmd_legacy_capabilities_match_text_and_delay_semantics(make_handler, monkeypatch, mtmd, kind, template, delay, expected):
     from llama_cpp import llama_cpp as native
@@ -1254,6 +1262,7 @@ def test_mtmd_legacy_capabilities_match_text_and_delay_semantics(make_handler, m
         mtmd_gen_audio_get_info=lambda ctx: SimpleNamespace(type=kind),
         mtmd_helper_model_can_chat=lambda *args: True,
         mtmd_support_vision=lambda ctx: False, mtmd_support_audio=lambda ctx: True,
+        mtmd_support_audio_stream=Mock(),
         mtmd_helper_support_video=lambda ctx: False,
     )
     monkeypatch.setattr(native, "llama_model_chat_template", lambda *args: template)
@@ -1262,9 +1271,12 @@ def test_mtmd_legacy_capabilities_match_text_and_delay_semantics(make_handler, m
         query.__ctypes_optional__ = True
         query.side_effect = RuntimeError("unavailable")
     monkeypatch.setattr(native, "llama_model_n_tokens_delay", query)
-    cap = handler._query_capabilities(SimpleNamespace(model=456, _ctx=SimpleNamespace(ctx=789)))
-    assert (cap.text_gen, cap.chat) == expected
-    assert cap.audio_gen == (kind != 0) and cap.audio_gen_spk_ref == (kind in (1, 2))
+    for stream in (False, True):
+        handler._mtmd_cpp.mtmd_support_audio_stream.return_value = stream
+        cap = handler._query_capabilities(SimpleNamespace(model=456, _ctx=SimpleNamespace(ctx=789)))
+        assert (cap.text_gen, cap.chat) == expected
+        assert cap.audio_duplex == (stream and kind == MOSHI)
+        assert cap.audio_gen == (kind != 0) and cap.audio_gen_spk_ref == (kind in (1, 2))
 
 
 def test_mtmd_chat_constructor_preserves_template_options(tmp_path):
@@ -1524,7 +1536,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         state.delivery = (inp.speed, inp.loudness)
         state.speaker_ref_text = inp.speaker_ref_text
         state.guidance = (inp.cfg_scale, inp.flow_steps)
-        if state.kind not in (8, 13):
+        if state.kind not in (8, VOXCPM2):
             assert state.guidance == (0, 0)
         state.prompts.append((ctypes.string_at(inp.prompt, inp.prompt_len), inp.seed))
         state.frame_temperature = inp.temp
@@ -1546,7 +1558,7 @@ def audio_pipeline(tmp_path, monkeypatch):
         return 0
 
     def get_output(ctx, rate, data, size, samples):
-        sample_rate = {3: 32000, 6: 44100, 7: 44100, 8: 48000, 13: 48000}.get(state.kind, 24000)
+        sample_rate = {3: 32000, 6: 44100, 7: 44100, 8: 48000, VOXCPM2: 48000}.get(state.kind, 24000)
         ctypes.cast(rate, ctypes.POINTER(ctypes.c_int32))[0] = sample_rate
         wav_buffer = io.BytesIO()
         with wave.open(wav_buffer, "wb") as wav:
@@ -1639,7 +1651,7 @@ def test_tts_sampled_models_repeated_requests_copy_binary_output(audio_pipeline,
 @pytest.mark.parametrize("kind, frames, native_limit", [
     (2, 1, 512), (3, 2, 512), (6, 1, 512),
     (3, None, 512), (7, None, 1), (7, None, 512), (7, None, 0), (7, None, -1),
-    (13, 1, 0), (13, None, 0),
+    (VOXCPM2, 1, 0), (VOXCPM2, None, 0),
 ])
 def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames, native_limit):
     generator, llama, backend, state, factory, _ = audio_pipeline
@@ -1656,7 +1668,7 @@ def test_tts_model_specific_frame_limits(audio_pipeline, kind, frames, native_li
     effective = frames if frames is not None else native_limit or state.stop_at
     assert result.finish_reason == ("stop" if effective >= state.stop_at else "length")
     llama._model.classifier_free_guidance.assert_not_called()
-    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100, 7: 44100, 13: 48000}[kind]
+    assert result.sample_rate == {2: 24000, 3: 32000, 6: 44100, 7: 44100, VOXCPM2: 48000}[kind]
     assert state.tokens == [42 if kind == 3 else -1] * min(effective, state.stop_at)
     assert backend.mtmd_helper_gen_audio_max_frames.call_count == int(frames is None)
     if kind != 3:
@@ -1715,9 +1727,9 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
         *((1, {"speaker_reference": b"audio", "speaker_ref_text": value}, "speaker_ref_text")
           for value in (" ", "bad\x00text", 42)),
         (2, {"speaker_reference": b"audio", "speaker_ref_text": "hello"}, "only for Qwen"),
-        *((kind, {"speaker_reference": b"audio"}, "omit speaker_reference") for kind in (11, 12)),
-        *((12, {"speed": speed}, "between 0.25 and 4") for speed in (0.24, 4.1)),
-        *((kind, {}, "supported TTS") for kind in (0, 9, 10)),
+        *((kind, {"speaker_reference": b"audio"}, "omit speaker_reference") for kind in (KOKORO, TINY_VOCA)),
+        *((TINY_VOCA, {"speed": speed}, "between 0.25 and 4") for speed in (0.24, 4.1)),
+        *((kind, {}, "supported TTS") for kind in (0, 9, 10, MOSHI)),
         (2, {}, "requires speaker_reference"),
         (2, {"voice": "alba", "speaker_reference": b"audio"}, "mutually exclusive"),
         (2, {"voice": "missing"}, "Unknown predefined voice"),
@@ -1727,10 +1739,10 @@ def test_tts_validates_model_and_request_before_decode(audio_pipeline):
         (3, {"max_frames": 1}, "max_frames >= 2"),
         (6, {"language": "en"}, "omit language"),
         (6, {"voice": "default"}, "speaker tags"),
-        (13, {"language": "en"}, "omit language"),
-        (13, {"voice": "default"}, "predefined voices"),
-        (13, {"speaker_reference": b"audio", "speaker_ref_text": "hello"}, "only for Qwen"),
-        *((13, {"flow_steps": steps}, "between 2 and 32") for steps in (1, 33)),
+        (VOXCPM2, {"language": "en"}, "omit language"),
+        (VOXCPM2, {"voice": "default"}, "predefined voices"),
+        (VOXCPM2, {"speaker_reference": b"audio", "speaker_ref_text": "hello"}, "only for Qwen"),
+        *((VOXCPM2, {"flow_steps": steps}, "between 2 and 32") for steps in (1, 33)),
     ]
     for kind, options, message in cases:
         state.kind = kind
@@ -1917,11 +1929,11 @@ def test_tts_delivery_validation_before_decode(audio_pipeline):
             with pytest.raises(ValueError, match=field + " must"):
                 generator.create_speech(llama=llama, text="hello", **{field: value})
 
-    for kind in (1, 2, 3, 5, 6, 7, 8, 11, 12, 13):
+    for kind in (1, 2, 3, 5, 6, 7, 8, KOKORO, TINY_VOCA, VOXCPM2):
         state.kind = kind
         for field, value, supported in (
-            ("speed", 1.1, (7, 11, 12)), ("loudness", -20, (7,)),
-            ("cfg_scale", 1, (8, 13)), ("flow_steps", 4, (8, 13)),
+            ("speed", 1.1, (7, KOKORO, TINY_VOCA)), ("loudness", -20, (7,)),
+            ("cfg_scale", 1, (8, VOXCPM2)), ("flow_steps", 4, (8, VOXCPM2)),
         ):
             if kind not in supported:
                 with pytest.raises(ValueError, match="Non-default .*" + field):
@@ -1967,7 +1979,7 @@ def test_tts_chatterbox_cfg_and_reference(audio_pipeline, multilingual, cfg, seq
 @pytest.mark.parametrize("kind,reference_cap,audio_cap,accepted", [
     (1, True, False, True), (1, False, True, False),
     (6, False, True, True), (6, False, False, False),
-    (13, False, True, True), (13, False, False, False),
+    (VOXCPM2, False, True, True), (VOXCPM2, False, False, False),
 ])
 def test_tts_reference_uses_generation_capability(audio_pipeline, kind, reference_cap, audio_cap, accepted):
     generator, llama, backend, state, sampler, _ = audio_pipeline
@@ -1982,7 +1994,7 @@ def test_tts_reference_uses_generation_capability(audio_pipeline, kind, referenc
         backend.mtmd_helper_gen_audio_init.assert_not_called()
         return
 
-    if kind == 13:
+    if kind == VOXCPM2:
         llama._ctx.n_seq_max = lambda: 1
         llama.context_params.kv_unified = False
         for steps in (2, 32):
@@ -2000,7 +2012,7 @@ def test_tts_reference_uses_generation_capability(audio_pipeline, kind, referenc
     assert backend.mtmd_bitmap_free.call_args_list == [((789,), {}), ((789,), {})]
 
 
-@pytest.mark.parametrize("kind", [11, 12], ids=["kokoro", "tiny-voca"])
+@pytest.mark.parametrize("kind", [KOKORO, TINY_VOCA], ids=["kokoro", "tiny-voca"])
 def test_tts_phoneme_model_voices_speed_and_template(audio_pipeline, kind):
     generator, llama, backend, state, sampler, _ = audio_pipeline
     state.kind, state.voices = kind, 2
@@ -2008,7 +2020,7 @@ def test_tts_phoneme_model_voices_speed_and_template(audio_pipeline, kind):
     def pronounce(ctx, word, buf, size):
         assert ctx == generator.mtmd_ctx and word == b"word" and size == len(buf)
         buf.value = b"W ER1 D"
-        return len(buf.value) if kind == 12 else 0
+        return len(buf.value) if kind == TINY_VOCA else 0
 
     backend.mtmd_gen_audio_g2p = pronounce
     llama._model.model_chat_template.return_value = None
@@ -2020,9 +2032,9 @@ def test_tts_phoneme_model_voices_speed_and_template(audio_pipeline, kind):
         "{{ phones | join(' ') }}"
     )
     generator.create_speech(llama=llama, text="word", voice="alba")
-    assert state.prompts[-1][0] == (b"alba W ER1 D" if kind == 12 else b"alba unknown")
+    assert state.prompts[-1][0] == (b"alba W ER1 D" if kind == TINY_VOCA else b"alba unknown")
     # The raw request bypasses the cached template, including its G2P callback.
-    phonemes = "h ə l ˈoʊ <sp> w ˈɜː l d ." if kind == 12 else "həlˈO wˈɜɹld."
+    phonemes = "h ə l ˈoʊ <sp> w ˈɜː l d ." if kind == TINY_VOCA else "həlˈO wˈɜɹld."
     audio = generator.create_speech(llama=llama, text=phonemes, voice="alba", speed=1.25, raw_prompt=True)
     assert audio.finish_reason == "stop" and state.prompts[-1][0] == phonemes.encode()
     assert state.delivery == (1.25, 0)

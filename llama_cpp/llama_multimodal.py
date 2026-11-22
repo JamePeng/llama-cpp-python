@@ -364,7 +364,9 @@ class MTMDBaseHandler:
             vision=mtmd.mtmd_support_vision(self.mtmd_ctx),
             audio=mtmd.mtmd_support_audio(self.mtmd_ctx),
             video=mtmd.mtmd_helper_support_video(self.mtmd_ctx),
-            audio_stream=audio_stream, text_gen=text_gen,
+            audio_stream=audio_stream,
+            audio_duplex=audio_stream and audio_type == types.MTMD_GEN_AUDIO_TYPE_MOSHI,
+            text_gen=text_gen,
             audio_gen=audio_gen,
             audio_gen_spk_ref=audio_type in (
                 types.MTMD_GEN_AUDIO_TYPE_QWEN3TTS, types.MTMD_GEN_AUDIO_TYPE_POCKETTTS,

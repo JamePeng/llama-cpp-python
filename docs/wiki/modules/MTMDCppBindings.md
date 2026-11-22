@@ -2,7 +2,7 @@
 title: MTMD ctypes Bindings
 module_name: llama_cpp.mtmd_cpp
 source_file: llama_cpp/mtmd_cpp.py
-last_updated: 2026-11-16
+last_updated: 2026-11-22
 version_target: "latest"
 ---
 
@@ -106,6 +106,12 @@ YuE2 is also supported by the high-level generator; see
 [song synthesis](../examples/audio/audio-tts.md#yue2).
 MiniMax-Music3 and Fish S2 enums are bound, but those pipelines are not yet
 enabled by `create_speech`.
+
+For Hibiki, `mtmd_gen_audio_get_info(ctx).type` reports `MTMD_GEN_AUDIO_TYPE_MOSHI`.
+Read `mtmd_helper_get_capabilities(model, ctx).audio_duplex` to detect simultaneous
+audio input and output. This realtime pipeline uses the low-level audio API.
+Use matching native libraries: the duplex field changes the capability struct
+returned by value, and the Kokoro, tiny-voca and VoxCPM2 enum values have shifted.
 
 `mtmd_bitmap_set_transcript(bitmap, text)` copies a UTF-8 transcript onto a
 reference bitmap. Pass `None` to clear it. For Qwen3-TTS, the helper sets this
