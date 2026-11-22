@@ -7,6 +7,142 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.8] Expanded TTS and Voice Cloning, YuE2 Stereo Song Generation, and llama.cpp 1.0 API Alignment
+
+- fix(mtmd): align duplex capability reporting and audio model IDs
+    - Expose `mtmd_helper_cap.audio_duplex` for models that can listen and speak
+      simultaneously. The fallback query reports it for Moshi/Hibiki when
+      streaming audio input is available.
+    - Add `MOSHI` (11) and shift Kokoro, tiny-voca and VoxCPM2 to IDs 12, 13
+      and 14. Use native libraries built from the matching vendor revision:
+      the capability struct returned by value grew from 8 to 9 bytes.
+
+- fix(grammar): reject inverted bounds during JSON Schema to GBNF conversion
+    - Raise `ValueError` when `minLength` exceeds `maxLength` or `minItems`
+      exceeds `maxItems`. The error identifies both fields and their values.
+
+- refactor(mtmd): centralize model binding and media collection
+    - Bind chat and TTS handlers to their `Llama` instance through
+      `MTMDBaseHandler`. Reject cross-model reuse after initialization and
+      release partial TTS state so initialization can be retried with another model.
+    - Call custom `_get_media_items()` overrides once per request. Generic ASR
+      templates keep markers at their original positions when an override
+      filters clips and rewrites URLs, including clips that share a URL.
+
+- feat(mtmd): support Drama 3 reference cloning and Qwen3-ASR language metadata
+    - Pass a reference clip and its transcript to the Drama 3 helper and bind
+      the native reference-code query.
+    - Separate the Qwen3-ASR language prefix from the transcript in complete
+      and streaming responses, preserve it in assistant history, and support
+      both generations of GGUF templates in the generic handler.
+
+- Bind the GGML sleep operator and align native log levels.
+
+- feat(mtmd): support VoxCPM2 speech synthesis
+    - Add 48 kHz mono speech with text-based voice design and optional
+      reference audio. Expose native flow noise, guidance, and flow steps.
+    - Align the VoxCPM2 model enum and document the low-level generation inputs.
+
+- feat(mtmd): support Kokoro, tiny-voca, and Qwen3-TTS reference cloning
+    - Add Kokoro and tiny-voca synthesis with preset voices, speed control, and
+      model phoneme templates. Pass `raw_prompt=True` or CLI `--raw-prompt`
+      to supply phonemes directly.
+    - Pass `speaker_ref_text` or CLI `--speaker-text` for Qwen3-TTS Base
+      in-context voice cloning. The helper falls back to the speaker embedding
+      when reference codes are unavailable.
+    - Align `mtmd_gen_inp.speed` and the audio model enums with the vendor
+      headers. Bind bitmap transcripts and grapheme-to-phoneme lookup.
+
+- feat(mtmd): support YuE2 stereo song generation
+    - Generate 48 kHz stereo WAV or float32 PCM from style tags and lyrics.
+      Expose score planning, CFG, flow steps, and the native generation limit.
+    - Align audio generation structures and channel counts, and expose the
+      native frame-limit query and GGUF TTS dictionaries.
+    - The shared loader introduced for tiny-voca rejected YuE2 projectors that
+      omitted the optional Qwen3 reranking head. JamePeng's fix restored
+      loading and was merged into the llama.cpp mainline as `53ecea05a`.
+      [llama.cpp #32427](https://github.com/ggml-org/llama.cpp/pull/32427)
+      · [llama.cpp #32606](https://github.com/ggml-org/llama.cpp/pull/32606)
+
+- feat(tts): support Zonos3 speech synthesis
+    - Add non-streaming 44.1 kHz WAV/PCM output with predefined voices or
+      reference audio, plus validated speed and loudness conditioning.
+    - Render the model's named `tts` template with vendor-compatible text
+      normalization packaged in the existing utility module.
+    - Preserve other TTS models' delivery defaults; document normalization,
+      reference conditioning, and speed/loudness limitations.
+
+- feat(examples): extend the TTS CLI and Streamlit playground
+    - Add Zonos3 CLI voice, speed, and loudness options. Extend the existing
+      Streamlit demo with Zonos3 and Soprano presets, native voice discovery,
+      and model-specific reference and generation controls.
+    - Retain serialized model access and reuse; cover busy-request rejection,
+      failed initialization cleanup, and unloading in the existing media tests.
+    - Use `/path/to/model/...` and `/path/to/reference.wav` placeholders and
+      synchronize the README, wiki navigation, model lists, and examples.
+    - Make the Streamlit TTS engine's type annotations compatible with Python 3.9.
+
+- feat(mtmd): support custom video decoders in high-level handlers
+    - Bind decoder structures and callbacks and accept `video_decoder` through
+      `MTMDBaseHandler`; keep callback owners alive through native cleanup.
+    - Validate required callbacks, isolate decoder cache identities, and prevent
+      reentrant close deadlocks. Retain the built-in FFmpeg decoder by default.
+    - Reorganize multimodal wiki guides around base handlers, generic loading,
+      practical media examples, custom decoders, and legacy handler guidance.
+
+- fix(speculative): align DFlash-family routing with the native refactor
+    - Add explicit DFlash2/LiliCorr types and align shifted n-gram enum IDs.
+    - Bind the native DFlash variant query and route generic DFlash to the
+      loader-selected head, including DSpark.
+    - Reject explicit type/head mismatches before creating draft contexts;
+      preserve variant-specific lattice, confidence, and device-feature paths.
+
+- fix(sampling): honor request options and native sampler mode precedence
+    - Apply dynamic temperature and activate Adaptive-P when configured.
+    - Keep zero history disabled and resolve both repetition and DRY `-1`
+      windows against the initialized per-sequence context capacity.
+    - Use plain temperature plus Mirostat without ordinary filters/penalties;
+      retain Python callbacks and generation constraints.
+    - Document the five-argument penalties API, DRY breaker limits, and native
+      1.0 migration in the README and wiki.
+
+- feat(bindings): align with the llama.cpp 1.0 native API
+    - Remove bindings for pruned exports and migrate internal callers to the
+      current model, vocabulary, state, and session APIs.
+    - Remove the managed `LlamaModel.token_cls()` accessor; use `token_bos()`
+      explicitly for models that use BOS as their classification token.
+    - Bind the promoted NextN/speculative APIs through their C exports and
+      rename the state-source API to `llama_set_ctx_state_src`.
+    - Remove `defrag_thold`, synchronize GGML operation IDs after pruning, and
+      replace `GGML_PREC_DEFAULT` with `GGML_PREC_UNDEFINED`.
+    - Align RPC preflight with protocol 10 and reject incompatible protocol 9
+      servers. Use matching rebuilt native libraries and RPC servers.
+    - Update API migration guidance and retain focused native ABI smoke checks.
+
+- fix(vocab): complete vocabulary enum alignment and overflow handling
+    - Add PLAMO3, SOPRANO, and TEKKEN_NUM3 enum values from the vendor headers.
+    - Treat the native INT32_MIN tokenization result as overflow instead of a
+      retry allocation size; clarify writable output buffers and special-token flags.
+    - Cover Unicode and embedded-NUL round trips with writable output buffers.
+
+- fix(mtmd): align video/audio layouts, media queries, and position types
+    - Align video parameter and nested option layouts, add TTS input `speed`
+      and `loudness` fields, and bind the Zonos3 generation type.
+    - Expose model-independent media metadata probing for type, dimensions,
+      source sample rate, duration, and video frame count without frame decoding.
+    - Map native invalid-input code `2` to `ValueError`, preserving cancellation
+      handling, temporary-resource cleanup, and retry after failure.
+    - Add SENSENOVA_U1 and CANVAS position types and correct the COUNT sentinel.
+    - Keep focused context/audio ABI and behavioral regressions instead of
+      exhaustive API catalogs; document intentional C++ bridge limits.
+    - Advance vendor from `2a4daf0e0` to `29b52d398`. Rebuild native libraries
+      from the matching revision for the changed APIs and structure layouts.
+
+- feat: Sync llama.cpp llama/mtmd/ggml API Binding 20261122
+
+More information see: https://github.com/JamePeng/llama-cpp-python/compare/c7c7055661f87c21602d81b386747c2321f6cca5...73926526d943728d33c9c932d112af956f8327b5
+
+
 ## [0.4.7] MTP Device States, Extra GGUF Shards, and Native API Alignment
 
 - feat(speculative): add NextN device hidden-state transfer for non-shared MTP
@@ -172,12 +308,6 @@ More information see: https://github.com/JamePeng/llama-cpp-python/compare/3fc39
     - Bind audio stream row-count and flush-progress queries as optional int64 APIs.
     - Support non-streaming Soprano WAV/PCM synthesis with model-specific validation.
     - Update documentation, CLI examples, and regression tests.
-
-    Validation:
-    - Soprano-1.1-80M BF16 + F16 mmproj: verified 32 kHz GPU output,
-    repeated requests, frame limits, error recovery, and CLI synthesis.
-    - Qwen3-TTS and Pocket TTS: WAV/PCM outputs remain byte-identical
-    before and after the changes with fixed seeds on the same GPU setup.
 
 - feat(speculative): support LiliCorr and align draft token suppression
     - Add LiliCorr block decoding, projected anchor handling, and checkpoint
