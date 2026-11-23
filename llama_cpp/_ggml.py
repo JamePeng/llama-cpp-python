@@ -418,6 +418,7 @@ class GGMLFType(enum.IntEnum):
 
 #     GGML_OP_GLU,
 #     GGML_OP_SLEEP,
+#     GGML_OP_SIGMOID_BACK,
 
 #     GGML_OP_COUNT,
 # };
@@ -532,7 +533,8 @@ class GGML_OP(enum.IntEnum):
     GGML_OP_GLU = 98
 
     GGML_OP_SLEEP = 99
-    GGML_OP_COUNT = 100
+    GGML_OP_SIGMOID_BACK = 100
+    GGML_OP_COUNT = 101
 
 # enum ggml_unary_op {
 #     GGML_UNARY_OP_ABS,
@@ -798,6 +800,14 @@ ggml_tensor_p = ctypes.POINTER(ggml_tensor)
 def ggml_sleep(ctx: ggml_context_p, a: ggml_tensor_p, us: int) -> ggml_tensor_p:
     """Create a view that waits for us microseconds after a has executed."""
     ...
+
+
+# GGML_API struct ggml_tensor * ggml_sigmoid_back(struct ggml_context * ctx, struct ggml_tensor * a, struct ggml_tensor * b);
+@ggml_base_function("ggml_sigmoid_back", [ggml_context_p, ggml_tensor_p, ggml_tensor_p], ggml_tensor_p)
+def ggml_sigmoid_back(ctx: ggml_context_p, a: ggml_tensor_p, b: ggml_tensor_p) -> ggml_tensor_p:
+    """Build the sigmoid backward operation from the upstream gradient a and forward input b."""
+    ...
+
 
 ggml_tensor._fields_ = [
         ("type", ctypes.c_int),

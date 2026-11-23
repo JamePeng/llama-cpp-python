@@ -185,7 +185,7 @@ def test_ggml_graph_and_fp8_layout(ggml_context):
     tensor = new_tensor(ctx, g.GGMLType.GGML_TYPE_F32, 1, 1, 1, 1)
     sleep = g.ggml_sleep(ctx, tensor, 17).contents
     assert (sleep.op, sleep.op_params[0]) == (g.GGML_OP.GGML_OP_SLEEP, 17)
-    assert g.GGML_OP.GGML_OP_COUNT == 100
+    assert g.GGML_OP.GGML_OP_COUNT == 101
     assert ctypes.addressof(sleep.view_src.contents) == ctypes.addressof(tensor.contents)
 
 
