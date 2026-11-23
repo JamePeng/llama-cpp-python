@@ -12,6 +12,7 @@ from . import _ggml
 # ggml-rpc.h protocol version and ggml-rpc.cpp command IDs at the bundled vendor revision.
 _RPC_PROTO_MAJOR = 10
 _RPC_PROTO_MINOR = 0
+_RPC_PROTO_PATCH = 2
 _RPC_CMD_HELLO = 14
 _RPC_CMD_DEVICE_COUNT = 15
 _RPC_CONN_CAPS_SIZE = 24
@@ -67,7 +68,7 @@ def _probe_rpc_server(endpoint: str) -> int:
             if major != _RPC_PROTO_MAJOR or minor > _RPC_PROTO_MINOR:
                 raise RuntimeError(
                     f"RPC server {endpoint!r} has incompatible protocol {major}.{minor}.{patch}; "
-                    f"client supports {_RPC_PROTO_MAJOR}.{_RPC_PROTO_MINOR}"
+                    f"client protocol is {_RPC_PROTO_MAJOR}.{_RPC_PROTO_MINOR}.{_RPC_PROTO_PATCH}"
                 )
             count = struct.unpack("=I", _rpc_request(sock, _RPC_CMD_DEVICE_COUNT, b"", 4))[0]
             if count == 0:

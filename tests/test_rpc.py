@@ -15,6 +15,7 @@ def test_rpc_preflight_constants_match_vendor():
     for macro, actual in (
         ("RPC_PROTO_MAJOR_VERSION", _rpc._RPC_PROTO_MAJOR),
         ("RPC_PROTO_MINOR_VERSION", _rpc._RPC_PROTO_MINOR),
+        ("RPC_PROTO_PATCH_VERSION", _rpc._RPC_PROTO_PATCH),
         ("GGML_RPC_MAX_SERVERS", _rpc._RPC_MAX_REGISTERED_SERVERS),
     ):
         assert actual == int(re.search(r"#define\s+" + macro + r"\s+(\d+)", header)[1]), macro
@@ -135,6 +136,7 @@ def test_probe_checks_vendor_handshake_and_device_count(monkeypatch):
     monkeypatch.setattr(socket, "gethostbyname", lambda host: "127.0.0.1")
     for version, device_count, error in (
         ((10, 0, 0), 2, None),
+        ((10, 0, _rpc._RPC_PROTO_PATCH), 2, None),
         ((10, 0, 255), 2, None),
         ((9, 0, 0), 2, "incompatible protocol"),
         ((11, 0, 0), 2, "incompatible protocol"),
@@ -144,12 +146,14 @@ def test_probe_checks_vendor_handshake_and_device_count(monkeypatch):
         sock = FakeSocket(version, device_count)
         monkeypatch.setattr(socket, "create_connection", lambda *args, **kwargs: sock)
         if error:
-            with pytest.raises(RuntimeError, match=error):
+            with pytest.raises(RuntimeError, match=error) as exc:
                 _rpc._probe_rpc_server("host:50052")
         else:
             assert _rpc._probe_rpc_server("host:50052") == device_count
         assert sock.sent[0] == bytes((14,)) + struct.pack("=Q", 24) + bytes(24), version
         if error == "incompatible protocol":
+            client = f"{_rpc._RPC_PROTO_MAJOR}.{_rpc._RPC_PROTO_MINOR}.{_rpc._RPC_PROTO_PATCH}"
+            assert f"client protocol is {client}" in str(exc.value)
             assert len(sock.sent) == 1, version
         else:
             assert sock.sent[1:] == [bytes((15,)) + struct.pack("=Q", 0)], version
