@@ -6,7 +6,7 @@ source_files:
   - llama_cpp/_rpc.py
   - llama_cpp/llama_multimodal.py
   - vendor/llama.cpp/ggml/src/ggml-rpc/ggml-rpc.cpp
-last_updated: 2026-11-13
+last_updated: 2026-11-23
 version_target: "latest"
 ---
 
@@ -17,12 +17,9 @@ compatible `ggml-rpc-server`. The GGUF file is read on the Python host; the
 RPC server supplies compute and device memory. Both the Python build and the
 server need RPC support from compatible llama.cpp revisions.
 
-The current vendor uses RPC protocol **10.0**. Its operation IDs changed during
-the native 1.0 API cleanup, so protocol 9 servers are incompatible. Python
-preflight follows the native handshake: the major version must match and the
-server minor version must not exceed the client minor version; patch versions
-do not participate in this check. Upgrade the server and its backend libraries
-together with the Python package's native libraries.
+The bundled llama.cpp uses RPC protocol 10.0.2. During the handshake, the
+client accepts a server with the same major version and a minor version less
+than or equal to its own. Patch versions may differ.
 
 ## Start the server
 
