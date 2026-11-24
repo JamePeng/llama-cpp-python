@@ -1432,6 +1432,7 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [lfm2-vl](https://huggingface.co/LiquidAI/LFM2-VL-3B-GGUF) | `LFM2VLChatHandler` | `lfm2-vl` |
 | [lfm2.5-vl](https://huggingface.co/LiquidAI/LFM2.5-VL-1.6B-GGUF) | `LFM25VLChatHandler` | `lfm2.5-vl` |
 | [deepseek-ocr](https://huggingface.co/JamePeng2023/DeepSeek-OCR-2-GGUF) | `MTMDChatHandler` | `None` |
+| [MiniCPM-OCR 1.0](https://huggingface.co/openbmb/MiniCPM-OCR-1.0-gguf) | `GenericMTMDChatHandler` | `None` |
 | [mineru2.5-pro](https://huggingface.co/JamePeng2023/MinerU2.5-Pro-2605-1.2B-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
 | [paddleocr-vl-1.5](https://huggingface.co/JamePeng2023/PaddleOCR-VL-1.5-GGUF) | `PaddleOCRChatHandler` | `paddleocr` |
 | [qwen2.5-vl](https://huggingface.co/unsloth/Qwen2.5-VL-3B-Instruct-GGUF) | `Qwen25VLChatHandler` | `qwen2.5-vl` |
@@ -1441,6 +1442,10 @@ Below are the supported multi-modal models and their respective chat handlers (P
 | [qwen3.6](https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF) | `Qwen35ChatHandler` | `qwen3.6` |
 | [qwen3.8](https://huggingface.co/unsloth/Qwen3.8-27B-GGUF) | `GenericMTMDChatHandler` | `qwen3.8` |
 | [step3-vl](https://huggingface.co/JamePeng2023/Step3-VL-10B-GGUF) | `Step3VLChatHandler` | `step3-vl` |
+
+For MiniCPM-OCR 1.0, pass the main GGUF and its matching `mmproj` to `Llama`
+and leave `chat_format` unset to use the model's embedded template. To transcribe
+an image, send an `image_url` content part followed by the text prompt `Text Recognition:`.
 
 The table identifies known handlers, not a guarantee that every listed model
 supports every modality. The loaded `mmproj` determines image/audio capability,
