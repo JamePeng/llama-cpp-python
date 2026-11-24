@@ -842,6 +842,32 @@ def ggml_flash_attn_ext_rows(ctx, q, k, v, mask, kv_rows, scale, max_bias, logit
     """
     ...
 
+# GGML_API bool ggml_flash_attn_ext_has_indexed_bias(const struct ggml_tensor * a);
+@ggml_base_function("ggml_flash_attn_ext_has_indexed_bias", [ggml_tensor_p], ctypes.c_bool)
+def ggml_flash_attn_ext_has_indexed_bias(a):
+    """Return whether a flash-attention node uses an indexed bias table."""
+    ...
+
+
+# GGML_API void ggml_flash_attn_ext_add_indexed_bias(struct ggml_tensor * a,
+#         struct ggml_tensor * table, struct ggml_tensor * indices);
+@ggml_base_function("ggml_flash_attn_ext_add_indexed_bias", [ggml_tensor_p] * 3, None)
+def ggml_flash_attn_ext_add_indexed_bias(a, table, indices):
+    """Attach an F32 bias table and I32 indices, or pass None for both to clear them."""
+    ...
+
+
+# GGML_API struct ggml_tensor * ggml_gated_delta_net_ext(struct ggml_context * ctx,
+#         struct ggml_tensor * q, struct ggml_tensor * k, struct ggml_tensor * v,
+#         struct ggml_tensor * g, struct ggml_tensor * beta, struct ggml_tensor * state,
+#         struct ggml_tensor * pend_k, struct ggml_tensor * pend_v,
+#         struct ggml_tensor * pend_gb, struct ggml_tensor * n_rep, bool keep);
+@ggml_base_function("ggml_gated_delta_net_ext", [ggml_context_p] + [ggml_tensor_p] * 10 + [ctypes.c_bool], ggml_tensor_p)
+def ggml_gated_delta_net_ext(ctx, q, k, v, g, beta, state, pend_k, pend_v, pend_gb, n_rep, keep):
+    """Build gated delta attention with all four replay tensors or None for each."""
+    ...
+
+
 # // Abort callback
 # // If not NULL, called before ggml computation
 # // If it returns true, the computation is aborted

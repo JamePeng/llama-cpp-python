@@ -61,6 +61,7 @@ def test_native_context_parameter_layouts():
     cases = (
         ("include/llama.h", "llama_model_params"),
         ("include/llama.h", "llama_context_params"),
+        ("include/llama.h", "llama_model_quantize_params"),
         ("tools/mtmd/mtmd.h", "mtmd_context_params"),
         *(("tools/mtmd/mtmd.h", name) for name in (
             "mtmd_caps", "mtmd_gen_audio_info", "mtmd_gen_inp", "mtmd_gen_out", "mtmd_gen_state_params",

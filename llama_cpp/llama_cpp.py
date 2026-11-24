@@ -1214,6 +1214,15 @@ llama_model_imatrix_data_p = ctypes.POINTER(llama_model_imatrix_data)
 #     const struct llama_model_tensor_override * tt_overrides;    // pointer to tensor overrides
 #     const int32_t * prune_layers;                               // pointer to layer indices to prune
 #     size_t max_buf_size;                                        // max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
+#     const struct llama_model_imatrix_data * activations;
+#     const struct llama_model_imatrix_data * statistics;
+#     const char * const * stats_schema;
+#     float target_bpw;
+#     int64_t target_size;
+#     const char * state_file;
+#     const enum ggml_type * target_exclude;
+#     ggml_abort_callback abort_callback;
+#     void * abort_callback_data;
 # } llama_model_quantize_params;
 class llama_model_quantize_params(ctypes.Structure):
     """Parameters for llama_model_quantize
@@ -1234,6 +1243,15 @@ class llama_model_quantize_params(ctypes.Structure):
         tt_overrides (POINTER(llama_model_tensor_override)): Pointer to tensor overrides.
         prune_layers (POINTER(c_int32)): Pointer to layer indices to prune.
         max_buf_size (size_t): max bytes of tensor rows kept in memory at once, 0 = default (8 GiB)
+        activations: Activation data for quantization.
+        statistics: Tensor statistics described by stats_schema.
+        stats_schema: Names of the tensor statistics.
+        target_bpw: Target bits per weight.
+        target_size: Target file size in bytes.
+        state_file: Path to the bits-per-weight state file.
+        target_exclude: GGML types excluded from target selection.
+        abort_callback: Return true to stop quantization.
+        abort_callback_data: User data passed to abort_callback.
     """
 
     if TYPE_CHECKING:
@@ -1249,9 +1267,18 @@ class llama_model_quantize_params(ctypes.Structure):
         dry_run: bool
         imatrix: ctypes.POINTER(llama_model_imatrix_data) # type: ignore
         kv_overrides: ctypes.POINTER(llama_model_kv_override) # type: ignore
-        tensor_types: ctypes.POINTER(llama_model_tensor_override) # type: ignore
+        tt_overrides: ctypes.POINTER(llama_model_tensor_override) # type: ignore
         prune_layers: ctypes.POINTER(ctypes.c_int32) # type: ignore
         max_buf_size: ctypes.c_size_t
+        activations: ctypes.POINTER(llama_model_imatrix_data) # type: ignore
+        statistics: ctypes.POINTER(llama_model_imatrix_data) # type: ignore
+        stats_schema: ctypes.POINTER(ctypes.c_char_p) # type: ignore
+        target_bpw: float
+        target_size: int
+        state_file: Optional[bytes]
+        target_exclude: ctypes.POINTER(ctypes.c_int) # type: ignore
+        abort_callback: ggml_abort_callback
+        abort_callback_data: ctypes.c_void_p
 
     _fields_ = [
         ("nthread", ctypes.c_int32),
@@ -1269,6 +1296,15 @@ class llama_model_quantize_params(ctypes.Structure):
         ("tt_overrides", ctypes.POINTER(llama_model_tensor_override)),
         ("prune_layers", ctypes.POINTER(ctypes.c_int32)),
         ("max_buf_size", ctypes.c_size_t),
+        ("activations", llama_model_imatrix_data_p),
+        ("statistics", llama_model_imatrix_data_p),
+        ("stats_schema", ctypes.POINTER(ctypes.c_char_p)),
+        ("target_bpw", ctypes.c_float),
+        ("target_size", ctypes.c_int64),
+        ("state_file", ctypes.c_char_p),
+        ("target_exclude", ctypes.POINTER(ctypes.c_int)),
+        ("abort_callback", ggml_abort_callback),
+        ("abort_callback_data", ctypes.c_void_p),
     ]
 
 
@@ -5708,13 +5744,13 @@ def llama_quant_init(
     ...
 
 
-# LLAMA_API void llama_quant_free(quantize_state_impl * qs);
+# LLAMA_API void llama_quant_free(const quantize_state_impl * qs);
 @ctypes_function_llama_ext(
     [
         "llama_quant_free",
-        "?llama_quant_free@@YAXPEAUquantize_state_impl@@@Z",
-        "__Z16llama_quant_freeP19quantize_state_impl",
-        "_Z16llama_quant_freeP19quantize_state_impl",
+        "?llama_quant_free@@YAXPEBUquantize_state_impl@@@Z",
+        "__Z16llama_quant_freePK19quantize_state_impl",
+        "_Z16llama_quant_freePK19quantize_state_impl",
     ],
     [quantize_state_impl_p_ctypes],
     None,
