@@ -1208,7 +1208,7 @@ def test_lilicorr_draft_submits_separate_states_through_extended_batch(batch_run
     engine.block_size, engine.draft_limit, engine.draft_min = 3, 1, 0
     engine.lilicorr_top_k, engine.n_embd_dec, engine.mask_token_id = 2, 6, 99
     anchor = np.arange(6, dtype=np.float32)
-    engine._lilicorr_features = {6: anchor}
+    engine._context_features = {6: anchor}
     engine.noise_batch, engine.draft_context = r.batch, r.context
     engine.checkpoint, engine.restore = Mock(return_value={"position": 6}), Mock()
     lattice = np.array([[0] * 6, [40, 41, 0, 3, 0, 3],

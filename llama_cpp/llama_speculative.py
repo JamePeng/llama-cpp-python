@@ -2272,6 +2272,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     planes and clear the fourth, matching llama.cpp's fused injection path.
     """
 
+    supports_predecoded_media = True
+    has_markov_context = False
+
     def __init__(
         self,
         config: SpecConfig,
@@ -2303,7 +2306,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         self._use_dev_features = False
         self._suppressed_tokens: Tuple[int, ...] = ()
         self.is_lilicorr = False
-        self._lilicorr_features: Dict[int, npt.NDArray[np.float32]] = {}
+        self._context_features: Dict[int, npt.NDArray[np.float32]] = {}
         self.draft_model = None
         self.draft_context = None
         self.noise_batch = None
@@ -2340,6 +2343,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 raise ValueError("DFlash draft model has no mask token")
 
             metadata = self.draft_model.metadata()
+            self.has_markov_context = self.is_dspark and self._metadata_bool(
+                metadata, "dflash.has_markov_context", False
+            )
             self.block_size = self._metadata_int(
                 metadata, "dflash.block_size", 16
             )
@@ -2470,7 +2476,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         for layer_id in self.target_layer_ids:
             self.target_context.set_embeddings_layer_inp(layer_id, True)
         self.draft_context.set_embeddings_nextn(
-            True, masked=not self.is_dflash2 and not self.is_lilicorr
+            True, masked=not (self.is_dflash2 or self.is_lilicorr or self.has_markov_context)
         )
         self.draft_context.set_causal_attn(self.causal_attn)
 
@@ -2644,11 +2650,25 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     "DFlash speculative decoding currently supports one sequence"
                 )
 
-        # Match llama.cpp: pinned image rows can exhaust a windowed draft cache.
-        if has_embeddings and n_tokens > 1 and batch.pos[0] == batch.pos[n_tokens - 1]:
-            return
+        positions = batch.pos[:n_tokens]
+        if has_embeddings:
+            self._process_media_positions(positions, seq_id)
+        else:
+            self._process_target_positions(positions, seq_id)
 
-        self._process_target_positions(batch.pos[:n_tokens], seq_id)
+    def process_media(self, batch: Any) -> None:
+        """Consume layer captures from the MTMD callback before the next decode."""
+        if batch.seq_id != 0:
+            raise NotImplementedError("DFlash speculative decoding currently supports seq_id=0")
+        if batch.n_tokens > 0:
+            self._process_media_positions(batch.pos[:batch.n_tokens], batch.seq_id)
+
+    def _process_media_positions(self, positions: Sequence[int], seq_id: int) -> None:
+        # Pinned image rows can exhaust a windowed draft cache.
+        if len(positions) > 1 and positions[0] == positions[-1]:
+            return
+        self.target_context.synchronize()
+        self._process_target_positions(positions, seq_id)
 
     def process_tokens(
         self, tokens: Sequence[int], positions: Sequence[int], outputs: Sequence[bool],
@@ -2678,6 +2698,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                         f"DFlash device KV injection failed with status {status} "
                         f"at feature row offset {offset}"
                     )
+                self._store_context_features(positions)
                 continue
             features = self._gather_target_features(
                 batch_rows=n_tokens, offset=offset, count=count
@@ -2721,19 +2742,22 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                     "DFlash KV injection failed with status "
                     f"{status} at feature row offset {offset}"
                 )
-            if self.is_lilicorr:
-                projected = self._copy_rows(
-                    self.draft_context.get_embeddings_nextn(), count, self.n_embd_dec
-                )
-                for position, row in zip(chunk_positions, projected):
-                    self._lilicorr_features[int(position)] = row.copy()
-                self._trim_lilicorr_features(int(chunk_positions[-1]) + 1)
+            self._store_context_features(chunk_positions)
 
-    def _trim_lilicorr_features(self, end: int) -> None:
+    def _store_context_features(self, positions: Sequence[int]) -> None:
+        if self.is_lilicorr or self.has_markov_context:
+            projected = self._copy_rows(
+                self.draft_context.get_embeddings_nextn(), len(positions), self.n_embd_dec
+            )
+            for position, row in zip(positions, projected):
+                self._context_features[int(position)] = row.copy()
+            self._trim_context_features(int(positions[-1]) + 1)
+
+    def _trim_context_features(self, end: int) -> None:
         """Keep only the projected rows near the committed draft boundary."""
-        if self.is_lilicorr:
-            self._lilicorr_features = {
-                pos: row for pos, row in self._lilicorr_features.items()
+        if self.is_lilicorr or self.has_markov_context:
+            self._context_features = {
+                pos: row for pos, row in self._context_features.items()
                 if max(0, end - self.block_size - 1) <= pos < end
             }
 
@@ -2754,9 +2778,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 "size": 0,
                 "flags": 0,
             }
-            if self.is_lilicorr:
+            if self.is_lilicorr or self.has_markov_context:
                 # Rows are owned and immutable; snapshots retain them across cache updates.
-                checkpoint["lilicorr_features"] = dict(self._lilicorr_features)
+                checkpoint["context_features"] = dict(self._context_features)
             if self._use_native_draft_rollback:
                 self._checkpoint_stats["native_captures"] += 1
             else:
@@ -2841,8 +2865,8 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 ):
                     raise RuntimeError("DFlash native draft-context rollback failed")
                 self._checkpoint_stats["native_restores"] += 1
-            if self.is_lilicorr:
-                self._lilicorr_features = dict(checkpoint["lilicorr_features"])
+            if self.is_lilicorr or self.has_markov_context:
+                self._context_features = dict(checkpoint["context_features"])
             self.verify_positions.clear()
             self.verify_features = np.empty(
                 (0, self.n_embd_enc), dtype=np.float32
@@ -2908,7 +2932,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         position = self.verify_positions[count - 1] + 1
         if not self.draft_context.memory_seq_rm(seq_id, position, -1):
             raise RuntimeError("DFlash native verification rollback failed")
-        self._trim_lilicorr_features(position)
+        self._trim_context_features(position)
         self.verify_positions.clear()
         self.verify_features = np.empty(
             (0, self.n_embd_enc), dtype=np.float32
@@ -2925,7 +2949,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         if self._use_native_draft_rollback:
             if not self.draft_context.memory_seq_rm(seq_id, position, -1):
                 raise RuntimeError("DFlash draft-context truncation failed")
-            self._trim_lilicorr_features(position)
+            self._trim_context_features(position)
         else:
             checkpoint = self._active_verification_checkpoint
             if checkpoint is None:
@@ -2972,11 +2996,18 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 0 if self.is_dspark and self.sample_from_anchor else 1
             )
         )
+        markov_anchor = None
+        if self.has_markov_context:
+            self._pending_verification_checkpoint = None
+            markov_anchor = self._context_features.get(n_past - 1)
+            if markov_anchor is None or n_past + n_block_tokens > self.draft_context.n_ctx_seq():
+                return np.empty(0, dtype=np.intc)
+
         self.noise_batch.reset()
         tokens = [id_last] + [self.mask_token_id] * (n_block_tokens - 1)
         positions = [n_past + i for i in range(n_block_tokens)]
         if self.is_lilicorr:
-            anchor = self._lilicorr_features.get(n_past - 1)
+            anchor = self._context_features.get(n_past - 1)
             if anchor is None:
                 if n_past != 0:
                     raise RuntimeError(
@@ -2988,11 +3019,16 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 states=np.broadcast_to(anchor, (n_block_tokens, self.n_embd_dec)),
             )
         else:
+            states = None
+            if markov_anchor is not None:
+                states = np.zeros((n_block_tokens, self.n_embd_dec), dtype=np.float32)
+                states[0] = markov_anchor
             self.noise_batch.add_tokens(
                 tokens,
                 positions=positions,
                 seq_ids=[seq_id],
                 outputs=[not self.is_dflash2] * n_block_tokens,
+                states=states,
             )
 
         self._pending_verification_checkpoint = None
@@ -3099,7 +3135,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     def clear(self) -> None:
         """Clear request-local draft cache and verification bookkeeping."""
         self._checkpoint_owner = None
-        self._lilicorr_features.clear()
+        self._context_features.clear()
         if self._closed:
             return
         self._pending_verification_checkpoint = None
@@ -3116,7 +3152,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
     def close(self) -> None:
         """Idempotently release all DFlash/DSpark native resources."""
         self._checkpoint_owner = None
-        self._lilicorr_features.clear()
+        self._context_features.clear()
         if self._closed:
             return
         self._closed = True

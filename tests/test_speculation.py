@@ -297,7 +297,7 @@ def _checkpoint_test_engine(*, native, engine_class=LlamaMTPDecoding):
     engine = object.__new__(engine_class)
     engine.is_lilicorr = False
     engine.is_mrope = False
-    engine._lilicorr_features = {}
+    engine._context_features = {}
     engine.is_mem_shared = False
     engine.draft_context = _FakeCheckpointContext()
     engine.n_embd = 2
@@ -960,7 +960,7 @@ def _draft_test_dflash_engine(*, dspark, sample_from_anchor, p_min=0.0):
     engine.is_dspark = dspark
     engine.is_dflash2 = False
     engine.is_lilicorr = False
-    engine._lilicorr_features = {}
+    engine._context_features = {}
     engine.selector_top_k = 0
     engine._suppressed_tokens = ()
     engine.sample_from_anchor = sample_from_anchor
@@ -1324,7 +1324,7 @@ def test_dflash_device_feature_selection_and_fallback(monkeypatch, mode):
         else [call(True), call(False)] if mode == "unsupported" else []
     )
     if mode in {"enabled", "probe-error"}:
-        engine._closed, engine._lilicorr_features = False, {}
+        engine._closed, engine._context_features = False, {}
         events = []
         engine._close_draft_resources = Mock(side_effect=lambda *args, **kwargs: events.append("close-draft"))
         engine.target_context.set_embeddings_layer_inp_dev.side_effect = lambda flag: events.append(("capture", flag))
@@ -1436,7 +1436,7 @@ def test_lilicorr_draft_uses_anchor_state_and_full_block(n_max, p_min, n_min, ex
     engine.lilicorr_top_k, engine.n_embd_dec, engine.block_size = 2, 6, 6
     engine.draft_min = n_min
     anchor = np.arange(6, dtype=np.float32)
-    engine._lilicorr_features = {6: anchor}
+    engine._context_features = {6: anchor}
     lattice = np.array([[0] * 6, [101, 102, 0, 3, 0, 3],
                         [201, 202, 0, 0, 1, 0], [301, 302, 0, 3, 0, 3],
                         [401, 402, 0, 3, 0, 3], [501, 502, 0, 3, 0, 3]], dtype=np.float32)
@@ -1455,7 +1455,7 @@ def test_lilicorr_missing_anchor_never_reuses_stale_features(pos0):
     engine = _draft_test_dflash_engine(dspark=False, sample_from_anchor=True)
     engine.is_lilicorr = True
     engine.lilicorr_top_k, engine.n_embd_dec, engine.block_size = 2, 6, 4
-    engine._lilicorr_features = {5: np.ones(6, dtype=np.float32)}
+    engine._context_features = {5: np.ones(6, dtype=np.float32)}
     engine.draft_context = _FakeDFlashDraftContext(confidence=np.zeros((4, 6), dtype=np.float32))
     if pos0:
         with pytest.raises(RuntimeError, match="anchor features are unavailable"):
@@ -1487,31 +1487,31 @@ def _lilicorr_projection_engine(*, native, n_ubatch):
 @pytest.mark.parametrize("operation", ["restore", "rollback", "truncate", "clear"])
 def test_lilicorr_projected_features_follow_checkpoint_recovery(native, operation):
     engine = _lilicorr_projection_engine(native=native, n_ubatch=1)
-    engine._lilicorr_features = {7: np.array([70, 80], dtype=np.float32)}
+    engine._context_features = {7: np.array([70, 80], dtype=np.float32)}
     checkpoint = engine.checkpoint()
     context = engine.draft_context
     features = np.array([[1, 2], [3, 4], [5, 6]], dtype=np.float32)
     engine._inject_target_features(features, [8, 9, 10], seq_id=0)
     context.projected.fill(-1)
-    np.testing.assert_array_equal(engine._lilicorr_features[10], [50, 60])
+    np.testing.assert_array_equal(engine._context_features[10], [50, 60])
     engine.verify_positions, engine.verify_features = [8, 9, 10], features
     engine._active_verification_checkpoint = checkpoint
     if operation == "restore":
         engine.restore(checkpoint)
-        assert set(engine._lilicorr_features) == {7}
+        assert set(engine._context_features) == {7}
     elif operation == "clear":
         engine._closed, engine._backend_sampler = False, None
         engine.clear()
-        assert engine._lilicorr_features == {}
+        assert engine._context_features == {}
     else:
         if operation == "rollback":
             engine.rollback_verified(checkpoint, n_accepted=1)
         else:
             engine.truncate(10)
-        assert set(engine._lilicorr_features) == {7, 8, 9}
-        np.testing.assert_array_equal(engine._lilicorr_features[9], [30, 40])
-    assert set(checkpoint["lilicorr_features"]) == {7}
-    np.testing.assert_array_equal(checkpoint["lilicorr_features"][7], [70, 80])
+        assert set(engine._context_features) == {7, 8, 9}
+        np.testing.assert_array_equal(engine._context_features[9], [30, 40])
+    assert set(checkpoint["context_features"]) == {7}
+    np.testing.assert_array_equal(checkpoint["context_features"][7], [70, 80])
 
 
 def test_lilicorr_feature_cache_is_bounded_by_native_positions():
@@ -1519,8 +1519,8 @@ def test_lilicorr_feature_cache_is_bounded_by_native_positions():
     positions = [1, 4, 6, 9, 10, 11, 14]
     features = np.array([[pos, pos + 1] for pos in positions], dtype=np.float32)
     engine._inject_target_features(features, positions, seq_id=0)
-    assert set(engine._lilicorr_features) == {10, 11, 14}
-    np.testing.assert_array_equal(engine._lilicorr_features[14], [140, 150])
+    assert set(engine._context_features) == {10, 11, 14}
+    np.testing.assert_array_equal(engine._context_features[14], [140, 150])
 
 
 def test_lilicorr_next_round_uses_accepted_anchor_after_rejection():
@@ -1552,7 +1552,7 @@ def test_lilicorr_next_round_uses_accepted_anchor_after_rejection():
     engine.is_lilicorr, engine.is_dflash2 = True, False
     engine.block_size, engine.draft_limit, engine.draft_min = 4, 3, 0
     engine.lilicorr_top_k, engine.n_embd_dec, engine.mask_token_id = 2, 6, 99
-    engine._lilicorr_features = {7: np.tile(np.array([70, 80], dtype=np.float32), 3)}
+    engine._context_features = {7: np.tile(np.array([70, 80], dtype=np.float32), 3)}
     engine.noise_batch, engine.inject_batch = _FakeDFlashBatch(), _FakeDFlashBatch()
     engine.draft_context = _Context()
 
@@ -1566,7 +1566,7 @@ def test_lilicorr_next_round_uses_accepted_anchor_after_rejection():
     engine.process(batch)
     engine.rollback_verified(checkpoint, n_accepted=1)
     assert engine.draft_context.position == 9
-    assert 10 not in engine._lilicorr_features and 11 not in engine._lilicorr_features
+    assert 10 not in engine._context_features and 11 not in engine._context_features
     assert engine.draft([], n_past=10, id_last=43, n_max=3).tolist() == [91, 92, 93]
     assert engine.draft_context.position == 9
 
@@ -1596,21 +1596,22 @@ def test_dflash_process_preserves_feature_layout_and_positions(kind, positions):
         assert layer_id in engine.target_layer_ids
         return layers[layer_id].ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-    engine.target_context = SimpleNamespace(get_embeddings_layer_inp=features)
+    synchronize = Mock()
+    engine.target_context = SimpleNamespace(get_embeddings_layer_inp=features, synchronize=synchronize)
     engine.draft_context = _FakeDFlashDraftContext()
     engine.inject_batch = _FakeDFlashBatch()
     engine.verify_positions = [3]
     engine.verify_features = np.array([[1, 2]], dtype=np.float32)
     if kind == "embedding":
-        batch = SimpleNamespace(n_tokens=len(positions), token=None, embd=[0.0], pos=positions,
-                                n_seq_id=[1] * len(positions), seq_id=[[0]] * len(positions))
-        engine.process(batch)
+        engine.process_media(SimpleNamespace(n_tokens=len(positions), pos=positions, seq_id=0))
     else:
         engine.process_tokens([11, 12], positions, [False, True])
     if pinned:
+        synchronize.assert_not_called()
         assert engine.draft_context.decoded == [] and engine.verify_positions == [3]
         np.testing.assert_array_equal(engine.verify_features, [[1, 2]])
         return
+    assert synchronize.call_count == int(kind == "embedding")
     expected = [[1, 2, 10, 20], [3, 4, 30, 40]] if kind == "layers" else layers[1][:len(positions)]
     np.testing.assert_array_equal(engine.draft_context.decoded[0][2].reshape(len(positions), engine.n_embd_enc), expected)
     np.testing.assert_array_equal(engine.verify_features, expected)
@@ -1628,6 +1629,20 @@ def test_dflash_native_position_is_independent_of_history_length():
     assert engine.noise_batch.positions == [7, 8, 9, 10]
     with pytest.raises(ValueError, match="non-negative"):
         engine.draft_at_position([], pos0=-1, id_last=42, n_max=3)
+
+
+def test_dspark_markov_block_uses_previous_position_state():
+    engine = _draft_test_dflash_engine(dspark=True, sample_from_anchor=True)
+    engine.has_markov_context = True
+    engine.draft_context = _FakeDFlashDraftContext()
+    engine.draft_context.n_ctx_seq = lambda: 32
+    assert engine.draft([], n_past=7, id_last=42, n_max=3).size == 0
+    anchor = np.arange(engine.n_embd_dec, dtype=np.float32) + 1
+    engine._context_features[6] = anchor
+    assert engine.draft([], n_past=7, id_last=42, n_max=3).size
+    states = engine.noise_batch.states
+    np.testing.assert_array_equal(states[0], anchor)
+    assert not np.any(states[1:])
 
 
 @pytest.mark.parametrize("native_max,cursor", [(-1, 0), (6, 7), (99, 100)])
@@ -1772,7 +1787,7 @@ def test_real_lilicorr_draft_matches_native_state_batch(dflash_model, monkeypatc
         llm.eval(tokens[:-1], copy_logits=False)
         engine.begin(tokens[:-1])
         pos0 = llm._ctx.memory_seq_pos_max(0) + 1
-        anchor = engine._lilicorr_features[pos0 - 1].copy()
+        anchor = engine._context_features[pos0 - 1].copy()
         captured = []
         decode = engine.draft_context.decode
 
@@ -1812,7 +1827,7 @@ def test_real_lilicorr_draft_matches_native_state_batch(dflash_model, monkeypatc
             llama_cpp_lib.llama_batch_ext_free(native)
             engine.restore(checkpoint)
         assert engine.draft_context.memory_seq_pos_max(0) == pos0 - 1
-        np.testing.assert_array_equal(engine._lilicorr_features[pos0 - 1], anchor)
+        np.testing.assert_array_equal(engine._context_features[pos0 - 1], anchor)
     finally:
         llm.reset()
 

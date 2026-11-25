@@ -1732,8 +1732,10 @@ class MTMDChatHandler(MTMDBaseHandler):
         """Compile the Jinja template with the chat helper functions."""
         environment = ImmutableSandboxedEnvironment(
             trim_blocks=True,
-            lstrip_blocks=True
+            lstrip_blocks=True,
+            extensions=[Jinja2ChatFormatter.IgnoreGenerationTags, "jinja2.ext.loopcontrols"],
         )
+        environment.filters["tojson"] = Jinja2ChatFormatter.tojson
         environment.globals["raise_exception"] = Jinja2ChatFormatter.raise_exception
         environment.globals["strftime_now"] = Jinja2ChatFormatter.strftime_now
         self.chat_template = environment.from_string(new_template)
@@ -2518,13 +2520,13 @@ class MTMDChatHandler(MTMDBaseHandler):
             ):
                 raise NotImplementedError(
                     "This speculative engine cannot consume MTMD prefilled prompts; "
-                    "use MTP or NGRAM_MAP_K/K4V, or disable speculative decoding for this handler"
+                    "use MTP, a DFlash-family engine, or NGRAM_MAP_K/K4V"
                 )
             prefill_started = True
             media_cache = self._get_media_checkpoint_cache(llama) if media_callback is None else None
             if media_callback is not None:
-                # Public prompt checkpoints contain only target state. MTP also
-                # needs its draft context and pending NextN row reconstructed.
+                # Public prompt checkpoints contain only target state. Rebuild
+                # the paired draft context and its captured rows with the prompt.
                 llama.reset()
                 if len(full_prompt_ids) > llama.n_ctx_seq():
                     raise ValueError("MTMD speculative prompt exceeds n_ctx_seq; increase n_ctx")
@@ -2916,6 +2918,7 @@ class GenericMTMDChatHandler(MTMDChatHandler):
         "<|audio|>",
         "<|video|>",
         "<|patch|>", # Muse Glimmer used
+        "<|content_image|><|unused_200054|>",  # MTMD supplies the Inkling 2 image boundary.
 
         # LLaVA / LFM / Mistral-style placeholders.
         "<image>",

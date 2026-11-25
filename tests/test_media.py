@@ -1319,6 +1319,20 @@ def test_mtmd_chat_template_strftime_now(make_handler):
     assert handler.chat_template.render() == datetime.datetime.now().strftime("%Y")
 
 
+def test_inkling2_media_template_preserves_history_and_image_marker(make_handler):
+    template = (
+        "{% generation %}{{ {'text': 'hello'} | tojson(separators=(',', ':')) }}"
+        "{% endgeneration %}<|content_image|><|unused_200054|><|end_message|>"
+    )
+    handler = make_handler("GenericMTMDChatHandler", chat_format=template)
+    handler.media_marker = "<__media__>"
+    handler._ensure_chat_template(SimpleNamespace(metadata={"general.architecture": "inkling2"}))
+    prompt = handler._replace_media_placeholders(
+        handler.chat_template.render(), [{"type": "image", "url": "/path/to/image.png"}],
+    )
+    assert prompt == '{"text":"hello"}<__media__><|end_message|>'
+
+
 @pytest.mark.parametrize("kind, handler_name, path, label, item", [
     pytest.param("image", handler_name, "/path/to/image.png", "Picture",
                  {"type": "image_url", "image_url": image_url},
@@ -2182,7 +2196,7 @@ def vision_model(request):
         handler.close()
 
 
-def _color_chat(llm, color, stream=False):
+def _color_chat(llm, color, stream=False, *, prompt="Name the color. Answer in one word.", max_tokens=8):
     import base64
     import io
     from PIL import Image
@@ -2191,8 +2205,56 @@ def _color_chat(llm, color, stream=False):
     url = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
     return llm.create_chat_completion(messages=[{"role": "user", "content": [
         {"type": "image_url", "image_url": {"url": url}},
-        {"type": "text", "text": "Name the color. Answer in one word."},
-    ]}], max_tokens=8, temperature=0, seed=42, stream=stream)
+        {"type": "text", "text": prompt},
+    ]}], max_tokens=max_tokens, temperature=0, seed=42, stream=stream)
+
+
+def test_real_inkling2_image_chat_with_dspark(monkeypatch):
+    import re
+    from contextlib import closing
+    from llama_cpp import Llama
+    from llama_cpp.llama_multimodal import GenericMTMDChatHandler
+    from llama_cpp.llama_speculative import SpecConfig, SpeculativeType
+
+    paths = [os.environ.get(f"LLAMA_TEST_INKLING2_{name}") for name in ("MODEL", "MMPROJ", "DSPARK")]
+    if not all(paths):
+        pytest.skip("Set LLAMA_TEST_INKLING2_MODEL, LLAMA_TEST_INKLING2_MMPROJ and LLAMA_TEST_INKLING2_DSPARK")
+    model, mmproj, sidecar = paths
+    gpu_layers = int(os.environ.get("LLAMA_TEST_N_GPU_LAYERS", "0"))
+    spec = SpecConfig(spec_type=SpeculativeType.DRAFT_DSPARK, draft_model_path=sidecar,
+                      draft_n_max=4, draft_n_gpu_layers=gpu_layers)
+    with GenericMTMDChatHandler(
+        chat_format=None, mmproj_path=mmproj, use_gpu=gpu_layers != 0, verbose=False,
+        extra_template_arguments={"reasoning_effort": "none"},
+    ) as handler, closing(Llama(
+        model_path=model, chat_handler=handler, speculative=spec,
+        n_ctx=2048, n_batch=32, n_ubatch=32, n_gpu_layers=gpu_layers, verbose=False,
+    )) as llm:
+        engine = llm.speculative
+        assert engine.has_markov_context
+        original = engine.process_media
+        rows = []
+
+        def capture(batch):
+            rows.append(batch.n_tokens)
+            original(batch)
+
+        monkeypatch.setattr(engine, "process_media", capture)
+        responses = {}
+        for color in ("red", "blue", "red"):
+            rows.clear()
+            result = _color_chat(
+                llm, color, prompt="What is the dominant color of the image? Describe it in one short sentence.",
+                max_tokens=128,
+            )
+            answer = result["choices"][0]["message"]["content"]
+            assert answer and re.search(rf"\b{color}\b", answer, re.IGNORECASE)
+            assert len(rows) > 1 and 0 < max(rows) <= llm.n_batch
+            stats = llm.last_speculative_stats
+            assert stats["drafted"] > 0 and stats["verified"] > 0
+            if color in responses:
+                assert answer == responses[color]
+            responses[color] = answer
 
 
 def test_real_media_changed_image_and_interrupted_retry(vision_model, monkeypatch):
