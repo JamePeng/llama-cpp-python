@@ -267,10 +267,10 @@ def test_disabled_periodic_checkpoints_do_not_prepare_histories(model):
     llm.checkpoint_interval = 16
     llm._speculative_verifying = False
     llm._hybrid_cache_mgr = SimpleNamespace(max_checkpoints=0, save_checkpoint=Mock())
-    llm._batch = SimpleNamespace(reset=lambda: None, add_sequence=lambda **kwargs: None)
+    llm._batch = SimpleNamespace(reset=lambda: None, add_tokens=lambda *args, **kwargs: None)
     llm._ctx.clear_loras = llm._ctx.clear_cvec = lambda: None
     llm._decode_eval_batch = lambda tokens, size: size
-    llm._process_speculative_batch = lambda: None
+    llm._process_speculative_batch = lambda *args: None
     llm.eval(list(range(64)), copy_logits=False)
     assert llm.n_tokens == 64
     llm._hybrid_cache_mgr.save_checkpoint.assert_not_called()
@@ -455,8 +455,12 @@ def embedding_model(model, monkeypatch):
     llm._ctx.decode = Mock(return_value=0)
     output = Mock(return_value=[3.0, 4.0])
     monkeypatch.setattr(lib, "llama_get_embeddings_seq", output)
-    with closing(LlamaBatch(n_tokens=16, embd=0, n_seq_max=2)) as llm._batch:
-        yield llm, output
+    rows = []
+    llm._batch = SimpleNamespace(
+        reset=rows.clear, n_tokens=lambda: len(rows),
+        add_tokens=lambda tokens, **kwargs: rows.extend(tokens),
+    )
+    return llm, output
 
 
 @pytest.mark.parametrize("cls", [Llama, LlamaEmbedding])
@@ -519,7 +523,7 @@ def test_fatal_decode_cleanup_allows_retry(model, monkeypatch, entry, speculativ
     llm._model = object()
     llm._abort_event = threading.Event()
     llm._active_speculative_phase_stats = None
-    llm._batch = SimpleNamespace(batch=SimpleNamespace(n_tokens=0))
+    llm._batch = object()
     llm.speculative = Mock() if speculative else None
     if speculative:
         llm.speculative.checkpoint_stats.return_value = {}
@@ -1301,8 +1305,8 @@ def test_real_hybrid_failure_then_retry(hybrid_model, monkeypatch, failure):
     llm.reset()
     reference = complete()["choices"][0]["text"]
     native_decode = llm._ctx.decode
-    def fail_after_commit(batch):
-        assert native_decode(batch) == 0
+    def fail_after_commit(batch, **kwargs):
+        assert native_decode(batch, **kwargs) == 0
         assert llm._ctx.memory_seq_pos_max(0) >= 0
         if failure == "interrupt":
             raise KeyboardInterrupt

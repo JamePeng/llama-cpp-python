@@ -462,6 +462,27 @@ class LlamaSpecEngine(abc.ABC):
         """
         _ = batch, seq_id
 
+    def process_tokens(
+        self, tokens: Sequence[int], positions: Sequence[int], outputs: Sequence[bool],
+        seq_id: int = 0,
+    ) -> None:
+        """Consume text rows submitted to the target, preserving the legacy hook."""
+        if type(self).process is LlamaSpecEngine.process:
+            return
+        from llama_cpp import llama_cpp as lib
+
+        count = len(tokens)
+        sequence = (lib.llama_seq_id * 1)(seq_id)
+        batch = lib.llama_batch(
+            n_tokens=count,
+            token=(lib.llama_token * count)(*tokens),
+            pos=(lib.llama_pos * count)(*positions),
+            n_seq_id=(ctypes.c_int32 * count)(*([1] * count)),
+            seq_id=(ctypes.POINTER(lib.llama_seq_id) * count)(*([sequence] * count)),
+            logits=(ctypes.c_int8 * count)(*outputs),
+        )
+        self.process(batch, seq_id=seq_id)
+
     @abc.abstractmethod
     def draft(
         self,
@@ -1466,17 +1487,20 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
 
     def process_media(self, batch: Any) -> None:
         """Consume the borrowed MTMD sub-batch before its buffers are reused."""
+        if batch.seq_id != 0:
+            raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
         expected_n_pos = 4 if self.target_model.rope_type() in (
             self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
             self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
         ) else 1
         if batch.n_embd != self.target_model.n_embd_inp() or batch.n_pos != expected_n_pos:
             raise ValueError("MTMD embedding width or position axes do not match the MTP target")
-        # MTMD's media helper requests no output rows; its borrowed view omits flags.
-        outputs = (ctypes.c_int8 * int(batch.n_tokens))()
-        self.process(self._llama_cpp_lib.llama_batch(
-            n_tokens=batch.n_tokens, embd=batch.embd, pos=batch.pos, logits=outputs,
-        ), seq_id=int(batch.seq_id))
+        count = int(batch.n_tokens)
+        if count <= 0:
+            return
+        row_start = self._target_row_start(count, [False] * count)
+        if row_start < count:
+            self._process_media_rows(batch.embd, batch.pos, count, row_start)
 
     def __init__(
         self,
@@ -1554,13 +1578,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             target_addr = ctypes.cast(target_context.ctx, ctypes.c_void_p).value
             self.is_mem_shared = other_addr == target_addr
             self.chain_heads = self.n_mtp_layers > 1 and not self.is_mem_shared
-            self.batch = internals.LlamaBatch(
-                n_tokens=self.draft_context.n_batch(),
-                embd=self.n_embd,
-                n_seq_max=1,
-                mixed=True,
-                verbose=verbose,
-            )
+            self.batch = internals.LlamaBatchExt(context=self.draft_context)
             self.embedding_batch = None
             self._use_dev_h = self._dev_h_enabled = False
             self._verify_h_device_rows = 0
@@ -1926,39 +1944,56 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             ):
                 raise NotImplementedError("MTP speculative decoding currently supports one sequence")
 
-        row_start = 0
-        if self.is_mem_shared:
-            if bool(batch.logits) and not batch.logits[n_tokens - 1]:
-                self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
-                self.verify_tokens.clear()
-                self.verify_positions.clear()
-                self.verify_embeddings = None
-                self.verify_media_positions = None
-                return
-            # Legacy batches without output flags select only their final row.
-            if not bool(batch.logits) or not all(batch.logits[i] for i in range(n_tokens)):
-                row_start = n_tokens - 1
-        n_rows = n_tokens - row_start
-
-        embeddings = None
-        media_positions = None
+        outputs = batch.logits if bool(batch.logits) else None
         if has_tokens:
-            positions = [int(batch.pos[i]) for i in range(row_start, n_tokens)]
-            tokens = [int(batch.token[i]) for i in range(row_start, n_tokens)]
+            self.process_tokens(batch.token[:n_tokens], batch.pos[:n_tokens], outputs, seq_id)
         else:
-            n_pos = 4 if self.target_model.rope_type() in (
-                self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
-                self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
-            ) else 1
-            pos_rows = np.ctypeslib.as_array(
-                batch.pos, shape=(n_tokens * n_pos,)
-            ).reshape(n_pos, n_tokens).T[row_start:]
-            positions = pos_rows[:, 0].tolist()
-            media_positions = pos_rows.tolist() if n_pos > 1 else positions
-            tokens = []
-            embeddings = self._copy_rows(
-                batch.embd, n_tokens, self.target_model.n_embd_inp()
-            )[row_start:]
+            row_start = self._target_row_start(n_tokens, outputs)
+            if row_start < n_tokens:
+                self._process_media_rows(batch.embd, batch.pos, n_tokens, row_start)
+
+    def process_tokens(
+        self, tokens: Sequence[int], positions: Sequence[int],
+        outputs: Optional[Sequence[bool]], seq_id: int = 0,
+    ) -> None:
+        if seq_id != 0:
+            raise NotImplementedError("MTP speculative decoding currently supports seq_id=0")
+        count = len(tokens)
+        row_start = self._target_row_start(count, outputs)
+        if row_start < count:
+            self._consume_target_rows(tokens[row_start:], positions[row_start:], row_start)
+
+    def _target_row_start(self, count: int, outputs: Optional[Sequence[bool]]) -> int:
+        if not self.is_mem_shared or count == 0:
+            return 0
+        if outputs is None:
+            # A legacy batch with an omitted mask requests its final output.
+            return count - 1
+        if not outputs[count - 1]:
+            self.verify_h = np.empty((0, self.n_embd), dtype=np.float32)
+            self.verify_tokens.clear()
+            self.verify_positions.clear()
+            self.verify_embeddings = None
+            self.verify_media_positions = None
+            return count
+        return 0 if all(outputs[i] for i in range(count)) else count - 1
+
+    def _process_media_rows(self, embd, pos, count: int, row_start: int) -> None:
+        n_pos = 4 if self.target_model.rope_type() in (
+            self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+            self._llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
+        ) else 1
+        pos_rows = np.ctypeslib.as_array(pos, shape=(count * n_pos,)).reshape(n_pos, count).T[row_start:]
+        positions = pos_rows[:, 0].tolist()
+        embeddings = self._copy_rows(embd, count, self.target_model.n_embd_inp())[row_start:]
+        self._consume_target_rows(
+            [], positions, row_start, embeddings=embeddings,
+            media_positions=pos_rows.tolist() if n_pos > 1 else positions,
+        )
+
+    def _consume_target_rows(
+        self, tokens, positions, row_start, *, embeddings=None, media_positions=None,
+    ) -> None:
         # Only non-shared drafts need every row for catch-up. Sparse shared-KV
         # output uses the original batch index, not a compact output index.
         if getattr(self, "_use_dev_h", False):
@@ -1969,7 +2004,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             if row_start else self.target_context.get_embeddings_nextn()
         )
         target_h = self._copy_rows(
-            pointer, n_rows, self.n_embd
+            pointer, len(positions), self.n_embd
         )
 
         self._process_target_rows(
@@ -2036,8 +2071,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             if embeddings is None:
                 catchup_batch = self.batch
                 catchup_batch.reset()
-                for token, pos, hidden in zip(tokens, positions, shifted_h):
-                    catchup_batch.add_token_embedding(token, hidden, pos, [0], False)
+                catchup_batch.add_tokens(tokens, positions=positions, states=shifted_h)
             else:
                 if self.embedding_batch is None:
                     from llama_cpp import _internals as internals
@@ -2158,7 +2192,7 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
         context_checkpoint = self.checkpoint(seq_id)
         chain_h: List[npt.NDArray[np.float32]] = [self.pending_h.copy()]
         self.batch.reset()
-        self.batch.add_token_embedding(id_last, self.pending_h, n_past, [0], True)
+        self.batch.add_token(id_last, n_past, output=True, state=self.pending_h)
         output_index = 0
 
         try:
@@ -2190,17 +2224,14 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
                     chain_h.append(hidden.copy())
                     for row, row_hidden in enumerate(chain_h):
                         row_token = id_last if row == 0 else result[row - 1]
-                        self.batch.add_token_embedding(
-                            row_token,
-                            row_hidden,
-                            n_past + row,
-                            [0],
-                            row == len(chain_h) - 1,
+                        self.batch.add_token(
+                            row_token, n_past + row,
+                            output=row == len(chain_h) - 1, state=row_hidden,
                         )
                     output_index = len(chain_h) - 1
                 else:
                     next_pos = n_past if self.is_mem_shared else n_past + step + 1
-                    self.batch.add_token_embedding(token, hidden, next_pos, [0], True)
+                    self.batch.add_token(token, next_pos, output=True, state=hidden)
                     output_index = 0
         finally:
             if self.chain_heads:
@@ -2289,9 +2320,9 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             self.is_dflash2 = self.resolved_type == SpeculativeType.DRAFT_DFLASH2
             self.is_lilicorr = self.resolved_type == SpeculativeType.DRAFT_LILICORR
             self.selector_top_k = self.draft_model.dflash_selector_top_k()
-            self.is_mrope = (
-                self.draft_model.rope_type()
-                == llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE
+            self.is_mrope = self.draft_model.rope_type() in (
+                llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_MROPE,
+                llama_cpp_lib.llama_rope_type.LLAMA_ROPE_TYPE_IMROPE,
             )
             self.target_layer_ids = self.draft_model.target_layer_ids()
             if not self.target_layer_ids:
@@ -2376,15 +2407,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 params=draft_ctx_params,
                 verbose=verbose,
             )
-            if self.is_lilicorr:
-                self.noise_batch = internals.LlamaBatchExt(context=self.draft_context)
-            else:
-                self.noise_batch = internals.LlamaBatch(
-                    n_tokens=block_capacity,
-                    embd=0,
-                    n_seq_max=1,
-                    verbose=verbose,
-                )
+            self.noise_batch = internals.LlamaBatchExt(context=self.draft_context)
             self._configure_draft_execution(internals)
 
             self._use_native_draft_rollback = (
@@ -2395,17 +2418,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 or self.draft_context.n_rs_seq() >= self.draft_limit
             )
             self._configure_device_features()
-            if self._use_dev_features:
-                self.inject_batch = internals.LlamaBatchExt(context=self.draft_context)
-            else:
-                self.inject_batch = internals.LlamaBatch(
-                    n_tokens=self.draft_context.n_ubatch(),
-                    embd=self.n_embd_enc,
-                    n_seq_max=1,
-                    verbose=verbose,
-                )
-                if self.is_mrope:
-                    self.inject_batch.enable_mrope_positions()
+            self.inject_batch = internals.LlamaBatchExt(context=self.draft_context)
             self._pending_verification_checkpoint = None
             self._active_verification_checkpoint = None
             self.verify_positions: List[int] = []
@@ -2635,11 +2648,25 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
         if has_embeddings and n_tokens > 1 and batch.pos[0] == batch.pos[n_tokens - 1]:
             return
 
+        self._process_target_positions(batch.pos[:n_tokens], seq_id)
+
+    def process_tokens(
+        self, tokens: Sequence[int], positions: Sequence[int], outputs: Sequence[bool],
+        seq_id: int = 0,
+    ) -> None:
+        if seq_id != 0:
+            raise NotImplementedError("DFlash speculative decoding currently supports seq_id=0")
+        self._process_target_positions(positions, seq_id)
+
+    def _process_target_positions(self, target_positions: Sequence[int], seq_id: int) -> None:
+        n_tokens = len(target_positions)
+        if not n_tokens:
+            return
         chunk_size = self.draft_context.n_ubatch()
         feature_chunks: List[npt.NDArray[np.float32]] = []
         for offset in range(0, n_tokens, chunk_size):
             count = min(chunk_size, n_tokens - offset)
-            positions = [int(batch.pos[offset + i]) for i in range(count)]
+            positions = target_positions[offset : offset + count]
             if getattr(self, "_use_dev_features", False):
                 self.inject_batch.reset()
                 for i, position in enumerate(positions):
@@ -2658,7 +2685,7 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             feature_chunks.append(features)
             self._inject_target_features(features, positions, seq_id=seq_id)
 
-        self.verify_positions = [int(batch.pos[i]) for i in range(n_tokens)]
+        self.verify_positions = list(target_positions)
         self.verify_features = (
             np.concatenate(feature_chunks, axis=0) if feature_chunks
             else np.empty((0, self.n_embd_enc), dtype=np.float32)
@@ -2682,23 +2709,12 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             count = min(chunk_size, len(positions) - offset)
             self.inject_batch.reset()
             chunk_positions = positions[offset : offset + count]
-            if getattr(self, "is_mrope", False):
-                self.inject_batch.add_embeddings_mrope(
-                    features[offset : offset + count].reshape(-1),
-                    pos_array=[
-                        chunk_positions,
-                        chunk_positions,
-                        chunk_positions,
-                        [0] * count,
-                    ],
-                    seq_ids=[seq_id],
-                )
-            else:
-                self.inject_batch.add_embeddings(
-                    features[offset : offset + count].reshape(-1),
-                    pos_array=chunk_positions,
-                    seq_ids=[seq_id],
-                )
+            coordinates = (
+                [(p, p, p, 0) for p in chunk_positions] if self.is_mrope else chunk_positions
+            )
+            self.inject_batch.add_embeddings(
+                features[offset : offset + count], positions=coordinates, seq_ids=[seq_id],
+            )
             status = self.draft_context.decode(self.inject_batch)
             if status != 0:
                 raise RuntimeError(
@@ -2972,11 +2988,11 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
                 states=np.broadcast_to(anchor, (n_block_tokens, self.n_embd_dec)),
             )
         else:
-            self.noise_batch.add_sequence(
-                token_array=tokens,
-                pos_array=positions,
+            self.noise_batch.add_tokens(
+                tokens,
+                positions=positions,
                 seq_ids=[seq_id],
-                logits_array=[not self.is_dflash2] * n_block_tokens,
+                outputs=[not self.is_dflash2] * n_block_tokens,
             )
 
         self._pending_verification_checkpoint = None

@@ -102,7 +102,7 @@ The generation examples follow the current low-level lifecycle:
 
 1. Initialize the process-global backend and discover packaged backend plugins.
 2. Obtain its vocabulary and create a context.
-3. Tokenize input and submit `llama_batch` objects with `llama_decode`.
+3. Tokenize input and submit `llama_batch_ext` objects with `llama_process`.
 4. Select tokens through a `llama_sampler_chain`.
 5. Free the sampler, batch, context, and model in reverse order.
 
@@ -112,7 +112,7 @@ invalidating one another.
 
 ## Batch sizing
 
-`--n-batch` limits the logical prompt chunk submitted to `llama_decode`.
+`--n-batch` limits the logical prompt chunk submitted to `llama_process`.
 `--n-ubatch auto` limits the physical graph to `min(n_batch, 512)`. For an
 explicit value, keep `n_ubatch <= n_batch <= n_ctx`; validation enforces this.
 

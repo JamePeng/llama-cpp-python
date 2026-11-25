@@ -16,6 +16,7 @@ from llama_cpp.llama_speculative import (
     LlamaDFlashDecoding,
     LlamaMTPDecoding,
     LlamaNGramMapDecoding,
+    LlamaSpecEngine,
     SpecConfig,
     SpeculativeType,
     create_native_spec_engine,
@@ -295,6 +296,7 @@ class _FakeCheckpointContext:
 def _checkpoint_test_engine(*, native, engine_class=LlamaMTPDecoding):
     engine = object.__new__(engine_class)
     engine.is_lilicorr = False
+    engine.is_mrope = False
     engine._lilicorr_features = {}
     engine.is_mem_shared = False
     engine.draft_context = _FakeCheckpointContext()
@@ -323,8 +325,9 @@ class _MTPCatchupBatch:
     def reset(self):
         self.rows.clear()
 
-    def add_token_embedding(self, token, hidden, position, seq_ids, output):
-        self.rows.append((token, np.array(hidden, copy=True), position))
+    def add_tokens(self, tokens, *, positions, states):
+        self.rows.extend((token, hidden.copy(), position)
+                         for token, hidden, position in zip(tokens, states, positions))
 
     def add_embeddings(self, features, *, positions, states):
         self.rows.extend((row.copy(), hidden.copy(), position)
@@ -725,20 +728,14 @@ def test_mtp_close_does_not_import_during_interpreter_shutdown():
     assert engine.draft_context is None
 
 
-class _FakeEvalBatch:
-    def __init__(self):
-        self.batch = self
-        self.n_tokens = 0
-
-
 class _FakeEvalContext:
     def __init__(self, statuses, events):
         self.statuses = list(statuses)
         self.events = events
         self.decode_sizes = []
 
-    def decode(self, batch):
-        self.decode_sizes.append(batch.batch.n_tokens)
+    def decode(self, batch, *, count):
+        self.decode_sizes.append(count)
         self.events.append("target-decode")
         return self.statuses.pop(0)
 
@@ -746,20 +743,26 @@ class _FakeEvalContext:
         self.events.append("target-sync")
 
 
-class _FakeSpecEngine:
+class _FakeSpecEngine(LlamaSpecEngine):
     def __init__(self, events):
         self.events = events
 
     def process(self, batch, seq_id=0):
-        assert batch is not None
-        assert seq_id == 0
+        assert batch.token[:batch.n_tokens] == [1, 2, 3]
+        assert batch.pos[:batch.n_tokens] == [0, 1, 2]
+        assert batch.logits[:batch.n_tokens] == [1, 1, 1]
+        assert batch.n_seq_id[:batch.n_tokens] == [1, 1, 1]
+        assert [batch.seq_id[i][0] for i in range(batch.n_tokens)] == [seq_id] * 3
         self.events.append("spec-process")
+
+    def draft(self, *args, **kwargs):
+        raise AssertionError("The target batch test does not draft")
 
 
 def _eval_test_llama(*, statuses, verifying, speculative=True):
     events = []
     llm = object.__new__(llama_cpp.Llama)
-    llm._batch = _FakeEvalBatch()
+    llm._batch = object()
     llm._ctx = _FakeEvalContext(statuses, events)
     llm._speculative_verifying = verifying
     llm.speculative = _FakeSpecEngine(events) if speculative else None
@@ -778,7 +781,7 @@ def test_speculative_target_sync_precedes_process_and_has_separate_timing():
     llm, events = _eval_test_llama(statuses=[0], verifying=True)
 
     assert llm._decode_eval_batch([1, 2, 3], 3) == 3
-    llm._process_speculative_batch()
+    llm._process_speculative_batch([1, 2, 3], range(3), [True] * 3)
 
     assert events == ["target-decode", "target-sync", "spec-process"]
     stats = llm._active_speculative_phase_stats
@@ -895,37 +898,20 @@ class _FakeDFlashBatch:
         self.mrope_positions = None
         self.states = None
 
-    def add_tokens(self, tokens, *, positions, seq_ids, states):
-        self.add_sequence(tokens, positions, seq_ids, [False] * len(tokens))
-        self.states = np.array(states, dtype=np.float32, copy=True)
-
-    def add_sequence(
-        self, token_array, pos_array, seq_ids, logits_array
-    ):
+    def add_tokens(self, tokens, *, positions, seq_ids, outputs=None, states=None):
         assert seq_ids == [0]
-        assert len(token_array) == len(pos_array) == len(logits_array)
-        self.tokens = list(token_array)
-        self.positions = list(pos_array)
-        self.logits = list(logits_array)
+        self.tokens = list(tokens)
+        self.positions = list(positions)
+        self.logits = [False] * len(tokens) if outputs is None else list(outputs)
+        self.states = None if states is None else np.array(states, dtype=np.float32, copy=True)
 
-    def add_embeddings(
-        self, embeddings, *, pos_array, seq_ids, logits_array=None
-    ):
+    def add_embeddings(self, embeddings, *, positions, seq_ids):
         assert seq_ids == [0]
         self.embeddings = np.asarray(embeddings, dtype=np.float32).copy()
-        self.positions = list(pos_array)
-        self.logits = list(logits_array or [])
-
-    def add_embeddings_mrope(
-        self, embeddings, *, pos_array, seq_ids, logits_array=None
-    ):
-        self.add_embeddings(
-            embeddings,
-            pos_array=pos_array[0],
-            seq_ids=seq_ids,
-            logits_array=logits_array,
-        )
-        self.mrope_positions = [list(plane) for plane in pos_array]
+        self.positions = list(positions)
+        if positions and isinstance(positions[0], tuple):
+            self.mrope_positions = list(positions)
+            self.positions = [pos[0] for pos in positions]
 
 
 class _FakeDFlashDraftContext:
@@ -1129,7 +1115,7 @@ def test_mtp_probability_cutoff_uses_suppressed_distribution_and_restores(p_min,
     engine._suppressed_tokens = (3,)
     engine.n_vocab, engine.n_embd, engine.chain_heads = 4, 2, False
     engine.pending_h = np.zeros(2, dtype=np.float32)
-    engine.batch = SimpleNamespace(reset=Mock(), add_token_embedding=Mock())
+    engine.batch = SimpleNamespace(reset=Mock(), add_token=Mock())
     engine.checkpoint, engine.restore = Mock(return_value={"position": 5}), Mock()
     logits, hidden = np.array([0, 1, 2, 5], dtype=np.float32), np.zeros(2, dtype=np.float32)
     engine.draft_context = SimpleNamespace(
@@ -1163,7 +1149,7 @@ def test_mtp_initialization_reads_suppression_from_draft_model(monkeypatch, exte
     monkeypatch.setattr(LlamaMTPDecoding, "_enable_backend_sampling", lambda *args: None)
     monkeypatch.setattr(internals, "LlamaContext", lambda **kwargs: context)
     batch = SimpleNamespace(close=Mock())
-    monkeypatch.setattr(internals, "LlamaBatch", lambda **kwargs: batch)
+    monkeypatch.setattr(internals, "LlamaBatchExt", lambda **kwargs: batch)
     with pytest.raises(RuntimeError, match="nextn setup") if fail else nullcontext():
         with closing(LlamaMTPDecoding(
             SpecConfig(spec_type=SpeculativeType.DRAFT_MTP, draft_model_path="mtp.gguf" if external else None),
@@ -1384,8 +1370,7 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
         set_embeddings_nextn=Mock(), set_causal_attn=Mock(),
         supports_embd_row=Mock(return_value=device),
     )
-    extended = Mock(return_value=_FakeDFlashBatch())
-    legacy = Mock(side_effect=lambda **kwargs: _FakeDFlashBatch())
+    extended = Mock(side_effect=lambda **kwargs: _FakeDFlashBatch())
     create_context = Mock(return_value=context)
     backend = Mock()
     monkeypatch.setattr(LlamaDFlashDecoding, "_load_draft_model", lambda *args, **kwargs: model)
@@ -1393,7 +1378,6 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
     monkeypatch.setattr(LlamaDFlashDecoding, "_enable_backend_sampling", backend)
     monkeypatch.setattr(internals, "LlamaContext", create_context)
     monkeypatch.setattr(internals, "LlamaBatchExt", extended)
-    monkeypatch.setattr(internals, "LlamaBatch", legacy)
     target = SimpleNamespace(ctx=None, set_embeddings_layer_inp=Mock(), set_embeddings_layer_inp_dev=Mock())
 
     def create():
@@ -1418,17 +1402,8 @@ def test_dflash_initialization_configures_variant_and_suppressed_tokens(monkeypa
     assert engine.draft_limit == 1
     assert params.n_batch == params.n_ubatch == params.n_outputs_max == (6 if top_k else 2)
     assert engine._use_dev_features is device
-    if top_k:
-        assert engine.noise_batch is extended.return_value
-        extended.assert_called_once_with(context=context)
-        assert legacy.call_count == 1  # feature injection only
-    elif device:
-        assert engine.inject_batch is extended.return_value
-        extended.assert_called_once_with(context=context)
-        assert legacy.call_count == 1
-    else:
-        extended.assert_not_called()
-        assert legacy.call_count == 2
+    assert engine.noise_batch is not engine.inject_batch
+    assert extended.call_args_list == [call(context=context), call(context=context)]
     if top_k or selector_top_k:
         backend.assert_not_called()
         model.suppress_tokens.assert_not_called()
@@ -1626,10 +1601,12 @@ def test_dflash_process_preserves_feature_layout_and_positions(kind, positions):
     engine.inject_batch = _FakeDFlashBatch()
     engine.verify_positions = [3]
     engine.verify_features = np.array([[1, 2]], dtype=np.float32)
-    batch = SimpleNamespace(n_tokens=len(positions), token=None if kind == "embedding" else [11, 12],
-                            embd=[0.0] if kind == "embedding" else None, pos=positions,
-                            n_seq_id=[1] * len(positions), seq_id=[[0]] * len(positions))
-    engine.process(batch)
+    if kind == "embedding":
+        batch = SimpleNamespace(n_tokens=len(positions), token=None, embd=[0.0], pos=positions,
+                                n_seq_id=[1] * len(positions), seq_id=[[0]] * len(positions))
+        engine.process(batch)
+    else:
+        engine.process_tokens([11, 12], positions, [False, True])
     if pinned:
         assert engine.draft_context.decoded == [] and engine.verify_positions == [3]
         np.testing.assert_array_equal(engine.verify_features, [[1, 2]])
@@ -1640,7 +1617,7 @@ def test_dflash_process_preserves_feature_layout_and_positions(kind, positions):
     assert engine.verify_positions == engine.draft_context.decoded[0][1] == positions
     assert engine.inject_batch.logits == []
     if kind == "mrope":
-        assert engine.inject_batch.mrope_positions == [positions] * 3 + [[0] * len(positions)]
+        assert engine.inject_batch.mrope_positions == [(p, p, p, 0) for p in positions]
 
 
 def test_dflash_native_position_is_independent_of_history_length():
@@ -1943,16 +1920,23 @@ def test_real_mtp_device_hidden_rows_match_independent_host_capture(mtp_model, m
         pytest.skip("Native NextN device state rows are unavailable for this model/backend")
     tokens = llm.tokenize(b"Explain speculative decoding with a draft model and target verification. " * 8)
     assert llm.n_batch < len(tokens) < llm.n_ctx() - 3
-    with closing(internals.LlamaContext(model=llm._model, params=llm.context_params, verbose=False)) as reference:
+    with closing(internals.LlamaContext(
+        model=llm._model, params=llm.context_params, verbose=False,
+    )) as reference, closing(internals.LlamaBatch(n_tokens=llm.n_batch, embd=0, n_seq_max=1)) as reference_batch:
         reference.set_embeddings_nextn(True, masked=False)
         decode = llm._ctx.decode
         seen = []
 
-        def compare(batch):
-            assert reference.decode(batch) == 0
-            status = decode(batch)
+        def compare(batch, *, count):
+            entries = batch.entries[:count]
+            reference_batch.reset()
+            reference_batch.add_sequence(
+                [entry.token for entry in entries], [entry.position[0] for entry in entries],
+                [0], [entry.output for entry in entries],
+            )
+            assert reference.decode(reference_batch) == 0
+            status = decode(batch, count=count)
             assert status == 0
-            count = int(batch.batch.n_tokens)
             hidden = engine._copy_rows(reference.get_embeddings_nextn(), count, engine.n_embd)
             np.testing.assert_array_equal(llm._ctx.get_embeddings_nextn_rows(0, count), hidden)
             seen.append(hidden)
@@ -1963,9 +1947,11 @@ def test_real_mtp_device_hidden_rows_match_independent_host_capture(mtp_model, m
         llm.eval(tokens, copy_logits=False)
         assert len(seen) > 1
         np.testing.assert_array_equal(engine.pending_h, seen[-1][-1])
-        with _target_batch(range(len(tokens), len(tokens) + 3), tokens=tokens[:3], outputs=[True] * 3) as batch:
-            llm._ctx.decode(batch)
-            engine.process(batch.batch)
+        positions = range(len(tokens), len(tokens) + 3)
+        with internals.LlamaBatchExt(context=llm._ctx) as batch:
+            batch.add_tokens(tokens[:3], positions=positions, outputs=[True] * 3)
+            llm._ctx.decode(batch, count=3)
+            engine.process_tokens(tokens[:3], positions, [True] * 3)
         engine.accept(1)
         np.testing.assert_array_equal(engine.pending_h, seen[-1][1])
 
@@ -2064,7 +2050,7 @@ def test_real_mtp_zero_checkpoint_score_hooks_match_native_batches(mtp_model, mo
     # independent native contexts with matching batches, not cross-mode tokens.
     with closing(internals.LlamaContext(
         model=llm._model, params=llm.context_params, verbose=False,
-    )) as reference, closing(internals.LlamaSampler()) as sampler:
+    )) as reference, internals.LlamaBatchExt(context=reference) as reference_batch, closing(internals.LlamaSampler()) as sampler:
         reference.set_embeddings_nextn(True, masked=False)
         sampler.add_greedy()
         decode, remove = llm._ctx.decode, llm._ctx.memory_seq_rm
@@ -2075,13 +2061,20 @@ def test_real_mtp_zero_checkpoint_score_hooks_match_native_batches(mtp_model, mo
             delivered, processors, criteria, sample_rows = [], [], [], []
             batch_start = batch_size = 0
 
-            def decode_reference(batch):
+            def decode_reference(batch, *, count):
                 nonlocal batch_start, batch_size
-                status = decode(batch)
+                status = decode(batch, count=count)
                 assert status == 0
-                assert reference.decode(batch) == 0
-                batch_start = int(batch.batch.pos[0])
-                batch_size = int(batch.batch.n_tokens)
+                entries = batch.entries[:count]
+                reference_batch.reset()
+                reference_batch.add_tokens(
+                    [entry.token for entry in entries],
+                    positions=[entry.position[0] for entry in entries],
+                    outputs=[entry.output for entry in entries],
+                )
+                assert reference.decode(reference_batch) == 0
+                batch_start = entries[0].position[0]
+                batch_size = count
                 return status
 
             def remove_reference(seq_id, p0, p1):

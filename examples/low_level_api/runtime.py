@@ -99,7 +99,10 @@ class LowLevelLlama:
             if not self.memory:
                 raise RuntimeError("the context does not expose token memory")
 
-            self.batch = llama_cpp.llama_batch_init(n_batch, 0, 1)
+            self.n_batch = llama_cpp.llama_n_batch(self.context)
+            self.batch = llama_cpp.llama_batch_ext_init(self.context)
+            if not self.batch:
+                raise MemoryError("failed to create the extended batch")
         except BaseException:
             self.close()
             raise
@@ -265,15 +268,20 @@ class LowLevelLlama:
         chunk_size = min(self.n_batch, len(tokens))
         while offset < len(tokens):
             chunk = tokens[offset : offset + chunk_size]
-            self.batch.n_tokens = len(chunk)
+            llama_cpp.llama_batch_ext_clear(self.batch)
             for index, token in enumerate(chunk):
-                self.batch.token[index] = token
-                self.batch.pos[index] = start_pos + offset + index
-                self.batch.n_seq_id[index] = 1
-                self.batch.seq_id[index][0] = 0
-                self.batch.logits[index] = index == len(chunk) - 1
+                row = llama_cpp.llama_batch_ext_add_token(self.batch, 0, token)
+                if row < 0:
+                    raise RuntimeError(f"could not add token to batch (code {row})")
+                position = llama_cpp.llama_pos(start_pos + offset + index)
+                if not llama_cpp.llama_batch_ext_set_pos(self.batch, row, ctypes.byref(position)):
+                    raise RuntimeError(f"could not set position of batch row {row}")
+            if not llama_cpp.llama_batch_ext_set_output_logits(self.batch, len(chunk) - 1, True):
+                raise RuntimeError("could not request logits for the last batch row")
 
-            result = llama_cpp.llama_decode(self.context, self.batch)
+            result = llama_cpp.llama_process(
+                self.context, llama_cpp.llama_process_type.LLAMA_PROCESS_TYPE_DECODE, self.batch,
+            )
             if result == 0:
                 offset += len(chunk)
                 continue
@@ -290,7 +298,7 @@ class LowLevelLlama:
                 -3: "graph computation failed",
             }
             detail = messages.get(result, "an unknown native error occurred")
-            raise RuntimeError(f"llama_decode failed with code {result}: {detail}")
+            raise RuntimeError(f"llama_process decode failed with code {result}: {detail}")
 
     def _new_sampler(
         self,
@@ -338,7 +346,7 @@ class LowLevelLlama:
             return
         self._closed = True
         if self.batch is not None:
-            llama_cpp.llama_batch_free(self.batch)
+            llama_cpp.llama_batch_ext_free(self.batch)
             self.batch = None
         if self.context is not None:
             llama_cpp.llama_free(self.context)

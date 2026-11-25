@@ -875,14 +875,7 @@ class Llama:
             self._hybrid_cache_mgr = None
 
         self._batch = self._stack.enter_context(
-            contextlib.closing(
-                internals.LlamaBatch(
-                    n_tokens=self.n_batch,
-                    embd=0,
-                    n_seq_max=self.context_params.n_seq_max,
-                    verbose=self.verbose,
-                )
-            )
+            internals.LlamaBatchExt(context=self._ctx)
         )
 
         if self.verbose:
@@ -1462,11 +1455,10 @@ class Llama:
         current_batch_size = initial_batch_size
 
         while current_batch_size > 0:
-            self._batch.batch.n_tokens = current_batch_size
             phase_stats = self._active_speculative_phase_stats
             decode_started = time.perf_counter()
             try:
-                status = self._ctx.decode(self._batch)
+                status = self._ctx.decode(self._batch, count=current_batch_size)
             except internals.LlamaDecodeAbort:
                 # llama.cpp may have committed an unknown number of ubatches.
                 # A full reset is the only backend-independent way to realign
@@ -1537,14 +1529,16 @@ class Llama:
             "Llama.eval(decode): Failed completely even with batch size 1."
         )
 
-    def _process_speculative_batch(self) -> None:
+    def _process_speculative_batch(
+        self, tokens: Sequence[int], positions: Sequence[int], outputs: Sequence[bool],
+    ) -> None:
         """Process synchronized target outputs and account only engine work."""
         if self.speculative is None:
             return
         phase_stats = self._active_speculative_phase_stats
         process_started = time.perf_counter()
         try:
-            self.speculative.process(self._batch.batch, seq_id=0)
+            self.speculative.process_tokens(tokens, positions, outputs)
         finally:
             if phase_stats is not None:
                 phase_stats["process_calls"] += 1
@@ -1786,12 +1780,7 @@ class Llama:
                 if i + n_chunk == n_eval:
                     logits_array[-1] = True
 
-            self._batch.add_sequence(
-                token_array=chunk,
-                pos_array=pos_array,
-                seq_ids=[0],
-                logits_array=logits_array
-            )
+            self._batch.add_tokens(chunk, positions=pos_array, outputs=logits_array)
 
             # JIT Dynamic LoRAs Weights Mounting
 
@@ -1834,7 +1823,11 @@ class Llama:
             self._last_eval_output_start = n_past
             self._last_eval_output_count = current_batch_size
 
-            self._process_speculative_batch()
+            if self.speculative is not None:
+                self._process_speculative_batch(
+                    chunk[:current_batch_size], pos_array[:current_batch_size],
+                    logits_array[:current_batch_size],
+                )
 
             # Save successfully processed tokens into the Python-side ledger
             self.input_ids[n_past : n_past + current_batch_size] = chunk[:current_batch_size]
@@ -3333,18 +3326,11 @@ class Llama:
                     decode_batch()
 
                 seq_id = len(seq_sizes)
-                # The batch logits mask also selects embedding outputs: NONE
-                # needs every token, while pooled output needs one per sequence.
-                logits_array = (
-                    [True] * n_tokens
-                    if is_none
-                    else [False] * (n_tokens - 1) + [True]
-                )
-                self._batch.add_sequence(
-                    token_array=tokens,
-                    pos_array=list(range(n_tokens)),
+                self._batch.add_tokens(
+                    tokens,
+                    positions=range(n_tokens),
                     seq_ids=[seq_id],
-                    logits_array=logits_array,
+                    outputs=[True] * n_tokens,
                 )
                 seq_sizes.append(n_tokens)
 
