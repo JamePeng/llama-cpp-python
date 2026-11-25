@@ -1649,6 +1649,8 @@ class GGMLBackendDevType(enum.IntEnum):
 #     bool events;
 #     // mmap is supported for loading
 #     bool mmap_support;
+#     // set_tensor_async from host memory can be ordered with the graph computation and can therefore be faster than a blocking write
+#     bool fast_async_host_input;
 # };
 class GGMLBackendDevCaps(ctypes.Structure):
     _fields_ = [
@@ -1657,6 +1659,7 @@ class GGMLBackendDevCaps(ctypes.Structure):
         ("buffer_from_host_ptr", ctypes.c_bool),
         ("events", ctypes.c_bool),
         ("mmap_support", ctypes.c_bool),
+        ("fast_async_host_input", ctypes.c_bool),
     ]
 
 # // all the device properties
