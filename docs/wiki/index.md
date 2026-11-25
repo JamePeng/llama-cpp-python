@@ -52,6 +52,7 @@ vendored `llama.cpp` APIs remain the source of truth.
 | Page | Description |
 |---|---|
 | [Qwen3.5 Image Chat](examples/vision/vision-qwen.md) | Matching model/projector setup, image requests, n-gram speculation, and prefill recovery. |
+| [Inkling 2 Mini Image Chat](examples/vision/vision-inkling2.md) | Run a matching vision projector and DSpark sidecar, and check draft activity. |
 | [Stateful Speculative Decoding](examples/speculative-decoding.md) | Choose a draft source, run a DSpark sidecar, compare host/device feature transfer, and understand state reuse. |
 | [DFlash2 Speculative Decoding](examples/dflash2-speculative-decoding.md) | Configure a DFlash2 sidecar, validate selector execution, compare ordinary and speculative output, and tune draft length. |
 | [MTMD Speech Synthesis](examples/audio/audio-tts.md) | Generate speech or YuE2 stereo songs; learn model options and explore CLI and Streamlit examples. |
@@ -90,7 +91,8 @@ For image, audio and video inputs:
 
 1. [Llama Multimodal](modules/LlamaMultimodal.md)
 2. [Qwen3.5 Image Chat](examples/vision/vision-qwen.md)
-3. [MTMD ctypes Bindings](modules/MTMDCppBindings.md) for native integrations
+3. [Inkling 2 Mini Image Chat](examples/vision/vision-inkling2.md)
+4. [MTMD ctypes Bindings](modules/MTMDCppBindings.md) for native integrations
 
 For grammar-constrained generation:
 
@@ -145,6 +147,7 @@ Completed pages currently linked from this index:
 - `features/rpc.md`
 - `features/caching.md`
 - `examples/vision/vision-qwen.md`
+- `examples/vision/vision-inkling2.md`
 - `troubleshooting.md`
 - `examples/speculative-decoding.md`
 - `examples/dflash2-speculative-decoding.md`

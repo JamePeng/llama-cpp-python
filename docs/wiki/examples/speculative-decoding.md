@@ -130,6 +130,8 @@ the full text prompt; `reset=False` is rejected for that restored state.
 Transient checkpoints used within generation are separate from public snapshots
 and cross-request prompt caching.
 
-High-level DFlash-family chat remains text-only. For compatible MTP image
-requests, use the [Qwen image-chat workflow](vision/vision-qwen.md#mtp-image-chat).
+For an Inkling 2 Mini model with a matching projector and DSpark sidecar, use
+the [Inkling 2 Mini image-chat example](vision/vision-inkling2.md).
+For compatible MTP image requests, use the
+[Qwen image-chat workflow](vision/vision-qwen.md#mtp-image-chat).
 For selector-specific setup, see [DFlash2 speculative decoding](dflash2-speculative-decoding.md).

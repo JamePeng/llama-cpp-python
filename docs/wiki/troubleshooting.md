@@ -64,8 +64,9 @@ context capacity. The handler will not advance its ledger after failed native
 removal or accept an out-of-range helper position. A partial prefill failure
 clears uncertain state, so retry with the full messages. Qwen3.5 image chat supports
 MTP with compatible MTP heads and a matching projector, as well as `NGRAM_MAP_K`
-and `NGRAM_MAP_K4V`. DFlash-family engines are rejected before media prefill.
-For MTP, the complete media prompt must fit without context shifting; see
+and `NGRAM_MAP_K4V`. Inkling 2 Mini supports image chat with its matching
+projector and DSpark sidecar. With MTP or a DFlash-family engine, the complete
+media prompt must fit without context shifting. See
 [MTP image chat](examples/vision/vision-qwen.md#mtp-image-chat).
 
 ## Embedding changed the generation context

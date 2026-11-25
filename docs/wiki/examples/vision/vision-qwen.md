@@ -81,7 +81,6 @@ speculative = SpecConfig(spec_type=SpeculativeType.NGRAM_MAP_K)
 
 `NGRAM_MAP_K4V` is also supported by the prefilled-media path. MTMD first evaluates
 the media; n-gram proposals never emit its negative ledger IDs as decoder tokens.
-DFlash-family engines are rejected by this chat handler before prefill.
 
 ## MTP image chat
 

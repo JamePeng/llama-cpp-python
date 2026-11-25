@@ -17,7 +17,7 @@ ordinary applications should use [Llama](../core/Llama.md),
 
 | Builder | Representation | Use |
 |---|---|---|
-| `LlamaBatch` | Fixed-capacity parallel arrays in a native `llama_batch`. | Existing token, embedding, and specialized mixed-input paths. |
+| `LlamaBatch` | Fixed-capacity parallel arrays in a native `llama_batch`. | Compatibility for callers using the deprecated native batch API. |
 | `LlamaBatchExt` | Logical entries rendered into a context-bound native `llama_batch_ext`. | Explicit per-entry tokens, external features, hidden states, device feature rows, positions, sequence membership, and outputs. |
 
 The extended builder separates input construction from submission. Each entry
@@ -38,10 +38,15 @@ LlamaBatchExt -> render              -> llama_process     -> llama_batch_ext
                                                          -> llama_ubatch -> graph
 ```
 
-Python chooses the entry point from the supplied object's type. There is no
-automatic builder selection based on the model or media. Existing `Llama` text
-and text-embedding paths still use `LlamaBatch`; `MTMDEmbeddingHandler` explicitly
-builds `LlamaBatchExt` for encoded text/media chunks.
+Python chooses the entry point from the supplied object's type. Text generation,
+text and multimodal embeddings, and speculative draft submissions use
+`LlamaBatchExt`. Generation retries a smaller prefix of the same batch if the
+backend reports a full KV cache. Speculative verification submits the complete
+candidate block in a single call.
+
+An encoder call or non-causal decode must fit within one native microbatch.
+For contexts with native recurrent rollback enabled, initialize
+`n_ubatch > n_rs_seq + 1` to leave room for the rollback tail.
 
 The legacy compatibility adapter constructs a temporary extended batch for each
 call and releases it afterward. It preserves explicit sequence IDs, positions,

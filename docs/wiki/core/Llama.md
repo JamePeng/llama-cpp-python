@@ -644,9 +644,9 @@ The `Llama` class allows you to load multiple LoRAs into VRAM and apply them dyn
     compatible MTP heads and a matching vision projector. `NGRAM_MAP_K` and
     `NGRAM_MAP_K4V` can consume a completed MTMD prompt handoff; negative media
     IDs remain in history, but proposals stop before the first negative ID.
-    DFlash-family
-    embedding-batch support is a lower-level capability and does not establish
-    general MTMD chat support. See the [support boundaries](../modules/LlamaSpeculative.md#native-draft-positions-and-image-batches).
+    DFlash-family engines receive target-layer captures after each MTMD decode.
+    Inkling 2 Mini image chat works with its matching projector and DSpark
+    sidecar. See the [support boundaries](../modules/LlamaSpeculative.md#native-draft-positions-and-image-batches).
 
     **Built-in MTP heads**
 

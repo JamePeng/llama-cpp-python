@@ -23,8 +23,9 @@ The current engines support one sequence (`seq_id=0`). High-level MTP supports
 Qwen3.5 MTMD image chat; its lower-level `process()` also accepts embedding batches.
 N-gram engines can use an MTMD-prefilled prompt. Their history retains media IDs,
 but proposed continuations stop before the first negative media ID.
-DFlash-family engines can consume target token or
-embedding batches at the lower level; see the [MTMD boundaries](#native-draft-positions-and-image-batches).
+The MTMD chat handler can also forward image batches to DFlash-family engines.
+Inkling 2 Mini image chat is covered with its matching DSpark sidecar and
+projector. See the [MTMD boundaries](#native-draft-positions-and-image-batches).
 
 ## Implementation Status
 
@@ -373,9 +374,11 @@ rows must be consumed before the next target decode.
 
 ### Lower-level embedding processing
 
-`process()` accepts a decoded legacy `llama_batch` containing token IDs or
-external input embeddings. Embedding rows use the target's `n_embd_inp()`;
-the separate NextN states use `n_embd_out()`. For non-shared contexts, the first
+`process_tokens()` receives the tokens, positions, and requested output rows
+from a successful target submission. The existing `process()` hook also accepts
+a decoded legacy `llama_batch`. MTMD passes borrowed embedding rows directly to
+the MTP engine. Embedding rows use the target's `n_embd_inp()`, and the separate
+NextN states use `n_embd_out()`. For non-shared contexts, the first
 row carries the pending state from the preceding batch, and subsequent rows
 carry the preceding target row's state. This handoff continues across text and
 embedding batches.
@@ -498,6 +501,13 @@ The resolved variant controls the draft output path:
 | DFlash2 | Unmasked rows | Packed selector lattice | Not activated |
 | LiliCorr | Unmasked rows | Packed candidate/transition lattice | Not activated |
 | DSpark | Masked rows | Markov/confidence output | Supported where applicable |
+| Inkling 2 DSpark | Unmasked rows | Context-conditioned Markov/confidence output | Supported where applicable |
+
+An Inkling 2 sidecar declares `dflash.has_markov_context`. After each injection,
+the engine retains the projected NextN rows near the current position. The
+noise batch carries the previous position's row as its anchor state and zero
+state on the remaining rows. Drafting resumes once the anchor state is available.
+Context rows follow checkpoint restore and accepted-prefix rollback.
 
 For each DFlash2 or LiliCorr position, the packed output contains `K` candidate token IDs
 and `K x K` transition scores. The engine starts from predecessor index zero,
@@ -512,12 +522,12 @@ scores and drafting stops before a transition below the threshold.
    block, selector, RoPE, and attention metadata, create injection/noise batches,
    enable selected target input taps, and configure the resolved variant's
    output mode.
-2. **Process prompt and begin:** each synchronized target decode calls
-   `process()`, which passes the configured target-layer rows through device
+2. **Process prompt and begin:** each synchronized text decode calls
+   `process_tokens()`, which passes the configured target-layer rows through device
    references or host copies to the fused encoder/KV-injection draft decode.
    After prompt evaluation, `begin()` verifies that this processing populated
    the complete draft prompt;
-   later target decodes continue through the same `process()` path.
+   later target decodes continue through the same path.
 3. **Draft:** `draft()` captures a native or partial on-device checkpoint,
    decodes one anchor-plus-mask block, applies DFlash token probability,
    DFlash2 selector-transition probability, or DSpark confidence filtering,
@@ -862,7 +872,11 @@ through a post-decode callback, preserving embedding positions and forwarding
 right-shifted target hidden states to its draft context. Qwen3.5-9B-MTP with its
 matching projector is covered by high-level image tests under native and device
 rollback modes. See the [image-chat example](../examples/vision/vision-qwen.md#mtp-image-chat).
-DFlash-family engines are rejected by this handler before prefill starts.
+DFlash-family engines use the same callback to consume target-layer features.
+Media rows with advancing positions are injected into the draft cache. Pinned
+image batches follow the native skip rule above. Inkling 2 DSpark also retains
+the projected NextN state for use at the next draft anchor. The complete prompt
+must fit the context so the target and draft can be rebuilt together.
 
 ### Draft checkpoint lifetime
 
@@ -914,8 +928,8 @@ strictly new suffix tokens. Supporting general prefix reuse requires a coupled
 checkpoint containing both the target state and the corresponding speculative
 state.
 
-* MTMD-prefilled generation supports MTP and n-gram engines. DFlash-family
-  embedding processing remains a lower-level capability.
+* MTMD-prefilled generation supports MTP, DFlash-family, and n-gram engines
+  with compatible target models and projectors.
 * Current engines support only `seq_id=0`; parallel sequence decoding is not yet
   supported.
 * Speculation still runs target verification. Low acceptance or expensive

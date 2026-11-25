@@ -632,7 +632,7 @@ python examples/low_level_api/generate.py -m path/to/model.gguf -p "Explain why 
 
 Run an example with `-h` for its complete options. The shared runtime
 demonstrates the current model/context lifecycle, vocabulary-based
-tokenization, `llama_batch` decoding, sampler chains, dynamic backend loading,
+tokenization, `llama_batch_ext` decoding, sampler chains, dynamic backend loading,
 and native logging configuration.
 
 Managed internal builders are available in `llama_cpp._internals`:
@@ -1098,15 +1098,16 @@ source based on the model and workload:
 | Mode | `SpeculativeType` | Draft source | MTMD chat support |
 |---|---|---|---|
 | MTP | `DRAFT_MTP` | Target NextN/MTP heads or a compatible external MTP GGUF | Image chat validated with Qwen3.5-9B-MTP |
-| DFlash family | `DRAFT_DFLASH` | Native loader selects the external DFlash, DFlash2, DSpark, or LiliCorr head | Not supported |
-| DFlash2 / LiliCorr | `DRAFT_DFLASH2` / `DRAFT_LILICORR` | Explicit selector/scorer head selection; must match the loaded sidecar | Not supported |
-| DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads | Not supported |
+| DFlash family | `DRAFT_DFLASH` | Native loader selects the external DFlash, DFlash2, DSpark, or LiliCorr head | MTMD target-layer capture |
+| DFlash2 / LiliCorr | `DRAFT_DFLASH2` / `DRAFT_LILICORR` | Explicit selector/scorer head selection; must match the loaded sidecar | MTMD target-layer capture |
+| DSpark | `DRAFT_DSPARK` | External DFlash-family GGUF with Markov/confidence heads | Image chat validated with Inkling 2 Mini |
 | N-gram K | `NGRAM_MAP_K` | Previous matching positions in verified token history | Supports MTMD-prefilled prompts |
 | N-gram K4V | `NGRAM_MAP_K4V` | Up to four cached continuations per n-gram key | Supports MTMD-prefilled prompts |
 
 MTP consumes each decoded media batch through an MTMD callback. N-gram engines
 use the completed prefill and stop proposals before negative media ledger IDs.
-DFlash-family embedding processing is available through the lower-level API.
+DFlash-family engines receive captured target-layer features from each decoded
+MTMD batch.
 
 Eagle3, draft-simple, and the other n-gram variants appear in
 `SpeculativeType` for `llama.cpp` API compatibility but do not yet have Python
