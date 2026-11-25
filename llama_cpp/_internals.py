@@ -683,6 +683,16 @@ class LlamaContext:
                 "were not initialized correctly."
             )
 
+        if params.n_rs_seq > 0:
+            n_rs_seq = llama_cpp.llama_n_rs_seq(ctx)
+            n_ubatch = llama_cpp.llama_n_ubatch(ctx)
+            if n_rs_seq > 0 and n_ubatch <= n_rs_seq + 1:
+                llama_cpp.llama_free(ctx)
+                raise ValueError(
+                    f"Recurrent rollback requires n_ubatch > n_rs_seq + 1 "
+                    f"(got n_ubatch={n_ubatch}, n_rs_seq={n_rs_seq})"
+                )
+
         self.ctx = ctx
 
         self._loras_applied: bool = False

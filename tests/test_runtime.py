@@ -1892,6 +1892,14 @@ def mtp_runtime(shared_mtp_runtime):
         model.reset()
 
 
+def test_recurrent_rollback_tail_must_fit_microbatch(mtp_runtime):
+    model, _ = mtp_runtime
+    params = type(model.context_params).from_buffer_copy(model.context_params)
+    params.n_rs_seq, params.n_ubatch = 4, 5
+    with pytest.raises(ValueError, match="n_ubatch > n_rs_seq"):
+        internals.LlamaContext(model=model._model, params=params, verbose=False)
+
+
 @pytest.mark.parametrize("input_kind", ["token", "embedding"])
 def test_extended_state_batch_matches_native_mtp(mtp_runtime, input_kind):
     model, draft = mtp_runtime

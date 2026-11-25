@@ -1525,7 +1525,10 @@ class LlamaMTPDecoding(_LlamaModelDraftEngine):
             # draft_n_max positions. Keep native recurrent snapshots so the
             # speculative branch can normally be discarded without serializing
             # state through host memory.
-            draft_ctx_params.n_rs_seq = max(0, int(config.draft_n_max))
+            draft_ctx_params.n_rs_seq = min(
+                config.draft_n_max,
+                max(0, min(draft_ctx_params.n_batch, draft_ctx_params.n_ubatch or draft_ctx_params.n_batch) - 2),
+            )
             # llama.cpp's draft context produces one output per sequence.  Keeping
             # this separate from the target verification limits avoids reserving
             # an unnecessary (1 + n_draft) output buffer in the MTP graph.
@@ -2354,12 +2357,15 @@ class LlamaDFlashDecoding(_LlamaModelDraftEngine):
             # Recurrent/hybrid sidecars need one native snapshot per possible
             # speculative position.  Non-recurrent DFlash sidecars clamp this
             # request to zero and use ordinary native KV/SWA suffix removal.
-            draft_ctx_params.n_rs_seq = max(0, int(self.draft_limit))
             draft_ctx_params.n_batch = max(
                 int(draft_ctx_params.n_batch), block_capacity
             )
             draft_ctx_params.n_ubatch = max(
                 int(draft_ctx_params.n_ubatch), block_capacity
+            )
+            draft_ctx_params.n_rs_seq = min(
+                self.draft_limit,
+                max(0, min(draft_ctx_params.n_batch, draft_ctx_params.n_ubatch) - 2),
             )
             draft_ctx_params.n_outputs_max = block_capacity
             draft_ctx_params.n_outputs_max_per_seq = (

@@ -277,7 +277,9 @@ class Llama:
             n_batch: Prompt processing maximum batch size
             n_ubatch: Physical batch size
             n_seq_max: max number of sequences (i.e. distinct states for recurrent models)
-            n_rs_seq: Number of recurrent-state snapshots per sequence for rollback. 0 disables rollback snapshots. Experimental.
+            n_rs_seq: Native recurrent rollback window per sequence. When
+                enabled, n_ubatch must exceed n_rs_seq + 1. Speculative
+                decoding can reserve rollback capacity automatically.
             n_outputs_max: Maximum outputs in a physical batch. 0 lets llama.cpp use the effective n_batch.
             n_outputs_max_per_seq: Maximum outputs per sequence. 0 lets llama.cpp use the effective n_outputs_max.
             n_threads: Number of threads to use for generation
@@ -619,10 +621,6 @@ class Llama:
                 max(1, self.n_seq_max),
                 speculative.max_draft_tokens(),
             )
-            # common_context_params_to_llama derives recurrent snapshots from
-            # the speculative method and draft length.
-            if speculative.spec_type.is_draft():
-                self.n_rs_seq = max(self.n_rs_seq, speculative.draft_n_max)
             self.n_outputs_max = required_total
             self.n_outputs_max_per_seq = required_per_seq
 
@@ -815,7 +813,11 @@ class Llama:
             self.n_outputs_max = required_total
             self.n_outputs_max_per_seq = required_per_seq
             if speculative.spec_type.is_draft():
-                self.n_rs_seq = max(self.n_rs_seq, speculative.draft_n_max)
+                auto_snapshots = min(
+                    speculative.draft_n_max,
+                    max(0, (self.context_params.n_ubatch or self.n_batch) - 2),
+                )
+                self.n_rs_seq = max(self.n_rs_seq, auto_snapshots)
             self.context_params.n_rs_seq = self.n_rs_seq
             self.context_params.n_outputs_max = required_total
             self.context_params.n_outputs_max_per_seq = required_per_seq
